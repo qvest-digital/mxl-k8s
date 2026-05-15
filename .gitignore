@@ -20,12 +20,12 @@ profile.cov
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
-# Go workspace file
-go.work
-go.work.sum
-
 # env file
 .env
+
+# Generated controller artifacts that should never be committed
+bin/
+testbin/
 
 # Editor/IDE
 # .idea/

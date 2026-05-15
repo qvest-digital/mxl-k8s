@@ -1,0 +1,9 @@
+go 1.26.0
+
+use (
+	./api
+	./ipc
+	./operator
+	./agent
+	./gateway
+)

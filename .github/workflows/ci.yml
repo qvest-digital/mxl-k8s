@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "Files need gofmt:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet (pure-Go modules)
+        run: |
+          for m in api ipc operator; do
+            echo ">> go vet ./... in $m"
+            (cd "$m" && go vet ./...)
+          done
+
+      - name: go vet (cgo modules — gated)
+        run: |
+          # agent and gateway depend on github.com/qvest-digital/go-mxl
+          # (+ /fabrics for gateway). Until that module ships a tagged
+          # release, the module proxy can't resolve them and `go vet`
+          # would fail. Gate-and-warn rather than fail the build.
+          for m in agent gateway; do
+            if [ -z "$(ls "$m"/*.go 2>/dev/null)" ] && [ "$(find "$m" -name '*.go' | wc -l)" = "1" ]; then
+              echo "::notice::$m is scaffolded but empty; skipping go vet"
+              continue
+            fi
+            if ! (cd "$m" && go mod download 2>/dev/null); then
+              echo "::warning::$m depends on an unreleased go-mxl; skipping go vet until go-mxl is tagged"
+              continue
+            fi
+            echo ">> go vet ./... in $m"
+            (cd "$m" && go vet ./...)
+          done

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits"
+  ],
+  "minimumReleaseAge": "3 days",
+  "prHourlyLimit": 2,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track tagged releases of dmf-mxl/mxl (or any fork) pinned in .github/libmxl.version",
+      "fileMatch": ["^\\.github/libmxl\\.version$"],
+      "matchStrings": [
+        "^https://github\\.com/(?<depName>[^/]+/[^/]+)/tree/(?<currentValue>[^\\s/]+)\\s*$"
+      ],
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "loose"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Group Go module bumps into one PR per module",
+      "matchManagers": ["gomod"],
+      "groupName": "Go modules",
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "description": "Group GitHub Actions bumps into one PR",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions",
+      "semanticCommitType": "ci",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "description": "libmxl is intentionally not delayed so upstream-breaking releases surface immediately via a CI-red PR",
+      "matchManagers": ["custom.regex"],
+      "matchFileNames": [".github/libmxl.version"],
+      "minimumReleaseAge": "0 days",
+      "schedule": ["at any time"],
+      "commitMessageTopic": "libmxl",
+      "semanticCommitType": "build",
+      "semanticCommitScope": "libmxl",
+      "labels": ["dependencies", "libmxl"]
+    }
+  ]
+}
