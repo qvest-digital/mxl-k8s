@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - mxl.qvest-digital.com_mxldomains.yaml
+  - mxl.qvest-digital.com_mxlflows.yaml
+  - mxl.qvest-digital.com_mxlflowmirrors.yaml
+  - mxl.qvest-digital.com_mxlreceivers.yaml
+  - mxl.qvest-digital.com_mxlnodecapabilities.yaml
