@@ -31,26 +31,26 @@ jobs:
 
       - name: go vet (pure-Go modules)
         run: |
-          for m in api ipc operator; do
+          for m in api ipc operator agent; do
             echo ">> go vet ./... in $m"
             (cd "$m" && go vet ./...)
           done
 
       - name: go build (pure-Go modules)
         run: |
-          for m in api ipc operator; do
+          for m in api ipc operator agent; do
             echo ">> go build ./... in $m"
             (cd "$m" && go build ./...)
           done
 
       - name: go vet (cgo modules — gated)
         run: |
-          # agent and gateway depend on github.com/qvest-digital/go-mxl
-          # (+ /fabrics for gateway). Until that module ships a tagged
-          # release, the module proxy can't resolve them and `go vet`
-          # would fail. Gate-and-warn rather than fail the build.
-          for m in agent gateway; do
-            if [ -z "$(ls "$m"/*.go 2>/dev/null)" ] && [ "$(find "$m" -name '*.go' | wc -l)" = "1" ]; then
+          # gateway will depend on github.com/qvest-digital/go-mxl/fabrics.
+          # Until that module ships a tagged release, the module proxy
+          # can't resolve it and `go vet` would fail. Gate-and-warn
+          # rather than fail the build.
+          for m in gateway; do
+            if [ "$(find "$m" -name '*.go' | wc -l)" = "1" ]; then
               echo "::notice::$m is scaffolded but empty; skipping go vet"
               continue
             fi
