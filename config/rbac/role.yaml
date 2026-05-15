@@ -1,0 +1,70 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mxl-operator
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - mxl.qvest-digital.com
+  resources:
+  - mxldomains
+  - mxlflows
+  - mxlnodecapabilities
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - mxl.qvest-digital.com
+  resources:
+  - mxldomains/status
+  - mxlflows/status
+  - mxlnodecapabilities/status
+  verbs:
+  - get
+- apiGroups:
+  - mxl.qvest-digital.com
+  resources:
+  - mxlflowmirrors
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - mxl.qvest-digital.com
+  resources:
+  - mxlflowmirrors/finalizers
+  - mxlreceivers/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - mxl.qvest-digital.com
+  resources:
+  - mxlflowmirrors/status
+  - mxlreceivers/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - mxl.qvest-digital.com
+  resources:
+  - mxlreceivers
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
