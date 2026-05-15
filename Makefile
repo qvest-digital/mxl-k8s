@@ -1,6 +1,7 @@
 CONTROLLER_TOOLS_VERSION ?= v0.18.0
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
-BUF ?= buf
+BUF_VERSION ?= v1.50.0
+BUF ?= go run github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
 
 MODULES := api ipc operator agent gateway
 
@@ -34,12 +35,24 @@ gen-api:
 gen-ipc:
 	cd ipc && $(BUF) generate
 
-GENERATED_PATHS := config/ api/v1alpha1/zz_generated.deepcopy.go
+CRD_GEN_PATHS := config/ api/v1alpha1/zz_generated.deepcopy.go
+IPC_GEN_PATHS := ipc/v1
 
 .PHONY: manifests-check
 manifests-check: gen-api
-	@if ! git diff --exit-code -- $(GENERATED_PATHS); then \
-		echo "Generated files are out of sync with controller-gen output."; \
+	@if ! git diff --exit-code -- $(CRD_GEN_PATHS); then \
+		echo "Generated CRD/DeepCopy files are out of sync."; \
 		echo "Run 'make gen-api' and commit the result."; \
 		exit 1; \
 	fi
+
+.PHONY: ipc-check
+ipc-check: gen-ipc
+	@if ! git diff --exit-code -- $(IPC_GEN_PATHS); then \
+		echo "Generated proto files are out of sync."; \
+		echo "Run 'make gen-ipc' and commit the result."; \
+		exit 1; \
+	fi
+
+.PHONY: generated-check
+generated-check: manifests-check ipc-check

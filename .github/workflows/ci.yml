@@ -75,3 +75,24 @@ jobs:
             echo "::error::generated files are out of date; run 'make gen-api' and commit the result"
             exit 1
           fi
+
+  ipc-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Regenerate proto
+        run: make gen-ipc
+
+      - name: Check no drift in generated proto files
+        run: |
+          if ! git diff --exit-code -- ipc/v1; then
+            echo "::error::generated proto files are out of date; run 'make gen-ipc' and commit the result"
+            exit 1
+          fi
