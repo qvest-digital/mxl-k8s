@@ -31,6 +31,10 @@ gen-api:
 	cd api && $(CONTROLLER_GEN) object paths=./...
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:dir=./config/crd
 
+.PHONY: gen-rbac
+gen-rbac:
+	$(CONTROLLER_GEN) rbac:roleName=mxl-operator paths=./operator/... output:rbac:dir=./config/rbac
+
 .PHONY: gen-ipc
 gen-ipc:
 	cd ipc && $(BUF) generate
@@ -39,10 +43,10 @@ CRD_GEN_PATHS := config/ api/v1alpha1/zz_generated.deepcopy.go
 IPC_GEN_PATHS := ipc/v1
 
 .PHONY: manifests-check
-manifests-check: gen-api
+manifests-check: gen-api gen-rbac
 	@if ! git diff --exit-code -- $(CRD_GEN_PATHS); then \
-		echo "Generated CRD/DeepCopy files are out of sync."; \
-		echo "Run 'make gen-api' and commit the result."; \
+		echo "Generated CRD/DeepCopy/RBAC files are out of sync."; \
+		echo "Run 'make gen-api gen-rbac' and commit the result."; \
 		exit 1; \
 	fi
 

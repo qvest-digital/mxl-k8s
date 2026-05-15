@@ -36,6 +36,13 @@ jobs:
             (cd "$m" && go vet ./...)
           done
 
+      - name: go build (pure-Go modules)
+        run: |
+          for m in api ipc operator; do
+            echo ">> go build ./... in $m"
+            (cd "$m" && go build ./...)
+          done
+
       - name: go vet (cgo modules — gated)
         run: |
           # agent and gateway depend on github.com/qvest-digital/go-mxl
