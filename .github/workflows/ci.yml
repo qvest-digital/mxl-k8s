@@ -45,21 +45,14 @@ jobs:
 
       - name: go vet (cgo modules — gated)
         run: |
-          # gateway will depend on github.com/qvest-digital/go-mxl/fabrics.
-          # Until that module ships a tagged release, the module proxy
-          # can't resolve it and `go vet` would fail. Gate-and-warn
-          # rather than fail the build.
+          # The gateway depends on libmxl + libmxl-fabrics (system
+          # libraries from upstream dmf-mxl/mxl) and on
+          # github.com/qvest-digital/go-mxl/fabrics, which has no
+          # tagged release yet. Until both prerequisites are wired
+          # into CI (libmxl install step + tagged go-mxl), the gateway
+          # is verified locally only.
           for m in gateway; do
-            if [ "$(find "$m" -name '*.go' | wc -l)" = "1" ]; then
-              echo "::notice::$m is scaffolded but empty; skipping go vet"
-              continue
-            fi
-            if ! (cd "$m" && go mod download 2>/dev/null); then
-              echo "::warning::$m depends on an unreleased go-mxl; skipping go vet until go-mxl is tagged"
-              continue
-            fi
-            echo ">> go vet ./... in $m"
-            (cd "$m" && go vet ./...)
+            echo "::warning::$m skipped: needs libmxl install step + tagged go-mxl"
           done
 
   manifests-check:
