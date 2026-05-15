@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package mxl.k8s.ipc.v1;
+
+// Provider mirrors the libmxl-fabrics provider enum. The string forms
+// of these values match the names accepted by
+// mxlFabricsProviderFromString.
+enum Provider {
+  PROVIDER_UNSPECIFIED = 0;
+  PROVIDER_AUTO = 1;
+  PROVIDER_TCP = 2;
+  PROVIDER_VERBS = 3;
+  PROVIDER_EFA = 4;
+  PROVIDER_SHM = 5;
+}
+
+// Direction describes whether a local libmxl-fabrics endpoint is
+// receiving a flow (ingress) or sending one (egress).
+enum Direction {
+  DIRECTION_UNSPECIFIED = 0;
+  DIRECTION_INGRESS = 1;
+  DIRECTION_EGRESS = 2;
+}
+
+// LocalControl is served by the mxl-fabrics-gateway over a UDS
+// (default /run/mxl/gateway.sock). The mxl-domain-agent is the only
+// client. Cross-node gateway coordination happens through the
+// Kubernetes API by way of MxlFlowMirror; there is no gateway-to-
+// gateway gRPC surface in this version.
+service LocalControl {
+  // OpenMirror tells the gateway to materialize an incoming flow on
+  // this node. The response carries the libmxl-fabrics target
+  // descriptor (mxlFabricsTargetInfoToString) once the local target
+  // is bound; the agent writes it into the MxlFlowMirror status so
+  // the source-side gateway can attach its initiator.
+  rpc OpenMirror(OpenMirrorRequest) returns (OpenMirrorResponse);
+
+  // CloseMirror tears down a mirror previously opened by OpenMirror.
+  rpc CloseMirror(CloseMirrorRequest) returns (CloseMirrorResponse);
+
+  // ListLocalEndpoints reports the libmxl-fabrics endpoints currently
+  // bound on this node.
+  rpc ListLocalEndpoints(ListLocalEndpointsRequest)
+      returns (ListLocalEndpointsResponse);
+}
+
+message OpenMirrorRequest {
+  // FlowID is the MXL flow being mirrored.
+  string flow_id = 1;
+
+  // SourceNode is the Kubernetes node currently hosting the flow's
+  // authoritative copy.
+  string source_node = 2;
+
+  // Provider selects the libmxl-fabrics provider for this mirror.
+  Provider provider = 3;
+}
+
+message OpenMirrorResponse {
+  // TargetInfo is the libmxl-fabrics target descriptor returned by
+  // mxlFabricsTargetInfoToString.
+  string target_info = 1;
+}
+
+message CloseMirrorRequest {
+  string flow_id = 1;
+}
+
+message CloseMirrorResponse {}
+
+message ListLocalEndpointsRequest {}
+
+message ListLocalEndpointsResponse {
+  repeated LocalEndpoint endpoints = 1;
+}
+
+message LocalEndpoint {
+  string flow_id = 1;
+  Provider provider = 2;
+  Direction direction = 3;
+  // TargetInfo is empty for egress endpoints.
+  string target_info = 4;
+}
