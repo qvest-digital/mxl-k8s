@@ -54,3 +54,24 @@ jobs:
             echo ">> go vet ./... in $m"
             (cd "$m" && go vet ./...)
           done
+
+  manifests-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Regenerate manifests
+        run: make gen-api
+
+      - name: Check no drift in generated files
+        run: |
+          if ! git diff --exit-code -- config/ api/v1alpha1/zz_generated.deepcopy.go; then
+            echo "::error::generated files are out of date; run 'make gen-api' and commit the result"
+            exit 1
+          fi

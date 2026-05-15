@@ -1,4 +1,5 @@
-CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen
+CONTROLLER_TOOLS_VERSION ?= v0.18.0
+CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
 BUF ?= buf
 
 MODULES := api ipc operator agent gateway
@@ -26,15 +27,19 @@ build:
 
 .PHONY: gen-api
 gen-api:
-	$(CONTROLLER_GEN) object paths=./api/...
+	cd api && $(CONTROLLER_GEN) object paths=./...
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:dir=./config/crd
-	$(CONTROLLER_GEN) rbac:roleName=mxl-k8s-operator paths=./operator/... output:rbac:dir=./config/rbac
 
 .PHONY: gen-ipc
 gen-ipc:
 	cd ipc && $(BUF) generate
 
+GENERATED_PATHS := config/ api/v1alpha1/zz_generated.deepcopy.go
+
 .PHONY: manifests-check
 manifests-check: gen-api
-	@git diff --exit-code -- config/ || \
-		(echo "config/ is out of sync with controller-gen output; run 'make gen-api'"; exit 1)
+	@if ! git diff --exit-code -- $(GENERATED_PATHS); then \
+		echo "Generated files are out of sync with controller-gen output."; \
+		echo "Run 'make gen-api' and commit the result."; \
+		exit 1; \
+	fi
