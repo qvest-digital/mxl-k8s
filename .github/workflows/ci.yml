@@ -43,17 +43,38 @@ jobs:
             (cd "$m" && go build ./...)
           done
 
-      - name: go vet (cgo modules — gated)
+  # gateway is the cgo lane. It links libmxl + libmxl-fabrics and so
+  # runs inside go-mxl's published builder image, which already has
+  # the Go toolchain, libmxl, libmxl-fabrics, libfabric, and a sane
+  # PKG_CONFIG_PATH set up. The image tag is bumped here (and in
+  # docs/BUILD.md) when go-mxl ships a new release; renovate also
+  # picks it up.
+  gateway:
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.3
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mark workspace as a safe git directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: gofmt
         run: |
-          # The gateway depends on libmxl + libmxl-fabrics (system
-          # libraries from upstream dmf-mxl/mxl) and on
-          # github.com/qvest-digital/go-mxl/fabrics, which has no
-          # tagged release yet. Until both prerequisites are wired
-          # into CI (libmxl install step + tagged go-mxl), the gateway
-          # is verified locally only.
-          for m in gateway; do
-            echo "::warning::$m skipped: needs libmxl install step + tagged go-mxl"
-          done
+          cd gateway
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "Files need gofmt:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: cd gateway && go vet ./...
+
+      - name: go build
+        run: cd gateway && go build ./...
 
   manifests-check:
     runs-on: ubuntu-24.04
