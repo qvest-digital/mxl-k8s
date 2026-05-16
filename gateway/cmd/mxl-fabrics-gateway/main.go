@@ -4,23 +4,25 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
-	"sync/atomic"
-	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
-	"github.com/qvest-digital/mxl-k8s/api/v1alpha1"
+
+	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/capabilities"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/config"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/mirror"
 )
 
 var (
@@ -30,7 +32,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+	utilruntime.Must(mxlv1alpha1.AddToScheme(scheme))
 }
 
 func main() {
@@ -54,37 +56,68 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("build kubeconfig: %w", err)
 	}
-	kClient, err := client.New(restCfg, client.Options{Scheme: scheme})
+
+	// Open libmxl handles up front so any misconfiguration (bad
+	// domain path, missing .so) fails before the manager comes up.
+	handles, err := instance.Open(cfg.DomainPath)
 	if err != nil {
-		return fmt.Errorf("build client: %w", err)
+		return fmt.Errorf("open libmxl: %w", err)
+	}
+	defer func() { _ = handles.Close() }()
+
+	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metricsserver.Options{BindAddress: cfg.MetricsAddr},
+		HealthProbeBindAddress: cfg.ProbeAddr,
+	})
+	if err != nil {
+		return fmt.Errorf("construct manager: %w", err)
 	}
 
-	ctx, cancel := context.WithCancel(ctrl.SetupSignalHandler())
-	defer cancel()
-
-	pub := &capabilities.Publisher{
-		Client:    kClient,
-		NodeName:  cfg.NodeName,
-		Providers: cfg.Providers,
-	}
-	if err := pub.EnsureExists(ctx); err != nil {
-		return err
+	if err := (&mirror.Reconciler{
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		NodeName:    cfg.NodeName,
+		BindAddress: cfg.BindAddress,
+		Handles:     handles,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup mirror reconciler: %w", err)
 	}
 
-	var ready atomic.Bool
-	ready.Store(true)
+	// MxlNodeCapabilities publisher runs as a Manager Runnable so it
+	// joins the leader-election / shutdown lifecycle and only fires
+	// once the cache has synced.
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		pub := &capabilities.Publisher{
+			Client:    mgr.GetClient(),
+			NodeName:  cfg.NodeName,
+			Providers: cfg.Providers,
+		}
+		if err := pub.EnsureExists(ctx); err != nil {
+			return err
+		}
+		pub.RunRefreshLoop(ctx, cfg.ResyncPeriod)
+		return nil
+	})); err != nil {
+		return fmt.Errorf("register capabilities runnable: %w", err)
+	}
 
-	go pub.RunRefreshLoop(ctx, cfg.ResyncPeriod)
-	go runProbes(ctx, cfg.ProbeAddr, &ready)
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		return fmt.Errorf("register healthz: %w", err)
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		return fmt.Errorf("register readyz: %w", err)
+	}
 
 	setupLog.Info("gateway started",
 		"node", cfg.NodeName,
+		"domainPath", cfg.DomainPath,
+		"bindAddress", cfg.BindAddress,
 		"providers", providerNames(cfg.Providers),
 		"probeAddr", cfg.ProbeAddr,
 		"resyncPeriod", cfg.ResyncPeriod)
 
-	<-ctx.Done()
-	return nil
+	return mgr.Start(ctrl.SetupSignalHandler())
 }
 
 func providerNames(providers []fabrics.Provider) []string {
@@ -93,34 +126,4 @@ func providerNames(providers []fabrics.Provider) []string {
 		out = append(out, p.String())
 	}
 	return out
-}
-
-// runProbes serves /healthz and /readyz on addr.
-func runProbes(ctx context.Context, addr string, ready *atomic.Bool) {
-	l := ctrl.Log.WithName("probes")
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("ok"))
-	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if !ready.Load() {
-			http.Error(w, "not ready", http.StatusServiceUnavailable)
-			return
-		}
-		_, _ = w.Write([]byte("ready"))
-	})
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		l.Error(err, "probe server exited")
-	}
 }

@@ -16,6 +16,16 @@ type Config struct {
 	// from --node-name or the NODE_NAME env var.
 	NodeName string
 
+	// DomainPath is the absolute path of the MXL domain directory this
+	// gateway operates on. One mxl.Instance is opened against this
+	// directory at boot and shared across all flows.
+	DomainPath string
+
+	// BindAddress is the libmxl-fabrics endpoint Node passed to each
+	// Target/Initiator Setup. Empty lets libmxl-fabrics bind to all
+	// interfaces; for in-cluster use this is typically $POD_IP.
+	BindAddress string
+
 	// Providers is the set of libmxl-fabrics providers this gateway is
 	// configured to support. Real per-provider probing happens at the
 	// first flow setup; the gateway publishes this list to
@@ -42,6 +52,10 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	var providers string
 	fs.StringVar(&c.NodeName, "node-name", os.Getenv("NODE_NAME"),
 		"Kubernetes node name (defaults to $NODE_NAME).")
+	fs.StringVar(&c.DomainPath, "domain-path", os.Getenv("MXL_DOMAIN"),
+		"Absolute path to the MXL domain directory the gateway operates on.")
+	fs.StringVar(&c.BindAddress, "bind-address", os.Getenv("POD_IP"),
+		"Local address libmxl-fabrics endpoints bind to (defaults to $POD_IP, empty for all interfaces).")
 	fs.StringVar(&providers, "providers", "tcp",
 		"Comma-separated libmxl-fabrics providers to advertise (auto,tcp,verbs,efa,shm).")
 	fs.StringVar(&c.Kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"),
@@ -78,6 +92,12 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 func (c *Config) Validate() error {
 	if c.NodeName == "" {
 		return fmt.Errorf("--node-name (or $NODE_NAME) is required")
+	}
+	if c.DomainPath == "" {
+		return fmt.Errorf("--domain-path (or $MXL_DOMAIN) is required")
+	}
+	if c.DomainPath[0] != '/' {
+		return fmt.Errorf("--domain-path must be absolute, got %q", c.DomainPath)
 	}
 	if len(c.Providers) == 0 {
 		return fmt.Errorf("--providers must list at least one provider")
