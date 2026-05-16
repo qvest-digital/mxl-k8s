@@ -1,10 +1,3 @@
-// Package mirror contains the gateway's MxlFlowMirror reconciler.
-//
-// Target-side: for mirrors with spec.targetNode equal to this
-// gateway's node, the reconciler opens a libmxl FlowWriter on the
-// flow, registers its memory regions with libmxl-fabrics, sets up a
-// fabrics.Target, and writes the serialized TargetInfo back to
-// status.targetInfo for the source-side gateway to consume.
 package mirror
 
 import (
@@ -28,12 +21,14 @@ import (
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
 )
 
-// FinalizerName is the target-side mirror finalizer the reconciler
-// adds to keep ownership of libmxl-fabrics handles across deletion.
-const FinalizerName = "gateway.mxl.qvest-digital.com/target-side"
+// TargetFinalizerName is the finalizer the target-side reconciler
+// adds so libmxl-fabrics handles get torn down before the CR is
+// removed from the API.
+const TargetFinalizerName = "gateway.mxl.qvest-digital.com/target-side"
 
-// Reconciler reconciles MxlFlowMirror resources from the target side.
-type Reconciler struct {
+// TargetReconciler reconciles MxlFlowMirror resources from the
+// receiving side. See the package doc.
+type TargetReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
@@ -46,8 +41,7 @@ type Reconciler struct {
 	// libmxl-fabrics semantics.
 	BindAddress string
 
-	// Handles owns the long-lived mxl + fabrics instances. Caller
-	// keeps it alive for the lifetime of the reconciler.
+	// Handles owns the long-lived mxl + fabrics instances.
 	Handles *instance.Handles
 
 	mu      sync.Mutex
@@ -55,7 +49,7 @@ type Reconciler struct {
 }
 
 // targetEntry holds the live libmxl handles for one target-side
-// mirror; they're all closed together by closeEntry.
+// mirror; closed together by closeTargetEntry.
 type targetEntry struct {
 	writer  *mxl.Writer
 	regions *fabrics.Regions
@@ -69,8 +63,9 @@ type targetEntry struct {
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors/finalizers,verbs=update
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflows,verbs=get;list;watch
 
-// Reconcile drives one MxlFlowMirror through its target-side lifecycle.
-func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// Reconcile drives one MxlFlowMirror through its target-side
+// lifecycle.
+func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("mxlflowmirror", req.NamespacedName)
 
 	var mirror mxlv1alpha1.MxlFlowMirror
@@ -85,11 +80,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Deletion path: tear down libmxl handles, drop the finalizer.
 	if !mirror.DeletionTimestamp.IsZero() {
-		if !controllerutil.ContainsFinalizer(&mirror, FinalizerName) {
+		if !controllerutil.ContainsFinalizer(&mirror, TargetFinalizerName) {
 			return ctrl.Result{}, nil
 		}
 		r.closeEntry(req.NamespacedName)
-		controllerutil.RemoveFinalizer(&mirror, FinalizerName)
+		controllerutil.RemoveFinalizer(&mirror, TargetFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
 			return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
 		}
@@ -98,8 +93,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// Ensure the finalizer is in place before we own any handles.
-	if !controllerutil.ContainsFinalizer(&mirror, FinalizerName) {
-		controllerutil.AddFinalizer(&mirror, FinalizerName)
+	if !controllerutil.ContainsFinalizer(&mirror, TargetFinalizerName) {
+		controllerutil.AddFinalizer(&mirror, TargetFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
@@ -138,7 +133,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		// Concurrent reconcile produced a stray entry; close the new
 		// one and reuse the existing.
 		r.mu.Unlock()
-		closeHandles(entry)
+		closeTargetHandles(entry)
 		return ctrl.Result{}, nil
 	}
 	r.targets[req.NamespacedName] = entry
@@ -163,7 +158,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 // openTarget walks the libmxl handshake: open FlowWriter, get
 // regions, create + setup fabrics.Target, marshal TargetInfo.
-func (r *Reconciler) openTarget(flowDef string, provider fabrics.Provider) (*targetEntry, error) {
+func (r *TargetReconciler) openTarget(flowDef string, provider fabrics.Provider) (*targetEntry, error) {
 	mxlInst := r.Handles.MXL()
 	if mxlInst == nil {
 		return nil, fmt.Errorf("mxl instance closed")
@@ -216,7 +211,7 @@ func (r *Reconciler) openTarget(flowDef string, provider fabrics.Provider) (*tar
 	}, nil
 }
 
-func (r *Reconciler) closeEntry(key types.NamespacedName) {
+func (r *TargetReconciler) closeEntry(key types.NamespacedName) {
 	r.mu.Lock()
 	entry := r.targets[key]
 	delete(r.targets, key)
@@ -224,10 +219,10 @@ func (r *Reconciler) closeEntry(key types.NamespacedName) {
 	if entry == nil {
 		return
 	}
-	closeHandles(entry)
+	closeTargetHandles(entry)
 }
 
-func closeHandles(e *targetEntry) {
+func closeTargetHandles(e *targetEntry) {
 	if e.info != nil {
 		_ = e.info.Close()
 	}
@@ -242,7 +237,7 @@ func closeHandles(e *targetEntry) {
 	}
 }
 
-func (r *Reconciler) markMaterializing(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror) error {
+func (r *TargetReconciler) markMaterializing(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror) error {
 	if mirror.Status.Phase == mxlv1alpha1.MxlFlowMirrorMaterializing {
 		return nil
 	}
@@ -250,24 +245,9 @@ func (r *Reconciler) markMaterializing(ctx context.Context, mirror *mxlv1alpha1.
 	return r.Status().Update(ctx, mirror)
 }
 
-// mapProvider translates the API enum into the fabrics package enum.
-func mapProvider(p mxlv1alpha1.MxlFabricsProvider) fabrics.Provider {
-	switch p {
-	case mxlv1alpha1.ProviderTCP:
-		return fabrics.ProviderTCP
-	case mxlv1alpha1.ProviderVerbs:
-		return fabrics.ProviderVerbs
-	case mxlv1alpha1.ProviderEFA:
-		return fabrics.ProviderEFA
-	case mxlv1alpha1.ProviderSHM:
-		return fabrics.ProviderSHM
-	}
-	return fabrics.ProviderAuto
-}
-
 // SetupWithManager wires the reconciler into the controller-runtime
 // Manager.
-func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *TargetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.targets == nil {
 		r.targets = make(map[types.NamespacedName]*targetEntry)
 	}

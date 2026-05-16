@@ -74,14 +74,23 @@ func run(args []string) error {
 		return fmt.Errorf("construct manager: %w", err)
 	}
 
-	if err := (&mirror.Reconciler{
+	if err := (&mirror.TargetReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
 		NodeName:    cfg.NodeName,
 		BindAddress: cfg.BindAddress,
 		Handles:     handles,
 	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup mirror reconciler: %w", err)
+		return fmt.Errorf("setup target reconciler: %w", err)
+	}
+	if err := (&mirror.SourceReconciler{
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		NodeName:    cfg.NodeName,
+		BindAddress: cfg.BindAddress,
+		Handles:     handles,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup source reconciler: %w", err)
 	}
 
 	// MxlNodeCapabilities publisher runs as a Manager Runnable so it
