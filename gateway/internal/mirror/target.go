@@ -101,8 +101,16 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Idempotent fast-path.
-	if mirror.Status.Phase == mxlv1alpha1.MxlFlowMirrorReady && mirror.Status.TargetInfo != "" {
+	// Idempotent fast-path. Requires *both* a Ready status and a live
+	// in-memory entry: a gateway restart preserves status but loses
+	// the libmxl FlowWriter, and closing that writer on shutdown
+	// removes the on-disk flow definition. Re-opening here restores
+	// the flow file and rotates TargetInfo, which the source side
+	// picks up via the MxlFlowMirror watch.
+	r.mu.Lock()
+	live := r.targets[req.NamespacedName] != nil
+	r.mu.Unlock()
+	if live && mirror.Status.Phase == mxlv1alpha1.MxlFlowMirrorReady && mirror.Status.TargetInfo != "" {
 		return ctrl.Result{}, nil
 	}
 
