@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: mxl-system
+
+resources:
+  # CRDs and the operator's generated ClusterRole live in config/.
+  - ../../config/crd
+  - ../../config/rbac
+
+  - 00-namespace.yaml
+  - 01-rbac.yaml
+  - 02-agent.yaml
+  - 03-gateway.yaml
+  - 04-operator.yaml
+  - 10-writer.yaml
+  - 20-receiver.yaml
+  - 21-reader.yaml

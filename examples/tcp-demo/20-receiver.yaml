@@ -1,0 +1,18 @@
+# MxlReceiver expressing that the reader pod wants the flow
+# materialized locally. The operator translates this into an
+# MxlFlowMirror; the gateway pair then sets up the TCP transfer.
+#
+# flowID below matches the deterministic UUID embedded in the
+# mxl-gst-testsrc demo flow definition shipped with go-mxl-runtime.
+
+apiVersion: mxl.qvest-digital.com/v1alpha1
+kind: MxlReceiver
+metadata:
+  name: tcp-demo
+  namespace: mxl-system
+spec:
+  flowID: "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
+  provider: tcp
+  podRef:
+    name: mxl-tcp-demo-reader
+    namespace: mxl-system

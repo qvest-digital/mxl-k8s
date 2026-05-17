@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: mxl-domain-agent
+  namespace: mxl-system
+  labels:
+    app.kubernetes.io/name: mxl-domain-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mxl-domain-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mxl-domain-agent
+    spec:
+      serviceAccountName: mxl-domain-agent
+      hostPID: false
+      containers:
+        - name: agent
+          image: local/mxl-domain-agent:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --domain-path=/run/mxl/domain
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          # CAP_SYS_ADMIN: fanotify_init in FAN_CLASS_NOTIF mode.
+          securityContext:
+            capabilities:
+              add: ["SYS_ADMIN"]
+          ports:
+            - name: probe
+              containerPort: 8081
+            - name: metrics
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probe
+            initialDelaySeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probe
+            initialDelaySeconds: 2
+          volumeMounts:
+            - name: mxl-domain
+              mountPath: /run/mxl/domain
+      volumes:
+        - name: mxl-domain
+          hostPath:
+            path: /run/mxl/domain
+            type: DirectoryOrCreate

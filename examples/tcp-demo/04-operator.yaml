@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mxl-operator
+  namespace: mxl-system
+  labels:
+    app.kubernetes.io/name: mxl-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mxl-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mxl-operator
+    spec:
+      serviceAccountName: mxl-operator
+      containers:
+        - name: operator
+          image: local/mxl-operator:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: probe
+              containerPort: 8081
+            - name: metrics
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probe
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probe

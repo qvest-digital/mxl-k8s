@@ -1,0 +1,47 @@
+# Consumer pod for the demo. Opens the (now-mirrored) flow on its
+# local MXL domain with mxl-info, which prints flow metadata. The
+# anti-affinity forces the pod onto a different node than the
+# writer so the mirror plumbing is actually exercised across the
+# fabric.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mxl-tcp-demo-reader
+  namespace: mxl-system
+  labels:
+    app.kubernetes.io/name: mxl-tcp-demo-reader
+    mxl-k8s-demo.qvest-digital.com/role: consumer
+spec:
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              mxl-k8s-demo.qvest-digital.com/role: producer
+          topologyKey: kubernetes.io/hostname
+  containers:
+    - name: reader
+      image: ghcr.io/qvest-digital/go-mxl-runtime:1.0.0-rc.3
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          # Wait for the gateway to materialize the mirrored flow
+          # (the .mxl-flow directory appears once the target-side
+          # gateway opens its FlowWriter).
+          while [ -z "$(ls /run/mxl/domain | grep -E '\.mxl-flow$' || true)" ]; do
+            sleep 1
+          done
+          exec /opt/libmxl/bin/mxl-info -d /run/mxl/domain
+      securityContext:
+        capabilities:
+          add: ["IPC_LOCK", "SYS_RESOURCE"]
+      volumeMounts:
+        - name: mxl-domain
+          mountPath: /run/mxl/domain
+  volumes:
+    - name: mxl-domain
+      hostPath:
+        path: /run/mxl/domain
+        type: DirectoryOrCreate

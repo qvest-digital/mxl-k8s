@@ -1,0 +1,35 @@
+# Producer pod for the demo. Writes a synthetic test pattern into a
+# flow on the local MXL domain using mxl-gst-testsrc from
+# go-mxl-runtime. The labels pin it onto its node so the receiver
+# below can target a different one via anti-affinity.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mxl-tcp-demo-writer
+  namespace: mxl-system
+  labels:
+    app.kubernetes.io/name: mxl-tcp-demo-writer
+    mxl-k8s-demo.qvest-digital.com/role: producer
+spec:
+  containers:
+    - name: writer
+      image: ghcr.io/qvest-digital/go-mxl-runtime:1.0.0-rc.3
+      command: ["/opt/libmxl/bin/mxl-gst-testsrc"]
+      args:
+        - "-d"
+        - "/run/mxl/domain"
+      # IPC_LOCK + SYS_RESOURCE: libmxl pins flow pages into RAM via
+      # mlock; tmpfs-backed shared memory needs the same to be
+      # RDMA-pinnable from the gateway sharing this domain.
+      securityContext:
+        capabilities:
+          add: ["IPC_LOCK", "SYS_RESOURCE"]
+      volumeMounts:
+        - name: mxl-domain
+          mountPath: /run/mxl/domain
+  volumes:
+    - name: mxl-domain
+      hostPath:
+        path: /run/mxl/domain
+        type: DirectoryOrCreate
