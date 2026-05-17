@@ -46,11 +46,15 @@ spec:
               path: /readyz
               port: probe
             initialDelaySeconds: 2
+          # /run/mxl is mounted (rather than /run/mxl/domain only)
+          # so the intent socket the agent creates at
+          # /run/mxl/agent.sock lands on the host and consumer pods
+          # can bind-mount it.
           volumeMounts:
-            - name: mxl-domain
-              mountPath: /run/mxl/domain
+            - name: mxl-run
+              mountPath: /run/mxl
       volumes:
-        - name: mxl-domain
+        - name: mxl-run
           hostPath:
-            path: /run/mxl/domain
+            path: /run/mxl
             type: DirectoryOrCreate

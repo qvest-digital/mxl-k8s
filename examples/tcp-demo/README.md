@@ -10,20 +10,31 @@ gateway → `libmxl-fabrics` TCP transfer between two k3s nodes.
 2. The agent on node-1 sees the new flow directory via fanotify and
    publishes an `MxlFlow` resource.
 3. A consumer reader pod is scheduled on node-2 (forced via pod
-   anti-affinity).
-4. The `MxlReceiver` resource points at the reader pod. The operator
-   resolves its node, looks up the flow's origin from `MxlFlow`
-   status, and creates an `MxlFlowMirror` for (flow, node-2) with
-   `provider: tcp`.
-5. The gateway on node-2 sees the mirror, opens a libmxl
-   `FlowWriter` for the flow on its local domain, sets up a
-   `fabrics.Target`, and writes the resulting `TargetInfo` back to
-   `mirror.status.targetInfo` with `phase: Ready`.
-6. The gateway on node-1 sees the mirror with a populated
-   `targetInfo`, opens a `FlowReader` on the local flow, builds a
-   `fabrics.Initiator`, and starts streaming grains to node-2.
-7. The reader on node-2 opens the (now mirrored) flow and prints
-   its metadata.
+   anti-affinity). An initContainer drops `libmxl-intent.so` into a
+   shared volume; the main container loads it via `LD_PRELOAD`.
+4. The reader's first `mxlCreateFlowReader` opens
+   `/run/mxl/domain/<uuid>.mxl-flow/flow_def.json`. The file doesn't
+   exist yet → `openat()` returns `ENOENT` → the shim catches it
+   and calls the agent on `/run/mxl/agent.sock` with the path.
+5. The agent's intent dispatcher resolves the calling pod via
+   `SO_PEERCRED`, finds the flow's origin from `MxlFlow.status`,
+   creates an `MxlFlowMirror` for `(flow, node-2)` with
+   `provider: tcp`, waits for it to reach `phase: Ready`, and
+   answers `{"ok":true}` to the shim.
+6. While the agent waits, the gateway on node-2 sees the new
+   mirror, opens a libmxl `FlowWriter` for the flow on its local
+   domain, sets up a `fabrics.Target`, and writes the resulting
+   `TargetInfo` back to `mirror.status.targetInfo`. The gateway on
+   node-1 picks that up, sets up a `fabrics.Initiator`, and starts
+   streaming grains.
+7. The shim retries the open. It now succeeds; the reader proceeds
+   to `mxl-info` and prints the flow metadata.
+
+The declarative path (apply an `MxlReceiver` ahead of time so the
+operator creates the mirror) is the alternative: the reader can
+then skip the shim and just open the flow directly. The shim turns
+that into "the application doesn't need to declare anything; the
+first open is the declaration".
 
 ## Prerequisites
 
@@ -47,13 +58,14 @@ to a registry you control and replace the `image:` fields).
 docker build -f docker/operator.Dockerfile -t local/mxl-operator:dev .
 docker build -f docker/agent.Dockerfile    -t local/mxl-domain-agent:dev .
 docker build -f docker/gateway.Dockerfile  -t local/mxl-fabrics-gateway:dev .
+docker build -f docker/shim.Dockerfile     -t local/mxl-intent-shim:dev .
 ```
 
 If your runtime can't see the local docker daemon (e.g. k3s with
 containerd), import the images:
 
 ```sh
-for img in mxl-operator mxl-domain-agent mxl-fabrics-gateway; do
+for img in mxl-operator mxl-domain-agent mxl-fabrics-gateway mxl-intent-shim; do
   docker save local/${img}:dev | sudo k3s ctr images import -
 done
 ```
