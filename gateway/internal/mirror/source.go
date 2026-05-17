@@ -61,6 +61,13 @@ type sourceEntry struct {
 	regions   *fabrics.Regions
 	initiator *fabrics.Initiator
 	info      *fabrics.TargetInfo
+	// infoStr is the serialized TargetInfo the initiator was set up
+	// with. We keep it so a later reconcile can detect that the
+	// target has rotated its info (e.g. the target-side gateway pod
+	// restarted and re-opened the FlowWriter) and reopen the
+	// initiator against the fresh address before the source's writes
+	// keep getting refused.
+	infoStr string
 
 	// cancel stops the per-flow transfer goroutine; done is closed
 	// when the goroutine returns.
@@ -109,12 +116,20 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 
-	// Already set up?
+	// Already set up against this exact target info?
 	r.mu.Lock()
 	existing := r.sources[req.NamespacedName]
 	r.mu.Unlock()
 	if existing != nil {
-		return ctrl.Result{}, nil
+		if existing.infoStr == mirror.Status.TargetInfo {
+			return ctrl.Result{}, nil
+		}
+		// TargetInfo rotated under us (typically: target gateway
+		// restarted and rebuilt the writer on a fresh ephemeral
+		// port). Tear down the stale initiator so we re-open
+		// against the new address.
+		l.Info("target info rotated, rebuilding initiator")
+		r.closeEntry(req.NamespacedName)
 	}
 
 	provider := mapProvider(mirror.Spec.Provider)
@@ -201,6 +216,7 @@ func (r *SourceReconciler) openInitiator(flowID, targetInfoStr string, provider 
 		regions:   regions,
 		initiator: initiator,
 		info:      info,
+		infoStr:   targetInfoStr,
 		cancel:    cancel,
 		done:      done,
 	}
