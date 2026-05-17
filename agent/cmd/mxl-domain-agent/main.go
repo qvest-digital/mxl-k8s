@@ -21,6 +21,9 @@ import (
 	"github.com/qvest-digital/mxl-k8s/agent/internal/domainpublisher"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/fanotify"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/flowpublisher"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/intent"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/intentsock"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/podlookup"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/statfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -111,11 +114,31 @@ func run(args []string) error {
 
 	go domainPub.RunRefreshLoop(ctx, cfg.ResyncPeriod)
 
+	if cfg.IntentSocketPath != "" {
+		intentDispatcher := &intent.Dispatcher{
+			Client:             kClient,
+			Resolver:           &podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName},
+			DomainPath:         cfg.DomainPath,
+			NodeName:           cfg.NodeName,
+			MaterializeTimeout: cfg.MaterializeTimeout,
+		}
+		intentServer := &intentsock.Server{
+			SocketPath: cfg.IntentSocketPath,
+			Dispatcher: intentDispatcher,
+		}
+		go func() {
+			if err := intentServer.Run(ctx); err != nil {
+				setupLog.Error(err, "intent socket exited")
+			}
+		}()
+	}
+
 	setupLog.Info("agent started",
 		"node", cfg.NodeName,
 		"domainPath", cfg.DomainPath,
 		"probeAddr", cfg.ProbeAddr,
-		"resyncPeriod", cfg.ResyncPeriod)
+		"resyncPeriod", cfg.ResyncPeriod,
+		"intentSocket", cfg.IntentSocketPath)
 
 	select {
 	case <-ctx.Done():

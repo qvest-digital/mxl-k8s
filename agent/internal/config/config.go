@@ -29,6 +29,16 @@ type Config struct {
 
 	// ResyncPeriod is how often the agent refreshes MxlDomain status.
 	ResyncPeriod time.Duration
+
+	// IntentSocketPath is the UDS the agent serves for libmxl-
+	// intent.so to request on-demand mirror materialization. Empty
+	// disables the intent endpoint.
+	IntentSocketPath string
+
+	// MaterializeTimeout caps the per-request wait the intent
+	// dispatcher allows before giving up on a mirror reaching
+	// Ready.
+	MaterializeTimeout time.Duration
 }
 
 // FromFlags populates a Config from command-line flags.
@@ -46,6 +56,10 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"Address the metrics endpoint binds to.")
 	fs.DurationVar(&c.ResyncPeriod, "resync-period", 30*time.Second,
 		"How often to refresh MxlDomain status.")
+	fs.StringVar(&c.IntentSocketPath, "intent-socket", "/run/mxl/agent.sock",
+		"UDS path for the on-demand intent endpoint. Empty disables.")
+	fs.DurationVar(&c.MaterializeTimeout, "materialize-timeout", 5*time.Second,
+		"Per-request budget for the intent dispatcher waiting for a mirror Ready.")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
