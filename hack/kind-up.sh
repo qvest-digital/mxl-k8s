@@ -82,7 +82,10 @@ if "${KUBECTL[@]}" -n mxl-system get deploy/mxl-operator >/dev/null 2>&1; then
   log "Rolling out latest images"
   "${KUBECTL[@]}" -n mxl-system rollout restart deploy/mxl-operator ds/mxl-domain-agent ds/mxl-fabrics-gateway || true
 fi
-"${KUBECTL[@]}" -n mxl-system delete pod mxl-tcp-demo-writer mxl-tcp-demo-reader --ignore-not-found --wait=false
+# Wait for the deletes to complete — re-applying while a pod is
+# still Terminating leaves the new pod in limbo (apply observes
+# the live object and treats it as a no-op).
+"${KUBECTL[@]}" -n mxl-system delete pod mxl-tcp-demo-writer mxl-tcp-demo-reader --ignore-not-found
 "${KUBECTL[@]}" apply -k "${REPO_ROOT}/examples/tcp-demo/"
 
 log "Waiting for control-plane workloads (timeout ${ROLLOUT_TIMEOUT_SECS}s)"
