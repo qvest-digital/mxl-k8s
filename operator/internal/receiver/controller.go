@@ -19,7 +19,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -248,9 +250,45 @@ func (r *Reconciler) markBound(ctx context.Context, recv *mxlv1alpha1.MxlReceive
 
 // SetupWithManager wires the reconciler into the controller-runtime
 // Manager.
+//
+// The Watches on MxlFlowMirror lets the reconciler notice when a
+// previously-bound mirror disappears (manual cleanup, gateway
+// crash, future GC) so the next reconcile re-creates it instead
+// of waiting for the 10h cache resync.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&mxlv1alpha1.MxlReceiver{}).
+		Watches(
+			&mxlv1alpha1.MxlFlowMirror{},
+			handler.EnqueueRequestsFromMapFunc(r.mirrorToReceivers),
+		).
 		Named("mxlreceiver").
 		Complete(r)
+}
+
+// mirrorToReceivers maps an MxlFlowMirror event to reconcile
+// requests for any MxlReceiver in the mirror's namespace whose
+// spec.flowID matches. The receiver reconciler is idempotent
+// against the resulting requeues.
+func (r *Reconciler) mirrorToReceivers(ctx context.Context, obj client.Object) []reconcile.Request {
+	mirror, ok := obj.(*mxlv1alpha1.MxlFlowMirror)
+	if !ok {
+		return nil
+	}
+	var receivers mxlv1alpha1.MxlReceiverList
+	if err := r.List(ctx, &receivers, client.InNamespace(mirror.Namespace)); err != nil {
+		return nil
+	}
+	var out []reconcile.Request
+	for i := range receivers.Items {
+		if receivers.Items[i].Spec.FlowID == mirror.Spec.FlowID {
+			out = append(out, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Namespace: receivers.Items[i].Namespace,
+					Name:      receivers.Items[i].Name,
+				},
+			})
+		}
+	}
+	return out
 }
