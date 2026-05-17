@@ -60,3 +60,27 @@ ipc-check: gen-ipc
 
 .PHONY: generated-check
 generated-check: manifests-check ipc-check
+
+# --- KIND demo helpers ---
+# `make kind-up`     builds the four component images, creates (or
+#                    reuses) a 3-node KIND cluster, loads the images,
+#                    applies examples/tcp-demo, and waits for the
+#                    MxlFlowMirror to reach Ready.
+# `make kind-down`   deletes the cluster.
+# `make kind-status` prints a quick status summary.
+#
+# Override the cluster name with KIND_CLUSTER=<name>.
+
+KIND_CLUSTER ?= mxl-k8s-demo
+
+.PHONY: kind-up
+kind-up:
+	KIND_CLUSTER=$(KIND_CLUSTER) bash hack/kind-up.sh
+
+.PHONY: kind-down
+kind-down:
+	KIND_CLUSTER=$(KIND_CLUSTER) bash hack/kind-down.sh
+
+.PHONY: kind-status
+kind-status:
+	KIND_CLUSTER=$(KIND_CLUSTER) bash hack/kind-status.sh

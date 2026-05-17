@@ -1,0 +1,16 @@
+# Three-node KIND cluster for the mxl-k8s tcp-demo: one control
+# plane and two workers, since the demo's podAntiAffinity needs at
+# least two schedulable nodes so the writer and reader land on
+# different hosts and the gateway pair actually does cross-node
+# work.
+#
+# Bumped containerd's `KubeletConfiguration` allowed unsafe sysctls
+# only if you need them; we don't here.
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: mxl-k8s-demo
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
