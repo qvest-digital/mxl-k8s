@@ -12,7 +12,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
 	"github.com/qvest-digital/go-mxl/mxl"
@@ -308,12 +310,51 @@ func closeSourceHandles(e *sourceEntry) {
 
 // SetupWithManager wires the reconciler into the controller-runtime
 // Manager.
+//
+// The Watches on MxlFlow closes the writer-startup race: when an
+// agent on the source node publishes a new MxlFlow (or updates its
+// Origin location) the reconciler is woken immediately for any
+// MxlFlowMirror with the matching flowID, instead of waiting out
+// the exponential backoff that started when the local FlowReader
+// open returned FLOW_NOT_FOUND before the writer had created it.
 func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.sources == nil {
 		r.sources = make(map[types.NamespacedName]*sourceEntry)
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&mxlv1alpha1.MxlFlowMirror{}).
+		Watches(
+			&mxlv1alpha1.MxlFlow{},
+			handler.EnqueueRequestsFromMapFunc(r.flowToMirrors),
+		).
 		Named("mxlflowmirror-source").
 		Complete(r)
+}
+
+// flowToMirrors maps an MxlFlow event to reconcile requests for any
+// source-side MxlFlowMirror whose spec.flowID matches and whose
+// sourceNode is this gateway's node. Cluster-wide list because
+// mirrors live in arbitrary user namespaces.
+func (r *SourceReconciler) flowToMirrors(ctx context.Context, obj client.Object) []reconcile.Request {
+	flow, ok := obj.(*mxlv1alpha1.MxlFlow)
+	if !ok {
+		return nil
+	}
+	var mirrors mxlv1alpha1.MxlFlowMirrorList
+	if err := r.List(ctx, &mirrors); err != nil {
+		return nil
+	}
+	var out []reconcile.Request
+	for i := range mirrors.Items {
+		m := &mirrors.Items[i]
+		if m.Spec.FlowID == flow.Spec.ID && m.Spec.SourceNode == r.NodeName {
+			out = append(out, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Namespace: m.Namespace,
+					Name:      m.Name,
+				},
+			})
+		}
+	}
+	return out
 }
