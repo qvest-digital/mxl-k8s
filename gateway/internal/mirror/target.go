@@ -140,7 +140,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	provider := mapProvider(mirror.Spec.Provider)
 
-	entry, err := r.openTarget(string(flow.Spec.Definition.Raw), provider)
+	entry, err := r.openTarget(req.NamespacedName, string(flow.Spec.Definition.Raw), provider)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("open target: %w", err)
 	}
@@ -175,7 +175,11 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 // openTarget walks the libmxl handshake: open FlowWriter, get
 // regions, create + setup fabrics.Target, marshal TargetInfo.
-func (r *TargetReconciler) openTarget(flowDef string, provider fabrics.Provider) (*targetEntry, error) {
+//
+// key identifies the MxlFlowMirror whose target we're opening; the
+// progress goroutine uses it to invoke recovery if the libmxl-fabrics
+// Target dies (so a Reconcile re-fires and a fresh target opens).
+func (r *TargetReconciler) openTarget(key types.NamespacedName, flowDef string, provider fabrics.Provider) (*targetEntry, error) {
 	mxlInst := r.Handles.MXL()
 	if mxlInst == nil {
 		return nil, fmt.Errorf("mxl instance closed")
@@ -222,7 +226,12 @@ func (r *TargetReconciler) openTarget(flowDef string, provider fabrics.Provider)
 
 	loopCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runTargetProgressLoop(loopCtx, done, target, writer)
+	go runTargetProgressLoop(loopCtx, done, target, writer, func() {
+		// Detach the recovery work from the goroutine that's
+		// exiting so closeEntry's wait-for-done doesn't deadlock
+		// on its own done channel.
+		go r.recoverFromFatalError(key)
+	})
 
 	return &targetEntry{
 		writer:  writer,
@@ -236,9 +245,10 @@ func (r *TargetReconciler) openTarget(flowDef string, provider fabrics.Provider)
 }
 
 // runTargetProgressLoop drives the libmxl-fabrics Target until ctx is
-// canceled. Each ReadGrain call internally advances the libfabric
-// event + completion queues — without it the target never accepts
-// incoming connections nor signals grain arrivals.
+// canceled or ReadGrain reports a non-recoverable error. Each
+// ReadGrain call internally advances the libfabric event +
+// completion queues — without it the target never accepts incoming
+// connections nor signals grain arrivals.
 //
 // For every grain ReadGrain reports as received, we also OpenGrain
 // followed by Commit on the local FlowWriter: the initiator side
@@ -246,7 +256,14 @@ func (r *TargetReconciler) openTarget(flowDef string, provider fabrics.Provider)
 // commit only advances the flow's HeadIndex so local FlowReaders
 // (consumer pods) can see the new grain. Mirrors the pattern from
 // upstream `mxl-fabrics-demo` tools/mxl-fabrics-demo/demo.cpp.
-func runTargetProgressLoop(ctx context.Context, done chan struct{}, target *fabrics.Target, writer *mxl.Writer) {
+//
+// On any error other than ErrNotReady the underlying Target is no
+// longer safe to poll — libmxl-fabrics has been observed to dangle
+// internal state after the remote endpoint drops, and the next
+// ReadGrain call segfaults inside cgo. We exit the loop and call
+// onFatal so the reconciler can drop the entry and re-open against
+// a fresh Target.
+func runTargetProgressLoop(ctx context.Context, done chan struct{}, target *fabrics.Target, writer *mxl.Writer, onFatal func()) {
 	defer close(done)
 	l := ctrl.Log.WithName("target-progress")
 	const tick = 100 * time.Millisecond
@@ -265,12 +282,11 @@ func runTargetProgressLoop(ctx context.Context, done chan struct{}, target *fabr
 		case errors.Is(err, fabrics.ErrNotReady):
 			// idle tick, keep polling.
 		default:
-			l.Error(err, "ReadGrain")
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(500 * time.Millisecond):
+			l.Error(err, "ReadGrain — target is no longer safe to poll, exiting loop")
+			if onFatal != nil {
+				onFatal()
 			}
+			return
 		}
 	}
 }
@@ -300,6 +316,36 @@ func (r *TargetReconciler) closeEntry(key types.NamespacedName) {
 		return
 	}
 	closeTargetHandles(entry)
+}
+
+// recoverFromFatalError tears down the entry behind a mirror whose
+// libmxl-fabrics Target died asynchronously, and clears the mirror's
+// status.TargetInfo so the For(&MxlFlowMirror{}) watch fires a
+// fresh Reconcile that rebuilds it.
+//
+// Must be invoked from a goroutine other than the progress loop
+// itself, since closeEntry waits for the loop's done channel.
+func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
+	l := ctrl.Log.WithName("target-recover").WithValues("mirror", key)
+	r.closeEntry(key)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var mirror mxlv1alpha1.MxlFlowMirror
+	if err := r.Get(ctx, key, &mirror); err != nil {
+		if !apierrors.IsNotFound(err) {
+			l.Error(err, "get mirror during recovery")
+		}
+		return
+	}
+	if mirror.Status.TargetInfo == "" {
+		return
+	}
+	mirror.Status.TargetInfo = ""
+	mirror.Status.Phase = mxlv1alpha1.MxlFlowMirrorMaterializing
+	if err := r.Status().Update(ctx, &mirror); err != nil {
+		l.Error(err, "clear status during recovery")
+	}
 }
 
 func closeTargetHandles(e *targetEntry) {
