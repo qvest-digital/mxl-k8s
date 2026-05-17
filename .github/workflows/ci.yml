@@ -88,12 +88,12 @@ jobs:
           check-latest: true
 
       - name: Regenerate manifests
-        run: make gen-api
+        run: make gen-api gen-rbac
 
       - name: Check no drift in generated files
         run: |
           if ! git diff --exit-code -- config/ api/v1alpha1/zz_generated.deepcopy.go; then
-            echo "::error::generated files are out of date; run 'make gen-api' and commit the result"
+            echo "::error::generated files are out of date; run 'make gen-api gen-rbac' and commit the result"
             exit 1
           fi
 
