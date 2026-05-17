@@ -1,0 +1,93 @@
+# Same RBAC shape as tcp-demo. Kept inline here so this demo is
+# self-contained; in a real deployment you'd factor these into a
+# shared Helm chart or kustomize base.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mxl-operator
+  namespace: mxl-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mxl-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mxl-operator
+subjects:
+  - kind: ServiceAccount
+    name: mxl-operator
+    namespace: mxl-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mxl-domain-agent
+  namespace: mxl-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mxl-domain-agent
+rules:
+  - apiGroups: ["mxl.qvest-digital.com"]
+    resources: ["mxldomains", "mxlflows", "mxlflowmirrors"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["mxl.qvest-digital.com"]
+    resources: ["mxldomains/status", "mxlflows/status", "mxlflowmirrors/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mxl-domain-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mxl-domain-agent
+subjects:
+  - kind: ServiceAccount
+    name: mxl-domain-agent
+    namespace: mxl-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mxl-fabrics-gateway
+  namespace: mxl-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mxl-fabrics-gateway
+rules:
+  - apiGroups: ["mxl.qvest-digital.com"]
+    resources: ["mxlflowmirrors", "mxlnodecapabilities"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["mxl.qvest-digital.com"]
+    resources: ["mxlflowmirrors/status", "mxlnodecapabilities/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["mxl.qvest-digital.com"]
+    resources: ["mxlflowmirrors/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["mxl.qvest-digital.com"]
+    resources: ["mxlflows"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mxl-fabrics-gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mxl-fabrics-gateway
+subjects:
+  - kind: ServiceAccount
+    name: mxl-fabrics-gateway
+    namespace: mxl-system

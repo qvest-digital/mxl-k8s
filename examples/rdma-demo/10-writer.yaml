@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mxl-rdma-demo-writer
+  namespace: mxl-system
+  labels:
+    app.kubernetes.io/name: mxl-rdma-demo-writer
+    mxl-k8s-demo.qvest-digital.com/role: producer
+spec:
+  containers:
+    - name: writer
+      image: ghcr.io/qvest-digital/go-mxl-runtime:1.0.0-rc.3
+      command: ["/opt/libmxl/bin/mxl-gst-testsrc"]
+      args:
+        - "-d"
+        - "/run/mxl/domain"
+      # Same capabilities as tcp-demo's writer: libmxl mlocks the
+      # tmpfs grain pages so the gateway's verbs path can pin them
+      # for ibv_reg_mr.
+      securityContext:
+        capabilities:
+          add: ["IPC_LOCK", "SYS_RESOURCE"]
+      volumeMounts:
+        - name: mxl-domain
+          mountPath: /run/mxl/domain
+  volumes:
+    - name: mxl-domain
+      hostPath:
+        path: /run/mxl/domain
+        type: DirectoryOrCreate

@@ -1,0 +1,87 @@
+# RDMA-capable gateway DaemonSet.
+#
+# Differences from tcp-demo:
+# - --providers=verbs (the gateway only claims the verbs provider).
+# - /dev/infiniband mounted into the pod so libibverbs / librdmacm
+#   can talk to the userspace RDMA driver.
+# - CAP_IPC_LOCK so libmxl can mlock() the tmpfs grain pages, which
+#   is what makes them pinnable for ibv_reg_mr.
+# - SYS_RESOURCE so the kernel raises RLIMIT_MEMLOCK for the
+#   process; some distros default it too low for production flows.
+# - FI_VERBS_IFACE forces libfabric to bind verbs to a specific
+#   net interface name; uncomment and set if your nodes have more
+#   than one RDMA NIC.
+#
+# The hostNetwork stance is unchanged: verbs endpoints still
+# announce a host-reachable address, so cross-node connectivity
+# depends on the same plumbing.
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: mxl-fabrics-gateway
+  namespace: mxl-system
+  labels:
+    app.kubernetes.io/name: mxl-fabrics-gateway
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mxl-fabrics-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mxl-fabrics-gateway
+    spec:
+      serviceAccountName: mxl-fabrics-gateway
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: gateway
+          image: local/mxl-fabrics-gateway:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --domain-path=/run/mxl/domain
+            - --providers=verbs
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            # - name: FI_VERBS_IFACE
+            #   value: "net1"
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK", "SYS_RESOURCE"]
+          ports:
+            - name: probe
+              containerPort: 8081
+            - name: metrics
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probe
+            initialDelaySeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probe
+            initialDelaySeconds: 2
+          volumeMounts:
+            - name: mxl-domain
+              mountPath: /run/mxl/domain
+            - name: infiniband
+              mountPath: /dev/infiniband
+      volumes:
+        - name: mxl-domain
+          hostPath:
+            path: /run/mxl/domain
+            type: DirectoryOrCreate
+        - name: infiniband
+          hostPath:
+            path: /dev/infiniband
+            type: Directory
