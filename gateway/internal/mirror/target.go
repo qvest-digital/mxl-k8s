@@ -2,6 +2,7 @@ package mirror
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -49,13 +50,21 @@ type TargetReconciler struct {
 }
 
 // targetEntry holds the live libmxl handles for one target-side
-// mirror; closed together by closeTargetEntry.
+// mirror plus the goroutine that drives the target's progress loop.
+// Closed together by closeTargetHandles.
 type targetEntry struct {
 	writer  *mxl.Writer
 	regions *fabrics.Regions
 	target  *fabrics.Target
 	info    *fabrics.TargetInfo
 	infoStr string
+
+	// cancel stops the per-mirror progress goroutine; done is closed
+	// when the goroutine returns. Without this loop the libmxl-fabrics
+	// Target never advances its event/completion queues, so remote
+	// initiators never get an FI_CONNECTED back and grains never land.
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors,verbs=get;list;watch;update;patch
@@ -210,13 +219,76 @@ func (r *TargetReconciler) openTarget(flowDef string, provider fabrics.Provider)
 		_ = writer.Close()
 		return nil, fmt.Errorf("TargetInfo.MarshalString: %w", err)
 	}
+
+	loopCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go runTargetProgressLoop(loopCtx, done, target, writer)
+
 	return &targetEntry{
 		writer:  writer,
 		regions: regions,
 		target:  target,
 		info:    info,
 		infoStr: s,
+		cancel:  cancel,
+		done:    done,
 	}, nil
+}
+
+// runTargetProgressLoop drives the libmxl-fabrics Target until ctx is
+// canceled. Each ReadGrain call internally advances the libfabric
+// event + completion queues — without it the target never accepts
+// incoming connections nor signals grain arrivals.
+//
+// For every grain ReadGrain reports as received, we also OpenGrain
+// followed by Commit on the local FlowWriter: the initiator side
+// has already RDMA'd payload + header into the ring slot, so the
+// commit only advances the flow's HeadIndex so local FlowReaders
+// (consumer pods) can see the new grain. Mirrors the pattern from
+// upstream `mxl-fabrics-demo` tools/mxl-fabrics-demo/demo.cpp.
+func runTargetProgressLoop(ctx context.Context, done chan struct{}, target *fabrics.Target, writer *mxl.Writer) {
+	defer close(done)
+	l := ctrl.Log.WithName("target-progress")
+	const tick = 100 * time.Millisecond
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		idx, err := target.ReadGrain(tick)
+		switch {
+		case err == nil:
+			if err := commitArrivedGrain(writer, idx); err != nil {
+				l.Error(err, "commit received grain", "idx", idx)
+			}
+		case errors.Is(err, fabrics.ErrNotReady):
+			// idle tick, keep polling.
+		default:
+			l.Error(err, "ReadGrain")
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+	}
+}
+
+// commitArrivedGrain advances the local flow's HeadIndex for a grain
+// whose payload + header were already filled in by the remote
+// initiator's RDMA write. OpenGrain returns a writable handle aliasing
+// the ring slot — we leave the slot bytes untouched and Commit so the
+// flow metadata catches up.
+func commitArrivedGrain(writer *mxl.Writer, idx uint64) error {
+	ga, err := writer.OpenGrain(idx)
+	if err != nil {
+		return fmt.Errorf("OpenGrain(%d): %w", idx, err)
+	}
+	if err := ga.Commit(ga.TotalSlices, 0); err != nil {
+		return fmt.Errorf("Commit(%d): %w", idx, err)
+	}
+	return nil
 }
 
 func (r *TargetReconciler) closeEntry(key types.NamespacedName) {
@@ -231,6 +303,12 @@ func (r *TargetReconciler) closeEntry(key types.NamespacedName) {
 }
 
 func closeTargetHandles(e *targetEntry) {
+	if e.cancel != nil {
+		e.cancel()
+	}
+	if e.done != nil {
+		<-e.done
+	}
 	if e.info != nil {
 		_ = e.info.Close()
 	}
