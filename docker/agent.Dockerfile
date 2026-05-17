@@ -17,11 +17,14 @@ ENV GOOS=linux
 RUN go mod download && \
     go build -trimpath -ldflags="-s -w" -o /out/mxl-domain-agent ./cmd/mxl-domain-agent
 
-# Runtime stage. Stays on distroless even though the agent needs
-# CAP_SYS_ADMIN at runtime for fanotify_init — the capability is
-# granted in the DaemonSet's securityContext; the binary itself
-# does not need to be root.
-FROM gcr.io/distroless/static-debian12:nonroot
+# Runtime stage. Runs as root because:
+#  - fanotify_init in FAN_CLASS_NOTIF mode needs CAP_SYS_ADMIN;
+#  - the intent socket at /run/mxl/agent.sock has to be created in
+#    a host-owned tmpfs path that's root-only by default on most
+#    distros.
+# Both can be relaxed (rootless + chowned bind-mounts) in a later
+# hardening pass; for now the DaemonSet manifest grants SYS_ADMIN
+# alongside running as root.
+FROM gcr.io/distroless/static-debian12:latest
 COPY --from=builder /out/mxl-domain-agent /usr/local/bin/mxl-domain-agent
-USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/mxl-domain-agent"]

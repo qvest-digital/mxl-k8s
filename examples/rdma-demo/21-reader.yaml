@@ -27,7 +27,7 @@ spec:
           mountPath: /shared
   containers:
     - name: reader
-      image: ghcr.io/qvest-digital/go-mxl-runtime:1.0.0-rc.3
+      image: local/mxl-demo-tools:dev
       command: ["/opt/libmxl/bin/mxl-info"]
       args:
         - "-d"

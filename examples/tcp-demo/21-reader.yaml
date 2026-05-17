@@ -1,8 +1,10 @@
 # Consumer pod for the demo. Opens the flow on its local MXL domain
-# with mxl-info. The libmxl-intent.so LD_PRELOAD shim turns the
-# initial ENOENT (the mirror hasn't materialized yet on this node)
-# into a synchronous wait on the agent's UDS — so mxl-info's first
-# open already sees the mirrored flow.
+# with the `read-grain` example binary from go-mxl, which prints a
+# one-line summary of each grain it observes. The libmxl-intent.so
+# LD_PRELOAD shim turns the initial ENOENT (the mirror hasn't
+# materialized yet on this node) into a synchronous wait on the
+# agent's UDS — so read-grain's first open already sees the
+# mirrored flow.
 #
 # Anti-affinity forces the pod onto a different node than the
 # writer so the mirror plumbing is actually exercised across the
@@ -33,11 +35,13 @@ spec:
           mountPath: /shared
   containers:
     - name: reader
-      image: ghcr.io/qvest-digital/go-mxl-runtime:1.0.0-rc.3
-      command: ["/opt/libmxl/bin/mxl-info"]
+      image: local/mxl-demo-tools:dev
+      command: ["/usr/local/bin/read-grain"]
       args:
-        - "-d"
+        - "-domain"
         - "/run/mxl/domain"
+        - "-flow"
+        - "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
       env:
         - name: LD_PRELOAD
           value: /opt/mxl-intent/libmxl-intent.so
@@ -45,21 +49,18 @@ spec:
         capabilities:
           add: ["IPC_LOCK", "SYS_RESOURCE"]
       volumeMounts:
-        - name: mxl-domain
-          mountPath: /run/mxl/domain
+        # Mount /run/mxl as a whole so both the domain subdir and the
+        # agent's intent socket land inside the pod even if the
+        # socket hasn't been created yet at scheduling time.
+        - name: mxl-run
+          mountPath: /run/mxl
         - name: intent-shim
           mountPath: /opt/mxl-intent
           readOnly: true
-        - name: agent-sock
-          mountPath: /run/mxl/agent.sock
   volumes:
-    - name: mxl-domain
+    - name: mxl-run
       hostPath:
-        path: /run/mxl/domain
+        path: /run/mxl
         type: DirectoryOrCreate
     - name: intent-shim
       emptyDir: {}
-    - name: agent-sock
-      hostPath:
-        path: /run/mxl/agent.sock
-        type: Socket

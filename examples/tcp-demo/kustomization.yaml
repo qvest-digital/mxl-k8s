@@ -16,3 +16,14 @@ resources:
   - 10-writer.yaml
   - 20-receiver.yaml
   - 21-reader.yaml
+
+# The demo writer (mxl-gst-testsrc) needs an NMOS flow definition
+# pointed at via --video-config-file. We ship it verbatim from
+# dmf-mxl's examples (Apache-2.0; SPDX header preserved) and mount
+# it into the writer pod as a ConfigMap.
+configMapGenerator:
+  - name: mxl-demo-flow-config
+    files:
+      - flow-video-v210.json
+generatorOptions:
+  disableNameSuffixHash: true
