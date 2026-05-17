@@ -53,11 +53,22 @@ type TargetReconciler struct {
 // mirror plus the goroutine that drives the target's progress loop.
 // Closed together by closeTargetHandles.
 type targetEntry struct {
-	writer  *mxl.Writer
+	// writer owns the local flow file. Its lifetime spans recoveries:
+	// closing it would invalidate the FlowReader handles in consumer
+	// pods, so the recovery path leaves it alone and only rebuilds
+	// the fabric side.
+	writer *mxl.Writer
+
+	// fabric-side handles, rebuilt by recoverFromFatalError when
+	// ReadGrain reports a non-recoverable error.
 	regions *fabrics.Regions
 	target  *fabrics.Target
 	info    *fabrics.TargetInfo
 	infoStr string
+
+	// provider records the configuration the entry was opened with,
+	// so the recovery path can rebuild the fabric side identically.
+	provider fabrics.Provider
 
 	// cancel stops the per-mirror progress goroutine; done is closed
 	// when the goroutine returns. Without this loop the libmxl-fabrics
@@ -173,36 +184,59 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	return ctrl.Result{}, nil
 }
 
-// openTarget walks the libmxl handshake: open FlowWriter, get
-// regions, create + setup fabrics.Target, marshal TargetInfo.
+// openTarget walks the libmxl handshake: open FlowWriter, register
+// memory regions, create + setup fabrics.Target, marshal TargetInfo,
+// and start the progress goroutine.
 //
 // key identifies the MxlFlowMirror whose target we're opening; the
 // progress goroutine uses it to invoke recovery if the libmxl-fabrics
-// Target dies (so a Reconcile re-fires and a fresh target opens).
+// Target dies (the writer is retained across recoveries to keep the
+// flow file valid for consumer pods).
 func (r *TargetReconciler) openTarget(key types.NamespacedName, flowDef string, provider fabrics.Provider) (*targetEntry, error) {
 	mxlInst := r.Handles.MXL()
 	if mxlInst == nil {
 		return nil, fmt.Errorf("mxl instance closed")
-	}
-	fabInst := r.Handles.Fabrics()
-	if fabInst == nil {
-		return nil, fmt.Errorf("fabrics instance closed")
 	}
 
 	writer, _, err := mxlInst.NewWriter(flowDef)
 	if err != nil {
 		return nil, fmt.Errorf("NewWriter: %w", err)
 	}
-	regions, err := fabrics.RegionsForFlowWriter(writer)
+	regions, target, info, s, err := r.openFabricSide(writer, provider)
 	if err != nil {
 		_ = writer.Close()
-		return nil, fmt.Errorf("RegionsForFlowWriter: %w", err)
+		return nil, err
+	}
+
+	entry := &targetEntry{
+		writer:   writer,
+		regions:  regions,
+		target:   target,
+		info:     info,
+		infoStr:  s,
+		provider: provider,
+	}
+	r.startProgressLoop(entry, key)
+	return entry, nil
+}
+
+// openFabricSide creates the regions + fabrics.Target + TargetInfo
+// on an already-open mxl.Writer. Used both by initial openTarget and
+// by recoverFromFatalError when the fabric side died but the writer
+// is still good.
+func (r *TargetReconciler) openFabricSide(writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Regions, *fabrics.Target, *fabrics.TargetInfo, string, error) {
+	fabInst := r.Handles.Fabrics()
+	if fabInst == nil {
+		return nil, nil, nil, "", fmt.Errorf("fabrics instance closed")
+	}
+	regions, err := fabrics.RegionsForFlowWriter(writer)
+	if err != nil {
+		return nil, nil, nil, "", fmt.Errorf("RegionsForFlowWriter: %w", err)
 	}
 	target, err := fabInst.NewTarget()
 	if err != nil {
 		_ = regions.Close()
-		_ = writer.Close()
-		return nil, fmt.Errorf("NewTarget: %w", err)
+		return nil, nil, nil, "", fmt.Errorf("NewTarget: %w", err)
 	}
 	info, err := target.Setup(fabrics.TargetConfig{
 		Endpoint: fabrics.EndpointAddress{Node: r.BindAddress},
@@ -212,36 +246,34 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, flowDef string, 
 	if err != nil {
 		_ = target.Close()
 		_ = regions.Close()
-		_ = writer.Close()
-		return nil, fmt.Errorf("Target.Setup: %w", err)
+		return nil, nil, nil, "", fmt.Errorf("Target.Setup: %w", err)
 	}
 	s, err := info.MarshalString()
 	if err != nil {
 		_ = info.Close()
 		_ = target.Close()
 		_ = regions.Close()
-		_ = writer.Close()
-		return nil, fmt.Errorf("TargetInfo.MarshalString: %w", err)
+		return nil, nil, nil, "", fmt.Errorf("TargetInfo.MarshalString: %w", err)
 	}
+	return regions, target, info, s, nil
+}
 
+// startProgressLoop wires the progress goroutine for an entry and
+// arms the recovery callback. Called after openTarget and again
+// after every successful in-place fabric rebuild.
+func (r *TargetReconciler) startProgressLoop(entry *targetEntry, key types.NamespacedName) {
 	loopCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	entry.cancel = cancel
+	entry.done = done
+	target := entry.target
+	writer := entry.writer
 	go runTargetProgressLoop(loopCtx, done, target, writer, func() {
 		// Detach the recovery work from the goroutine that's
-		// exiting so closeEntry's wait-for-done doesn't deadlock
+		// exiting so the recovery's wait-for-done doesn't deadlock
 		// on its own done channel.
 		go r.recoverFromFatalError(key)
 	})
-
-	return &targetEntry{
-		writer:  writer,
-		regions: regions,
-		target:  target,
-		info:    info,
-		infoStr: s,
-		cancel:  cancel,
-		done:    done,
-	}, nil
 }
 
 // runTargetProgressLoop drives the libmxl-fabrics Target until ctx is
@@ -318,16 +350,60 @@ func (r *TargetReconciler) closeEntry(key types.NamespacedName) {
 	closeTargetHandles(entry)
 }
 
-// recoverFromFatalError tears down the entry behind a mirror whose
-// libmxl-fabrics Target died asynchronously, and clears the mirror's
-// status.TargetInfo so the For(&MxlFlowMirror{}) watch fires a
-// fresh Reconcile that rebuilds it.
+// recoverFromFatalError rebuilds the libmxl-fabrics side of a mirror
+// whose Target died asynchronously, keeping the mxl.Writer alive so
+// consumer FlowReaders stay valid across the recovery. The new
+// TargetInfo is published to mirror.status so the source side picks
+// up the rotation through its existing watch.
 //
 // Must be invoked from a goroutine other than the progress loop
-// itself, since closeEntry waits for the loop's done channel.
+// itself: we wait on the loop's done channel before touching the
+// entry's resources.
 func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 	l := ctrl.Log.WithName("target-recover").WithValues("mirror", key)
-	r.closeEntry(key)
+
+	r.mu.Lock()
+	entry := r.targets[key]
+	r.mu.Unlock()
+	if entry == nil {
+		return
+	}
+
+	// Wait for the previous progress loop to finish before swapping
+	// its target/regions/info pointers.
+	if entry.done != nil {
+		<-entry.done
+	}
+
+	// Tear down the fabric side; KEEP the writer so the flow file
+	// on disk and consumer FlowReader handles stay valid.
+	if entry.info != nil {
+		_ = entry.info.Close()
+	}
+	if entry.target != nil {
+		_ = entry.target.Close()
+	}
+	if entry.regions != nil {
+		_ = entry.regions.Close()
+	}
+	entry.info, entry.target, entry.regions, entry.infoStr = nil, nil, nil, ""
+
+	regions, target, info, s, err := r.openFabricSide(entry.writer, entry.provider)
+	if err != nil {
+		l.Error(err, "rebuild fabric side")
+		// Drop the entry so the next Reconcile rebuilds from scratch
+		// (closing the writer too, which will invalidate readers).
+		r.mu.Lock()
+		delete(r.targets, key)
+		r.mu.Unlock()
+		_ = entry.writer.Close()
+		return
+	}
+	entry.regions = regions
+	entry.target = target
+	entry.info = info
+	entry.infoStr = s
+	r.startProgressLoop(entry, key)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -338,14 +414,13 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 		}
 		return
 	}
-	if mirror.Status.TargetInfo == "" {
+	mirror.Status.TargetInfo = s
+	mirror.Status.Phase = mxlv1alpha1.MxlFlowMirrorReady
+	if err := r.Status().Update(ctx, &mirror); err != nil {
+		l.Error(err, "publish rebuilt TargetInfo")
 		return
 	}
-	mirror.Status.TargetInfo = ""
-	mirror.Status.Phase = mxlv1alpha1.MxlFlowMirrorMaterializing
-	if err := r.Status().Update(ctx, &mirror); err != nil {
-		l.Error(err, "clear status during recovery")
-	}
+	l.Info("rebuilt fabric side after fatal ReadGrain")
 }
 
 func closeTargetHandles(e *targetEntry) {
