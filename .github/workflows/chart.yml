@@ -15,7 +15,7 @@ on:
     tags: ['charts/mxl-k8s/v*.*.*']
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 concurrency:
@@ -30,6 +30,9 @@ env:
   HELM_SCHEMA_VERSION: "0.23.2"
   HELM_DOCS_VERSION: v1.14.2
   KUBECONFORM_VERSION: v0.6.7
+  # mikefarah/yq for in-place yaml editing of values.yaml at
+  # package-time. Pinned because we rely on `yq -i` semantics.
+  YQ_VERSION: v4.44.6
 
 jobs:
   meta:
@@ -179,6 +182,31 @@ jobs:
             --username "${{ github.actor }}" \
             --password-stdin
 
+      - name: Install yq
+        run: |
+          set -eu
+          curl -fsSL \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
+            -o /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
+          yq --version
+
+      # hack/chart-resolve-tags.sh patches charts/mxl-k8s/values.yaml
+      # in place with the right image tag per component, picking the
+      # source manifest from the chart's version: dev for 0.0.0-dev*,
+      # prerelease-manifest.json for rcs, release-manifest.json for
+      # stable. The script also writes a Markdown table of the
+      # resolved tags to stdout; we save it for the
+      # publish-bundled-component-table step below.
+      - name: Resolve per-component image tags into values.yaml
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -eu
+          bash hack/chart-resolve-tags.sh "$VERSION" > /tmp/bundled.md
+          echo "--- resolved values.yaml diff ---"
+          git --no-pager diff -- charts/mxl-k8s/values.yaml
+
       - name: Package chart
         env:
           VERSION: ${{ needs.meta.outputs.version }}
@@ -195,3 +223,21 @@ jobs:
           owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           tgz=$(ls /tmp/chart/mxl-k8s-*.tgz)
           helm push "${tgz}" "oci://ghcr.io/${owner}/mxl-k8s/charts"
+
+      # Append the bundled-component-versions table to either the
+      # GitHub release notes (tag push -> release-please-action already
+      # created the release) or the workflow summary (dev build).
+      - name: Publish bundled-component table
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+            existing=$(gh release view "${tag}" --json body --jq .body)
+            { printf "%s\n\n" "${existing}"; cat /tmp/bundled.md; } \
+              | gh release edit "${tag}" --notes-file -
+          else
+            cat /tmp/bundled.md >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -101,6 +101,23 @@ chart-check: chart-crd-sync chart-schema chart-docs
 		exit 1; \
 	fi
 
+# Pin per-component image tags in charts/mxl-k8s/values.yaml so a
+# local `helm install ./charts/mxl-k8s` or `helm template
+# ./charts/mxl-k8s` resolves to the same image tags the CI-published
+# chart would carry. `MODE` is one of `dev`, `rc`, `stable` (default
+# `rc`). The chart workflow runs the same script with the chart's
+# version at package time; local users can match either flow.
+# `make chart-resolve-reset` reverts values.yaml.
+MODE ?= rc
+
+.PHONY: chart-resolve
+chart-resolve:
+	@bash hack/chart-resolve-tags.sh $(MODE)
+
+.PHONY: chart-resolve-reset
+chart-resolve-reset:
+	git checkout -- charts/mxl-k8s/values.yaml
+
 HELM_SCHEMA ?= $(shell go env GOPATH)/bin/helm-schema
 HELM_DOCS   ?= $(shell go env GOPATH)/bin/helm-docs
 

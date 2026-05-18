@@ -54,11 +54,11 @@ tests:
           path: spec.template.spec.containers[0].image
           value: "ghcr.io/qvest-digital/mxl-k8s/operator@sha256:0000000000000000000000000000000000000000000000000000000000000001"
 
-  - it: falls back to Chart.AppVersion when tag and digest are empty
+  - it: falls back to v-prefixed Chart.AppVersion when tag and digest are empty
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: "ghcr.io/qvest-digital/mxl-k8s/operator:0.0.0"
+          value: "ghcr.io/qvest-digital/mxl-k8s/operator:v0.0.0"
 
   - it: respects a custom registry override
     set:

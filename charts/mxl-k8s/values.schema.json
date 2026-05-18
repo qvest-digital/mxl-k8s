@@ -222,13 +222,13 @@
             },
             "tag": {
               "default": "",
-              "title": "tag",
-              "type": "string"
+              "description": "Image tag. Empty falls back to `v\u003cChart.AppVersion\u003e` so a local `helm install ./charts/mxl-k8s` from the repo still resolves to a single bundle version. The published OCI artifact has this field pre-populated at package time to the tag the agent's last release produced; see the chart's GitHub release page for the per-component bundle table.",
+              "required": [],
+              "title": "tag"
             }
           },
           "required": [
-            "repository",
-            "tag"
+            "repository"
           ],
           "title": "image",
           "type": "object"
@@ -831,13 +831,13 @@
             },
             "tag": {
               "default": "",
-              "title": "tag",
-              "type": "string"
+              "description": "Image tag. Empty falls back to `v\u003cChart.AppVersion\u003e` so a local `helm install ./charts/mxl-k8s` from the repo still resolves to a single bundle version. The published OCI artifact has this field pre-populated at package time to the tag the gateway's last release produced; see the chart's GitHub release page for the per-component bundle table.",
+              "required": [],
+              "title": "tag"
             }
           },
           "required": [
-            "repository",
-            "tag"
+            "repository"
           ],
           "title": "image",
           "type": "object"
@@ -1457,7 +1457,7 @@
             },
             "tag": {
               "default": "",
-              "description": "Image tag. Empty falls back to Chart.AppVersion.",
+              "description": "Image tag. Empty falls back to `v\u003cChart.AppVersion\u003e` so a local `helm install ./charts/mxl-k8s` from the repo still resolves to a single bundle version. The published OCI artifact has this field pre-populated at package time to the tag the operator's last release produced; see the chart's GitHub release page for the per-component bundle table.",
               "required": [],
               "title": "tag"
             }
