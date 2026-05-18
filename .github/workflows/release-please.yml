@@ -3,11 +3,26 @@ name: release-please
 on:
   push:
     branches: [main]
-  # Manual trigger for the case where the stable cycle needs to be
-  # nudged without a fresh prerelease cut (e.g. after the gate fix
-  # below lands and the existing prerelease tags should still
-  # produce stable PRs).
+  # Manual escape hatch: dispatch with force_release=<component> to
+  # run a single component's stable cycle without waiting for an rc
+  # tag to land. Useful for catching up a stable PR that fell out of
+  # sync with the prerelease cycle (e.g. branch overwritten by an
+  # earlier misconfigured run).
   workflow_dispatch:
+    inputs:
+      force_release:
+        description: "Force the stable cycle for this component"
+        required: false
+        type: choice
+        options:
+          - ""
+          - api
+          - ipc
+          - agent
+          - operator
+          - gateway
+          - shim
+          - charts/mxl-k8s
 
 permissions:
   contents: write
@@ -17,12 +32,21 @@ concurrency:
   group: release-please
 
 jobs:
-  # Every merge to main opens (or updates) a per-component prerelease PR
-  # proposing <component>/vX.Y.Z-rc.N. Merging tags the prerelease.
+  # Every merge to main opens (or updates) a per-component prerelease
+  # PR proposing <component>/vX.Y.Z-rc.N. Merging that PR tags the
+  # prerelease and sets the corresponding <component>--release_created
+  # output to 'true' on the same workflow run, which gates the
+  # matching release-<component> job below.
   prerelease:
     runs-on: ubuntu-24.04
     outputs:
-      releases_created: ${{ steps.rp.outputs.releases_created }}
+      api_released:      ${{ steps.rp.outputs['api--release_created'] }}
+      ipc_released:      ${{ steps.rp.outputs['ipc--release_created'] }}
+      agent_released:    ${{ steps.rp.outputs['agent--release_created'] }}
+      operator_released: ${{ steps.rp.outputs['operator--release_created'] }}
+      gateway_released:  ${{ steps.rp.outputs['gateway--release_created'] }}
+      shim_released:     ${{ steps.rp.outputs['shim--release_created'] }}
+      chart_released:    ${{ steps.rp.outputs['charts/mxl-k8s--release_created'] }}
     steps:
       - id: rp
         uses: googleapis/release-please-action@v5
@@ -30,30 +54,95 @@ jobs:
           config-file: .github/prerelease-config.json
           manifest-file: .github/prerelease-manifest.json
 
-  # Once a prerelease tag for any component exists, run release-please
-  # again against the stable config so the matching <component>/vX.Y.Z
-  # PR can be opened. The release config's extra-files entries rewrite
-  # .github/prerelease-manifest.json after a stable tag so subsequent
-  # rcs for that component start from the new baseline.
-  #
-  # The gate is `releases_created == 'true'` alone. googleapis/release-
-  # please-action@v5 only populates the top-level `tag_name` output in
-  # single-package manifest mode; with multiple packages it stays empty
-  # and per-package outputs are used instead. Since the prerelease
-  # config has `prerelease: true` + `prerelease-type: rc`, every
-  # release this step produces is an rc by construction - the previous
-  # `contains(tag_name, 'rc')` check was redundant and broke the
-  # workflow for this multi-package repo.
-  #
-  # Triggering manually via workflow_dispatch runs the stable step too,
-  # which lets the stable PRs catch up to prerelease tags that already
-  # exist.
-  release:
+  # One stable-cycle job per component, each pointed at a
+  # single-package release-config-<component>.json so a release-X
+  # invocation cannot propose for an unrelated package. Each job
+  # only runs when the prerelease cycle just tagged THAT component
+  # (release_created), or when a workflow_dispatch explicitly
+  # forces it. release-please-action's `path:` input does not
+  # filter in manifest mode (it is only honoured by `fromConfig`),
+  # so the only reliable scoping is a single-package config file.
+
+  release-api:
     runs-on: ubuntu-24.04
     needs: [prerelease]
-    if: github.event_name == 'workflow_dispatch' || needs.prerelease.outputs.releases_created == 'true'
+    if: >
+      needs.prerelease.outputs.api_released == 'true' ||
+      (github.event_name == 'workflow_dispatch' && inputs.force_release == 'api')
     steps:
       - uses: googleapis/release-please-action@v5
         with:
-          config-file: .github/release-config.json
+          config-file: .github/release-config-api.json
+          manifest-file: .github/release-manifest.json
+
+  release-ipc:
+    runs-on: ubuntu-24.04
+    needs: [prerelease]
+    if: >
+      needs.prerelease.outputs.ipc_released == 'true' ||
+      (github.event_name == 'workflow_dispatch' && inputs.force_release == 'ipc')
+    steps:
+      - uses: googleapis/release-please-action@v5
+        with:
+          config-file: .github/release-config-ipc.json
+          manifest-file: .github/release-manifest.json
+
+  release-agent:
+    runs-on: ubuntu-24.04
+    needs: [prerelease]
+    if: >
+      needs.prerelease.outputs.agent_released == 'true' ||
+      (github.event_name == 'workflow_dispatch' && inputs.force_release == 'agent')
+    steps:
+      - uses: googleapis/release-please-action@v5
+        with:
+          config-file: .github/release-config-agent.json
+          manifest-file: .github/release-manifest.json
+
+  release-operator:
+    runs-on: ubuntu-24.04
+    needs: [prerelease]
+    if: >
+      needs.prerelease.outputs.operator_released == 'true' ||
+      (github.event_name == 'workflow_dispatch' && inputs.force_release == 'operator')
+    steps:
+      - uses: googleapis/release-please-action@v5
+        with:
+          config-file: .github/release-config-operator.json
+          manifest-file: .github/release-manifest.json
+
+  release-gateway:
+    runs-on: ubuntu-24.04
+    needs: [prerelease]
+    if: >
+      needs.prerelease.outputs.gateway_released == 'true' ||
+      (github.event_name == 'workflow_dispatch' && inputs.force_release == 'gateway')
+    steps:
+      - uses: googleapis/release-please-action@v5
+        with:
+          config-file: .github/release-config-gateway.json
+          manifest-file: .github/release-manifest.json
+
+  release-shim:
+    runs-on: ubuntu-24.04
+    needs: [prerelease]
+    if: >
+      needs.prerelease.outputs.shim_released == 'true' ||
+      (github.event_name == 'workflow_dispatch' && inputs.force_release == 'shim')
+    steps:
+      - uses: googleapis/release-please-action@v5
+        with:
+          config-file: .github/release-config-shim.json
+          manifest-file: .github/release-manifest.json
+
+  release-chart:
+    runs-on: ubuntu-24.04
+    needs: [prerelease]
+    if: >
+      needs.prerelease.outputs.chart_released == 'true' ||
+      (github.event_name == 'workflow_dispatch' && inputs.force_release == 'charts/mxl-k8s')
+    steps:
+      - uses: googleapis/release-please-action@v5
+        with:
+          config-file: .github/release-config-chart.json
           manifest-file: .github/release-manifest.json
