@@ -58,8 +58,41 @@ ipc-check: gen-ipc
 		exit 1; \
 	fi
 
+.PHONY: chart-crd-sync
+chart-crd-sync:
+	@mkdir -p charts/mxl-k8s/crds
+	@cp config/crd/mxl.qvest-digital.com_*.yaml charts/mxl-k8s/crds/
+
+.PHONY: chart-schema
+chart-schema:
+	$(HELM_SCHEMA) --chart-search-root charts/mxl-k8s --append-newline \
+	    --helm-docs-compatibility-mode --skip-auto-generation additionalProperties
+
+.PHONY: chart-docs
+chart-docs:
+	$(HELM_DOCS) --chart-search-root charts
+
+.PHONY: chart-lint
+chart-lint:
+	helm lint charts/mxl-k8s
+
+.PHONY: chart-test
+chart-test: chart-lint
+	helm unittest charts/mxl-k8s -f 'tests/unit/*_test.yaml'
+
+.PHONY: chart-check
+chart-check: chart-crd-sync chart-schema chart-docs
+	@if ! git diff --exit-code -- charts/mxl-k8s/crds charts/mxl-k8s/values.schema.json charts/mxl-k8s/README.md; then \
+		echo "Chart generated artefacts are out of sync."; \
+		echo "Run 'make chart-crd-sync chart-schema chart-docs' and commit the result."; \
+		exit 1; \
+	fi
+
+HELM_SCHEMA ?= $(shell go env GOPATH)/bin/helm-schema
+HELM_DOCS   ?= $(shell go env GOPATH)/bin/helm-docs
+
 .PHONY: generated-check
-generated-check: manifests-check ipc-check
+generated-check: manifests-check ipc-check chart-check
 
 # --- KIND demo helpers ---
 # `make kind-up`     builds the four component images, creates (or

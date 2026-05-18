@@ -80,6 +80,23 @@ For cluster operators:
   per-component release tag (`:vX.Y.Z` plus `:latest` or
   `:pre`).
 
+## Install via Helm
+
+The control plane (operator, agent, gateway, CRDs, RBAC) ships as a
+Helm chart at
+`oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s`.
+
+```sh
+helm install mxl oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
+  --version 0.1.0 \
+  --namespace mxl-system --create-namespace
+```
+
+FluxCD users point an `OCI`-typed `HelmRepository` at the same URL.
+See [`charts/mxl-k8s/README.md`](charts/mxl-k8s/README.md) for the
+full values reference, override examples (RDMA, private registry,
+IRSA), and the FluxCD `HelmRelease` snippet.
+
 ## Run the demo locally
 
 The repo ships a KIND cluster that runs an end-to-end TCP flow
