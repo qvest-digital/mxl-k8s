@@ -10,7 +10,7 @@
 # Build:
 #   docker build -f docker/demo-tools.Dockerfile -t local/mxl-demo-tools:dev .
 
-ARG GO_MXL_TAG=1.0.0-rc.3
+ARG GO_MXL_TAG=1.0.0-rc.5
 
 FROM ghcr.io/qvest-digital/go-mxl-builder:${GO_MXL_TAG} AS builder
 ARG GO_MXL_TAG

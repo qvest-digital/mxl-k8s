@@ -3,7 +3,7 @@ module github.com/qvest-digital/mxl-k8s/gateway
 go 1.26.0
 
 require (
-	github.com/qvest-digital/go-mxl v1.0.0-rc.3
+	github.com/qvest-digital/go-mxl v1.0.0-rc.5
 	github.com/qvest-digital/mxl-k8s/api v0.0.0-00010101000000-000000000000
 	k8s.io/apimachinery v0.36.1
 	k8s.io/client-go v0.36.1

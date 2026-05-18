@@ -52,7 +52,7 @@ jobs:
   gateway:
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.3
+      image: ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.5
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
