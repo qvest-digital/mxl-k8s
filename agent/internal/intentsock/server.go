@@ -33,15 +33,30 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"golang.org/x/sys/unix"
-
-	"github.com/qvest-digital/mxl-k8s/agent/internal/intent"
 )
 
+// MaterializeDispatcher is the contract the Server expects from the
+// intent dispatcher: given a peer PID and a flow_def.json path, drive
+// the mirror to Ready (or surface a terminal error).
+//
+// The narrow interface keeps the server testable without pulling in
+// the full intent package; *intent.Dispatcher satisfies it
+// implicitly.
+type MaterializeDispatcher interface {
+	Materialize(ctx context.Context, pid int32, path string) error
+}
+
 // Server listens on a UDS and dispatches requests to the intent
-// Dispatcher.
+// dispatcher.
 type Server struct {
 	SocketPath string
-	Dispatcher *intent.Dispatcher
+	Dispatcher MaterializeDispatcher
+
+	// PeerPIDFn overrides the SO_PEERCRED-based PID extraction.
+	// Tests inject a closure returning a known PID over net.Pipe;
+	// production leaves this nil and the unix(7) implementation
+	// kicks in.
+	PeerPIDFn func(net.Conn) (int32, error)
 }
 
 type request struct {
@@ -111,7 +126,11 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	pid, err := peerPID(conn)
+	pidFn := s.PeerPIDFn
+	if pidFn == nil {
+		pidFn = peerPID
+	}
+	pid, err := pidFn(conn)
 	if err != nil {
 		writeResponse(conn, response{Error: fmt.Sprintf("peer credentials: %s", err)})
 		return
