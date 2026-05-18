@@ -16,7 +16,13 @@
     "operator": { "component": "operator" },
     "gateway":  { "component": "gateway" },
     "shim":           { "release-type": "simple", "component": "shim" },
-    "charts/mxl-k8s": { "release-type": "helm",   "component": "charts/mxl-k8s" }
+    "charts/mxl-k8s": {
+      "release-type": "helm",
+      "component": "charts/mxl-k8s",
+      "extra-files": [
+        { "type": "generic", "path": "charts/mxl-k8s/Chart.yaml" }
+      ]
+    }
   },
   "changelog-sections": [
     {"type": "feat",     "section": "Features"},

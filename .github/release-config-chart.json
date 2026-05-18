@@ -14,7 +14,8 @@
           "type": "json",
           "path": ".github/prerelease-manifest.json",
           "jsonpath": "$[\"charts/mxl-k8s\"]"
-        }
+        },
+        { "type": "generic", "path": "charts/mxl-k8s/Chart.yaml" }
       ]
     }
   },

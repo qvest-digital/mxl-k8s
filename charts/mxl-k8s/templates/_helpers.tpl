@@ -42,7 +42,10 @@ app.kubernetes.io/component: {{ .component }}
 
 {{/*
 Resolve the image reference for one component. Digest beats tag. Tag
-falls back to chart appVersion.
+falls back to "v" prepended to chart appVersion, matching the
+"v<VERSION>" tags that images.yml publishes to ghcr.io. An explicit
+image.tag is used verbatim so digests, "pre", "latest", or
+externally-mirrored tags pass through unchanged.
 
 Call as: include "mxlk8s.image" (dict "global" .Values.global "image" .Values.operator.image "Chart" .Chart)
 */}}
@@ -52,7 +55,7 @@ Call as: include "mxlk8s.image" (dict "global" .Values.global "image" .Values.op
 {{- if .image.digest -}}
 {{- printf "%s/%s@%s" $registry $repo .image.digest -}}
 {{- else -}}
-{{- $tag := default .Chart.AppVersion .image.tag -}}
+{{- $tag := default (printf "v%s" .Chart.AppVersion) .image.tag -}}
 {{- printf "%s/%s:%s" $registry $repo $tag -}}
 {{- end -}}
 {{- end -}}
