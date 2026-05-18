@@ -7,41 +7,11 @@ exchange over tmpfs. `mxl-k8s` turns MXL's cross-node transport
 (`libmxl-fabrics`) into a cluster feature so individual media
 functions do not have to carry it themselves.
 
-This page shows what a media function needs in order to participate,
-what the cluster needs in order to host the control plane, and what
-parts of the
-[EBU Dynamic Media Facility Reference Architecture (V2.0,
-April 2026)](https://tech.ebu.ch/publications/white-paper-2026-04-15)
-mxl-k8s addresses today.
-
-## What mxl-k8s does for you
-
-The DMF reference architecture organises a media facility into layers
-(Application & UI, Media Functions, Media Exchange, Container
-Platform, Host Platform, Infrastructure) and lifecycle phases (Design,
-Plan, Provision, Configure, Finalise & Review) plus Control, Monitor,
-and Security. `mxl-k8s` lives in the **Media Exchange** row. The
-diagram below colours each cell by mxl-k8s state:
-
-![DMF coverage map](./diagrams/dmf-coverage.drawio.svg)
-
-`mxl-k8s` covers the runtime jobs that turn a flow on one node into a
-flow on another: discovering and registering flows that producers
-materialise, opening and tearing down the per-mirror libmxl-fabrics
-handshake, and recovering from gateway and writer restarts. Other DMF
-rows are intentionally out of scope: Kubernetes owns container
-deployment, your identity provider owns user-access auditing, and the
-per-function on-node behaviour stays with upstream `dmf-mxl`.
-
-## Upstream alignment
-
-`mxl-k8s` links `libmxl` and `libmxl-fabrics` from
-[`dmf-mxl/mxl`](https://github.com/dmf-mxl/mxl) through the
-[`go-mxl`](https://github.com/qvest-digital/go-mxl) bindings. The
-control plane does not fork, patch, or replace per-function on-node
-behaviour. FlowReader / FlowWriter semantics, grain layout, and the
-shape of `flow_def.json` remain upstream's design; `mxl-k8s` is the
-cluster orchestration around them.
+This page shows what a media function needs in order to participate
+and what the cluster needs in order to host the control plane. For
+project scope and the DMF coverage map see the
+[root README](../README.md); for forward-looking features see
+[`ROADMAP.md`](../ROADMAP.md).
 
 ## Prerequisites
 
@@ -303,19 +273,11 @@ selects the libmxl-fabrics provider for the cross-node transfer:
 Only `tcp` is part of routine CI today. The non-`tcp` providers
 work in code but have not been exercised continuously.
 
-## Roadmap
-
-The roadmap below tracks `mxl-k8s` features against the DMF
-Media-Exchange building blocks. Current items are already in `main`;
-Next items have scaffolding (a CRD, a chart flag, or a proto
-contract) already in tree and need wiring; Future / Idea items are
-candidates for later iteration and are subject to maintainer
-confirmation.
-
-![mxl-k8s roadmap](./diagrams/roadmap.drawio.svg)
-
 ## See also
 
+- [Root README](../README.md): project scope and the DMF coverage
+  map.
+- [`ROADMAP.md`](../ROADMAP.md): current / next / future features.
 - [`docs/architecture/`](./architecture/): runtime walkthrough of
   the operator, agent, gateway, and shim.
 - [`docs/BUILD.md`](./BUILD.md): local-build prerequisites and the
@@ -323,6 +285,3 @@ confirmation.
 - [`docs/RDMA.md`](./RDMA.md): host setup for the `verbs` and
   `efa` providers.
 - [`docs/KIND.md`](./KIND.md): KIND demo walkthrough.
-- EBU Tech 3408 V2.0, The Dynamic Media Facility Reference
-  Architecture
-  ([April 2026](https://tech.ebu.ch/publications/white-paper-2026-04-15)).

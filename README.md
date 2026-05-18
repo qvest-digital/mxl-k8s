@@ -52,6 +52,21 @@ For the full architecture walkthrough (per-node anatomy,
 control-plane and data-plane sequences, lifecycle diagrams) see
 [`docs/architecture/`](docs/architecture/).
 
+## Scope
+
+mxl-k8s lives in the Media Exchange row of the
+[EBU Dynamic Media Facility Reference Architecture (V2.0,
+April 2026)](https://tech.ebu.ch/publications/white-paper-2026-04-15).
+It covers cross-node flow plumbing: discovery and registration,
+the per-mirror libmxl-fabrics handshake, and recovery on writer or
+gateway restarts. Container orchestration, identity, and
+per-function on-node behaviour stay with Kubernetes, the cluster's
+identity provider, and upstream `dmf-mxl` respectively.
+
+![DMF coverage map](docs/diagrams/dmf-coverage.drawio.svg)
+
+See [`ROADMAP.md`](ROADMAP.md) for the feature roadmap.
+
 ## What you do not have to write
 
 For media-function authors:
