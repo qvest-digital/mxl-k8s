@@ -5,5 +5,5 @@
   "operator": "1.0.0-rc.1",
   "gateway": "1.0.0-rc.1",
   "shim": "1.0.0-rc.1",
-  "charts/mxl-k8s": "1.0.0-rc.0"
+  "charts/mxl-k8s": "1.0.0-rc.1"
 }
