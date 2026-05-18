@@ -1,0 +1,10 @@
+# CRDs only. Useful when the cluster operator owns the workloads
+# separately and wants the chart to ship just the API surface.
+operator:
+  enabled: false
+agent:
+  enabled: false
+gateway:
+  enabled: false
+rbac:
+  create: false

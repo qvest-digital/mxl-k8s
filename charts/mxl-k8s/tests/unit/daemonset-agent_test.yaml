@@ -1,0 +1,51 @@
+suite: daemonset-agent
+templates:
+  - templates/daemonset-agent.yaml
+tests:
+  - it: renders nothing when agent.enabled=false
+    set:
+      agent.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders a DaemonSet with SYS_ADMIN by default
+    asserts:
+      - isKind:
+          of: DaemonSet
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          content: SYS_ADMIN
+      - equal:
+          path: spec.template.spec.containers[0].args[0]
+          value: --domain-path=/run/mxl/domain
+
+  - it: mounts the whole /run/mxl so the intent socket is host-visible
+    asserts:
+      - equal:
+          path: spec.template.spec.volumes[0].hostPath.path
+          value: /run/mxl
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPath
+          value: /run/mxl
+
+  - it: NODE_NAME comes from the downward API
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[0].name
+          value: NODE_NAME
+      - equal:
+          path: spec.template.spec.containers[0].env[0].valueFrom.fieldRef.fieldPath
+          value: spec.nodeName
+
+  - it: respects custom domainPath everywhere it appears
+    set:
+      agent.flags.domainPath: /var/run/mxl/domain
+      agent.hostPath.run: /var/run/mxl
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --domain-path=/var/run/mxl/domain
+      - equal:
+          path: spec.template.spec.volumes[0].hostPath.path
+          value: /var/run/mxl

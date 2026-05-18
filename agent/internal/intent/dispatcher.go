@@ -33,6 +33,11 @@ const (
 	defaultPollInterval       = 50 * time.Millisecond
 )
 
+// FlowChecker reports whether the named flow's flow_def.json is
+// present locally. The default implementation stats the filesystem
+// under DomainPath; tests inject a closure that fakes the lookup.
+type FlowChecker func(flowID string) bool
+
 // Dispatcher resolves a libmxl-intent.so request into an
 // MxlFlowMirror reconciliation that completes (Ready) or fails.
 type Dispatcher struct {
@@ -53,6 +58,10 @@ type Dispatcher struct {
 	// mirror status while waiting; zero means use the package
 	// default.
 	PollInterval time.Duration
+
+	// FlowChecker overrides the filesystem-based local-flow check.
+	// Nil falls back to the default stat under DomainPath.
+	FlowChecker FlowChecker
 }
 
 // Materialize ensures that the flow referenced by path is, or will
@@ -134,6 +143,9 @@ func FlowIDFromPath(domain, path string) (string, bool) {
 }
 
 func (d *Dispatcher) flowExistsLocally(flowID string) bool {
+	if d.FlowChecker != nil {
+		return d.FlowChecker(flowID)
+	}
 	_, err := os.Stat(filepath.Join(d.DomainPath, flowID+".mxl-flow", "flow_def.json"))
 	return err == nil
 }

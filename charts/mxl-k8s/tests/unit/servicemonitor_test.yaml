@@ -1,0 +1,32 @@
+suite: servicemonitor
+templates:
+  - templates/servicemonitor-operator.yaml
+  - templates/servicemonitor-agent.yaml
+  - templates/servicemonitor-gateway.yaml
+tests:
+  - it: no ServiceMonitor by default (Prometheus Operator stays optional)
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: operator ServiceMonitor renders when toggled
+    set:
+      operator.metrics.serviceMonitor.enabled: true
+    template: templates/servicemonitor-operator.yaml
+    asserts:
+      - isKind:
+          of: ServiceMonitor
+      - equal:
+          path: spec.endpoints[0].interval
+          value: 30s
+
+  - it: extra labels on the ServiceMonitor land on the resource
+    set:
+      gateway.metrics.serviceMonitor.enabled: true
+      gateway.metrics.serviceMonitor.labels:
+        release: prometheus-stack
+    template: templates/servicemonitor-gateway.yaml
+    asserts:
+      - equal:
+          path: metadata.labels.release
+          value: prometheus-stack

@@ -1,0 +1,33 @@
+suite: rbac
+templates:
+  - templates/rbac-operator.yaml
+  - templates/rbac-agent.yaml
+  - templates/rbac-gateway.yaml
+tests:
+  - it: rbac.create=false suppresses every ClusterRole and Binding
+    set:
+      rbac.create: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: disabling a component drops its ClusterRole regardless of rbac.create
+    set:
+      operator.enabled: false
+      agent.enabled: false
+    template: templates/rbac-operator.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: gateway rbac is present by default
+    template: templates/rbac-gateway.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: ClusterRole
+        documentIndex: 0
+      - isKind:
+          of: ClusterRoleBinding
+        documentIndex: 1

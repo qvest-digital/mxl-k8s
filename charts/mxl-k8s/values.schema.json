@@ -1,0 +1,1823 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "agent": {
+      "description": "Agent: per-node DaemonSet that watches the MXL domain via fanotify, publishes flow state, and serves the LD_PRELOAD intent socket.",
+      "properties": {
+        "affinity": {
+          "required": [],
+          "title": "affinity",
+          "type": "object"
+        },
+        "args": {
+          "items": {
+            "required": []
+          },
+          "title": "args",
+          "type": "array"
+        },
+        "containerSecurityContext": {
+          "properties": {
+            "allowPrivilegeEscalation": {
+              "default": false,
+              "title": "allowPrivilegeEscalation",
+              "type": "boolean"
+            },
+            "capabilities": {
+              "properties": {
+                "add": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "required": []
+                  },
+                  "title": "add",
+                  "type": "array"
+                },
+                "drop": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "required": []
+                  },
+                  "title": "drop",
+                  "type": "array"
+                }
+              },
+              "required": [
+                "add",
+                "drop"
+              ],
+              "title": "capabilities",
+              "type": "object"
+            },
+            "readOnlyRootFilesystem": {
+              "default": true,
+              "title": "readOnlyRootFilesystem",
+              "type": "boolean"
+            },
+            "runAsNonRoot": {
+              "default": "false",
+              "description": "fanotify on /run/mxl/domain reads host inodes, so the agent currently runs as root. PSA-restricted environments cannot host the agent without a policy exception.",
+              "required": [],
+              "title": "runAsNonRoot"
+            }
+          },
+          "required": [
+            "allowPrivilegeEscalation",
+            "readOnlyRootFilesystem",
+            "capabilities"
+          ],
+          "title": "containerSecurityContext",
+          "type": "object"
+        },
+        "enabled": {
+          "default": true,
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "extraContainers": {
+          "items": {
+            "required": []
+          },
+          "title": "extraContainers",
+          "type": "array"
+        },
+        "extraEnv": {
+          "items": {
+            "required": []
+          },
+          "title": "extraEnv",
+          "type": "array"
+        },
+        "extraVolumeMounts": {
+          "items": {
+            "required": []
+          },
+          "title": "extraVolumeMounts",
+          "type": "array"
+        },
+        "extraVolumes": {
+          "items": {
+            "required": []
+          },
+          "title": "extraVolumes",
+          "type": "array"
+        },
+        "flags": {
+          "properties": {
+            "domainPath": {
+              "default": "/run/mxl/domain",
+              "description": " pattern: ^/.+ @schema",
+              "pattern": "^/.+",
+              "required": [],
+              "title": "domainPath"
+            },
+            "healthProbeBindAddress": {
+              "default": ":8081",
+              "description": " pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$ @schema",
+              "pattern": "^:[0-9]+$|^[0-9.]+:[0-9]+$",
+              "required": [],
+              "title": "healthProbeBindAddress"
+            },
+            "intentSocket": {
+              "default": "/run/mxl/agent.sock",
+              "description": " pattern: ^/.+ @schema",
+              "pattern": "^/.+",
+              "required": [],
+              "title": "intentSocket"
+            },
+            "materializeTimeout": {
+              "default": "5s",
+              "title": "materializeTimeout",
+              "type": "string"
+            },
+            "metricsBindAddress": {
+              "default": ":8080",
+              "description": " pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$ @schema",
+              "pattern": "^:[0-9]+$|^[0-9.]+:[0-9]+$",
+              "required": [],
+              "title": "metricsBindAddress"
+            },
+            "resyncPeriod": {
+              "default": "30s",
+              "title": "resyncPeriod",
+              "type": "string"
+            },
+            "zapLogLevel": {
+              "default": "info",
+              "description": " enum: [\"debug\", \"info\", \"warn\", \"error\"] @schema",
+              "enum": [
+                "debug",
+                "info",
+                "warn",
+                "error"
+              ],
+              "required": [],
+              "title": "zapLogLevel"
+            }
+          },
+          "required": [
+            "materializeTimeout",
+            "resyncPeriod"
+          ],
+          "title": "flags",
+          "type": "object"
+        },
+        "hostPath": {
+          "description": "hostPath layout. The agent mounts the whole /run/mxl so the intent socket lands on the host where consumer pods can see it.",
+          "properties": {
+            "run": {
+              "default": "/run/mxl",
+              "description": " pattern: ^/.+ @schema",
+              "pattern": "^/.+",
+              "required": [],
+              "title": "run"
+            },
+            "type": {
+              "default": "DirectoryOrCreate",
+              "description": " enum: [\"DirectoryOrCreate\", \"Directory\"] @schema",
+              "enum": [
+                "DirectoryOrCreate",
+                "Directory"
+              ],
+              "required": [],
+              "title": "type"
+            }
+          },
+          "required": [],
+          "title": "hostPath"
+        },
+        "image": {
+          "properties": {
+            "digest": {
+              "default": "",
+              "description": " pattern: ^$|^sha256:[0-9a-f]{64}$ @schema",
+              "pattern": "^$|^sha256:[0-9a-f]{64}$",
+              "required": [],
+              "title": "digest"
+            },
+            "pullPolicy": {
+              "default": "",
+              "description": " enum: [\"\", \"Always\", \"IfNotPresent\", \"Never\"] @schema",
+              "enum": [
+                "",
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ],
+              "required": [],
+              "title": "pullPolicy"
+            },
+            "repository": {
+              "default": "agent",
+              "title": "repository",
+              "type": "string"
+            },
+            "tag": {
+              "default": "",
+              "title": "tag",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repository",
+            "tag"
+          ],
+          "title": "image",
+          "type": "object"
+        },
+        "initContainers": {
+          "items": {
+            "required": []
+          },
+          "title": "initContainers",
+          "type": "array"
+        },
+        "livenessProbe": {
+          "properties": {
+            "httpGet": {
+              "properties": {
+                "path": {
+                  "default": "/healthz",
+                  "title": "path",
+                  "type": "string"
+                },
+                "port": {
+                  "default": "probe",
+                  "title": "port",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "port"
+              ],
+              "title": "httpGet",
+              "type": "object"
+            },
+            "initialDelaySeconds": {
+              "default": 5,
+              "title": "initialDelaySeconds",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "httpGet",
+            "initialDelaySeconds"
+          ],
+          "title": "livenessProbe",
+          "type": "object"
+        },
+        "metrics": {
+          "properties": {
+            "service": {
+              "properties": {
+                "enabled": {
+                  "default": true,
+                  "title": "enabled",
+                  "type": "boolean"
+                },
+                "port": {
+                  "default": "8080",
+                  "description": " minimum: 1 maximum: 65535 @schema",
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "required": [],
+                  "title": "port"
+                },
+                "type": {
+                  "default": "ClusterIP",
+                  "description": " enum: [\"ClusterIP\", \"NodePort\", \"LoadBalancer\"] @schema",
+                  "enum": [
+                    "ClusterIP",
+                    "NodePort",
+                    "LoadBalancer"
+                  ],
+                  "required": [],
+                  "title": "type"
+                }
+              },
+              "required": [
+                "enabled"
+              ],
+              "title": "service",
+              "type": "object"
+            },
+            "serviceMonitor": {
+              "properties": {
+                "enabled": {
+                  "default": false,
+                  "title": "enabled",
+                  "type": "boolean"
+                },
+                "interval": {
+                  "default": "30s",
+                  "title": "interval",
+                  "type": "string"
+                },
+                "labels": {
+                  "required": [],
+                  "title": "labels",
+                  "type": "object"
+                },
+                "metricRelabelings": {
+                  "items": {
+                    "required": []
+                  },
+                  "title": "metricRelabelings",
+                  "type": "array"
+                },
+                "relabelings": {
+                  "items": {
+                    "required": []
+                  },
+                  "title": "relabelings",
+                  "type": "array"
+                },
+                "scrapeTimeout": {
+                  "default": "10s",
+                  "title": "scrapeTimeout",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "enabled",
+                "interval",
+                "scrapeTimeout",
+                "labels",
+                "relabelings",
+                "metricRelabelings"
+              ],
+              "title": "serviceMonitor",
+              "type": "object"
+            }
+          },
+          "required": [
+            "service",
+            "serviceMonitor"
+          ],
+          "title": "metrics",
+          "type": "object"
+        },
+        "nodeSelector": {
+          "required": [],
+          "title": "nodeSelector",
+          "type": "object"
+        },
+        "podAnnotations": {
+          "required": [],
+          "title": "podAnnotations",
+          "type": "object"
+        },
+        "podLabels": {
+          "required": [],
+          "title": "podLabels",
+          "type": "object"
+        },
+        "podSecurityContext": {
+          "required": [],
+          "title": "podSecurityContext",
+          "type": "object"
+        },
+        "priorityClassName": {
+          "default": "",
+          "title": "priorityClassName",
+          "type": "string"
+        },
+        "readinessProbe": {
+          "properties": {
+            "httpGet": {
+              "properties": {
+                "path": {
+                  "default": "/readyz",
+                  "title": "path",
+                  "type": "string"
+                },
+                "port": {
+                  "default": "probe",
+                  "title": "port",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "port"
+              ],
+              "title": "httpGet",
+              "type": "object"
+            },
+            "initialDelaySeconds": {
+              "default": 2,
+              "title": "initialDelaySeconds",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "httpGet",
+            "initialDelaySeconds"
+          ],
+          "title": "readinessProbe",
+          "type": "object"
+        },
+        "resources": {
+          "properties": {
+            "limits": {
+              "required": [],
+              "title": "limits",
+              "type": "object"
+            },
+            "requests": {
+              "properties": {
+                "cpu": {
+                  "default": "25m",
+                  "title": "cpu",
+                  "type": "string"
+                },
+                "memory": {
+                  "default": "32Mi",
+                  "title": "memory",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cpu",
+                "memory"
+              ],
+              "title": "requests",
+              "type": "object"
+            }
+          },
+          "required": [
+            "requests",
+            "limits"
+          ],
+          "title": "resources",
+          "type": "object"
+        },
+        "serviceAccount": {
+          "properties": {
+            "annotations": {
+              "required": [],
+              "title": "annotations",
+              "type": "object"
+            },
+            "automountServiceAccountToken": {
+              "default": true,
+              "title": "automountServiceAccountToken",
+              "type": "boolean"
+            },
+            "create": {
+              "default": true,
+              "title": "create",
+              "type": "boolean"
+            },
+            "labels": {
+              "required": [],
+              "title": "labels",
+              "type": "object"
+            },
+            "name": {
+              "default": "",
+              "title": "name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "create",
+            "name",
+            "annotations",
+            "labels",
+            "automountServiceAccountToken"
+          ],
+          "title": "serviceAccount",
+          "type": "object"
+        },
+        "tolerations": {
+          "items": {
+            "required": []
+          },
+          "title": "tolerations",
+          "type": "array"
+        },
+        "topologySpreadConstraints": {
+          "items": {
+            "required": []
+          },
+          "title": "topologySpreadConstraints",
+          "type": "array"
+        },
+        "updateStrategy": {
+          "properties": {
+            "rollingUpdate": {
+              "properties": {
+                "maxUnavailable": {
+                  "default": 1,
+                  "title": "maxUnavailable",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "maxUnavailable"
+              ],
+              "title": "rollingUpdate",
+              "type": "object"
+            },
+            "type": {
+              "default": "RollingUpdate",
+              "description": " enum: [\"RollingUpdate\", \"OnDelete\"] @schema",
+              "enum": [
+                "RollingUpdate",
+                "OnDelete"
+              ],
+              "required": [],
+              "title": "type"
+            }
+          },
+          "required": [
+            "rollingUpdate"
+          ],
+          "title": "updateStrategy",
+          "type": "object"
+        }
+      },
+      "required": [
+        "enabled",
+        "updateStrategy",
+        "image",
+        "args",
+        "flags",
+        "serviceAccount",
+        "podAnnotations",
+        "podLabels",
+        "priorityClassName",
+        "nodeSelector",
+        "tolerations",
+        "affinity",
+        "topologySpreadConstraints",
+        "resources",
+        "podSecurityContext",
+        "containerSecurityContext",
+        "livenessProbe",
+        "readinessProbe",
+        "extraEnv",
+        "extraVolumes",
+        "extraVolumeMounts",
+        "extraContainers",
+        "initContainers",
+        "metrics"
+      ],
+      "title": "agent"
+    },
+    "crds": {
+      "description": "CRD handling. The chart installs CRDs from its crds/ directory by default. Helm only installs them on first install and never deletes or upgrades them; Flux's HelmRelease.spec.{install,upgrade}.crds governs replace semantics. Set skipInstall=true when CRDs are managed by a separate Kustomization or operator framework.",
+      "properties": {
+        "skipInstall": {
+          "default": false,
+          "title": "skipInstall",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "skipInstall"
+      ],
+      "title": "crds"
+    },
+    "gateway": {
+      "description": "Gateway: per-node DaemonSet that owns libmxl-fabrics handles and moves grains across the wire. Runs with hostNetwork so the fabric endpoint binds the node interface.",
+      "properties": {
+        "affinity": {
+          "required": [],
+          "title": "affinity",
+          "type": "object"
+        },
+        "args": {
+          "items": {
+            "required": []
+          },
+          "title": "args",
+          "type": "array"
+        },
+        "containerSecurityContext": {
+          "properties": {
+            "allowPrivilegeEscalation": {
+              "default": false,
+              "title": "allowPrivilegeEscalation",
+              "type": "boolean"
+            },
+            "capabilities": {
+              "properties": {
+                "add": {
+                  "description": "Additional caps beyond what rdma.enabled implies.",
+                  "items": {
+                    "required": []
+                  },
+                  "required": [],
+                  "title": "add"
+                },
+                "drop": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "required": []
+                  },
+                  "title": "drop",
+                  "type": "array"
+                }
+              },
+              "required": [
+                "drop"
+              ],
+              "title": "capabilities",
+              "type": "object"
+            },
+            "readOnlyRootFilesystem": {
+              "default": true,
+              "title": "readOnlyRootFilesystem",
+              "type": "boolean"
+            },
+            "runAsNonRoot": {
+              "default": false,
+              "title": "runAsNonRoot",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "allowPrivilegeEscalation",
+            "runAsNonRoot",
+            "readOnlyRootFilesystem",
+            "capabilities"
+          ],
+          "title": "containerSecurityContext",
+          "type": "object"
+        },
+        "dnsPolicy": {
+          "default": "ClusterFirstWithHostNet",
+          "description": " enum: [\"ClusterFirst\", \"ClusterFirstWithHostNet\", \"Default\", \"None\"] @schema",
+          "enum": [
+            "ClusterFirst",
+            "ClusterFirstWithHostNet",
+            "Default",
+            "None"
+          ],
+          "required": [],
+          "title": "dnsPolicy"
+        },
+        "enabled": {
+          "default": true,
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "extraContainers": {
+          "items": {
+            "required": []
+          },
+          "title": "extraContainers",
+          "type": "array"
+        },
+        "extraEnv": {
+          "items": {
+            "required": []
+          },
+          "title": "extraEnv",
+          "type": "array"
+        },
+        "extraVolumeMounts": {
+          "items": {
+            "required": []
+          },
+          "title": "extraVolumeMounts",
+          "type": "array"
+        },
+        "extraVolumes": {
+          "items": {
+            "required": []
+          },
+          "title": "extraVolumes",
+          "type": "array"
+        },
+        "flags": {
+          "properties": {
+            "bindAddress": {
+              "default": "$(POD_IP)",
+              "description": "Bind address for libmxl-fabrics endpoints. Default uses the downward-API POD_IP so each gateway binds its node IP.",
+              "required": [],
+              "title": "bindAddress"
+            },
+            "domainPath": {
+              "default": "/run/mxl/domain",
+              "description": " pattern: ^/.+ @schema",
+              "pattern": "^/.+",
+              "required": [],
+              "title": "domainPath"
+            },
+            "healthProbeBindAddress": {
+              "default": ":8081",
+              "description": " pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$ @schema",
+              "pattern": "^:[0-9]+$|^[0-9.]+:[0-9]+$",
+              "required": [],
+              "title": "healthProbeBindAddress"
+            },
+            "metricsBindAddress": {
+              "default": ":8080",
+              "description": " pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$ @schema",
+              "pattern": "^:[0-9]+$|^[0-9.]+:[0-9]+$",
+              "required": [],
+              "title": "metricsBindAddress"
+            },
+            "providers": {
+              "description": " items:   enum: [\"tcp\", \"verbs\", \"efa\", \"shm\", \"auto\"] @schema",
+              "items": {
+                "enum": [
+                  "tcp",
+                  "verbs",
+                  "efa",
+                  "shm",
+                  "auto"
+                ],
+                "required": []
+              },
+              "required": [],
+              "title": "providers"
+            },
+            "resyncPeriod": {
+              "default": "30s",
+              "title": "resyncPeriod",
+              "type": "string"
+            },
+            "zapLogLevel": {
+              "default": "info",
+              "description": " enum: [\"debug\", \"info\", \"warn\", \"error\"] @schema",
+              "enum": [
+                "debug",
+                "info",
+                "warn",
+                "error"
+              ],
+              "required": [],
+              "title": "zapLogLevel"
+            }
+          },
+          "required": [
+            "resyncPeriod"
+          ],
+          "title": "flags",
+          "type": "object"
+        },
+        "hostNetwork": {
+          "default": "true",
+          "description": "hostNetwork is required because the libmxl-fabrics TargetInfo embeds the host:port a peer dials; a CNI overlay IP would not be reachable cross-node.",
+          "required": [],
+          "title": "hostNetwork"
+        },
+        "hostPath": {
+          "properties": {
+            "domain": {
+              "default": "/run/mxl/domain",
+              "description": " pattern: ^/.+ @schema",
+              "pattern": "^/.+",
+              "required": [],
+              "title": "domain"
+            },
+            "type": {
+              "default": "DirectoryOrCreate",
+              "description": " enum: [\"DirectoryOrCreate\", \"Directory\"] @schema",
+              "enum": [
+                "DirectoryOrCreate",
+                "Directory"
+              ],
+              "required": [],
+              "title": "type"
+            }
+          },
+          "required": [],
+          "title": "hostPath",
+          "type": "object"
+        },
+        "image": {
+          "properties": {
+            "digest": {
+              "default": "",
+              "description": " pattern: ^$|^sha256:[0-9a-f]{64}$ @schema",
+              "pattern": "^$|^sha256:[0-9a-f]{64}$",
+              "required": [],
+              "title": "digest"
+            },
+            "pullPolicy": {
+              "default": "",
+              "description": " enum: [\"\", \"Always\", \"IfNotPresent\", \"Never\"] @schema",
+              "enum": [
+                "",
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ],
+              "required": [],
+              "title": "pullPolicy"
+            },
+            "repository": {
+              "default": "gateway",
+              "title": "repository",
+              "type": "string"
+            },
+            "tag": {
+              "default": "",
+              "title": "tag",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repository",
+            "tag"
+          ],
+          "title": "image",
+          "type": "object"
+        },
+        "initContainers": {
+          "items": {
+            "required": []
+          },
+          "title": "initContainers",
+          "type": "array"
+        },
+        "livenessProbe": {
+          "properties": {
+            "httpGet": {
+              "properties": {
+                "path": {
+                  "default": "/healthz",
+                  "title": "path",
+                  "type": "string"
+                },
+                "port": {
+                  "default": "probe",
+                  "title": "port",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "port"
+              ],
+              "title": "httpGet",
+              "type": "object"
+            },
+            "initialDelaySeconds": {
+              "default": 5,
+              "title": "initialDelaySeconds",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "httpGet",
+            "initialDelaySeconds"
+          ],
+          "title": "livenessProbe",
+          "type": "object"
+        },
+        "metrics": {
+          "properties": {
+            "service": {
+              "properties": {
+                "enabled": {
+                  "default": true,
+                  "title": "enabled",
+                  "type": "boolean"
+                },
+                "port": {
+                  "default": "8080",
+                  "description": " minimum: 1 maximum: 65535 @schema",
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "required": [],
+                  "title": "port"
+                },
+                "type": {
+                  "default": "ClusterIP",
+                  "description": " enum: [\"ClusterIP\", \"NodePort\", \"LoadBalancer\"] @schema",
+                  "enum": [
+                    "ClusterIP",
+                    "NodePort",
+                    "LoadBalancer"
+                  ],
+                  "required": [],
+                  "title": "type"
+                }
+              },
+              "required": [
+                "enabled"
+              ],
+              "title": "service",
+              "type": "object"
+            },
+            "serviceMonitor": {
+              "properties": {
+                "enabled": {
+                  "default": false,
+                  "title": "enabled",
+                  "type": "boolean"
+                },
+                "interval": {
+                  "default": "30s",
+                  "title": "interval",
+                  "type": "string"
+                },
+                "labels": {
+                  "required": [],
+                  "title": "labels",
+                  "type": "object"
+                },
+                "metricRelabelings": {
+                  "items": {
+                    "required": []
+                  },
+                  "title": "metricRelabelings",
+                  "type": "array"
+                },
+                "relabelings": {
+                  "items": {
+                    "required": []
+                  },
+                  "title": "relabelings",
+                  "type": "array"
+                },
+                "scrapeTimeout": {
+                  "default": "10s",
+                  "title": "scrapeTimeout",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "enabled",
+                "interval",
+                "scrapeTimeout",
+                "labels",
+                "relabelings",
+                "metricRelabelings"
+              ],
+              "title": "serviceMonitor",
+              "type": "object"
+            }
+          },
+          "required": [
+            "service",
+            "serviceMonitor"
+          ],
+          "title": "metrics",
+          "type": "object"
+        },
+        "nodeSelector": {
+          "required": [],
+          "title": "nodeSelector",
+          "type": "object"
+        },
+        "podAnnotations": {
+          "required": [],
+          "title": "podAnnotations",
+          "type": "object"
+        },
+        "podLabels": {
+          "required": [],
+          "title": "podLabels",
+          "type": "object"
+        },
+        "podSecurityContext": {
+          "required": [],
+          "title": "podSecurityContext",
+          "type": "object"
+        },
+        "priorityClassName": {
+          "default": "",
+          "title": "priorityClassName",
+          "type": "string"
+        },
+        "rdma": {
+          "properties": {
+            "enabled": {
+              "default": "false",
+              "description": "Add the capabilities and mounts the verbs/efa providers need.",
+              "required": [],
+              "title": "enabled"
+            },
+            "extraEnv": {
+              "items": {
+                "required": []
+              },
+              "title": "extraEnv",
+              "type": "array"
+            },
+            "infinibandHostPath": {
+              "default": "/dev/infiniband",
+              "description": " pattern: ^/.+ @schema",
+              "pattern": "^/.+",
+              "required": [],
+              "title": "infinibandHostPath"
+            }
+          },
+          "required": [
+            "extraEnv"
+          ],
+          "title": "rdma",
+          "type": "object"
+        },
+        "readinessProbe": {
+          "properties": {
+            "httpGet": {
+              "properties": {
+                "path": {
+                  "default": "/readyz",
+                  "title": "path",
+                  "type": "string"
+                },
+                "port": {
+                  "default": "probe",
+                  "title": "port",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "port"
+              ],
+              "title": "httpGet",
+              "type": "object"
+            },
+            "initialDelaySeconds": {
+              "default": 2,
+              "title": "initialDelaySeconds",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "httpGet",
+            "initialDelaySeconds"
+          ],
+          "title": "readinessProbe",
+          "type": "object"
+        },
+        "resources": {
+          "properties": {
+            "limits": {
+              "required": [],
+              "title": "limits",
+              "type": "object"
+            },
+            "requests": {
+              "properties": {
+                "cpu": {
+                  "default": "100m",
+                  "title": "cpu",
+                  "type": "string"
+                },
+                "memory": {
+                  "default": "128Mi",
+                  "title": "memory",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cpu",
+                "memory"
+              ],
+              "title": "requests",
+              "type": "object"
+            }
+          },
+          "required": [
+            "requests",
+            "limits"
+          ],
+          "title": "resources",
+          "type": "object"
+        },
+        "serviceAccount": {
+          "properties": {
+            "annotations": {
+              "required": [],
+              "title": "annotations",
+              "type": "object"
+            },
+            "automountServiceAccountToken": {
+              "default": true,
+              "title": "automountServiceAccountToken",
+              "type": "boolean"
+            },
+            "create": {
+              "default": true,
+              "title": "create",
+              "type": "boolean"
+            },
+            "labels": {
+              "required": [],
+              "title": "labels",
+              "type": "object"
+            },
+            "name": {
+              "default": "",
+              "title": "name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "create",
+            "name",
+            "annotations",
+            "labels",
+            "automountServiceAccountToken"
+          ],
+          "title": "serviceAccount",
+          "type": "object"
+        },
+        "tolerations": {
+          "items": {
+            "required": []
+          },
+          "title": "tolerations",
+          "type": "array"
+        },
+        "topologySpreadConstraints": {
+          "items": {
+            "required": []
+          },
+          "title": "topologySpreadConstraints",
+          "type": "array"
+        },
+        "updateStrategy": {
+          "properties": {
+            "rollingUpdate": {
+              "properties": {
+                "maxUnavailable": {
+                  "default": 1,
+                  "title": "maxUnavailable",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "maxUnavailable"
+              ],
+              "title": "rollingUpdate",
+              "type": "object"
+            },
+            "type": {
+              "default": "RollingUpdate",
+              "description": " enum: [\"RollingUpdate\", \"OnDelete\"] @schema",
+              "enum": [
+                "RollingUpdate",
+                "OnDelete"
+              ],
+              "required": [],
+              "title": "type"
+            }
+          },
+          "required": [
+            "rollingUpdate"
+          ],
+          "title": "updateStrategy",
+          "type": "object"
+        }
+      },
+      "required": [
+        "enabled",
+        "updateStrategy",
+        "image",
+        "args",
+        "flags",
+        "hostPath",
+        "rdma",
+        "serviceAccount",
+        "podAnnotations",
+        "podLabels",
+        "priorityClassName",
+        "nodeSelector",
+        "tolerations",
+        "affinity",
+        "topologySpreadConstraints",
+        "resources",
+        "podSecurityContext",
+        "containerSecurityContext",
+        "livenessProbe",
+        "readinessProbe",
+        "extraEnv",
+        "extraVolumes",
+        "extraVolumeMounts",
+        "extraContainers",
+        "initContainers",
+        "metrics"
+      ],
+      "title": "gateway"
+    },
+    "global": {
+      "description": "Global settings inherited by every component unless overridden.",
+      "properties": {
+        "commonAnnotations": {
+          "description": "Annotations added to every object the chart renders.",
+          "required": [],
+          "title": "commonAnnotations"
+        },
+        "commonLabels": {
+          "description": "Labels added to every object the chart renders.",
+          "required": [],
+          "title": "commonLabels"
+        },
+        "image": {
+          "properties": {
+            "pullPolicy": {
+              "default": "IfNotPresent",
+              "description": "Default imagePullPolicy. Per-component override wins. @schema enum: [\"Always\", \"IfNotPresent\", \"Never\"] @schema",
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ],
+              "required": [],
+              "title": "pullPolicy"
+            },
+            "pullSecrets": {
+              "description": "Image pull secrets, applied to every Pod.",
+              "items": {
+                "required": []
+              },
+              "required": [],
+              "title": "pullSecrets"
+            },
+            "registry": {
+              "default": "ghcr.io/qvest-digital/mxl-k8s",
+              "description": "Container registry prefix. Per-component image.repository is appended to this.",
+              "required": [],
+              "title": "registry"
+            }
+          },
+          "required": [],
+          "title": "image",
+          "type": "object"
+        }
+      },
+      "required": [
+        "image"
+      ],
+      "title": "global"
+    },
+    "namespace": {
+      "description": "Namespace handling. Most Flux users set createNamespace on the HelmRelease and leave namespace.create=false here.",
+      "properties": {
+        "create": {
+          "default": false,
+          "title": "create",
+          "type": "boolean"
+        },
+        "name": {
+          "default": "",
+          "description": "Namespace the chart's namespaced resources land in. Falls back to .Release.Namespace when empty.",
+          "required": [],
+          "title": "name"
+        }
+      },
+      "required": [
+        "create"
+      ],
+      "title": "namespace"
+    },
+    "operator": {
+      "description": "Operator: cluster-wide reconciler for MxlReceiver, MxlFlowMirror, and related CRDs. Single Deployment.",
+      "properties": {
+        "affinity": {
+          "required": [],
+          "title": "affinity",
+          "type": "object"
+        },
+        "args": {
+          "description": "Extra raw args appended after the structured flags.",
+          "items": {
+            "required": []
+          },
+          "required": [],
+          "title": "args"
+        },
+        "containerSecurityContext": {
+          "properties": {
+            "allowPrivilegeEscalation": {
+              "default": false,
+              "title": "allowPrivilegeEscalation",
+              "type": "boolean"
+            },
+            "capabilities": {
+              "properties": {
+                "drop": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "required": []
+                  },
+                  "title": "drop",
+                  "type": "array"
+                }
+              },
+              "required": [
+                "drop"
+              ],
+              "title": "capabilities",
+              "type": "object"
+            },
+            "readOnlyRootFilesystem": {
+              "default": true,
+              "title": "readOnlyRootFilesystem",
+              "type": "boolean"
+            },
+            "runAsNonRoot": {
+              "default": true,
+              "title": "runAsNonRoot",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "allowPrivilegeEscalation",
+            "runAsNonRoot",
+            "readOnlyRootFilesystem",
+            "capabilities"
+          ],
+          "title": "containerSecurityContext",
+          "type": "object"
+        },
+        "enabled": {
+          "default": true,
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "extraContainers": {
+          "items": {
+            "required": []
+          },
+          "title": "extraContainers",
+          "type": "array"
+        },
+        "extraEnv": {
+          "items": {
+            "required": []
+          },
+          "title": "extraEnv",
+          "type": "array"
+        },
+        "extraVolumeMounts": {
+          "items": {
+            "required": []
+          },
+          "title": "extraVolumeMounts",
+          "type": "array"
+        },
+        "extraVolumes": {
+          "items": {
+            "required": []
+          },
+          "title": "extraVolumes",
+          "type": "array"
+        },
+        "flags": {
+          "description": "key=value.",
+          "properties": {
+            "healthProbeBindAddress": {
+              "default": ":8081",
+              "description": " pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$ @schema",
+              "pattern": "^:[0-9]+$|^[0-9.]+:[0-9]+$",
+              "required": [],
+              "title": "healthProbeBindAddress"
+            },
+            "leaderElect": {
+              "default": "false",
+              "description": "Enable leader election. Required for replicaCount \u003e 1.",
+              "required": [],
+              "title": "leaderElect"
+            },
+            "metricsBindAddress": {
+              "default": ":8080",
+              "description": " pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$ @schema",
+              "pattern": "^:[0-9]+$|^[0-9.]+:[0-9]+$",
+              "required": [],
+              "title": "metricsBindAddress"
+            },
+            "zapDevel": {
+              "default": false,
+              "title": "zapDevel",
+              "type": "boolean"
+            },
+            "zapLogLevel": {
+              "default": "info",
+              "description": " enum: [\"debug\", \"info\", \"warn\", \"error\"] @schema",
+              "enum": [
+                "debug",
+                "info",
+                "warn",
+                "error"
+              ],
+              "required": [],
+              "title": "zapLogLevel"
+            }
+          },
+          "required": [
+            "zapDevel"
+          ],
+          "title": "flags"
+        },
+        "image": {
+          "properties": {
+            "digest": {
+              "default": "",
+              "description": "Image digest. Wins over tag when set. @schema pattern: ^$|^sha256:[0-9a-f]{64}$ @schema",
+              "pattern": "^$|^sha256:[0-9a-f]{64}$",
+              "required": [],
+              "title": "digest"
+            },
+            "pullPolicy": {
+              "default": "",
+              "description": "imagePullPolicy override. Empty falls back to global. @schema enum: [\"\", \"Always\", \"IfNotPresent\", \"Never\"] @schema",
+              "enum": [
+                "",
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ],
+              "required": [],
+              "title": "pullPolicy"
+            },
+            "repository": {
+              "default": "operator",
+              "title": "repository",
+              "type": "string"
+            },
+            "tag": {
+              "default": "",
+              "description": "Image tag. Empty falls back to Chart.AppVersion.",
+              "required": [],
+              "title": "tag"
+            }
+          },
+          "required": [
+            "repository"
+          ],
+          "title": "image",
+          "type": "object"
+        },
+        "initContainers": {
+          "items": {
+            "required": []
+          },
+          "title": "initContainers",
+          "type": "array"
+        },
+        "livenessProbe": {
+          "properties": {
+            "httpGet": {
+              "properties": {
+                "path": {
+                  "default": "/healthz",
+                  "title": "path",
+                  "type": "string"
+                },
+                "port": {
+                  "default": "probe",
+                  "title": "port",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "port"
+              ],
+              "title": "httpGet",
+              "type": "object"
+            },
+            "initialDelaySeconds": {
+              "default": 5,
+              "title": "initialDelaySeconds",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "httpGet",
+            "initialDelaySeconds"
+          ],
+          "title": "livenessProbe",
+          "type": "object"
+        },
+        "metrics": {
+          "properties": {
+            "service": {
+              "properties": {
+                "enabled": {
+                  "default": true,
+                  "title": "enabled",
+                  "type": "boolean"
+                },
+                "port": {
+                  "default": "8080",
+                  "description": " minimum: 1 maximum: 65535 @schema",
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "required": [],
+                  "title": "port"
+                },
+                "type": {
+                  "default": "ClusterIP",
+                  "description": " enum: [\"ClusterIP\", \"NodePort\", \"LoadBalancer\"] @schema",
+                  "enum": [
+                    "ClusterIP",
+                    "NodePort",
+                    "LoadBalancer"
+                  ],
+                  "required": [],
+                  "title": "type"
+                }
+              },
+              "required": [
+                "enabled"
+              ],
+              "title": "service",
+              "type": "object"
+            },
+            "serviceMonitor": {
+              "properties": {
+                "enabled": {
+                  "default": "false",
+                  "description": "Render a Prometheus Operator ServiceMonitor. Requires the monitoring.coreos.com CRDs to be installed cluster-wide.",
+                  "required": [],
+                  "title": "enabled"
+                },
+                "interval": {
+                  "default": "30s",
+                  "title": "interval",
+                  "type": "string"
+                },
+                "labels": {
+                  "required": [],
+                  "title": "labels",
+                  "type": "object"
+                },
+                "metricRelabelings": {
+                  "items": {
+                    "required": []
+                  },
+                  "title": "metricRelabelings",
+                  "type": "array"
+                },
+                "relabelings": {
+                  "items": {
+                    "required": []
+                  },
+                  "title": "relabelings",
+                  "type": "array"
+                },
+                "scrapeTimeout": {
+                  "default": "10s",
+                  "title": "scrapeTimeout",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "interval",
+                "scrapeTimeout",
+                "labels",
+                "relabelings",
+                "metricRelabelings"
+              ],
+              "title": "serviceMonitor",
+              "type": "object"
+            }
+          },
+          "required": [
+            "service",
+            "serviceMonitor"
+          ],
+          "title": "metrics",
+          "type": "object"
+        },
+        "nodeSelector": {
+          "required": [],
+          "title": "nodeSelector",
+          "type": "object"
+        },
+        "podAnnotations": {
+          "required": [],
+          "title": "podAnnotations",
+          "type": "object"
+        },
+        "podDisruptionBudget": {
+          "properties": {
+            "enabled": {
+              "default": false,
+              "title": "enabled",
+              "type": "boolean"
+            },
+            "minAvailable": {
+              "default": "1",
+              "description": " minimum: 1 @schema",
+              "minimum": 1,
+              "required": [],
+              "title": "minAvailable"
+            }
+          },
+          "required": [
+            "enabled"
+          ],
+          "title": "podDisruptionBudget",
+          "type": "object"
+        },
+        "podLabels": {
+          "required": [],
+          "title": "podLabels",
+          "type": "object"
+        },
+        "podSecurityContext": {
+          "required": [],
+          "title": "podSecurityContext",
+          "type": "object"
+        },
+        "priorityClassName": {
+          "default": "",
+          "title": "priorityClassName",
+          "type": "string"
+        },
+        "readinessProbe": {
+          "properties": {
+            "httpGet": {
+              "properties": {
+                "path": {
+                  "default": "/readyz",
+                  "title": "path",
+                  "type": "string"
+                },
+                "port": {
+                  "default": "probe",
+                  "title": "port",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "port"
+              ],
+              "title": "httpGet",
+              "type": "object"
+            },
+            "initialDelaySeconds": {
+              "default": 2,
+              "title": "initialDelaySeconds",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "httpGet",
+            "initialDelaySeconds"
+          ],
+          "title": "readinessProbe",
+          "type": "object"
+        },
+        "replicaCount": {
+          "default": "1",
+          "description": " minimum: 1 @schema",
+          "minimum": 1,
+          "required": [],
+          "title": "replicaCount"
+        },
+        "resources": {
+          "properties": {
+            "limits": {
+              "required": [],
+              "title": "limits",
+              "type": "object"
+            },
+            "requests": {
+              "properties": {
+                "cpu": {
+                  "default": "50m",
+                  "title": "cpu",
+                  "type": "string"
+                },
+                "memory": {
+                  "default": "64Mi",
+                  "title": "memory",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cpu",
+                "memory"
+              ],
+              "title": "requests",
+              "type": "object"
+            }
+          },
+          "required": [
+            "requests",
+            "limits"
+          ],
+          "title": "resources",
+          "type": "object"
+        },
+        "serviceAccount": {
+          "properties": {
+            "annotations": {
+              "required": [],
+              "title": "annotations",
+              "type": "object"
+            },
+            "automountServiceAccountToken": {
+              "default": true,
+              "title": "automountServiceAccountToken",
+              "type": "boolean"
+            },
+            "create": {
+              "default": true,
+              "title": "create",
+              "type": "boolean"
+            },
+            "labels": {
+              "required": [],
+              "title": "labels",
+              "type": "object"
+            },
+            "name": {
+              "default": "",
+              "description": "ServiceAccount name. Empty falls back to a generated name.",
+              "required": [],
+              "title": "name"
+            }
+          },
+          "required": [
+            "create",
+            "annotations",
+            "labels",
+            "automountServiceAccountToken"
+          ],
+          "title": "serviceAccount",
+          "type": "object"
+        },
+        "tolerations": {
+          "items": {
+            "required": []
+          },
+          "title": "tolerations",
+          "type": "array"
+        },
+        "topologySpreadConstraints": {
+          "items": {
+            "required": []
+          },
+          "title": "topologySpreadConstraints",
+          "type": "array"
+        }
+      },
+      "required": [
+        "enabled",
+        "image",
+        "serviceAccount",
+        "podAnnotations",
+        "podLabels",
+        "priorityClassName",
+        "nodeSelector",
+        "tolerations",
+        "affinity",
+        "topologySpreadConstraints",
+        "resources",
+        "podSecurityContext",
+        "containerSecurityContext",
+        "livenessProbe",
+        "readinessProbe",
+        "extraEnv",
+        "extraVolumes",
+        "extraVolumeMounts",
+        "extraContainers",
+        "initContainers",
+        "podDisruptionBudget",
+        "metrics"
+      ],
+      "title": "operator"
+    },
+    "rbac": {
+      "description": "ClusterRoles and ClusterRoleBindings for every enabled component. Set to false when RBAC is centrally managed.",
+      "properties": {
+        "create": {
+          "default": true,
+          "title": "create",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "create"
+      ],
+      "title": "rbac"
+    }
+  },
+  "required": [],
+  "type": "object"
+}

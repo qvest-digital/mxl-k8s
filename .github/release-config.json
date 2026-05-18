@@ -67,6 +67,17 @@
           "jsonpath": "$[\"shim\"]"
         }
       ]
+    },
+    "charts/mxl-k8s": {
+      "release-type": "helm",
+      "component": "charts/mxl-k8s",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": ".github/prerelease-manifest.json",
+          "jsonpath": "$[\"charts/mxl-k8s\"]"
+        }
+      ]
     }
   },
   "changelog-sections": [

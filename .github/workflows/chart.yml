@@ -1,0 +1,197 @@
+name: chart
+
+on:
+  pull_request:
+    paths:
+      - 'charts/mxl-k8s/**'
+      - 'config/crd/**'
+      - '.github/workflows/chart.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'charts/mxl-k8s/**'
+      - 'config/crd/**'
+      - '.github/workflows/chart.yml'
+    tags: ['charts/mxl-k8s/v*.*.*']
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: chart-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # helm-schema and helm-unittest tags upstream are bare semver (no v
+  # prefix); go install and helm plugin install accept that form.
+  HELM_VERSION: v3.18.4
+  HELM_UNITTEST_VERSION: "1.1.0"
+  HELM_SCHEMA_VERSION: "0.23.2"
+  HELM_DOCS_VERSION: v1.14.2
+  KUBECONFORM_VERSION: v0.6.7
+
+jobs:
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      publish: ${{ steps.m.outputs.publish }}
+      version: ${{ steps.m.outputs.version }}
+    steps:
+      - id: m
+        run: |
+          set -eu
+          short_sha="${GITHUB_SHA:0:7}"
+          publish=false
+          version=""
+
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+                # refs/tags/charts/mxl-k8s/vX.Y.Z[-rc.N]
+                version="${GITHUB_REF_NAME##*/v}"
+                publish=true
+              elif [ "$GITHUB_REF" = "refs/heads/main" ]; then
+                # SemVer-valid prerelease build for the floating dev channel.
+                # OCI translates "+" to "_" at push time.
+                version="0.0.0-dev+sha.${short_sha}"
+                publish=true
+              fi
+              ;;
+          esac
+
+          {
+            echo "publish=${publish}"
+            echo "version=${version}"
+          } >> "$GITHUB_OUTPUT"
+
+  lint:
+    runs-on: ubuntu-24.04
+    needs: meta
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Install helm-unittest
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version "${HELM_UNITTEST_VERSION}"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Install helm-schema and helm-docs
+        run: |
+          go install github.com/dadav/helm-schema/cmd/helm-schema@${HELM_SCHEMA_VERSION}
+          go install github.com/norwoodj/helm-docs/cmd/helm-docs@${HELM_DOCS_VERSION}
+
+      - name: CRD sync drift check
+        run: |
+          set -eu
+          for f in config/crd/mxl.qvest-digital.com_*.yaml; do
+            dest="charts/mxl-k8s/crds/$(basename "$f")"
+            if ! cmp -s "$f" "$dest"; then
+              echo "::error::chart CRD copy $dest is out of sync with $f"
+              echo "Run 'make chart-crd-sync' and commit the result."
+              diff -u "$f" "$dest" || true
+              exit 1
+            fi
+          done
+
+      - name: helm lint
+        run: helm lint charts/mxl-k8s
+
+      - name: Schema drift check
+        run: |
+          set -eu
+          ~/go/bin/helm-schema --chart-search-root charts/mxl-k8s \
+            --append-newline --helm-docs-compatibility-mode \
+            --skip-auto-generation additionalProperties
+          if ! git diff --exit-code charts/mxl-k8s/values.schema.json; then
+            echo "::error::values.schema.json is out of sync with values.yaml"
+            echo "Run 'make chart-schema' and commit the result."
+            exit 1
+          fi
+
+      - name: helm-docs drift check
+        run: |
+          set -eu
+          ~/go/bin/helm-docs --chart-search-root charts
+          if ! git diff --exit-code charts/mxl-k8s/README.md; then
+            echo "::error::charts/mxl-k8s/README.md is out of sync with values.yaml"
+            echo "Run 'make chart-docs' and commit the result."
+            exit 1
+          fi
+
+      - name: helm unittest
+        run: helm unittest charts/mxl-k8s -f 'tests/unit/*_test.yaml'
+
+  render:
+    runs-on: ubuntu-24.04
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        values: [minimal-tcp, full-rdma, all-disabled, crds-only, custom-registry]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kubeconform
+          kubeconform -v
+
+      - name: Render scenario
+        run: |
+          helm template mxl charts/mxl-k8s \
+            -f charts/mxl-k8s/tests/values/${{ matrix.values }}.yaml \
+            --namespace mxl-system > /tmp/render.yaml
+
+      - name: Validate against Kubernetes schemas
+        run: |
+          kubeconform -strict -summary \
+            -ignore-missing-schemas \
+            -schema-location default \
+            /tmp/render.yaml
+
+  package-push:
+    runs-on: ubuntu-24.04
+    needs: [meta, lint, render]
+    if: needs.meta.outputs.publish == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
+            --username "${{ github.actor }}" \
+            --password-stdin
+
+      - name: Package chart
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -eu
+          helm package charts/mxl-k8s \
+            --version "${VERSION}" \
+            --app-version "${VERSION}" \
+            --destination /tmp/chart
+
+      - name: Push chart to OCI
+        run: |
+          set -eu
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          tgz=$(ls /tmp/chart/mxl-k8s-*.tgz)
+          helm push "${tgz}" "oci://ghcr.io/${owner}/mxl-k8s/charts"

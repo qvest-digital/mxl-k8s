@@ -1,0 +1,18 @@
+{{- if and .Values.operator.enabled .Values.operator.metrics.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}-operator-metrics
+  namespace: {{ include "mxlk8s.namespace" . }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "operator") | nindent 4 }}
+spec:
+  type: {{ .Values.operator.metrics.service.type }}
+  selector:
+    {{- include "mxlk8s.selectorLabels" (dict "Context" . "component" "operator") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.operator.metrics.service.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

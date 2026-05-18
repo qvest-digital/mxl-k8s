@@ -23,7 +23,7 @@ for m in api ipc operator; do (cd "$m" && go build ./... && go vet ./...); done
 
 `agent` requires libmxl. `gateway` additionally requires libmxl-fabrics.
 Both are built from the same upstream source pinned by
-[`.github/libmxl.version`](../.github/libmxl.version) — the file holds
+[`.github/libmxl.version`](../.github/libmxl.version): the file holds
 one `https://github.com/<owner>/<repo>/tree/<ref>` URL. Renovate
 maintains it; humans should update it the same way.
 

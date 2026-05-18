@@ -1,0 +1,12 @@
+{{- if and .Values.namespace.create .Values.namespace.name }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace.name }}
+  labels:
+    {{- include "mxlk8s.labels" . | nindent 4 }}
+  {{- with .Values.global.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

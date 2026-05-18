@@ -1,0 +1,14 @@
+_anchors:
+  defaults: &defaults
+    config:
+      with-expecter: true
+      filename: "{{.InterfaceName | snakecase}}_mock.go"
+      mockname: "Mock{{.InterfaceName}}"
+      outpkg: mocks
+      dir: "{{.InterfaceDir}}/mocks"
+
+# Per-package interface lists are added by the module PRs that introduce the
+# interfaces (agent FlowChecker + MaterializeDispatcher, gateway
+# FlowReader/FlowWriter/Initiator/Target/Regions). Keep this file in place
+# so `make mocks` is a no-op until then.
+packages: {}

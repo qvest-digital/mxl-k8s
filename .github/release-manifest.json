@@ -4,5 +4,6 @@
   "agent": "0.0.0",
   "operator": "0.0.0",
   "gateway": "0.0.0",
-  "shim": "0.0.0"
+  "shim": "0.0.0",
+  "charts/mxl-k8s": "0.0.0"
 }

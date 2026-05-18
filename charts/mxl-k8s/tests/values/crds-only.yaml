@@ -1,0 +1,13 @@
+# Skip the chart's CRD overlay path. Helm's crds/ directory still
+# ships the CRDs on first install; this value affects only the
+# templates/crds/ overlay (used when CRDs are managed out-of-band).
+operator:
+  enabled: false
+agent:
+  enabled: false
+gateway:
+  enabled: false
+rbac:
+  create: false
+crds:
+  skipInstall: true
