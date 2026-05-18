@@ -1,8 +1,9 @@
 apiVersion: v2
 name: mxl-k8s
-description: Kubernetes control plane for MXL (Media eXchange Layer). Installs the operator, per-node agent and gateway, CRDs, and RBAC.
+description: Kubernetes control plane for MXL (Media eXchange Layer). Installs
+  the operator, per-node agent and gateway, CRDs, and RBAC.
 type: application
-version: 0.0.0
+version: 1.0.0-rc.1
 appVersion: 0.0.0 # x-release-please-version
 kubeVersion: ">=1.28-0"
 keywords:
