@@ -1,22 +1,130 @@
 # mxl-k8s
 
-Kubernetes control plane for MXL ([Media eXchange Layer][mxl]) domains.
-This is how the moving parts fit together at runtime:
+Kubernetes control plane for [MXL][mxl]. mxl-k8s turns the
+cross-node transport that [libmxl-fabrics][mxl] provides into a
+cluster capability so individual media functions don't have to
+carry it themselves.
+
+## Why
+
+MXL gives media functions intra-node, zero-copy flow exchange
+on tmpfs. The moment two functions land on different machines,
+crossing the wire is a separate stack: discover where the flow
+lives, open a libmxl-fabrics Target on the consumer node, run
+an Initiator on the producer node, exchange addresses and
+memory keys, register memory regions, drive a transfer loop,
+recover from drops. That is a lot to ask of a function whose
+job is to produce or consume grains.
+
+mxl-k8s lifts that stack into the cluster. A producer or
+consumer pod keeps the same shape it has on a single node: it
+reads or writes against its local `/run/mxl/domain` and never
+mentions libmxl-fabrics. The cluster makes sure the flow shows
+up there.
+
+## How
 
 ![System context](docs/architecture/diagrams/01-system-context.drawio.svg)
+
+Four pieces, all running inside the cluster:
+
+- A per-node **agent** DaemonSet watches `/run/mxl/domain` via
+  `fanotify` and publishes each flow on the Kubernetes API.
+- A per-node **gateway** DaemonSet owns the libmxl-fabrics
+  handles: FlowReader on producer nodes, FlowWriter on consumer
+  nodes, Initiator/Target on the fabric, and the per-grain
+  transfer loop.
+- A cluster-scoped **operator** reconciles `MxlReceiver` intent
+  ("this pod wants to consume that flow") into one
+  `MxlFlowMirror` per (flow, target-node). Multiple consumers on
+  the same node share a single mirror.
+- An **LD_PRELOAD shim** in consumer pods turns the first
+  `openat` on a not-yet-materialised flow into a synchronous
+  wait on the local agent. Consumer code calls
+  `mxlCreateFlowReader` the same way it does on a single node.
+
+The CRDs (`MxlFlow`, `MxlReceiver`, `MxlFlowMirror`,
+`MxlDomain`, `MxlNodeCapabilities`) describe flows, who wants
+them, and what each node can carry.
+
+For the full architecture walkthrough (per-node anatomy,
+control-plane and data-plane sequences, lifecycle diagrams) see
+[`docs/architecture/`](docs/architecture/).
+
+## What you do not have to write
+
+For media-function authors:
+
+- No `libmxl-fabrics` link, no `libfabric` link, no headers.
+- No TargetInfo handshake, no memory-region registration, no
+  per-grain transfer loop.
+- No provider choice at code time. The fabric provider
+  (`tcp`, `verbs`, `efa`, `shm`) is a YAML knob on the
+  `MxlReceiver`.
+- No reconnect path for producer or consumer restarts. The
+  gateway rebuilds the fabric side and republishes the new
+  address on its own; the function keeps reading from its local
+  domain.
+
+For cluster operators:
+
+- One DaemonSet per node owns the fabric. Bandwidth scaling and
+  failure isolation follow the standard Kubernetes affordances.
+- Provider rollout and host-side prerequisites
+  (`/dev/infiniband`, `IPC_LOCK`, RoCEv2 PFC/DSCP, EFA AMI
+  configuration) are documented under
+  [`docs/RDMA.md`](docs/RDMA.md).
+- Container images publish to
+  `ghcr.io/qvest-digital/mxl-k8s/<component>` for every PR,
+  every push to `main` (`:dev` plus `:sha-<short>`), and every
+  per-component release tag (`:vX.Y.Z` plus `:latest` or
+  `:pre`).
+
+## Run the demo locally
+
+The repo ships a KIND cluster that runs an end-to-end TCP flow
+across two worker nodes. Requires Docker, [`kind`][kind] >= 0.20,
+and `kubectl`. Linux host with a kernel >= 5.17 (the agent's
+`fanotify` needs `FAN_REPORT_DFID_NAME`).
+
+```sh
+make kind-up
+```
+
+That builds every component image locally, brings up a
+three-node KIND cluster (control plane plus two workers),
+applies the [`examples/tcp-demo`](examples/tcp-demo/) bundle, and
+waits for the `MxlFlowMirror` to reach `Ready`. After about a
+minute the writer pod is producing grains on one worker and the
+reader pod is consuming them on the other.
+
+```sh
+kubectl --context kind-mxl-k8s-demo -n mxl-system logs pod/mxl-tcp-demo-reader
+```
+
+The reader prints one line per grain (`idx=... size=... slices=.../...`).
+Use `make kind-status` for the converged state of the CRDs and
+pods, `make kind-down` to tear the cluster down.
+
+[`docs/KIND.md`](docs/KIND.md) walks through what each step does
+and what to look at if convergence stalls.
+
+## Repository layout
 
 The repo is a Go workspace with five modules:
 
 | Module | Path | Purpose |
 | --- | --- | --- |
-| `api` | `github.com/qvest-digital/mxl-k8s/api` | CRD types (`MxlDomain`, `MxlFlow`, `MxlFlowMirror`, `MxlReceiver`, `MxlNodeCapabilities`). |
-| `ipc` | `github.com/qvest-digital/mxl-k8s/ipc` | gRPC contract between agent ↔ gateway and gateway ↔ gateway. |
-| `operator` | `github.com/qvest-digital/mxl-k8s/operator` | Cluster operator: reconciles the CRDs. |
-| `agent` | `github.com/qvest-digital/mxl-k8s/agent` | Per-node DaemonSet: watches the MXL domain via `fanotify`, publishes flow state, gates consumer opens. Links `libmxl` via [`go-mxl`][go-mxl]. |
-| `gateway` | `github.com/qvest-digital/mxl-k8s/gateway` | Per-node DaemonSet: cross-node grain transport. Links `libmxl-fabrics` via [`go-mxl/fabrics`][go-mxl]. |
+| `api` | `github.com/qvest-digital/mxl-k8s/api` | CRD types. |
+| `ipc` | `github.com/qvest-digital/mxl-k8s/ipc` | gRPC contract between agent and gateway. |
+| `operator` | `github.com/qvest-digital/mxl-k8s/operator` | Cluster operator that reconciles the CRDs. |
+| `agent` | `github.com/qvest-digital/mxl-k8s/agent` | Per-node DaemonSet. Links libmxl via [`go-mxl`][go-mxl]. |
+| `gateway` | `github.com/qvest-digital/mxl-k8s/gateway` | Per-node DaemonSet. Links libmxl-fabrics via [`go-mxl/fabrics`][go-mxl]. |
 
-See [`docs/architecture/`](docs/architecture/) for the full architecture
-walkthrough and [`docs/BUILD.md`](docs/BUILD.md) for local-build instructions.
+[`docs/BUILD.md`](docs/BUILD.md) covers local-build prerequisites
+and the cgo lane for `agent` and `gateway`.
+[`CLAUDE.md`](CLAUDE.md) carries the contributor rules.
 
 [mxl]: https://github.com/dmf-mxl/mxl
 [go-mxl]: https://github.com/qvest-digital/go-mxl
+[kind]: https://kind.sigs.k8s.io/
