@@ -3,7 +3,20 @@ CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTR
 BUF_VERSION ?= v1.50.0
 BUF ?= go run github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
 
+GOTESTSUM_VERSION ?= v1.13.0
+GOTESTSUM ?= go run gotest.tools/gotestsum@$(GOTESTSUM_VERSION)
+MOCKERY_VERSION ?= v3.5.4
+MOCKERY ?= go run github.com/vektra/mockery/v3@$(MOCKERY_VERSION)
+SETUP_ENVTEST_VERSION ?= release-0.22
+SETUP_ENVTEST ?= go run sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)
+ENVTEST_K8S_VERSION ?= 1.31.0
+ENVTEST_DIR ?= $(CURDIR)/bin
+COVERAGE_DIR ?= $(CURDIR)/bin
+TEST_TIMEOUT ?= 5m
+TEST_ARGS ?= -race -timeout $(TEST_TIMEOUT)
+
 MODULES := api ipc operator agent gateway
+PURE_TEST_MODULES := api ipc operator agent
 
 .PHONY: all
 all: gen-api gen-ipc lint build
@@ -93,6 +106,84 @@ HELM_DOCS   ?= $(shell go env GOPATH)/bin/helm-docs
 
 .PHONY: generated-check
 generated-check: manifests-check ipc-check chart-check
+
+# --- Test targets ---
+# `make test`         runs unit tests across pure-Go modules (api, ipc,
+#                     operator, agent). The operator suite needs the
+#                     kube-apiserver + etcd binaries that envtest provides;
+#                     they are fetched into $(ENVTEST_DIR) on demand and
+#                     reused thereafter.
+# `make test-gateway` runs gateway tests inside the cgo lane (libmxl +
+#                     libmxl-fabrics must be installed for the package to
+#                     compile). CI runs this in the go-mxl-builder image.
+# `make test-all`     runs both lanes.
+# `make mocks`        regenerates testify-style mocks listed in
+#                     `.mockery.yaml`. `make mocks-check` fails the build
+#                     if generated mocks are out of sync with the
+#                     committed copies.
+#
+# JUnit XML and coverage profiles land under bin/ keyed by module name.
+
+.PHONY: envtest-assets
+envtest-assets:
+	@mkdir -p $(ENVTEST_DIR)
+	@$(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir=$(ENVTEST_DIR) >/dev/null
+
+.PHONY: envtest-path
+envtest-path:
+	@$(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir=$(ENVTEST_DIR) -p path
+
+define test_module
+	@echo ">> test $(1)"
+	@mkdir -p $(COVERAGE_DIR)
+	@cd $(1) && KUBEBUILDER_ASSETS="$$(cd $(CURDIR) && $(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir=$(ENVTEST_DIR) -p path)" \
+	    $(GOTESTSUM) \
+	        --format=testname \
+	        --junitfile=$(COVERAGE_DIR)/junit-$(1).xml \
+	        --jsonfile=$(COVERAGE_DIR)/test-$(1).json \
+	        -- $(TEST_ARGS) \
+	        -coverprofile=$(COVERAGE_DIR)/cover-$(1).out \
+	        -covermode=atomic \
+	        ./...
+endef
+
+.PHONY: test
+test: envtest-assets
+	@for m in $(PURE_TEST_MODULES); do \
+	    $(MAKE) --no-print-directory test-one MODULE=$$m || exit $$?; \
+	done
+
+.PHONY: test-one
+test-one:
+	$(call test_module,$(MODULE))
+
+.PHONY: test-gateway
+test-gateway:
+	$(call test_module,gateway)
+
+.PHONY: test-all
+test-all: test test-gateway
+
+.PHONY: coverage-report
+coverage-report:
+	@for m in $(MODULES); do \
+	    f=$(COVERAGE_DIR)/cover-$$m.out; \
+	    if [ -f $$f ]; then \
+	        echo "=== $$m ==="; \
+	        (cd $$m && go tool cover -func=$$f | tail -n 1); \
+	    fi; \
+	done
+
+.PHONY: mocks
+mocks:
+	$(MOCKERY)
+
+.PHONY: mocks-check
+mocks-check: mocks
+	@if ! git diff --exit-code -- '**/mocks/*.go'; then \
+	    echo "mocks out of date; run 'make mocks' and commit the result."; \
+	    exit 1; \
+	fi
 
 # --- KIND demo helpers ---
 # `make kind-up`     builds the four component images, creates (or
