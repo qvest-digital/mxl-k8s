@@ -20,9 +20,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           check-latest: true
@@ -62,7 +62,7 @@ jobs:
       image: ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.5
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Mark workspace as a safe git directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -87,9 +87,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           check-latest: true
@@ -108,9 +108,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           check-latest: true
@@ -136,9 +136,9 @@ jobs:
       matrix:
         module: [api, ipc, operator, agent]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
           check-latest: true
@@ -146,7 +146,7 @@ jobs:
 
       - name: Cache envtest binaries
         if: matrix.module == 'operator'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: bin/k8s
           key: envtest-${{ runner.os }}-${{ env.ENVTEST_K8S_VERSION }}-${{ env.SETUP_ENVTEST_VERSION }}
@@ -183,7 +183,7 @@ jobs:
 
       - name: Upload test artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-${{ matrix.module }}
           if-no-files-found: ignore
@@ -201,7 +201,7 @@ jobs:
       image: ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.5
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Mark workspace as a safe git directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -221,7 +221,7 @@ jobs:
 
       - name: Upload test artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-gateway
           if-no-files-found: ignore
@@ -240,16 +240,16 @@ jobs:
     if: always()
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: bin
           pattern: test-results-*
           merge-multiple: true
 
       - name: Publish JUnit results
-        uses: dorny/test-reporter@v1
+        uses: dorny/test-reporter@v3
         if: hashFiles('bin/junit-*.xml') != ''
         with:
           name: tests

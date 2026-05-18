@@ -131,13 +131,13 @@ jobs:
     runs-on: ${{ matrix.runner.runs_on }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         if: needs.meta.outputs.push == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -146,7 +146,7 @@ jobs:
       - name: Build (push by digest)
         if: needs.meta.outputs.push == 'true'
         id: push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.image.dockerfile }}
@@ -162,7 +162,7 @@ jobs:
       # local build that just validates the Dockerfile compiles.
       - name: Build (validate only)
         if: needs.meta.outputs.push != 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.image.dockerfile }}
@@ -180,7 +180,7 @@ jobs:
 
       - name: Upload digest
         if: needs.meta.outputs.push == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digests-${{ matrix.image.name }}-${{ matrix.runner.arch }}
           path: ${{ runner.temp }}/digests/*
@@ -199,15 +199,15 @@ jobs:
         image: ${{ fromJSON(needs.meta.outputs.images) }}
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-${{ matrix.image.name }}-*
           merge-multiple: false
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
