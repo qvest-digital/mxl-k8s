@@ -57,9 +57,9 @@ control-plane and data-plane sequences, lifecycle diagrams) see
 mxl-k8s lives in the Media Exchange row of the
 [EBU Dynamic Media Facility Reference Architecture (V2.0,
 April 2026)](https://tech.ebu.ch/publications/white-paper-2026-04-15).
-It covers cross-node flow plumbing: discovery and registration,
-the per-mirror libmxl-fabrics handshake, and recovery on writer or
-gateway restarts. Container orchestration, identity, and
+It covers the cross-node flow lifecycle: discovery and
+registration, the per-mirror libmxl-fabrics handshake, and recovery
+on writer or gateway restarts. Container orchestration, identity, and
 per-function on-node behaviour stay with Kubernetes, the cluster's
 identity provider, and upstream `dmf-mxl` respectively.
 
