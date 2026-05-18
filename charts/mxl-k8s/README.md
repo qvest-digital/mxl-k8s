@@ -64,6 +64,28 @@ Track `:dev` instead of a semver range by setting `version: ">=0.0.0-0"`
 on the HelmRelease. The chart is published as `0.0.0-dev+sha.<short>`
 on every merge to `main`; Helm encodes the `+` as `_` in the OCI tag.
 
+## Per-component image versions
+
+Operator, agent, and gateway release independently from the chart;
+their versions can diverge. The published chart pins
+`<component>.image.tag` per component at package time so a chart
+release at `1.0.0-rc.5` can ship operator at `v1.0.0-rc.4`, agent at
+`v1.0.0-rc.5`, and gateway at `v1.0.0-rc.2` without the user
+touching values.
+
+The pinned table for each released chart appears in the chart's
+GitHub release notes
+(`https://github.com/qvest-digital/mxl-k8s/releases/tag/charts/mxl-k8s/v<X>`).
+The `:dev` chart pins every tag to `dev` so it tracks main HEAD
+images.
+
+A `helm install ./charts/mxl-k8s` from a clone of the repo (source
+values.yaml, no pin) falls back to `v<Chart.AppVersion>` for every
+component, which is fine for the rare case where the contributor
+wants the same version across all components from one checkout.
+
+`--set <comp>.image.tag=<tag>` overrides the pin as usual.
+
 ## Common overrides
 
 ### Minimal tcp deployment
@@ -140,11 +162,13 @@ Kubernetes: `>=1.28-0`
 | agent | object | `{"affinity":{},"args":[],"containerSecurityContext":{"allowPrivilegeEscalation":false,"capabilities":{"add":["SYS_ADMIN"],"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsNonRoot":false},"enabled":true,"extraContainers":[],"extraEnv":[],"extraVolumeMounts":[],"extraVolumes":[],"flags":{"domainPath":"/run/mxl/domain","healthProbeBindAddress":":8081","intentSocket":"/run/mxl/agent.sock","materializeTimeout":"5s","metricsBindAddress":":8080","resyncPeriod":"30s","zapLogLevel":"info"},"hostPath":{"run":"/run/mxl","type":"DirectoryOrCreate"},"image":{"digest":"","pullPolicy":"","repository":"agent","tag":""},"initContainers":[],"livenessProbe":{"httpGet":{"path":"/healthz","port":"probe"},"initialDelaySeconds":5},"metrics":{"service":{"enabled":true,"port":8080,"type":"ClusterIP"},"serviceMonitor":{"enabled":false,"interval":"30s","labels":{},"metricRelabelings":[],"relabelings":[],"scrapeTimeout":"10s"}},"nodeSelector":{},"podAnnotations":{},"podLabels":{},"podSecurityContext":{},"priorityClassName":"","readinessProbe":{"httpGet":{"path":"/readyz","port":"probe"},"initialDelaySeconds":2},"resources":{"limits":{},"requests":{"cpu":"25m","memory":"32Mi"}},"serviceAccount":{"annotations":{},"automountServiceAccountToken":true,"create":true,"labels":{},"name":""},"tolerations":[],"topologySpreadConstraints":[],"updateStrategy":{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"}}` | Agent: per-node DaemonSet that watches the MXL domain via fanotify, publishes flow state, and serves the LD_PRELOAD intent socket. |
 | agent.containerSecurityContext.runAsNonRoot | bool | `false` | fanotify on /run/mxl/domain reads host inodes, so the agent currently runs as root. PSA-restricted environments cannot host the agent without a policy exception. |
 | agent.hostPath | object | `{"run":"/run/mxl","type":"DirectoryOrCreate"}` | hostPath layout. The agent mounts the whole /run/mxl so the intent socket lands on the host where consumer pods can see it. |
+| agent.image.tag | string | `""` | Image tag. Empty falls back to `v<Chart.AppVersion>` so a local `helm install ./charts/mxl-k8s` from the repo still resolves to a single bundle version. The published OCI artifact has this field pre-populated at package time to the tag the agent's last release produced; see the chart's GitHub release page for the per-component bundle table. |
 | crds | object | `{"skipInstall":false}` | CRD handling. The chart installs CRDs from its crds/ directory by default. Helm only installs them on first install and never deletes or upgrades them; Flux's HelmRelease.spec.{install,upgrade}.crds governs replace semantics. Set skipInstall=true when CRDs are managed by a separate Kustomization or operator framework. |
 | gateway | object | `{"affinity":{},"args":[],"containerSecurityContext":{"allowPrivilegeEscalation":false,"capabilities":{"add":[],"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsNonRoot":false},"dnsPolicy":"ClusterFirstWithHostNet","enabled":true,"extraContainers":[],"extraEnv":[],"extraVolumeMounts":[],"extraVolumes":[],"flags":{"bindAddress":"$(POD_IP)","domainPath":"/run/mxl/domain","healthProbeBindAddress":":8081","metricsBindAddress":":8080","providers":["tcp"],"resyncPeriod":"30s","zapLogLevel":"info"},"hostNetwork":true,"hostPath":{"domain":"/run/mxl/domain","type":"DirectoryOrCreate"},"image":{"digest":"","pullPolicy":"","repository":"gateway","tag":""},"initContainers":[],"livenessProbe":{"httpGet":{"path":"/healthz","port":"probe"},"initialDelaySeconds":5},"metrics":{"service":{"enabled":true,"port":8080,"type":"ClusterIP"},"serviceMonitor":{"enabled":false,"interval":"30s","labels":{},"metricRelabelings":[],"relabelings":[],"scrapeTimeout":"10s"}},"nodeSelector":{},"podAnnotations":{},"podLabels":{},"podSecurityContext":{},"priorityClassName":"","rdma":{"enabled":false,"extraEnv":[],"infinibandHostPath":"/dev/infiniband"},"readinessProbe":{"httpGet":{"path":"/readyz","port":"probe"},"initialDelaySeconds":2},"resources":{"limits":{},"requests":{"cpu":"100m","memory":"128Mi"}},"serviceAccount":{"annotations":{},"automountServiceAccountToken":true,"create":true,"labels":{},"name":""},"tolerations":[],"topologySpreadConstraints":[],"updateStrategy":{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"}}` | Gateway: per-node DaemonSet that owns libmxl-fabrics handles and moves grains across the wire. Runs with hostNetwork so the fabric endpoint binds the node interface. |
 | gateway.containerSecurityContext.capabilities.add | list | `[]` | Additional caps beyond what rdma.enabled implies. |
 | gateway.flags.bindAddress | string | `"$(POD_IP)"` | Bind address for libmxl-fabrics endpoints. Default uses the downward-API POD_IP so each gateway binds its node IP. |
 | gateway.hostNetwork | bool | `true` | hostNetwork is required because the libmxl-fabrics TargetInfo embeds the host:port a peer dials; a CNI overlay IP would not be reachable cross-node. |
+| gateway.image.tag | string | `""` | Image tag. Empty falls back to `v<Chart.AppVersion>` so a local `helm install ./charts/mxl-k8s` from the repo still resolves to a single bundle version. The published OCI artifact has this field pre-populated at package time to the tag the gateway's last release produced; see the chart's GitHub release page for the per-component bundle table. |
 | gateway.rdma.enabled | bool | `false` | Add the capabilities and mounts the verbs/efa providers need. |
 | global | object | `{"commonAnnotations":{},"commonLabels":{},"image":{"pullPolicy":"IfNotPresent","pullSecrets":[],"registry":"ghcr.io/qvest-digital/mxl-k8s"}}` | Global settings inherited by every component unless overridden. |
 | global.commonAnnotations | object | `{}` | Annotations added to every object the chart renders. |
@@ -159,7 +183,7 @@ Kubernetes: `>=1.28-0`
 | operator.flags.leaderElect | bool | `false` | Enable leader election. Required for replicaCount > 1. |
 | operator.image.digest | string | `""` | Image digest. Wins over tag when set. @schema pattern: ^$|^sha256:[0-9a-f]{64}$ @schema |
 | operator.image.pullPolicy | string | `""` | imagePullPolicy override. Empty falls back to global. @schema enum: ["", "Always", "IfNotPresent", "Never"] @schema |
-| operator.image.tag | string | `""` | Image tag. Empty falls back to Chart.AppVersion. |
+| operator.image.tag | string | `""` | Image tag. Empty falls back to `v<Chart.AppVersion>` so a local `helm install ./charts/mxl-k8s` from the repo still resolves to a single bundle version. The published OCI artifact has this field pre-populated at package time to the tag the operator's last release produced; see the chart's GitHub release page for the per-component bundle table. |
 | operator.metrics.serviceMonitor.enabled | bool | `false` | Render a Prometheus Operator ServiceMonitor. Requires the monitoring.coreos.com CRDs to be installed cluster-wide. |
 | operator.serviceAccount.name | string | `""` | ServiceAccount name. Empty falls back to a generated name. |
 | rbac | object | `{"create":true}` | ClusterRoles and ClusterRoleBindings for every enabled component. Set to false when RBAC is centrally managed. |
