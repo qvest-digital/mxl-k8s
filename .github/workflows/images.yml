@@ -1,0 +1,239 @@
+name: images
+
+on:
+  push:
+    branches: [main]
+    # Per-component release tags (e.g. gateway/v0.0.1, api/v1.2.3).
+    # release-please produces these with the slash separator so they
+    # double as Go submodule version tags.
+    tags: ['*/v*.*.*']
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: images-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Compute the list of images to build and the registry references /
+  # tag lists each image should be published under. Centralised here so
+  # build and merge agree on what to publish.
+  #
+  # The images list is a JSON array consumed by the build matrix below.
+  # On main / PR all five images are included; on a per-component tag
+  # push (e.g. gateway/v1.2.3) only the matching image is included so
+  # an unrelated component's image isn't re-published.
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      images: ${{ steps.m.outputs.images }}
+      push: ${{ steps.m.outputs.push }}
+      has_images: ${{ steps.m.outputs.has_images }}
+    steps:
+      - id: m
+        run: |
+          set -eu
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          prefix="ghcr.io/${owner}/mxl-k8s"
+          short_sha="${GITHUB_SHA:0:7}"
+
+          # All images this repo ships. Order matches docker/ listing.
+          declare -a all=(
+            "operator|docker/operator.Dockerfile"
+            "agent|docker/agent.Dockerfile"
+            "gateway|docker/gateway.Dockerfile"
+            "shim|docker/shim.Dockerfile"
+            "demo-tools|docker/demo-tools.Dockerfile"
+          )
+
+          push=false
+          selected=""
+          declare -a extra_tags=()
+
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            push=true
+            if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+              # refs/tags/<component>/v<version>
+              ref="$GITHUB_REF_NAME"
+              selected="${ref%%/*}"
+              version="${ref#*/v}"
+              extra_tags+=("v${version}")
+              case "$version" in
+                # SemVer prereleases (anything with a dash after the
+                # MAJOR.MINOR.PATCH triplet) move :pre, not :latest.
+                *-*) extra_tags+=("pre") ;;
+                *)   extra_tags+=("latest") ;;
+              esac
+            else
+              # Push to main: :dev always tracks HEAD; :sha-<short> is
+              # the content-addressed handle.
+              extra_tags+=("dev" "sha-${short_sha}")
+            fi
+          elif [ "$GITHUB_EVENT_NAME" = "pull_request" ] \
+              && [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}" ]; then
+            push=true
+            extra_tags+=("pr-${{ github.event.number }}-${short_sha}")
+          fi
+
+          # Build the images JSON. For fork PRs (push=false) we still
+          # include every image so the build matrix exercises every
+          # Dockerfile; just nothing gets pushed.
+          images='['
+          first=true
+          for entry in "${all[@]}"; do
+            name="${entry%%|*}"
+            dockerfile="${entry#*|}"
+            if [ -n "$selected" ] && [ "$name" != "$selected" ]; then
+              continue
+            fi
+            image="${prefix}/${name}"
+            tags=""
+            if [ ${#extra_tags[@]} -gt 0 ]; then
+              for t in "${extra_tags[@]}"; do
+                if [ -z "$tags" ]; then tags="${image}:${t}"; else tags="${tags},${image}:${t}"; fi
+              done
+            fi
+            $first || images="${images},"
+            images="${images}{\"name\":\"${name}\",\"dockerfile\":\"${dockerfile}\",\"image\":\"${image}\",\"tags\":\"${tags}\"}"
+            first=false
+          done
+          images="${images}]"
+
+          if [ "$first" = "true" ]; then
+            has_images=false
+          else
+            has_images=true
+          fi
+
+          {
+            echo "push=${push}"
+            echo "images=${images}"
+            echo "has_images=${has_images}"
+          } >> "$GITHUB_OUTPUT"
+
+  # Per-image, per-arch build. Each cell builds on the matching native
+  # runner and (when push=true) writes a per-digest entry to GHCR. The
+  # digest is uploaded as an artifact so the merge job can stitch the
+  # two arches into one multi-arch manifest list per tag.
+  build:
+    needs: meta
+    if: needs.meta.outputs.has_images == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.meta.outputs.images) }}
+        runner:
+          - { arch: amd64, runs_on: ubuntu-24.04,     platform: linux/amd64 }
+          - { arch: arm64, runs_on: ubuntu-24.04-arm, platform: linux/arm64 }
+    runs-on: ${{ matrix.runner.runs_on }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: needs.meta.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (push by digest)
+        if: needs.meta.outputs.push == 'true'
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          platforms: ${{ matrix.runner.platform }}
+          outputs: type=image,name=${{ matrix.image.image }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image.name }}-${{ matrix.runner.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}-${{ matrix.runner.arch }}
+
+      # Fork PRs can't write to the package registry, so fall back to a
+      # local build that just validates the Dockerfile compiles.
+      - name: Build (validate only)
+        if: needs.meta.outputs.push != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          platforms: ${{ matrix.runner.platform }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.image.name }}-${{ matrix.runner.arch }}
+
+      - name: Export digest
+        if: needs.meta.outputs.push == 'true'
+        run: |
+          set -eu
+          mkdir -p "${RUNNER_TEMP}/digests"
+          d="${{ steps.push.outputs.digest }}"
+          touch "${RUNNER_TEMP}/digests/${d#sha256:}"
+
+      - name: Upload digest
+        if: needs.meta.outputs.push == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.image.name }}-${{ matrix.runner.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Stitch the per-arch digests of each image into one multi-arch
+  # manifest list, applying the full tag list computed by meta.
+  merge:
+    needs: [meta, build]
+    if: needs.meta.outputs.push == 'true' && needs.meta.outputs.has_images == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.meta.outputs.images) }}
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ matrix.image.name }}-*
+          merge-multiple: false
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list
+        env:
+          IMAGE: ${{ matrix.image.image }}
+          TAGS: ${{ matrix.image.tags }}
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          tag_args=""
+          IFS=,
+          for t in $TAGS; do tag_args="$tag_args -t $t"; done
+          unset IFS
+          refs=""
+          for f in digests-${{ matrix.image.name }}-*/*; do
+            digest=$(basename "$f")
+            refs="$refs ${IMAGE}@sha256:${digest}"
+          done
+          echo "creating manifest for $IMAGE with tags:$tag_args" >&2
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $tag_args $refs
+
+      - name: Inspect
+        run: |
+          first=$(echo '${{ matrix.image.tags }}' | cut -d, -f1)
+          docker buildx imagetools inspect "$first"
