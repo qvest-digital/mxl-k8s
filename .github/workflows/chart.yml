@@ -76,7 +76,7 @@ jobs:
           version: ${{ env.HELM_VERSION }}
 
       - name: Install helm-unittest
-        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version "${HELM_UNITTEST_VERSION}" --verify=false
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version "${HELM_UNITTEST_VERSION}"
 
       - uses: actions/setup-go@v5
         with:
