@@ -31,6 +31,39 @@ a `replace` directive to it. `api`, `ipc`, and `operator` must not gain
 any CGo dependency — they have to build on a host without libmxl
 installed.
 
+## Branches and PRs
+
+- Direct commits to `main` are off by default. Every change opens a
+  feature branch and a PR against `main`. Commit directly to `main`
+  only when the maintainer has explicitly approved it for that
+  specific change.
+- Force-pushes are off by default. Force-pushing to `main` is
+  prohibited. Force-pushing to a feature branch is only permitted
+  with explicit approval, because another editor may be reviewing
+  the branch or checked out against it.
+- Use a separate `git worktree` per branch when working alongside
+  other editors on the repository. Worktrees keep the main checkout
+  clean while sharing the object database, so parallel sessions do
+  not collide over staged changes or the working tree.
+
+### Working in a worktree
+
+From the main checkout, create a worktree pinned to a feature
+branch tracking `origin/main`:
+
+```sh
+git fetch origin
+git worktree add ../mxl-k8s.<topic> -b <topic> origin/main
+cd ../mxl-k8s.<topic>
+```
+
+When the PR has merged, drop the worktree and the local branch:
+
+```sh
+git worktree remove ../mxl-k8s.<topic>
+git branch -D <topic>
+```
+
 ## Commits
 
 - Use Conventional Commits with a scope matching the module being
