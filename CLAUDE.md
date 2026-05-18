@@ -31,6 +31,85 @@ a `replace` directive to it. `api`, `ipc`, and `operator` must not gain
 any CGo dependency — they have to build on a host without libmxl
 installed.
 
+## Branches and PRs
+
+- Direct commits to `main` are off by default. Every change opens a
+  feature branch and a PR against `main`. Commit directly to `main`
+  only when the maintainer has explicitly approved it for that
+  specific change.
+- Force-pushes are off by default. Force-pushing to `main` is
+  prohibited. Force-pushing to a feature branch is only permitted
+  with explicit approval, because another editor may be reviewing
+  the branch or checked out against it.
+- Use a separate `git worktree` per branch when working alongside
+  other editors on the repository. Worktrees keep the main checkout
+  clean while sharing the object database, so parallel sessions do
+  not collide over staged changes or the working tree.
+- Merge PRs with **Squash and merge**. release-please derives version
+  bumps and changelog entries from the resulting single commit on
+  `main`, and a noisy merge of dozens of intermediate commits would
+  bury the release-relevant ones.
+- Delete the feature branch on the remote as soon as the PR is
+  merged (GitHub's "Delete branch" button on the merged PR, or the
+  repo-level "Automatically delete head branches" setting). Stale
+  remote branches confuse the next contributor's `git fetch` and
+  inflate `git branch -r` output.
+
+### Squash commit format for release-please
+
+GitHub's squash-merge uses the PR title as the resulting commit
+subject (with the PR number appended) and the PR body as the commit
+body. release-please parses that commit on `main` to decide what
+gets a changelog entry and how the version bumps. Two consequences:
+
+1. **PR title is Conventional Commits.** Write the PR title in
+   `<type>(<scope>): <subject>` form just as if it were a single
+   commit subject. Subject `<= 72` chars, imperative mood.
+2. **Multiple release-relevant changes go in the PR body, at the
+   bottom, one per line.** release-please reads additional
+   conventional-commit footer lines and emits one changelog entry
+   per line. Add them after the prose explanation, separated by a
+   blank line. Example for a PR that touches two modules:
+
+   ```
+   feat(operator): adopt server-side apply for MxlFlowMirror status
+
+   Status updates collided with the controller-runtime cache when
+   the gateway raced the operator. Switch to SSA so only the
+   reconciler's field manager owns status.targetInfo.
+
+   fix(gateway): close FlowReader on shutdown
+   BREAKING CHANGE: operator now requires Kubernetes >= 1.30 for
+   server-side apply on subresources
+   ```
+
+   That single squash commit produces three release-relevant
+   entries: the `feat(operator)` (driving the minor bump), the
+   `fix(gateway)` (driving a patch bump on gateway), and a
+   `BREAKING CHANGE` footer (driving a major bump on operator).
+   Use `BREAKING CHANGE:` or `BREAKING-CHANGE:` (release-please
+   accepts both) and `Release-As: X.Y.Z` for explicit overrides.
+
+### Working in a worktree
+
+From the main checkout, create a worktree pinned to a feature
+branch tracking `origin/main`:
+
+```sh
+git fetch origin
+git worktree add ../mxl-k8s.<topic> -b <topic> origin/main
+cd ../mxl-k8s.<topic>
+```
+
+When the PR has merged, drop the worktree, the local branch, and
+the now-stale remote tracking ref:
+
+```sh
+git worktree remove ../mxl-k8s.<topic>
+git branch -D <topic>
+git fetch --prune origin
+```
+
 ## Commits
 
 - Use Conventional Commits with a scope matching the module being
