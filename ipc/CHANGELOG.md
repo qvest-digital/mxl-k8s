@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.2](https://github.com/qvest-digital/mxl-k8s/compare/ipc/v1.0.0-rc.1...ipc/v1.0.0-rc.2) (2026-05-18)
+
+
+### Miscellaneous
+
+* **deps:** update go modules ([#23](https://github.com/qvest-digital/mxl-k8s/issues/23)) ([11d827c](https://github.com/qvest-digital/mxl-k8s/commit/11d827c3e219894079702d75f3b408c5709fd130))
+
 ## [1.0.0-rc.1](https://github.com/qvest-digital/mxl-k8s/compare/ipc/v1.0.0-rc.0...ipc/v1.0.0-rc.1) (2026-05-18)
 
 
