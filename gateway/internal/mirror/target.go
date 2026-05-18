@@ -268,7 +268,9 @@ func (r *TargetReconciler) startProgressLoop(entry *targetEntry, key types.Names
 	entry.done = done
 	target := entry.target
 	writer := entry.writer
-	go runTargetProgressLoop(loopCtx, done, target, writer, func() {
+	readFn := target.ReadGrainNonBlocking
+	commitFn := func(idx uint64) error { return commitArrivedGrain(writer, idx) }
+	go runTargetProgressLoop(loopCtx, done, readFn, commitFn, func() {
 		// Detach the recovery work from the goroutine that's
 		// exiting so the recovery's wait-for-done doesn't deadlock
 		// on its own done channel.
@@ -279,7 +281,7 @@ func (r *TargetReconciler) startProgressLoop(entry *targetEntry, key types.Names
 // runTargetProgressLoop drives the libmxl-fabrics Target until ctx
 // is canceled or ReadGrain reports a non-recoverable error. Each
 // ReadGrain call internally advances the libfabric event +
-// completion queues — without it the target never accepts incoming
+// completion queues - without it the target never accepts incoming
 // connections nor signals grain arrivals.
 //
 // We use the non-blocking ReadGrain plus a Go-side sleep on idle
@@ -292,19 +294,28 @@ func (r *TargetReconciler) startProgressLoop(entry *targetEntry, key types.Names
 // every 10-60 seconds in steady state. Polling from Go avoids
 // blocking in libfabric, which sidesteps the signal-interaction.
 //
-// For every grain ReadGrain reports as received, we also OpenGrain
-// followed by Commit on the local FlowWriter: the initiator side
-// has already RDMA'd payload + header into the ring slot, so the
-// commit only advances the flow's HeadIndex so local FlowReaders
-// (consumer pods) can see the new grain. Mirrors the pattern from
-// upstream `mxl-fabrics-demo` tools/mxl-fabrics-demo/demo.cpp.
+// For every grain ReadGrain reports as received, commitFn does the
+// OpenGrain + Commit dance on the local FlowWriter so consumer
+// FlowReaders see the arrived grain.
 //
 // On any non-ErrNotReady error from ReadGrain the underlying Target
-// is no longer safe to poll — libmxl-fabrics has been observed to
+// is no longer safe to poll - libmxl-fabrics has been observed to
 // dangle internal state after the remote endpoint drops, and the
 // next ReadGrain call segfaults inside cgo. We exit the loop and
 // call onFatal so the reconciler can rebuild the fabric side.
-func runTargetProgressLoop(ctx context.Context, done chan struct{}, target *fabrics.Target, writer *mxl.Writer, onFatal func()) {
+//
+// The loop takes readFn and commitFn as injected closures so the
+// state machine - the only piece prone to bugs and the only piece
+// worth unit-testing - is isolated from cgo. Production passes a
+// closure over fabrics.Target.ReadGrainNonBlocking and a closure
+// over commitArrivedGrain(writer, ...).
+func runTargetProgressLoop(
+	ctx context.Context,
+	done chan struct{},
+	readGrain ReadGrainFunc,
+	commit CommitFunc,
+	onFatal func(),
+) {
 	defer close(done)
 	l := ctrl.Log.WithName("target-progress")
 	const idleSleep = 1 * time.Millisecond
@@ -314,10 +325,10 @@ func runTargetProgressLoop(ctx context.Context, done chan struct{}, target *fabr
 			return
 		default:
 		}
-		idx, err := target.ReadGrainNonBlocking()
+		idx, err := readGrain()
 		switch {
 		case err == nil:
-			if err := commitArrivedGrain(writer, idx); err != nil {
+			if err := commit(idx); err != nil {
 				l.Error(err, "commit received grain", "idx", idx)
 			}
 		case errors.Is(err, fabrics.ErrNotReady):
@@ -327,7 +338,7 @@ func runTargetProgressLoop(ctx context.Context, done chan struct{}, target *fabr
 			case <-time.After(idleSleep):
 			}
 		default:
-			l.Error(err, "ReadGrain — target is no longer safe to poll, exiting loop")
+			l.Error(err, "ReadGrain - target is no longer safe to poll, exiting loop")
 			if onFatal != nil {
 				onFatal()
 			}

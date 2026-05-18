@@ -225,14 +225,50 @@ func (r *SourceReconciler) openInitiator(flowID, targetInfoStr string, provider 
 	if progressInterval <= 0 {
 		progressInterval = 2 * time.Millisecond
 	}
-	go runTransferLoop(loopCtx, done, flowID, reader, initiator, progressInterval)
+	runtimeFn := func() (uint64, error) {
+		rt, err := reader.Runtime()
+		if err != nil {
+			return 0, err
+		}
+		return rt.HeadIndex, nil
+	}
+	transferFn := func(idx uint64) (bool, error) {
+		grain, err := reader.GetGrainNonBlocking(idx)
+		if err != nil {
+			// Not yet committed or already aged out; signal the loop
+			// to break and re-try on the next tick.
+			return false, err
+		}
+		if grain.TotalSlices == 0 {
+			// Continuous flows or grains with no slice subdivision
+			// report TotalSlices==0; v0 sends only fully-discrete
+			// grains and skips these.
+			return true, nil
+		}
+		return false, initiator.TransferGrain(idx, 0, grain.TotalSlices)
+	}
+	progressFn := initiator.MakeProgressNonBlocking
+	go runTransferLoop(loopCtx, done, flowID, runtimeFn, transferFn, progressFn, progressInterval)
 
 	return entry, nil
 }
 
-// runTransferLoop pumps grains that appear on reader into initiator
-// until ctx is canceled. Closes done on exit.
-func runTransferLoop(ctx context.Context, done chan struct{}, flowID string, reader *mxl.Reader, initiator *fabrics.Initiator, interval time.Duration) {
+// runTransferLoop pumps grains that appear on the source flow into
+// the initiator until ctx is canceled. Closes done on exit.
+//
+// The loop is parameterised by three injected functions so the
+// cgo-dependent calls stay isolated from the state machine: tests
+// can drive it with closures that return canned indices and record
+// every interaction.
+func runTransferLoop(
+	ctx context.Context,
+	done chan struct{},
+	flowID string,
+	probeRuntime RuntimeProbe,
+	transferGrain TransferFunc,
+	makeProgress ProgressFunc,
+	interval time.Duration,
+) {
 	defer close(done)
 
 	l := ctrl.Log.WithName("transfer").WithValues("flowID", flowID)
@@ -241,12 +277,12 @@ func runTransferLoop(ctx context.Context, done chan struct{}, flowID string, rea
 	// attached mirror tails the live flow rather than replaying
 	// historical grains the producer may already have aged out of
 	// the ring.
-	rt, err := reader.Runtime()
+	head0, err := probeRuntime()
 	if err != nil {
 		l.Error(err, "initial Runtime")
 		return
 	}
-	lastSent := int64(rt.HeadIndex)
+	lastSent := int64(head0)
 
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -258,35 +294,20 @@ func runTransferLoop(ctx context.Context, done chan struct{}, flowID string, rea
 		case <-t.C:
 		}
 
-		rt, err := reader.Runtime()
+		head, err := probeRuntime()
 		if err != nil {
 			l.Error(err, "Runtime")
 			continue
 		}
-		head := int64(rt.HeadIndex)
-		for idx := lastSent + 1; idx <= head; idx++ {
-			grain, err := reader.GetGrainNonBlocking(uint64(idx))
-			if err != nil {
-				// Not yet committed or already aged out; retry next tick.
-				break
-			}
-			slices := grain.TotalSlices
-			if slices == 0 {
-				// Continuous flows or grains with no slice subdivision
-				// report TotalSlices==0; the kernel interprets the
-				// [start, end) range as empty for them, so v0 sends
-				// only fully-discrete grains.
-				lastSent = idx
-				continue
-			}
-			if err := initiator.TransferGrain(uint64(idx), 0, slices); err != nil {
+		for idx := lastSent + 1; idx <= int64(head); idx++ {
+			if _, err := transferGrain(uint64(idx)); err != nil {
 				l.Error(err, "TransferGrain", "index", idx)
 				break
 			}
 			lastSent = idx
 		}
 
-		if err := initiator.MakeProgressNonBlocking(); err != nil && !errors.Is(err, fabrics.ErrNotReady) {
+		if err := makeProgress(); err != nil && !errors.Is(err, fabrics.ErrNotReady) {
 			l.Error(err, "MakeProgress")
 		}
 	}
