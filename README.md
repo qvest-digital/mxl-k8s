@@ -1,9 +1,10 @@
 # mxl-k8s
 
-Kubernetes control plane for [MXL][mxl]. mxl-k8s turns the
-cross-node transport that [libmxl-fabrics][mxl] provides into a
-cluster capability so individual media functions don't have to
-carry it themselves.
+Kubernetes control plane for [MXL][mxl]. mxl-k8s is the
+cluster-side complement to [`dmf-mxl`][mxl]: it links the upstream
+`libmxl` and `libmxl-fabrics` libraries unmodified, and turns MXL's
+cross-node transport into a cluster feature so individual media
+functions don't have to carry it themselves.
 
 ## Why
 
@@ -138,6 +139,9 @@ The repo is a Go workspace with five modules:
 | `agent` | `github.com/qvest-digital/mxl-k8s/agent` | Per-node DaemonSet. Links libmxl via [`go-mxl`][go-mxl]. |
 | `gateway` | `github.com/qvest-digital/mxl-k8s/gateway` | Per-node DaemonSet. Links libmxl-fabrics via [`go-mxl/fabrics`][go-mxl]. |
 
+[`docs/USAGE.md`](docs/USAGE.md) covers the prerequisites for a
+media function (container, libmxl link, capabilities) and how to
+integrate it as a producer or consumer.
 [`docs/BUILD.md`](docs/BUILD.md) covers local-build prerequisites
 and the cgo lane for `agent` and `gateway`.
 [`CLAUDE.md`](CLAUDE.md) carries the contributor rules.
