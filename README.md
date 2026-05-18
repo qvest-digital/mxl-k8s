@@ -1,8 +1,9 @@
 # mxl-k8s
 
-Kubernetes control plane for [MXL][mxl]. mxl-k8s turns the
-cross-node transport that [libmxl-fabrics][mxl] provides into a
-cluster capability so individual media functions don't have to
+Kubernetes control plane for [MXL][mxl]. mxl-k8s is the
+cluster-side complement to [`dmf-mxl`][mxl]: it links upstream
+`libmxl` and `libmxl-fabrics` and turns MXL's cross-node transport
+into a cluster feature so individual media functions don't have to
 carry it themselves.
 
 ## Why
@@ -50,6 +51,30 @@ them, and what each node can carry.
 For the full architecture walkthrough (per-node anatomy,
 control-plane and data-plane sequences, lifecycle diagrams) see
 [`docs/architecture/`](docs/architecture/).
+
+## Scope
+
+mxl-k8s lives in the Media Exchange row of the
+[EBU Dynamic Media Facility Reference Architecture (V2.0,
+April 2026)](https://tech.ebu.ch/publications/white-paper-2026-04-15).
+It covers the cross-node flow lifecycle: discovery and
+registration, the per-mirror libmxl-fabrics handshake, and recovery
+on writer or gateway restarts. Container orchestration, identity, and
+per-function on-node behaviour stay with Kubernetes, the cluster's
+identity provider, and upstream `dmf-mxl` respectively.
+
+![DMF coverage map](docs/diagrams/dmf-coverage.drawio.svg)
+
+`libmxl` and `libmxl-fabrics` are linked from
+[`dmf-mxl/mxl`](https://github.com/dmf-mxl/mxl) through the
+[`go-mxl`](https://github.com/qvest-digital/go-mxl) bindings. The
+first release will track upstream `dmf-mxl/mxl` directly once a
+small set of changes lands there. FlowReader / FlowWriter
+semantics, grain layout, and the shape of `flow_def.json` remain
+upstream's design; mxl-k8s is the cluster orchestration around
+them.
+
+See [`ROADMAP.md`](ROADMAP.md) for the feature roadmap.
 
 ## What you do not have to write
 
@@ -138,6 +163,9 @@ The repo is a Go workspace with five modules:
 | `agent` | `github.com/qvest-digital/mxl-k8s/agent` | Per-node DaemonSet. Links libmxl via [`go-mxl`][go-mxl]. |
 | `gateway` | `github.com/qvest-digital/mxl-k8s/gateway` | Per-node DaemonSet. Links libmxl-fabrics via [`go-mxl/fabrics`][go-mxl]. |
 
+[`docs/USAGE.md`](docs/USAGE.md) covers the prerequisites for a
+media function (container, libmxl link, capabilities) and how to
+integrate it as a producer or consumer.
 [`docs/BUILD.md`](docs/BUILD.md) covers local-build prerequisites
 and the cgo lane for `agent` and `gateway`.
 [`CLAUDE.md`](CLAUDE.md) carries the contributor rules.
