@@ -1,10 +1,10 @@
 # mxl-k8s
 
 Kubernetes control plane for [MXL][mxl]. mxl-k8s is the
-cluster-side complement to [`dmf-mxl`][mxl]: it links the upstream
-`libmxl` and `libmxl-fabrics` libraries unmodified, and turns MXL's
-cross-node transport into a cluster feature so individual media
-functions don't have to carry it themselves.
+cluster-side complement to [`dmf-mxl`][mxl]: it links upstream
+`libmxl` and `libmxl-fabrics` and turns MXL's cross-node transport
+into a cluster feature so individual media functions don't have to
+carry it themselves.
 
 ## Why
 
@@ -67,10 +67,12 @@ identity provider, and upstream `dmf-mxl` respectively.
 
 `libmxl` and `libmxl-fabrics` are linked from
 [`dmf-mxl/mxl`](https://github.com/dmf-mxl/mxl) through the
-[`go-mxl`](https://github.com/qvest-digital/go-mxl) bindings, without
-forks or patches. FlowReader / FlowWriter semantics, grain layout,
-and the shape of `flow_def.json` remain upstream's design; mxl-k8s
-is the cluster orchestration around them.
+[`go-mxl`](https://github.com/qvest-digital/go-mxl) bindings. The
+first release will track upstream `dmf-mxl/mxl` directly once a
+small set of changes lands there. FlowReader / FlowWriter
+semantics, grain layout, and the shape of `flow_def.json` remain
+upstream's design; mxl-k8s is the cluster orchestration around
+them.
 
 See [`ROADMAP.md`](ROADMAP.md) for the feature roadmap.
 
