@@ -314,24 +314,6 @@ confirmation.
 
 ![mxl-k8s roadmap](./diagrams/roadmap.drawio.svg)
 
-In prose, the same items:
-
-- **Current.** Flow registry via fanotify, declarative receiver
-  path, on-demand intent path, TCP libfabric transport with
-  per-mirror Initiator + Target, fatal-error recovery that keeps
-  the FlowWriter alive across fabric rebuilds, TargetInfo rotation
-  on writer restart, `MxlNodeCapabilities` advertisement, Helm
-  chart packaging with multi-arch images, KIND end-to-end demo.
-- **Next.** RDMA (`verbs` / `efa`) exercised in CI under the
-  existing `gateway.rdma.enabled` chart flag, `ipc/v1`
-  `LocalControl` gRPC wired up between agent and gateway, flow
-  metrics with Grafana dashboards, flow-aware pod scheduling that
-  reads `MxlNodeCapabilities`, cluster-wide flow listing UX.
-- **Future / Idea.** Flow-domain RBAC and `MxlReceiver`
-  admission gating, cross-cluster flow exchange, gateway-to-gateway
-  encryption, per-flow QoS / density caps, audit logging of flow
-  access.
-
 ## See also
 
 - [`docs/architecture/`](./architecture/): runtime walkthrough of
