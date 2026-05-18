@@ -39,9 +39,44 @@ installed.
   a scope.
 - Breaking changes get `!` (`feat(api)!: …`) or a `BREAKING CHANGE:`
   footer.
-- Subject line ≤ 72 chars. Body wraps at 72.
+- Subject line ≤ 72 chars, imperative mood ("add", "fix", not "added",
+  "fixes"). Body wraps at 72.
 - Prefer small, focused commits. The release tooling derives version
   bumps and the changelog from commit subjects.
+
+### Message content
+
+A commit message documents why a change exists, in terms that stay
+useful when read alone, years later, by someone with no memory of
+the work that produced it. The same rules apply to PR descriptions.
+
+- Explain *why*. The diff shows *what*; don't restate it.
+- Stay scoped to this repository and this change. No speculation
+  about upstream, downstream, future work, or follow-ups. If
+  something was deliberately left out of the diff, name it and the
+  reason — only when that omission matters for understanding the
+  present change.
+- Reference another repository or project only when its state is
+  the direct reason for the change (a dependency bump, a vendored
+  fix, an API contract pinned to a published version). Context for
+  reviewers, gratitude, or cross-linking belongs in the PR thread
+  or an issue, not the commit.
+- Write declarative facts. No personal pronouns ("I", "we", "you").
+  Don't address a reader: no "note that…", "as you can see…", "we
+  decided to…", "this should help…".
+- Don't narrate. No history of what was tried first, what failed,
+  or what alternatives were considered.
+- No filler verbs without specifics. "Clean up", "improve",
+  "refactor" alone tell nothing; either name the actual change or
+  drop the line.
+- No checklists, "Summary" / "Test plan" sections, marketing
+  phrasing, or emojis. Those belong in the PR description if
+  anywhere.
+- No tool-authored `Co-Authored-By:` trailers — the message
+  describes the change, not the process that produced it.
+- Cross-reference an issue or PR only when its content is itself
+  the reason for the change (`closes #N` where the issue is the
+  why). Vague "see #N for context" pointers do not belong here.
 
 ## Versioning and tags
 
