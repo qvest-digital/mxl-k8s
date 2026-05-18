@@ -23,9 +23,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # helm-schema tags upstream are bare semver (no v prefix); go install accepts both.
+  # helm-schema and helm-unittest tags upstream are bare semver (no v
+  # prefix); go install and helm plugin install accept that form.
   HELM_VERSION: v3.18.4
-  HELM_UNITTEST_VERSION: v0.7.5
+  HELM_UNITTEST_VERSION: "1.1.0"
   HELM_SCHEMA_VERSION: "0.23.2"
   HELM_DOCS_VERSION: v1.14.2
   KUBECONFORM_VERSION: v0.6.7
@@ -75,7 +76,7 @@ jobs:
           version: ${{ env.HELM_VERSION }}
 
       - name: Install helm-unittest
-        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version ${HELM_UNITTEST_VERSION#v} --verify=false || true
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version "${HELM_UNITTEST_VERSION}" --verify=false
 
       - uses: actions/setup-go@v5
         with:
