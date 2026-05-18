@@ -1,0 +1,11 @@
+# Smallest install that produces a working tcp-provider control plane.
+operator:
+  replicaCount: 1
+agent:
+  enabled: true
+gateway:
+  enabled: true
+  flags:
+    providers: [tcp]
+  rdma:
+    enabled: false

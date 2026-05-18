@@ -1,0 +1,151 @@
+{{ template "chart.header" . }}
+
+{{ template "chart.description" . }}
+
+{{ template "chart.versionBadge" . }}{{ template "chart.typeBadge" . }}{{ template "chart.appVersionBadge" . }}
+
+## Prerequisites
+
+- Helm >= 3.14 (chart uses `values.schema.json`).
+- Kubernetes >= 1.28.
+- Kernel >= 5.17 on every node that runs the agent (`fanotify` with
+  `FAN_REPORT_DFID_NAME`).
+- Prometheus Operator CRDs (`monitoring.coreos.com`) optional, only
+  when `*.metrics.serviceMonitor.enabled=true`.
+
+## Install via Helm CLI
+
+```sh
+helm install mxl oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
+  --version 0.1.0 \
+  --namespace mxl-system --create-namespace
+```
+
+The chart installs the CRDs from its `crds/` directory on first
+install. Helm itself never updates or removes them.
+
+## Install via FluxCD
+
+```yaml
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: mxl-k8s
+  namespace: flux-system
+spec:
+  type: oci
+  interval: 1h
+  url: oci://ghcr.io/qvest-digital/mxl-k8s/charts
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: mxl-k8s
+  namespace: mxl-system
+spec:
+  interval: 10m
+  chart:
+    spec:
+      chart: mxl-k8s
+      version: "0.1.x"
+      sourceRef:
+        kind: HelmRepository
+        name: mxl-k8s
+        namespace: flux-system
+  install:
+    createNamespace: true
+    crds: Create
+  upgrade:
+    crds: CreateReplace
+  values: {}
+```
+
+Track `:dev` instead of a semver range by setting `version: ">=0.0.0-0"`
+on the HelmRelease. The chart is published as `0.0.0-dev+sha.<short>`
+on every merge to `main`; Helm encodes the `+` as `_` in the OCI tag.
+
+## Common overrides
+
+### Minimal tcp deployment
+
+```yaml
+gateway:
+  flags:
+    providers: [tcp]
+  rdma:
+    enabled: false
+```
+
+### Full RDMA deployment (verbs + shm)
+
+```yaml
+operator:
+  replicaCount: 3
+  flags:
+    leaderElect: true
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+gateway:
+  flags:
+    providers: [verbs, shm]
+  rdma:
+    enabled: true
+    extraEnv:
+      - name: FI_VERBS_IFACE
+        value: net1
+```
+
+### Private registry with pinned digests
+
+```yaml
+global:
+  image:
+    registry: registry.internal.example.com/mxl-k8s
+    pullPolicy: Always
+    pullSecrets:
+      - name: registry-pull-secret
+operator:
+  image:
+    digest: sha256:<digest>
+agent:
+  image:
+    digest: sha256:<digest>
+gateway:
+  image:
+    digest: sha256:<digest>
+```
+
+### IRSA-style ServiceAccount bindings
+
+```yaml
+operator:
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/mxl-operator
+```
+
+{{ template "chart.maintainersSection" . }}
+
+{{ template "chart.sourcesSection" . }}
+
+{{ template "chart.requirementsSection" . }}
+
+{{ template "chart.valuesSection" . }}
+
+## Uninstall
+
+Helm leaves the CRDs installed when the chart is uninstalled (they
+live in `crds/`, not `templates/`). Delete them by hand if you want
+them gone:
+
+```sh
+kubectl delete crd \
+  mxldomains.mxl.qvest-digital.com \
+  mxlflows.mxl.qvest-digital.com \
+  mxlflowmirrors.mxl.qvest-digital.com \
+  mxlnodecapabilities.mxl.qvest-digital.com \
+  mxlreceivers.mxl.qvest-digital.com
+```
+
+{{ template "helm-docs.versionFooter" . }}

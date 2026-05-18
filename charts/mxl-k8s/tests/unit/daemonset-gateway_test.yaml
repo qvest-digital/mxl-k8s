@@ -1,0 +1,88 @@
+suite: daemonset-gateway
+templates:
+  - templates/daemonset-gateway.yaml
+tests:
+  - it: hostNetwork is true and dnsPolicy is ClusterFirstWithHostNet
+    asserts:
+      - equal:
+          path: spec.template.spec.hostNetwork
+          value: true
+      - equal:
+          path: spec.template.spec.dnsPolicy
+          value: ClusterFirstWithHostNet
+
+  - it: providers list joins on commas in the rendered arg
+    set:
+      gateway.flags.providers: [tcp, verbs, shm]
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --providers=tcp,verbs,shm
+
+  - it: rdma.enabled adds IPC_LOCK + SYS_RESOURCE and the /dev/infiniband mount
+    set:
+      gateway.rdma.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          content: IPC_LOCK
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          content: SYS_RESOURCE
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: infiniband
+            mountPath: /dev/infiniband
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: infiniband
+            hostPath:
+              path: /dev/infiniband
+              type: Directory
+
+  - it: rdma.enabled=false leaves the cap list and volumes alone
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          content: IPC_LOCK
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 1
+
+  - it: POD_IP env wiring
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+
+  - it: rdma.extraEnv is appended only when rdma.enabled
+    set:
+      gateway.rdma.enabled: true
+      gateway.rdma.extraEnv:
+        - name: FI_VERBS_IFACE
+          value: net1
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FI_VERBS_IFACE
+            value: net1
+
+  - it: rdma.extraEnv has no effect when rdma is disabled
+    set:
+      gateway.rdma.enabled: false
+      gateway.rdma.extraEnv:
+        - name: FI_VERBS_IFACE
+          value: net1
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FI_VERBS_IFACE
+            value: net1

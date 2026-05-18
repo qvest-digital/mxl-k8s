@@ -1,0 +1,16 @@
+# HA operator plus RDMA-enabled gateway.
+operator:
+  replicaCount: 3
+  flags:
+    leaderElect: true
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+gateway:
+  flags:
+    providers: [verbs, shm]
+  rdma:
+    enabled: true
+    extraEnv:
+      - name: FI_VERBS_IFACE
+        value: net1

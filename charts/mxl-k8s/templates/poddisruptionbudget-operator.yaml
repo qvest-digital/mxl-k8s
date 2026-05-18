@@ -1,0 +1,14 @@
+{{- if and .Values.operator.enabled .Values.operator.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Chart.Name }}-operator
+  namespace: {{ include "mxlk8s.namespace" . }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "operator") | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.operator.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "mxlk8s.selectorLabels" (dict "Context" . "component" "operator") | nindent 6 }}
+{{- end }}

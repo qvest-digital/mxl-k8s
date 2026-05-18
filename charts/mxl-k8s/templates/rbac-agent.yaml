@@ -1,0 +1,33 @@
+{{- if and .Values.agent.enabled .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "agent" "values" .Values.agent) }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "agent") | nindent 4 }}
+rules:
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxldomains, mxlflows]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxldomains/status, mxlflows/status]
+    verbs: [get, update, patch]
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxlflowmirrors]
+    verbs: [get, list, watch, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "agent" "values" .Values.agent) }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "agent") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "agent" "values" .Values.agent) }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "agent" "values" .Values.agent) }}
+    namespace: {{ include "mxlk8s.namespace" . }}
+{{- end }}

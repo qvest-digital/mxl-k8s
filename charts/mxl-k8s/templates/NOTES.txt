@@ -1,0 +1,19 @@
+mxl-k8s {{ .Chart.Version }} installed into namespace {{ include "mxlk8s.namespace" . }}.
+
+Enabled components:
+{{- if .Values.operator.enabled }}
+  - operator (Deployment, replicas={{ .Values.operator.replicaCount }})
+{{- end }}
+{{- if .Values.agent.enabled }}
+  - agent    (DaemonSet, hostPath {{ .Values.agent.hostPath.run }})
+{{- end }}
+{{- if .Values.gateway.enabled }}
+  - gateway  (DaemonSet, hostNetwork, providers={{ .Values.gateway.flags.providers | join "," }})
+{{- end }}
+
+CRDs are installed from the chart's crds/ directory. Helm does not
+upgrade or remove them; manage CRD lifecycle through Flux's
+HelmRelease.spec.{install,upgrade}.crds or out-of-band.
+
+See https://github.com/qvest-digital/mxl-k8s for the architecture
+walkthrough, the available providers, and the example bundles.
