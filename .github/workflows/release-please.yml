@@ -8,11 +8,35 @@ permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: release-please
+
 jobs:
-  release-please:
+  # Every merge to main opens (or updates) a per-component prerelease PR
+  # proposing <component>/vX.Y.Z-rc.N. Merging tags the prerelease.
+  prerelease:
     runs-on: ubuntu-24.04
+    outputs:
+      releases_created: ${{ steps.rp.outputs.releases_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - id: rp
+        uses: googleapis/release-please-action@v5
         with:
-          config-file: .release-please-config.json
-          manifest-file: .release-please-manifest.json
+          config-file: .github/prerelease-config.json
+          manifest-file: .github/prerelease-manifest.json
+
+  # Once a prerelease tag for any component exists, run release-please
+  # again against the stable config so the matching <component>/vX.Y.Z
+  # PR can be opened. The release config's extra-files entries rewrite
+  # .github/prerelease-manifest.json after a stable tag so subsequent
+  # rcs for that component start from the new baseline.
+  release:
+    runs-on: ubuntu-24.04
+    needs: [prerelease]
+    if: needs.prerelease.outputs.releases_created == 'true' && contains(needs.prerelease.outputs.tag_name, 'rc')
+    steps:
+      - uses: googleapis/release-please-action@v5
+        with:
+          config-file: .github/release-config.json
+          manifest-file: .github/release-manifest.json
