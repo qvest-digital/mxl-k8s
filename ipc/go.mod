@@ -8,6 +8,8 @@ require (
 )
 
 require (
+	github.com/google/go-cmp v0.7.0 // indirect
+	github.com/stretchr/testify v1.11.1 // indirect
 	golang.org/x/net v0.30.0 // indirect
 	golang.org/x/sys v0.26.0 // indirect
 	golang.org/x/text v0.19.0 // indirect
