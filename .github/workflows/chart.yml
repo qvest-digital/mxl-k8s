@@ -191,68 +191,19 @@ jobs:
           chmod +x /usr/local/bin/yq
           yq --version
 
-      # Source values.yaml ships every <component>.image.tag empty so a
-      # `helm install ./charts/mxl-k8s` from a clone falls back to
-      # `v<Chart.AppVersion>` via templates/_helpers.tpl. The published
-      # artifact, by contrast, must pin each component to the actual tag
-      # `images.yml` produced for that component's last release: chart
-      # versions and component versions are independent. The branch below
-      # picks the right tag depending on what kind of chart build this is.
+      # hack/chart-resolve-tags.sh patches charts/mxl-k8s/values.yaml
+      # in place with the right image tag per component, picking the
+      # source manifest from the chart's version: dev for 0.0.0-dev*,
+      # prerelease-manifest.json for rcs, release-manifest.json for
+      # stable. The script also writes a Markdown table of the
+      # resolved tags to stdout; we save it for the
+      # publish-bundled-component-table step below.
       - name: Resolve per-component image tags into values.yaml
-        id: resolve
         env:
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
           set -eu
-          components="operator agent gateway"
-
-          case "$VERSION" in
-            0.0.0-dev*)
-              # On push to main, images.yml publishes <component>:dev. The
-              # chart's :dev artifact tracks main HEAD images and pins them
-              # all to the dev tag.
-              kind=dev
-              for c in $components; do
-                yq -i ".${c}.image.tag = \"dev\"" charts/mxl-k8s/values.yaml
-              done
-              ;;
-            *-*)
-              # Chart prerelease (rc). Each component's current rc is in
-              # the prerelease manifest. The published image tag for that
-              # rc carries the `v` prefix (see images.yml).
-              kind=rc
-              for c in $components; do
-                v=$(jq -r ".\"${c}\"" .github/prerelease-manifest.json)
-                yq -i ".${c}.image.tag = \"v${v}\"" charts/mxl-k8s/values.yaml
-              done
-              ;;
-            *)
-              # Stable chart release. Each component's stable version is
-              # in the release manifest.
-              kind=stable
-              for c in $components; do
-                v=$(jq -r ".\"${c}\"" .github/release-manifest.json)
-                yq -i ".${c}.image.tag = \"v${v}\"" charts/mxl-k8s/values.yaml
-              done
-              ;;
-          esac
-
-          # Emit a Markdown table of resolved tags so the next step can
-          # paste it into either the GitHub release notes or the
-          # workflow summary.
-          {
-            echo "## Bundled component versions"
-            echo ""
-            echo "| Component | Image tag |"
-            echo "| --- | --- |"
-            for c in $components; do
-              t=$(yq ".${c}.image.tag" charts/mxl-k8s/values.yaml)
-              echo "| ${c} | \`${t}\` |"
-            done
-          } > /tmp/bundled.md
-
-          echo "kind=${kind}" >> "$GITHUB_OUTPUT"
-
+          bash hack/chart-resolve-tags.sh "$VERSION" > /tmp/bundled.md
           echo "--- resolved values.yaml diff ---"
           git --no-pager diff -- charts/mxl-k8s/values.yaml
 
