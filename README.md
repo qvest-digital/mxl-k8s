@@ -65,6 +65,13 @@ identity provider, and upstream `dmf-mxl` respectively.
 
 ![DMF coverage map](docs/diagrams/dmf-coverage.drawio.svg)
 
+`libmxl` and `libmxl-fabrics` are linked from
+[`dmf-mxl/mxl`](https://github.com/dmf-mxl/mxl) through the
+[`go-mxl`](https://github.com/qvest-digital/go-mxl) bindings, without
+forks or patches. FlowReader / FlowWriter semantics, grain layout,
+and the shape of `flow_def.json` remain upstream's design; mxl-k8s
+is the cluster orchestration around them.
+
 See [`ROADMAP.md`](ROADMAP.md) for the feature roadmap.
 
 ## What you do not have to write
