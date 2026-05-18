@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.0 (2026-05-18)
+
+
+### Features
+
+* **ipc:** add v1 LocalControl service ([d0b5033](https://github.com/qvest-digital/mxl-k8s/commit/d0b50332bc8c502a0e4342946b8d13120de79900))
+
+
+### Build System
+
+* **deps:** bump google.golang.org/grpc from 1.69.4 to 1.79.3 in /ipc ([#8](https://github.com/qvest-digital/mxl-k8s/issues/8)) ([595c378](https://github.com/qvest-digital/mxl-k8s/commit/595c378699b6a4463dfd33dbcc9396045e67d97f))
+
+
+### Miscellaneous
+
+* **deps:** update go modules ([#23](https://github.com/qvest-digital/mxl-k8s/issues/23)) ([11d827c](https://github.com/qvest-digital/mxl-k8s/commit/11d827c3e219894079702d75f3b408c5709fd130))
+* **main:** release ipc 1.0.0-rc.1 ([#2](https://github.com/qvest-digital/mxl-k8s/issues/2)) ([d2a6d29](https://github.com/qvest-digital/mxl-k8s/commit/d2a6d29a2d7b97eef451f37bbf22dbad69960d98))
+* **main:** release ipc 1.0.0-rc.2 ([#27](https://github.com/qvest-digital/mxl-k8s/issues/27)) ([34d0be8](https://github.com/qvest-digital/mxl-k8s/commit/34d0be8cec87143557c932e60e913a017cb456a6))
+* scaffold multi-module go workspace and CI ([11f4159](https://github.com/qvest-digital/mxl-k8s/commit/11f41597db99c5de1b47dfa7a5060ecc3090cebf))
+
 ## [1.0.0-rc.2](https://github.com/qvest-digital/mxl-k8s/compare/ipc/v1.0.0-rc.1...ipc/v1.0.0-rc.2) (2026-05-18)
 
 
