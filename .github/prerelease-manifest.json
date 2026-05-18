@@ -4,5 +4,5 @@
   "agent": "1.0.0-rc.0",
   "operator": "1.0.0-rc.0",
   "gateway": "1.0.0-rc.0",
-  "shim": "1.0.0-rc.0"
+  "shim": "1.0.0-rc.1"
 }
