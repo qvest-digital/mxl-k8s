@@ -15,7 +15,7 @@ on:
     tags: ['charts/mxl-k8s/v*.*.*']
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 concurrency:
@@ -30,6 +30,9 @@ env:
   HELM_SCHEMA_VERSION: "0.23.2"
   HELM_DOCS_VERSION: v1.14.2
   KUBECONFORM_VERSION: v0.6.7
+  # mikefarah/yq for in-place yaml editing of values.yaml at
+  # package-time. Pinned because we rely on `yq -i` semantics.
+  YQ_VERSION: v4.44.6
 
 jobs:
   meta:
@@ -179,6 +182,80 @@ jobs:
             --username "${{ github.actor }}" \
             --password-stdin
 
+      - name: Install yq
+        run: |
+          set -eu
+          curl -fsSL \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
+            -o /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
+          yq --version
+
+      # Source values.yaml ships every <component>.image.tag empty so a
+      # `helm install ./charts/mxl-k8s` from a clone falls back to
+      # `v<Chart.AppVersion>` via templates/_helpers.tpl. The published
+      # artifact, by contrast, must pin each component to the actual tag
+      # `images.yml` produced for that component's last release: chart
+      # versions and component versions are independent. The branch below
+      # picks the right tag depending on what kind of chart build this is.
+      - name: Resolve per-component image tags into values.yaml
+        id: resolve
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -eu
+          components="operator agent gateway"
+
+          case "$VERSION" in
+            0.0.0-dev*)
+              # On push to main, images.yml publishes <component>:dev. The
+              # chart's :dev artifact tracks main HEAD images and pins them
+              # all to the dev tag.
+              kind=dev
+              for c in $components; do
+                yq -i ".${c}.image.tag = \"dev\"" charts/mxl-k8s/values.yaml
+              done
+              ;;
+            *-*)
+              # Chart prerelease (rc). Each component's current rc is in
+              # the prerelease manifest. The published image tag for that
+              # rc carries the `v` prefix (see images.yml).
+              kind=rc
+              for c in $components; do
+                v=$(jq -r ".\"${c}\"" .github/prerelease-manifest.json)
+                yq -i ".${c}.image.tag = \"v${v}\"" charts/mxl-k8s/values.yaml
+              done
+              ;;
+            *)
+              # Stable chart release. Each component's stable version is
+              # in the release manifest.
+              kind=stable
+              for c in $components; do
+                v=$(jq -r ".\"${c}\"" .github/release-manifest.json)
+                yq -i ".${c}.image.tag = \"v${v}\"" charts/mxl-k8s/values.yaml
+              done
+              ;;
+          esac
+
+          # Emit a Markdown table of resolved tags so the next step can
+          # paste it into either the GitHub release notes or the
+          # workflow summary.
+          {
+            echo "## Bundled component versions"
+            echo ""
+            echo "| Component | Image tag |"
+            echo "| --- | --- |"
+            for c in $components; do
+              t=$(yq ".${c}.image.tag" charts/mxl-k8s/values.yaml)
+              echo "| ${c} | \`${t}\` |"
+            done
+          } > /tmp/bundled.md
+
+          echo "kind=${kind}" >> "$GITHUB_OUTPUT"
+
+          echo "--- resolved values.yaml diff ---"
+          git --no-pager diff -- charts/mxl-k8s/values.yaml
+
       - name: Package chart
         env:
           VERSION: ${{ needs.meta.outputs.version }}
@@ -195,3 +272,21 @@ jobs:
           owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           tgz=$(ls /tmp/chart/mxl-k8s-*.tgz)
           helm push "${tgz}" "oci://ghcr.io/${owner}/mxl-k8s/charts"
+
+      # Append the bundled-component-versions table to either the
+      # GitHub release notes (tag push -> release-please-action already
+      # created the release) or the workflow summary (dev build).
+      - name: Publish bundled-component table
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+            existing=$(gh release view "${tag}" --json body --jq .body)
+            { printf "%s\n\n" "${existing}"; cat /tmp/bundled.md; } \
+              | gh release edit "${tag}" --notes-file -
+          else
+            cat /tmp/bundled.md >> "$GITHUB_STEP_SUMMARY"
+          fi
