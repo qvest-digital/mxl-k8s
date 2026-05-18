@@ -9,6 +9,7 @@
   "packages": {
     "api": {
       "component": "api",
+      "initial-version": "1.0.0-rc.0",
       "extra-files": [
         {
           "type": "json",
@@ -19,6 +20,7 @@
     },
     "ipc": {
       "component": "ipc",
+      "initial-version": "1.0.0-rc.0",
       "extra-files": [
         {
           "type": "json",
@@ -29,6 +31,7 @@
     },
     "agent": {
       "component": "agent",
+      "initial-version": "1.0.0-rc.0",
       "extra-files": [
         {
           "type": "json",
@@ -39,6 +42,7 @@
     },
     "operator": {
       "component": "operator",
+      "initial-version": "1.0.0-rc.0",
       "extra-files": [
         {
           "type": "json",
@@ -49,6 +53,7 @@
     },
     "gateway": {
       "component": "gateway",
+      "initial-version": "1.0.0-rc.0",
       "extra-files": [
         {
           "type": "json",
@@ -60,6 +65,7 @@
     "shim": {
       "release-type": "simple",
       "component": "shim",
+      "initial-version": "1.0.0-rc.0",
       "extra-files": [
         {
           "type": "json",
@@ -71,6 +77,7 @@
     "charts/mxl-k8s": {
       "release-type": "helm",
       "component": "charts/mxl-k8s",
+      "initial-version": "1.0.0-rc.0",
       "extra-files": [
         {
           "type": "json",
