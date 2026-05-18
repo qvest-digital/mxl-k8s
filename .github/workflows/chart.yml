@@ -23,9 +23,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # helm-schema tags upstream are bare semver (no v prefix); go install accepts both.
   HELM_VERSION: v3.18.4
   HELM_UNITTEST_VERSION: v0.7.5
-  HELM_SCHEMA_VERSION: v0.20.0
+  HELM_SCHEMA_VERSION: "0.23.2"
   HELM_DOCS_VERSION: v1.14.2
   KUBECONFORM_VERSION: v0.6.7
 
