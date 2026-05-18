@@ -1,0 +1,45 @@
+{{- if and .Values.operator.enabled .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "operator" "values" .Values.operator) }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "operator") | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxldomains, mxlflows, mxlnodecapabilities]
+    verbs: [get, list, watch]
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxldomains/status, mxlflows/status, mxlnodecapabilities/status]
+    verbs: [get]
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxlflowmirrors]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxlflowmirrors/finalizers, mxlreceivers/finalizers]
+    verbs: [update]
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxlflowmirrors/status, mxlreceivers/status]
+    verbs: [get, patch, update]
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxlreceivers]
+    verbs: [get, list, patch, update, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "operator" "values" .Values.operator) }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "operator") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "operator" "values" .Values.operator) }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "operator" "values" .Values.operator) }}
+    namespace: {{ include "mxlk8s.namespace" . }}
+{{- end }}

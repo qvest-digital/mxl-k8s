@@ -1,0 +1,408 @@
+# -- Global settings inherited by every component unless overridden.
+global:
+  image:
+    # -- Container registry prefix. Per-component image.repository is
+    # appended to this.
+    registry: ghcr.io/qvest-digital/mxl-k8s
+    # -- Default imagePullPolicy. Per-component override wins.
+    # @schema
+    # enum: ["Always", "IfNotPresent", "Never"]
+    # @schema
+    pullPolicy: IfNotPresent
+    # -- Image pull secrets, applied to every Pod.
+    pullSecrets: []
+  # -- Labels added to every object the chart renders.
+  commonLabels: {}
+  # -- Annotations added to every object the chart renders.
+  commonAnnotations: {}
+
+# -- Namespace handling. Most Flux users set createNamespace on the
+# HelmRelease and leave namespace.create=false here.
+namespace:
+  create: false
+  # -- Namespace the chart's namespaced resources land in. Falls back
+  # to .Release.Namespace when empty.
+  name: ""
+
+# -- CRD handling. The chart installs CRDs from its crds/ directory by
+# default. Helm only installs them on first install and never deletes
+# or upgrades them; Flux's HelmRelease.spec.{install,upgrade}.crds
+# governs replace semantics. Set skipInstall=true when CRDs are
+# managed by a separate Kustomization or operator framework.
+crds:
+  skipInstall: false
+
+# -- ClusterRoles and ClusterRoleBindings for every enabled component.
+# Set to false when RBAC is centrally managed.
+rbac:
+  create: true
+
+# -- Operator: cluster-wide reconciler for MxlReceiver, MxlFlowMirror,
+# and related CRDs. Single Deployment.
+operator:
+  enabled: true
+  # @schema
+  # minimum: 1
+  # @schema
+  replicaCount: 1
+  image:
+    repository: operator
+    # -- Image tag. Empty falls back to Chart.AppVersion.
+    tag: ""
+    # -- Image digest. Wins over tag when set.
+    # @schema
+    # pattern: ^$|^sha256:[0-9a-f]{64}$
+    # @schema
+    digest: ""
+    # -- imagePullPolicy override. Empty falls back to global.
+    # @schema
+    # enum: ["", "Always", "IfNotPresent", "Never"]
+    # @schema
+    pullPolicy: ""
+  # -- Extra raw args appended after the structured flags.
+  args: []
+  # -- Structured CLI flags. Rendered via the helper as --key=value.
+  flags:
+    # @schema
+    # pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$
+    # @schema
+    metricsBindAddress: ":8080"
+    # @schema
+    # pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$
+    # @schema
+    healthProbeBindAddress: ":8081"
+    # -- Enable leader election. Required for replicaCount > 1.
+    leaderElect: false
+    # @schema
+    # enum: ["debug", "info", "warn", "error"]
+    # @schema
+    zapLogLevel: info
+    zapDevel: false
+  serviceAccount:
+    create: true
+    # -- ServiceAccount name. Empty falls back to a generated name.
+    name: ""
+    annotations: {}
+    labels: {}
+    automountServiceAccountToken: true
+  podAnnotations: {}
+  podLabels: {}
+  priorityClassName: ""
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits: {}
+  podSecurityContext: {}
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    runAsNonRoot: true
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: probe
+    initialDelaySeconds: 5
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: probe
+    initialDelaySeconds: 2
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  extraContainers: []
+  initContainers: []
+  podDisruptionBudget:
+    enabled: false
+    # @schema
+    # minimum: 1
+    # @schema
+    minAvailable: 1
+  metrics:
+    service:
+      enabled: true
+      # @schema
+      # enum: ["ClusterIP", "NodePort", "LoadBalancer"]
+      # @schema
+      type: ClusterIP
+      # @schema
+      # minimum: 1
+      # maximum: 65535
+      # @schema
+      port: 8080
+    serviceMonitor:
+      # -- Render a Prometheus Operator ServiceMonitor. Requires the
+      # monitoring.coreos.com CRDs to be installed cluster-wide.
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
+      relabelings: []
+      metricRelabelings: []
+
+# -- Agent: per-node DaemonSet that watches the MXL domain via
+# fanotify, publishes flow state, and serves the LD_PRELOAD intent
+# socket.
+agent:
+  enabled: true
+  updateStrategy:
+    # @schema
+    # enum: ["RollingUpdate", "OnDelete"]
+    # @schema
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  image:
+    repository: agent
+    tag: ""
+    # @schema
+    # pattern: ^$|^sha256:[0-9a-f]{64}$
+    # @schema
+    digest: ""
+    # @schema
+    # enum: ["", "Always", "IfNotPresent", "Never"]
+    # @schema
+    pullPolicy: ""
+  args: []
+  flags:
+    # @schema
+    # pattern: ^/.+
+    # @schema
+    domainPath: /run/mxl/domain
+    # @schema
+    # pattern: ^/.+
+    # @schema
+    intentSocket: /run/mxl/agent.sock
+    materializeTimeout: 5s
+    resyncPeriod: 30s
+    # @schema
+    # pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$
+    # @schema
+    metricsBindAddress: ":8080"
+    # @schema
+    # pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$
+    # @schema
+    healthProbeBindAddress: ":8081"
+    # @schema
+    # enum: ["debug", "info", "warn", "error"]
+    # @schema
+    zapLogLevel: info
+  # -- hostPath layout. The agent mounts the whole /run/mxl so the
+  # intent socket lands on the host where consumer pods can see it.
+  hostPath:
+    # @schema
+    # pattern: ^/.+
+    # @schema
+    run: /run/mxl
+    # @schema
+    # enum: ["DirectoryOrCreate", "Directory"]
+    # @schema
+    type: DirectoryOrCreate
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+    labels: {}
+    automountServiceAccountToken: true
+  podAnnotations: {}
+  podLabels: {}
+  priorityClassName: ""
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits: {}
+  podSecurityContext: {}
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    # -- fanotify on /run/mxl/domain reads host inodes, so the agent
+    # currently runs as root. PSA-restricted environments cannot host
+    # the agent without a policy exception.
+    runAsNonRoot: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      add: ["SYS_ADMIN"]
+      drop: ["ALL"]
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: probe
+    initialDelaySeconds: 5
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: probe
+    initialDelaySeconds: 2
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  extraContainers: []
+  initContainers: []
+  metrics:
+    service:
+      enabled: true
+      # @schema
+      # enum: ["ClusterIP", "NodePort", "LoadBalancer"]
+      # @schema
+      type: ClusterIP
+      # @schema
+      # minimum: 1
+      # maximum: 65535
+      # @schema
+      port: 8080
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
+      relabelings: []
+      metricRelabelings: []
+
+# -- Gateway: per-node DaemonSet that owns libmxl-fabrics handles and
+# moves grains across the wire. Runs with hostNetwork so the fabric
+# endpoint binds the node interface.
+gateway:
+  enabled: true
+  updateStrategy:
+    # @schema
+    # enum: ["RollingUpdate", "OnDelete"]
+    # @schema
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  image:
+    repository: gateway
+    tag: ""
+    # @schema
+    # pattern: ^$|^sha256:[0-9a-f]{64}$
+    # @schema
+    digest: ""
+    # @schema
+    # enum: ["", "Always", "IfNotPresent", "Never"]
+    # @schema
+    pullPolicy: ""
+  args: []
+  flags:
+    # @schema
+    # pattern: ^/.+
+    # @schema
+    domainPath: /run/mxl/domain
+    # -- Bind address for libmxl-fabrics endpoints. Default uses the
+    # downward-API POD_IP so each gateway binds its node IP.
+    bindAddress: $(POD_IP)
+    # @schema
+    # items:
+    #   enum: ["tcp", "verbs", "efa", "shm", "auto"]
+    # @schema
+    providers:
+      - tcp
+    resyncPeriod: 30s
+    # @schema
+    # pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$
+    # @schema
+    metricsBindAddress: ":8080"
+    # @schema
+    # pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$
+    # @schema
+    healthProbeBindAddress: ":8081"
+    # @schema
+    # enum: ["debug", "info", "warn", "error"]
+    # @schema
+    zapLogLevel: info
+  # -- hostNetwork is required because the libmxl-fabrics TargetInfo
+  # embeds the host:port a peer dials; a CNI overlay IP would not be
+  # reachable cross-node.
+  hostNetwork: true
+  # @schema
+  # enum: ["ClusterFirst", "ClusterFirstWithHostNet", "Default", "None"]
+  # @schema
+  dnsPolicy: ClusterFirstWithHostNet
+  hostPath:
+    # @schema
+    # pattern: ^/.+
+    # @schema
+    domain: /run/mxl/domain
+    # @schema
+    # enum: ["DirectoryOrCreate", "Directory"]
+    # @schema
+    type: DirectoryOrCreate
+  rdma:
+    # -- Add the capabilities and mounts the verbs/efa providers need.
+    enabled: false
+    # @schema
+    # pattern: ^/.+
+    # @schema
+    infinibandHostPath: /dev/infiniband
+    extraEnv: []
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+    labels: {}
+    automountServiceAccountToken: true
+  podAnnotations: {}
+  podLabels: {}
+  priorityClassName: ""
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits: {}
+  podSecurityContext: {}
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    runAsNonRoot: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      # -- Additional caps beyond what rdma.enabled implies.
+      add: []
+      drop: ["ALL"]
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: probe
+    initialDelaySeconds: 5
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: probe
+    initialDelaySeconds: 2
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  extraContainers: []
+  initContainers: []
+  metrics:
+    service:
+      enabled: true
+      # @schema
+      # enum: ["ClusterIP", "NodePort", "LoadBalancer"]
+      # @schema
+      type: ClusterIP
+      # @schema
+      # minimum: 1
+      # maximum: 65535
+      # @schema
+      port: 8080
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
+      relabelings: []
+      metricRelabelings: []

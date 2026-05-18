@@ -1,0 +1,19 @@
+{{- if and .Values.gateway.enabled .Values.gateway.metrics.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}-gateway-metrics
+  namespace: {{ include "mxlk8s.namespace" . }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "gateway") | nindent 4 }}
+spec:
+  type: {{ .Values.gateway.metrics.service.type }}
+  clusterIP: None
+  selector:
+    {{- include "mxlk8s.selectorLabels" (dict "Context" . "component" "gateway") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.gateway.metrics.service.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

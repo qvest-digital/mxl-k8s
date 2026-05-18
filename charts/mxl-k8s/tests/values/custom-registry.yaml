@@ -1,0 +1,23 @@
+# Mirror or private registry with pinned digests.
+global:
+  image:
+    registry: registry.internal.example.com/mxl-k8s
+    pullPolicy: Always
+    pullSecrets:
+      - name: registry-pull-secret
+  commonLabels:
+    team: media-platform
+  commonAnnotations:
+    sandbox.example.com/owner: platform-team
+operator:
+  image:
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000001
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/mxl-operator
+agent:
+  image:
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000002
+gateway:
+  image:
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000003

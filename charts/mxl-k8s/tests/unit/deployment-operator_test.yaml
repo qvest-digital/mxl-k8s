@@ -1,0 +1,95 @@
+suite: deployment-operator
+templates:
+  - templates/deployment-operator.yaml
+tests:
+  - it: renders nothing when operator.enabled=false
+    set:
+      operator.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders one Deployment with default values
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Deployment
+      - equal:
+          path: metadata.namespace
+          value: NAMESPACE
+        template: templates/deployment-operator.yaml
+    release:
+      namespace: NAMESPACE
+
+  - it: renders structured flags as --key=value args
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --health-probe-bind-address=:8081
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --metrics-bind-address=:8080
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --zap-log-level=info
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --leader-elect
+
+  - it: emits --leader-elect when leaderElect=true
+    set:
+      operator.flags.leaderElect: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --leader-elect
+
+  - it: digest beats tag in the image reference
+    set:
+      operator.image.tag: "v1.2.3"
+      operator.image.digest: "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/qvest-digital/mxl-k8s/operator@sha256:0000000000000000000000000000000000000000000000000000000000000001"
+
+  - it: falls back to Chart.AppVersion when tag and digest are empty
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "ghcr.io/qvest-digital/mxl-k8s/operator:0.0.0"
+
+  - it: respects a custom registry override
+    set:
+      global.image.registry: registry.internal/mxl-k8s
+      operator.image.tag: "v1.2.3"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "registry.internal/mxl-k8s/operator:v1.2.3"
+
+  - it: applies extra raw args after structured flags
+    set:
+      operator.args:
+        - --feature-gate=FooBar=true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --feature-gate=FooBar=true
+
+  - it: serviceAccountName follows the SA name override
+    set:
+      operator.serviceAccount.name: my-sa
+    asserts:
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: my-sa
+
+  - it: serviceAccountName falls back to generated name when SA not created
+    set:
+      operator.serviceAccount.create: false
+    asserts:
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: mxl-k8s-operator

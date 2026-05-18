@@ -1,0 +1,26 @@
+coverage:
+  paths:
+    - bin/cover-api.out
+    - bin/cover-ipc.out
+    - bin/cover-operator.out
+    - bin/cover-agent.out
+    - bin/cover-gateway.out
+
+codeToTestRatio:
+  code:
+    - '**/*.go'
+    - '!**/*_test.go'
+    - '!**/mocks/*.go'
+    - '!**/zz_generated*.go'
+  test:
+    - '**/*_test.go'
+
+testExecutionTime:
+  if: true
+
+comment:
+  if: is_pull_request
+
+diff:
+  datastores:
+    - artifact://${GITHUB_REPOSITORY}

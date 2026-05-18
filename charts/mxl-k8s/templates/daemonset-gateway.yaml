@@ -1,0 +1,160 @@
+{{- if .Values.gateway.enabled }}
+{{- /*
+Build the effective capability list for the gateway container.
+rdma.enabled implies IPC_LOCK + SYS_RESOURCE (libmxl pins shm pages).
+Users may add more via .Values.gateway.containerSecurityContext.capabilities.add.
+*/ -}}
+{{- $caps := list -}}
+{{- if .Values.gateway.rdma.enabled -}}
+  {{- $caps = append $caps "IPC_LOCK" -}}
+  {{- $caps = append $caps "SYS_RESOURCE" -}}
+{{- end -}}
+{{- range .Values.gateway.containerSecurityContext.capabilities.add -}}
+  {{- $caps = append $caps . -}}
+{{- end -}}
+{{- $caps = uniq $caps -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Chart.Name }}-gateway
+  namespace: {{ include "mxlk8s.namespace" . }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "gateway") | nindent 4 }}
+  {{- with .Values.global.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "mxlk8s.selectorLabels" (dict "Context" . "component" "gateway") | nindent 6 }}
+  updateStrategy:
+    {{- toYaml .Values.gateway.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "gateway") | nindent 8 }}
+        {{- with .Values.gateway.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.gateway.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "gateway" "values" .Values.gateway) }}
+      hostNetwork: {{ .Values.gateway.hostNetwork }}
+      dnsPolicy: {{ .Values.gateway.dnsPolicy }}
+      {{- with .Values.global.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.gateway.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: gateway
+          image: {{ include "mxlk8s.image" (dict "global" .Values.global "image" .Values.gateway.image "Chart" .Chart) }}
+          imagePullPolicy: {{ include "mxlk8s.imagePullPolicy" (dict "global" .Values.global "image" .Values.gateway.image) }}
+          args:
+            {{- include "mxlk8s.flags.render" (dict "flags" .Values.gateway.flags) | nindent 12 }}
+            {{- with .Values.gateway.args }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            {{- with .Values.gateway.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if .Values.gateway.rdma.enabled }}
+            {{- with .Values.gateway.rdma.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- end }}
+          ports:
+            - name: probe
+              containerPort: 8081
+            - name: metrics
+              containerPort: 8080
+          {{- with .Values.gateway.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.gateway.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: {{ .Values.gateway.containerSecurityContext.allowPrivilegeEscalation }}
+            runAsNonRoot: {{ .Values.gateway.containerSecurityContext.runAsNonRoot }}
+            readOnlyRootFilesystem: {{ .Values.gateway.containerSecurityContext.readOnlyRootFilesystem }}
+            capabilities:
+              drop:
+                {{- toYaml .Values.gateway.containerSecurityContext.capabilities.drop | nindent 16 }}
+              {{- if gt (len $caps) 0 }}
+              add:
+                {{- range $caps }}
+                - {{ . }}
+                {{- end }}
+              {{- end }}
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          volumeMounts:
+            - name: mxl-domain
+              mountPath: {{ .Values.gateway.hostPath.domain }}
+            {{- if .Values.gateway.rdma.enabled }}
+            - name: infiniband
+              mountPath: {{ .Values.gateway.rdma.infinibandHostPath }}
+            {{- end }}
+            {{- with .Values.gateway.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        {{- with .Values.gateway.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      volumes:
+        - name: mxl-domain
+          hostPath:
+            path: {{ .Values.gateway.hostPath.domain }}
+            type: {{ .Values.gateway.hostPath.type }}
+        {{- if .Values.gateway.rdma.enabled }}
+        - name: infiniband
+          hostPath:
+            path: {{ .Values.gateway.rdma.infinibandHostPath }}
+            type: Directory
+        {{- end }}
+        {{- with .Values.gateway.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}
