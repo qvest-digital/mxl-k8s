@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.3](https://github.com/qvest-digital/mxl-k8s/compare/shim/v1.0.0-rc.2...shim/v1.0.0-rc.3) (2026-05-19)
+
+
+### Miscellaneous
+
+* contributor-review pass on docs, comments, and typography ([#46](https://github.com/qvest-digital/mxl-k8s/issues/46)) ([cddc9ba](https://github.com/qvest-digital/mxl-k8s/commit/cddc9bad1535087a19d04570b77438e6df27a1eb))
+
 ## [1.0.0-rc.2](https://github.com/qvest-digital/mxl-k8s/compare/shim/v1.0.0-rc.1...shim/v1.0.0-rc.2) (2026-05-19)
 
 
