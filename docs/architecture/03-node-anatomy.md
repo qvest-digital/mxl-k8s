@@ -34,7 +34,10 @@ Three things matter here:
   startup with mode `0666`; access control happens after `accept()`
   via `SO_PEERCRED` and the subsequent `podlookup.PodForPID` call,
   not via filesystem permissions. The socket file is bind-mounted
-  into any consumer pod that uses the LD_PRELOAD shim.
+  into any consumer pod that uses the LD_PRELOAD shim. The agent
+  runs with `hostPID: true` so `SO_PEERCRED` returns the consumer's
+  host-namespace PID and `/proc/<pid>/cgroup` is readable for the
+  pod-UID lookup.
 
 ## Shared-memory zero-copy
 

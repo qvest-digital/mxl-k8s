@@ -15,6 +15,11 @@ spec:
         app.kubernetes.io/name: mxl-domain-agent
     spec:
       serviceAccountName: mxl-domain-agent
+      # hostPID: the intent socket uses SO_PEERCRED to identify the
+      # caller, and resolves PID->Pod via /proc/<pid>/cgroup. Both
+      # require the agent's PID namespace and /proc view to match
+      # the host's.
+      hostPID: true
       containers:
         - name: agent
           image: local/mxl-domain-agent:dev

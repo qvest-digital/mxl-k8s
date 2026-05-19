@@ -170,6 +170,12 @@
           "title": "flags",
           "type": "object"
         },
+        "hostPID": {
+          "default": "true",
+          "description": "Run the agent in the host PID namespace. Required for the intent socket's SO_PEERCRED-based pod identification: without it the connecting consumer pod's PID is not visible to the agent and the on-demand mirror materialization path silently fails.",
+          "required": [],
+          "title": "hostPID"
+        },
         "hostPath": {
           "description": "hostPath layout. The agent mounts the whole /run/mxl so the intent socket lands on the host where consumer pods can see it.",
           "properties": {
