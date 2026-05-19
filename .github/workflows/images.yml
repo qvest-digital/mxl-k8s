@@ -12,6 +12,11 @@ on:
 permissions:
   contents: read
   packages: write
+  # dorny/paths-filter calls the PR Files API for pull_request
+  # events; without pull-requests:read GITHUB_TOKEN can't list the
+  # changed files and the action fails with
+  # "Resource not accessible by integration".
+  pull-requests: read
 
 concurrency:
   group: images-${{ github.workflow }}-${{ github.ref }}
