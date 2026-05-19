@@ -12,15 +12,27 @@ on:
       - 'charts/mxl-k8s/**'
       - 'config/crd/**'
       - '.github/workflows/chart.yml'
-  # release-please-action creates a GitHub release alongside the
-  # tag at chart-cut time. Using release:published here (instead
-  # of push:tags) sidesteps the GitHub Actions quirk that
-  # silently swallows tag-push events when push: also carries a
-  # paths filter (the path filter can't compute a meaningful
-  # diff for the first matching tag and the event is dropped).
-  # The meta job filters down to chart releases.
-  release:
-    types: [published]
+  # release-please.yml calls this workflow as a reusable workflow
+  # when a charts/mxl-k8s release tag has just been cut. Listening
+  # on release:published instead does not work: release-please-action
+  # creates the release with the default GITHUB_TOKEN, and events
+  # produced by GITHUB_TOKEN do not start downstream workflow runs.
+  # workflow_call (and workflow_dispatch, for manual recovery) are
+  # the documented exceptions, so we drive the release publish
+  # through them.
+  workflow_call:
+    inputs:
+      release_tag:
+        description: "charts/mxl-k8s release tag to package (e.g. charts/mxl-k8s/v1.0.0-rc.2)"
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "charts/mxl-k8s release tag to package (e.g. charts/mxl-k8s/v1.0.0-rc.2). Leave empty for a dev build of HEAD."
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -50,7 +62,10 @@ jobs:
       version: ${{ steps.m.outputs.version }}
       release_tag: ${{ steps.m.outputs.release_tag }}
     env:
-      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      # inputs.release_tag is set by both workflow_call (from
+      # release-please.yml) and workflow_dispatch. It is absent on
+      # pull_request / push.
+      INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
       - id: m
         run: |
@@ -60,31 +75,26 @@ jobs:
           version=""
           release_tag=""
 
-          case "$GITHUB_EVENT_NAME" in
-            push)
-              # Only branch=main pushes reach this case; tag pushes are
-              # handled via the release:published event below to avoid
-              # the paths-filter quirk that drops tag-push events.
-              if [ "$GITHUB_REF" = "refs/heads/main" ]; then
-                # SemVer-valid prerelease build for the floating dev channel.
-                # OCI translates "+" to "_" at push time.
-                version="0.0.0-dev+sha.${short_sha}"
+          if [ -n "${INPUT_RELEASE_TAG:-}" ]; then
+            # Called for a tagged release. Accept only chart tags;
+            # anything else is a caller mistake worth failing on.
+            case "$INPUT_RELEASE_TAG" in
+              charts/mxl-k8s/v*.*.*)
+                version="${INPUT_RELEASE_TAG##*/v}"
+                release_tag="$INPUT_RELEASE_TAG"
                 publish=true
-              fi
-              ;;
-            release)
-              # release-please-action published a release. Filter to
-              # chart tags only; other components publish their own
-              # release events that this workflow must ignore.
-              case "$RELEASE_TAG" in
-                charts/mxl-k8s/v*.*.*)
-                  version="${RELEASE_TAG##*/v}"
-                  release_tag="$RELEASE_TAG"
-                  publish=true
-                  ;;
-              esac
-              ;;
-          esac
+                ;;
+              *)
+                echo "::error::release_tag '${INPUT_RELEASE_TAG}' is not a charts/mxl-k8s tag"
+                exit 1
+                ;;
+            esac
+          elif [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            # SemVer-valid prerelease build for the floating dev channel.
+            # OCI translates "+" to "_" at push time.
+            version="0.0.0-dev+sha.${short_sha}"
+            publish=true
+          fi
 
           {
             echo "publish=${publish}"
@@ -249,19 +259,20 @@ jobs:
           helm push "${tgz}" "oci://ghcr.io/${owner}/mxl-k8s/charts"
 
       # Append the bundled-component-versions table to either the
-      # GitHub release notes (tag push -> release-please-action already
-      # created the release) or the workflow summary (dev build).
+      # GitHub release notes (release_tag is set by the caller in
+      # release-please.yml, or by a manual workflow_dispatch) or
+      # the workflow summary (dev build off main).
       - name: Publish bundled-component table
         env:
           VERSION: ${{ needs.meta.outputs.version }}
+          RELEASE_TAG: ${{ needs.meta.outputs.release_tag }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            tag="${GITHUB_REF_NAME}"
-            existing=$(gh release view "${tag}" --json body --jq .body)
+          if [ -n "${RELEASE_TAG:-}" ]; then
+            existing=$(gh release view "${RELEASE_TAG}" --json body --jq .body)
             { printf "%s\n\n" "${existing}"; cat /tmp/bundled.md; } \
-              | gh release edit "${tag}" --notes-file -
+              | gh release edit "${RELEASE_TAG}" --notes-file -
           else
             cat /tmp/bundled.md >> "$GITHUB_STEP_SUMMARY"
           fi
