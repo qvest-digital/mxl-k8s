@@ -176,6 +176,20 @@ the work that produced it. The same rules apply to PR descriptions.
   build tag `mxl_integration`. The CI lint/vet/build jobs don't run
   them.
 
+## Shell scripts
+
+- All bash scripts under `hack/` (and anything else invoked from the
+  Makefile) must run on bash 3.2. macOS still ships
+  `/bin/bash` 3.2.57, and `make` recipes resolve bare `bash` via
+  `PATH`, which on a default macOS install hits `/bin/bash` first.
+- No `declare -A` / associative arrays, no `${var,,}` / `${var^^}`
+  case conversion, no `mapfile` / `readarray`, no `[[ ... =~ ]]` with
+  capture groups via `BASH_REMATCH` assumptions that differ in 3.2,
+  no `${!prefix*}` indirect expansion tricks beyond what 3.2 supports.
+  Use parallel indexed arrays in place of associative arrays.
+- Verify a script parses under the system bash before committing:
+  `/bin/bash -n hack/<script>.sh`.
+
 ## Test
 
 - Assertions use `github.com/stretchr/testify/require` (plus `assert`
