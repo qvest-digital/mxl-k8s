@@ -48,9 +48,10 @@ node, and then get out of the way of the data path.
   spawn or schedule it.
 - **Consumer pod** — a user's consumer. Calls libmxl to open a
   FlowReader. It opts into on-demand materialization by `LD_PRELOAD`-
-  ing `libmxl-intent.so`, which intercepts `openat()` ENOENT on
-  `flow_def.json` and asks the local agent to materialize the flow
-  before retrying.
+  ing `libmxl-intent.so`, which intercepts the libc calls libmxl
+  makes (`openat`, `open`, `access`, `stat`, `lstat`) against
+  anything under a `.mxl-flow/` directory and asks the local agent
+  to materialize the flow before retrying.
 - **Operator** (`operator/cmd/mxl-operator`) — single Deployment,
   cluster-scoped. Its only active reconciler is
   `receiver.Reconciler`, which turns each `MxlReceiver` into one
