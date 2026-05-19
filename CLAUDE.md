@@ -214,6 +214,25 @@ the work that produced it. The same rules apply to PR descriptions.
   a coverage summary via `octocov`. Both run in the `report` job that
   fans in artifacts from the per-module test jobs.
 
+## CI path filters
+
+`ci.yml` and `images.yml` each open with a `changes` job
+(`dorny/paths-filter@v3`) that scopes every downstream job to the
+diff. Two consequences for contributors:
+
+- The filter list is part of each module's "what depends on me"
+  contract. If a Go module starts importing a sibling that it
+  didn't before, that sibling's path glob must be added to the
+  importing module's filter in `ci.yml`. Same for `images.yml`:
+  if a Dockerfile starts COPYing a sibling module, that module
+  goes on the image's filter. Without the update the dependent
+  job stops re-running when its dependency moves.
+- Branch protection requires only the `ci-summary` / `images-
+  summary` jobs (which run unconditionally and fail iff any
+  required upstream is in `failure` / `cancelled`). Do not add
+  individual conditional jobs to the required-checks list -- a
+  skipped check on an unrelated diff would block the PR.
+
 ## When in doubt
 
 Ask the maintainer before changing the public Go API of `api` or `ipc`,
