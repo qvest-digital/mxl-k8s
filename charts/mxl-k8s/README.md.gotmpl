@@ -18,7 +18,7 @@
 <!-- x-release-please-start-version -->
 ```sh
 helm install mxl oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
-  --version 1.0.0-rc.2 \
+  --version 1.0.0-rc.3 \
   --namespace mxl-system --create-namespace
 ```
 <!-- x-release-please-end -->
@@ -50,7 +50,7 @@ spec:
   chart:
     spec:
       chart: mxl-k8s
-      version: "1.0.0-rc.2"
+      version: "1.0.0-rc.3"
       sourceRef:
         kind: HelmRepository
         name: mxl-k8s
