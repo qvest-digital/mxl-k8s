@@ -283,7 +283,16 @@ jobs:
     runs-on: ${{ matrix.runner.runs_on }}
     timeout-minutes: 60
     steps:
+      # When invoked with a release_tag (workflow_call from release-
+      # please.yml or workflow_dispatch backfilling a missed tag),
+      # check out the tag's commit rather than the workflow's
+      # triggering ref. The default ref is main HEAD, which can have
+      # drifted from the tag's content; building from there would
+      # publish "v<X>" tags pointing at a binary that isn't the
+      # tag's source.
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - uses: docker/setup-buildx-action@v4
 
