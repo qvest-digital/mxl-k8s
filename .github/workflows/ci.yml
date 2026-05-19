@@ -38,7 +38,7 @@ jobs:
       test_modules: ${{ steps.m.outputs.test_modules }}
     steps:
       - uses: actions/checkout@v6
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: f
         with:
           # Each filter lists the path globs whose change forces the
