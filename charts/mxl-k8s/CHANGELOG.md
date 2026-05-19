@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.3](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.2...charts/mxl-k8s/v1.0.0-rc.3) (2026-05-19)
+
+
+### Bug Fixes
+
+* **chart:** align pod template name label with selector ([#50](https://github.com/qvest-digital/mxl-k8s/issues/50)) ([5b65bd4](https://github.com/qvest-digital/mxl-k8s/commit/5b65bd47ece985ac123b7849daee9f2f692ccde9))
+
 ## [1.0.0-rc.2](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.1...charts/mxl-k8s/v1.0.0-rc.2) (2026-05-19)
 
 
