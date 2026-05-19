@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kind-status.sh — quick at-a-glance view of the demo's state.
+# kind-status.sh -- quick at-a-glance view of the demo's state.
 
 set -euo pipefail
 

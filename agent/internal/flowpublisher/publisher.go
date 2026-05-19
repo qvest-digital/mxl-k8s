@@ -85,7 +85,7 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 		if !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("create MxlFlow: %w", err)
 		}
-		// Already there — leave spec alone (writers may have richer
+		// Already there -- leave spec alone (writers may have richer
 		// metadata than us), just refresh our location entry.
 		l.V(1).Info("MxlFlow already exists", "flowID", flowID)
 	} else {
@@ -121,7 +121,7 @@ func (p *Publisher) isMirrorTarget(ctx context.Context, flowID string) (bool, er
 }
 
 // PublishVanished updates the MxlFlow status to mark this node's
-// location as Stale. The MxlFlow itself is left in place — other
+// location as Stale. The MxlFlow itself is left in place -- other
 // nodes may still hold a mirror.
 func (p *Publisher) PublishVanished(ctx context.Context, dirName string) error {
 	flowID, ok := FlowIDFromDirName(dirName)

@@ -16,7 +16,7 @@ spec:
     spec:
       serviceAccountName: mxl-fabrics-gateway
       # hostNetwork so the libmxl-fabrics TCP endpoint listens on the
-      # node's interface — TargetInfo embeds host:port, which any peer
+      # node's interface -- TargetInfo embeds host:port, which any peer
       # gateway can dial across the cluster.
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet

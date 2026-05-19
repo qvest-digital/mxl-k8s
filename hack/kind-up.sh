@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kind-up.sh — bring up a KIND cluster, build & load the mxl-k8s
+# kind-up.sh -- bring up a KIND cluster, build & load the mxl-k8s
 # images, apply examples/tcp-demo, and wait for the MxlFlowMirror
 # to reach Ready.
 #
@@ -8,7 +8,7 @@
 # reloads them, and re-applies the demo. Pair with `hack/kind-down.sh`
 # to start clean.
 #
-# Requires: docker, kind ≥ 0.20, kubectl, a Linux kernel ≥ 5.17 on
+# Requires: docker, kind >= 0.20, kubectl, a Linux kernel >= 5.17 on
 # the host (KIND nodes share it; the agent's fanotify needs
 # FAN_REPORT_DFID_NAME).
 
@@ -82,7 +82,7 @@ if "${KUBECTL[@]}" -n mxl-system get deploy/mxl-operator >/dev/null 2>&1; then
   log "Rolling out latest images"
   "${KUBECTL[@]}" -n mxl-system rollout restart deploy/mxl-operator ds/mxl-domain-agent ds/mxl-fabrics-gateway || true
 fi
-# Wait for the deletes to complete — re-applying while a pod is
+# Wait for the deletes to complete -- re-applying while a pod is
 # still Terminating leaves the new pod in limbo (apply observes
 # the live object and treats it as a no-op).
 "${KUBECTL[@]}" -n mxl-system delete pod mxl-tcp-demo-writer mxl-tcp-demo-reader --ignore-not-found

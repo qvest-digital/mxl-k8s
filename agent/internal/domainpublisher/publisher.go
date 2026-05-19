@@ -29,7 +29,7 @@ type Publisher struct {
 }
 
 // Name is the metadata.name used for this agent's MxlDomain. One
-// MxlDomain per (node, domain path) — we use the node name for v0
+// MxlDomain per (node, domain path) -- we use the node name for v0
 // (assumes one domain per node).
 func (p *Publisher) Name() string {
 	return p.NodeName

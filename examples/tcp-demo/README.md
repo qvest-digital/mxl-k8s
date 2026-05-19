@@ -1,7 +1,7 @@
 # tcp-demo
 
-End-to-end exercise of `MxlReceiver` → operator → `MxlFlowMirror` →
-gateway → `libmxl-fabrics` TCP transfer between two k3s nodes.
+End-to-end exercise of `MxlReceiver` -> operator -> `MxlFlowMirror` ->
+gateway -> `libmxl-fabrics` TCP transfer between two k3s nodes.
 
 ## What it does
 
@@ -40,13 +40,13 @@ first open is the declaration".
 
 ## Prerequisites
 
-- A two-node Linux cluster, kernel ≥ 5.17 on the worker nodes
+- A two-node Linux cluster, kernel >= 5.17 on the worker nodes
   (fanotify `FAN_REPORT_DFID_NAME`).
 - Worker nodes can reach each other on the host network (libmxl-
   fabrics' TCP endpoint listens on the gateway pod's host IP via
   `hostNetwork: true`).
 - A CNI that allows host-network pods to talk to each other (any
-  default — flannel, calico, cilium — is fine).
+  default -- flannel, calico, cilium -- is fine).
 
 ## Build the images
 

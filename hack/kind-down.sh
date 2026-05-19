@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kind-down.sh — delete the demo KIND cluster.
+# kind-down.sh -- delete the demo KIND cluster.
 
 set -euo pipefail
 

@@ -2,7 +2,7 @@
 
 Same end-to-end slice as `tcp-demo`, configured for the
 `libmxl-fabrics` **verbs** provider. Grains move between gateway
-pods over RDMA via libibverbs / librdmacm — typically RoCEv2 on
+pods over RDMA via libibverbs / librdmacm -- typically RoCEv2 on
 ethernet NICs, native InfiniBand on IB fabrics, with EFA as a
 close cousin (see `docs/RDMA.md` for AWS specifics).
 
@@ -26,7 +26,7 @@ The cluster must actually have RDMA-capable NICs and the matching
 host-side drivers. See `docs/RDMA.md` for the full prerequisite
 list; quick summary:
 
-- Linux kernel ≥ 5.17 (same as tcp-demo) on the worker nodes.
+- Linux kernel >= 5.17 (same as tcp-demo) on the worker nodes.
 - `ibverbs`, `rdma-core`, and the NIC-specific kernel modules
   (e.g. `mlx5_ib` for Mellanox / NVIDIA ConnectX, `bnxt_re` for
   Broadcom, `irdma` for Intel E810) loaded on the host.
