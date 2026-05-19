@@ -1,22 +1,22 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "release-type": "simple",
+  "release-type": "go",
   "include-component-in-tag": true,
   "include-v-in-tag": true,
   "tag-separator": "/",
   "separate-pull-requests": true,
-  "prerelease": false,
+  "versioning": "prerelease",
+  "prerelease-type": "rc",
+  "prerelease": true,
+  "initial-version": "1.0.0-rc.0",
   "packages": {
-    "shim": {
-      "component": "shim",
-      "extra-files": [
-        {
-          "type": "json",
-          "path": ".github/prerelease-manifest.json",
-          "jsonpath": "$[\"shim\"]"
-        }
-      ]
-    }
+    "api":      { "component": "api" },
+    "ipc":      { "component": "ipc" },
+    "agent":    { "component": "agent" },
+    "operator": { "component": "operator" },
+    "gateway":  { "component": "gateway" },
+    "shim":           { "release-type": "simple", "component": "shim" },
+    "charts/mxl-k8s": { "release-type": "helm",   "component": "charts/mxl-k8s" }
   },
   "changelog-sections": [
     {"type": "feat",     "section": "Features"},
