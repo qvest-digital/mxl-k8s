@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.4](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.3...charts/mxl-k8s/v1.0.0-rc.4) (2026-05-19)
+
+
+### Continuous Integration
+
+* collapse dual release-please configs into one with per-package prerelease toggle ([#51](https://github.com/qvest-digital/mxl-k8s/issues/51)) ([e537056](https://github.com/qvest-digital/mxl-k8s/commit/e537056ec89e16659b6f0100fc5346ee36c58041))
+
 ## [1.0.0-rc.3](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.2...charts/mxl-k8s/v1.0.0-rc.3) (2026-05-19)
 
 
