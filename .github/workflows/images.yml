@@ -41,7 +41,11 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: images-${{ github.workflow }}-${{ github.ref }}
+  # Include release_tag so distinct workflow_call / workflow_dispatch
+  # backfills (one per component tag) get their own queue slot and
+  # don't cancel each other. PR / push / tag-event invocations key
+  # on the ref as before.
+  group: images-${{ github.workflow }}-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -272,7 +276,12 @@ jobs:
   # two arches into one multi-arch manifest list per tag.
   build:
     needs: meta
-    if: needs.meta.outputs.has_images == 'true'
+    # `!cancelled()` defeats the implicit success() check on needs.
+    # Without it, build would be skipped whenever a transitive need
+    # (the changes job, which is skipped for tag / workflow_call /
+    # workflow_dispatch events) was non-success, even though the
+    # explicit condition below would otherwise have run it.
+    if: ${{ !cancelled() && needs.meta.outputs.has_images == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -352,7 +361,7 @@ jobs:
   # manifest list, applying the full tag list computed by meta.
   merge:
     needs: [meta, build]
-    if: needs.meta.outputs.push == 'true' && needs.meta.outputs.has_images == 'true'
+    if: ${{ !cancelled() && needs.meta.outputs.push == 'true' && needs.meta.outputs.has_images == 'true' }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
