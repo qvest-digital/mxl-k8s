@@ -11,6 +11,15 @@ tests:
           path: spec.template.spec.dnsPolicy
           value: ClusterFirstWithHostNet
 
+  - it: pod template name label matches the selector
+    asserts:
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/name"]
+          value: mxl-k8s-gateway
+      - equal:
+          path: spec.template.metadata.labels["app.kubernetes.io/name"]
+          value: mxl-k8s-gateway
+
   - it: providers list joins on commas in the rendered arg
     set:
       gateway.flags.providers: [tcp, verbs, shm]

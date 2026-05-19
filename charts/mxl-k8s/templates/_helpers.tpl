@@ -33,11 +33,21 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
 {{/*
-Per-component object labels = common labels + selector labels.
+Per-component object labels. Composes the chart-identity labels with
+mxlk8s.selectorLabels so spec.template.metadata.labels and
+spec.selector.matchLabels agree on app.kubernetes.io/name; mismatch
+makes the apiserver reject the workload at install time.
 */}}
 {{- define "mxlk8s.componentLabels" -}}
-{{ include "mxlk8s.labels" .Context }}
-app.kubernetes.io/component: {{ .component }}
+helm.sh/chart: {{ include "mxlk8s.chart" .Context }}
+app.kubernetes.io/managed-by: {{ .Context.Release.Service }}
+{{- if .Context.Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Context.Chart.AppVersion | quote }}
+{{- end }}
+{{ include "mxlk8s.selectorLabels" . }}
+{{- with .Context.Values.global.commonLabels }}
+{{ toYaml . }}
+{{- end }}
 {{- end -}}
 
 {{/*
