@@ -12,26 +12,69 @@ on:
 permissions:
   contents: read
   packages: write
+  # dorny/paths-filter calls the PR Files API for pull_request
+  # events; without pull-requests:read GITHUB_TOKEN can't list the
+  # changed files and the action fails with
+  # "Resource not accessible by integration".
+  pull-requests: read
 
 concurrency:
   group: images-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Per-image filter for PR / push-to-main events. Each filter lists
+  # every input that the image's docker build context actually
+  # depends on. See CLAUDE.md for the contract: when a Dockerfile
+  # starts COPYing a new sibling module, that module must be added
+  # here so the image rebuilds on the dependency's changes.
+  # Tag-event builds bypass this filter entirely; a release tag is
+  # an explicit "publish this image now" signal regardless of diff.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      operator:   ${{ steps.f.outputs.operator }}
+      agent:      ${{ steps.f.outputs.agent }}
+      gateway:    ${{ steps.f.outputs.gateway }}
+      shim:       ${{ steps.f.outputs.shim }}
+      demo_tools: ${{ steps.f.outputs.demo_tools }}
+      workflow:   ${{ steps.f.outputs.workflow }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: f
+        with:
+          filters: |
+            operator:   ['docker/operator.Dockerfile', 'operator/**', 'api/**', 'go.work*']
+            agent:      ['docker/agent.Dockerfile', 'agent/**', 'api/**', 'go.work*']
+            gateway:    ['docker/gateway.Dockerfile', 'gateway/**', 'api/**', 'go.work*']
+            shim:       ['docker/shim.Dockerfile', 'shim/**']
+            demo_tools: ['docker/demo-tools.Dockerfile']
+            workflow:   ['.github/workflows/images.yml']
+
   # Compute the list of images to build and the registry references /
   # tag lists each image should be published under. Centralised here so
   # build and merge agree on what to publish.
   #
   # The images list is a JSON array consumed by the build matrix below.
-  # On main / PR all five images are included; on a per-component tag
-  # push (e.g. gateway/v1.2.3) only the matching image is included so
-  # an unrelated component's image isn't re-published.
+  # On a per-component tag push (e.g. gateway/v1.2.3) only the matching
+  # image is included. On main / PR events the list is filtered by the
+  # changes job; an unrelated diff publishes nothing.
   meta:
+    needs: changes
     runs-on: ubuntu-24.04
     outputs:
       images: ${{ steps.m.outputs.images }}
       push: ${{ steps.m.outputs.push }}
       has_images: ${{ steps.m.outputs.has_images }}
+    env:
+      CHANGED_OPERATOR:   ${{ needs.changes.outputs.operator }}
+      CHANGED_AGENT:      ${{ needs.changes.outputs.agent }}
+      CHANGED_GATEWAY:    ${{ needs.changes.outputs.gateway }}
+      CHANGED_SHIM:       ${{ needs.changes.outputs.shim }}
+      CHANGED_DEMO_TOOLS: ${{ needs.changes.outputs.demo_tools }}
+      CHANGED_WORKFLOW:   ${{ needs.changes.outputs.workflow }}
     steps:
       - id: m
         run: |
@@ -48,6 +91,20 @@ jobs:
             "shim|docker/shim.Dockerfile"
             "demo-tools|docker/demo-tools.Dockerfile"
           )
+
+          # Per-image change flags from the changes job. A workflow-
+          # file edit expands the set to all images so an edit cannot
+          # silently exclude an image from the publish surface.
+          declare -A wanted=(
+            [operator]="$CHANGED_OPERATOR"
+            [agent]="$CHANGED_AGENT"
+            [gateway]="$CHANGED_GATEWAY"
+            [shim]="$CHANGED_SHIM"
+            [demo-tools]="$CHANGED_DEMO_TOOLS"
+          )
+          if [ "$CHANGED_WORKFLOW" = "true" ]; then
+            for k in "${!wanted[@]}"; do wanted[$k]=true; done
+          fi
 
           push=false
           selected=""
@@ -79,15 +136,20 @@ jobs:
           fi
 
           # Build the images JSON. For fork PRs (push=false) we still
-          # include every image so the build matrix exercises every
-          # Dockerfile; just nothing gets pushed.
+          # include every image we'd otherwise build so the matrix
+          # exercises the Dockerfiles; nothing gets pushed.
           images='['
           first=true
           for entry in "${all[@]}"; do
             name="${entry%%|*}"
             dockerfile="${entry#*|}"
-            if [ -n "$selected" ] && [ "$name" != "$selected" ]; then
-              continue
+            if [ -n "$selected" ]; then
+              # Tag-driven release: include only the matching image.
+              if [ "$name" != "$selected" ]; then continue; fi
+            else
+              # Push/PR: respect the per-image filter from the changes
+              # job. Unaffected images skip the build entirely.
+              if [ "${wanted[$name]:-false}" != "true" ]; then continue; fi
             fi
             image="${prefix}/${name}"
             tags=""
@@ -237,3 +299,26 @@ jobs:
         run: |
           first=$(echo '${{ matrix.image.tags }}' | cut -d, -f1)
           docker buildx imagetools inspect "$first"
+
+  # Branch-protection target. Always runs, succeeds only when every
+  # required upstream job is in `success` or `skipped` state. Without
+  # this gate, branch protection would need to enumerate every
+  # conditional job individually and would block PRs that legitimately
+  # skipped one.
+  images-summary:
+    needs: [changes, meta, build, merge]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Verify upstream jobs
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -eu
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          bad=$(echo "$NEEDS" | jq '[.[] | select(.result == "failure" or .result == "cancelled")] | length')
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::$bad required job(s) failed or were cancelled"
+            exit 1
+          fi
