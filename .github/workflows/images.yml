@@ -102,6 +102,11 @@ jobs:
       has_images: ${{ steps.m.outputs.has_images }}
     env:
       INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+      # head_commit is present on push events; empty otherwise. Used
+      # to detect release-please's own merge commits and defer their
+      # image publish to the workflow_call run that release-please.yml
+      # fires alongside, so the same content isn't built twice.
+      HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
       # When `changes` is skipped, needs.changes.outputs.<x> is the
       # empty string. Defaulting to 'true' falls back to "build it"
       # for the no-filter case (manual workflow_dispatch dev build);
@@ -173,19 +178,51 @@ jobs:
                 ;;
             esac
             tag_release "$INPUT_RELEASE_TAG"
+            # This run IS the release publish for the matching
+            # component. The push-to-main run that fired alongside is
+            # skipped (see the release-please-commit detection below),
+            # so add :dev and :sha-<short> here too. The commit being
+            # tagged is the current main HEAD by release-please's
+            # construction, so :dev tracking HEAD stays consistent.
+            extra_tags+=("dev" "sha-${short_sha}")
           elif [ "$GITHUB_EVENT_NAME" = "push" ]; then
-            push=true
             if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+              push=true
               tag_release "$GITHUB_REF_NAME"
             else
-              # Push to main: :dev always tracks HEAD; :sha-<short>
-              # is the content-addressed handle.
-              extra_tags+=("dev" "sha-${short_sha}")
+              # Push to main: :dev tracks HEAD; :sha-<short> is the
+              # content-addressed handle. Defer release-please's own
+              # merge commits to the workflow_call invocation from
+              # release-please.yml so the same content isn't built
+              # twice (push-to-main run alongside workflow_call run).
+              # release-please's PR titles always start with
+              # "chore(main): release "; the squash-merge subject
+              # carries that prefix verbatim.
+              case "${HEAD_COMMIT_MSG%%$'\n'*}" in
+                "chore(main): release "*)
+                  echo "Release-please merge commit; image publish deferred to workflow_call from release-please.yml."
+                  push=false
+                  # Empty the wanted set so the loop below produces
+                  # an empty images list and build/merge skip.
+                  for k in "${!wanted[@]}"; do wanted[$k]=false; done
+                  ;;
+                *)
+                  push=true
+                  extra_tags+=("dev" "sha-${short_sha}")
+                  ;;
+              esac
             fi
           elif [ "$GITHUB_EVENT_NAME" = "pull_request" ] \
               && [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}" ]; then
             push=true
             extra_tags+=("pr-${{ github.event.number }}-${short_sha}")
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            # Manual recovery with an empty release_tag: republish
+            # :dev and :sha-<short> for the current HEAD on every
+            # image. Same effect as a push-to-main run, but on
+            # demand.
+            push=true
+            extra_tags+=("dev" "sha-${short_sha}")
           fi
 
           # Build the images JSON. For fork PRs (push=false) we still
