@@ -191,9 +191,11 @@ the same shape as the producer pod above.
 If the consumer should open the flow lazily, without an
 `MxlReceiver` applied ahead of time, inject the
 `libmxl-intent.so` LD_PRELOAD shim into the consumer pod. The
-shim intercepts the first `openat` for `/run/mxl/domain/<flowID>.
-mxl-flow/flow_def.json`, blocks on the agent's UDS until the
-mirror has materialised, and then lets the call complete.
+shim intercepts `openat`, `open`, `access`, `stat`, and `lstat`
+for any path under `/run/mxl/domain/<flowID>.mxl-flow/` (libmxl
+probes the directory and the access file before flow_def.json),
+blocks on the agent's UDS until the mirror has materialised, and
+then lets the call complete.
 
 ```yaml
 apiVersion: v1

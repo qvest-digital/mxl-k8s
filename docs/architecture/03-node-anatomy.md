@@ -120,8 +120,8 @@ view:
 - **Bind-mount of `/run/mxl/agent.sock` into consumer pods.** The
   alternative — a TCP listener on localhost — would force the shim
   to use a different syscall path and lose `SO_PEERCRED`-based
-  caller identification. A UDS file fits the shim's "intercept one
-  `openat` and block" model with minimal surface.
+  caller identification. A UDS file fits the shim's "intercept the
+  libmxl probe and block" model with minimal surface.
 - **Volatile tmpfs is acceptable** because every flow exists in the
   cluster only while a writer is running. There is nothing to
   persist across reboots: when the writer pod comes back, it

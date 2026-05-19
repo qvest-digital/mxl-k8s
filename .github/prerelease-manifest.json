@@ -1,9 +1,9 @@
 {
   "api": "1.0.0-rc.1",
   "ipc": "1.0.0-rc.2",
-  "agent": "1.0.0-rc.1",
+  "agent": "1.0.0-rc.2",
   "operator": "1.0.0-rc.1",
-  "gateway": "1.0.0-rc.1",
-  "shim": "1.0.0-rc.1",
+  "gateway": "1.0.0-rc.2",
+  "shim": "1.0.0-rc.2",
   "charts/mxl-k8s": "1.0.0-rc.2"
 }

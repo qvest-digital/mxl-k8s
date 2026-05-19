@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -96,15 +97,25 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		r.closeEntry(req.NamespacedName)
 		controllerutil.RemoveFinalizer(&mirror, SourceFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
+			if apierrors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
 		}
 		l.Info("torn down source-side mirror")
 		return ctrl.Result{}, nil
 	}
 
+	// Concurrent reconcilers (target-side gateway, agent intent
+	// dispatcher) routinely race us on the same MxlFlowMirror;
+	// surface the conflict as a benign requeue instead of a
+	// stacktraced Reconciler error.
 	if !controllerutil.ContainsFinalizer(&mirror, SourceFinalizerName) {
 		controllerutil.AddFinalizer(&mirror, SourceFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
+			if apierrors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil

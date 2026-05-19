@@ -12,12 +12,12 @@
  *     LD_PRELOAD=/path/to/libmxl-intent.so /usr/local/bin/your-app
  *
  * Configure the agent socket via $MXL_INTENT_SOCK (default
- * /run/mxl/agent.sock). When the hook sees an openat() return
- * ENOENT for a path matching ... .mxl-flow/flow_def.json, it
- * connects to the agent, sends `{"path":"<absolute path>"}\n`,
- * waits for `{"ok":true}\n` (or an error), and retries the open.
+ * /run/mxl/agent.sock). When any hooked call returns ENOENT for a
+ * path matching ... .mxl-flow/flow_def.json, the shim connects to
+ * the agent, sends `{"path":"<absolute path>"}\n`, waits for
+ * `{"ok":true}\n` (or an error), and retries the original call.
  *
- * Outside that narrow path, openat() falls straight through to the
+ * Outside that narrow path the hooks fall straight through to the
  * real glibc implementation.
  */
 
@@ -43,36 +43,52 @@
 #define DEF_FILENAME "flow_def.json"
 
 typedef int (*openat_fn)(int dirfd, const char *pathname, int flags, ...);
+typedef int (*open_fn)(const char *pathname, int flags, ...);
+typedef int (*access_fn)(const char *pathname, int mode);
+typedef int (*stat_fn)(const char *pathname, struct stat *buf);
+typedef int (*lstat_fn)(const char *pathname, struct stat *buf);
+
 static openat_fn real_openat = NULL;
+static open_fn   real_open   = NULL;
+static access_fn real_access = NULL;
+static stat_fn   real_stat   = NULL;
+static lstat_fn  real_lstat  = NULL;
 
 __attribute__((constructor)) static void shim_init(void)
 {
 	real_openat = (openat_fn)dlsym(RTLD_NEXT, "openat");
+	real_open   = (open_fn)  dlsym(RTLD_NEXT, "open");
+	real_access = (access_fn)dlsym(RTLD_NEXT, "access");
+	real_stat   = (stat_fn)  dlsym(RTLD_NEXT, "stat");
+	real_lstat  = (lstat_fn) dlsym(RTLD_NEXT, "lstat");
 }
 
-/* Return true when path looks like
- * .../<something><FLOW_SUFFIX>/flow_def.json.
- * No filesystem access — pure string inspection. */
-static bool is_flow_def_path(const char *path)
+/* Return true when path is absolute and contains a non-empty
+ * <id>.mxl-flow path component. libmxl probes the flow directory
+ * itself (stat, access) and the access-file inside it before it
+ * ever touches flow_def.json, so the shim cannot restrict its
+ * trigger to that single filename. Matching at the directory-name
+ * level keeps the shim narrow enough that unrelated opens
+ * (/etc/..., /lib/..., locale data) still pass straight through.
+ * No filesystem access -- pure string inspection. */
+static bool is_flow_path(const char *path)
 {
 	if (!path || path[0] != '/') return false;
 
-	size_t len = strlen(path);
-	size_t fn = strlen(DEF_FILENAME);
-	if (len <= fn + 1) return false;
-	if (memcmp(path + len - fn, DEF_FILENAME, fn) != 0) return false;
-	if (path[len - fn - 1] != '/') return false;
-
-	const char *parent_end = path + len - fn - 1;
 	size_t sfx = strlen(FLOW_SUFFIX);
-	if ((size_t)(parent_end - path) < sfx) return false;
-	if (memcmp(parent_end - sfx, FLOW_SUFFIX, sfx) != 0) return false;
-
-	/* Require at least one character before .mxl-flow (the flow id). */
-	const char *parent_start = parent_end - sfx - 1;
-	while (parent_start >= path && *parent_start != '/') parent_start--;
-	if (parent_end - sfx <= parent_start + 1) return false;
-	return true;
+	const char *p = path;
+	while (*p) {
+		while (*p == '/') p++;
+		if (!*p) break;
+		const char *start = p;
+		while (*p && *p != '/') p++;
+		size_t complen = (size_t)(p - start);
+		if (complen > sfx &&
+		    memcmp(p - sfx, FLOW_SUFFIX, sfx) == 0) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /* Talk to the agent over the UDS. Returns 0 on success (the agent
@@ -162,7 +178,7 @@ int openat(int dirfd, const char *pathname, int flags, ...)
 	/* Only intervene for absolute flow_def.json paths. The shim is
 	 * intentionally narrow so unrelated opens (libc, libpthread,
 	 * /etc/...) pass straight through. */
-	if (!is_flow_def_path(pathname)) {
+	if (!is_flow_path(pathname)) {
 		errno = ENOENT;
 		return -1;
 	}
@@ -174,4 +190,118 @@ int openat(int dirfd, const char *pathname, int flags, ...)
 
 	return has_mode ? real_openat(dirfd, pathname, flags, mode)
 			: real_openat(dirfd, pathname, flags);
+}
+
+/* libmxl resolves open(2) directly against libc rather than via
+ * openat(2), so a separate hook is required. The flow-not-found
+ * code path in libmxl reaches this entry before openat, which is
+ * why hooking openat alone leaves the consumer's first open
+ * attempt failing. */
+int open(const char *pathname, int flags, ...)
+{
+	mode_t mode = 0;
+	bool has_mode = (flags & O_CREAT) || (flags & __O_TMPFILE);
+	if (has_mode) {
+		va_list args;
+		va_start(args, flags);
+		mode = va_arg(args, mode_t);
+		va_end(args);
+	}
+
+	if (!real_open) {
+		errno = ENOSYS;
+		return -1;
+	}
+
+	int fd = has_mode ? real_open(pathname, flags, mode)
+			  : real_open(pathname, flags);
+	if (fd >= 0 || errno != ENOENT) return fd;
+
+	if (!is_flow_path(pathname)) {
+		errno = ENOENT;
+		return -1;
+	}
+
+	if (request_materialization(pathname) != 0) {
+		errno = ENOENT;
+		return -1;
+	}
+
+	return has_mode ? real_open(pathname, flags, mode)
+			: real_open(pathname, flags);
+}
+
+/* libmxl probes the flow_def.json with access(F_OK) before
+ * attempting to open it. Without this hook the probe returns
+ * ENOENT and libmxl reports FLOW_NOT_FOUND without ever reaching
+ * open or openat. */
+int access(const char *pathname, int mode)
+{
+	if (!real_access) {
+		errno = ENOSYS;
+		return -1;
+	}
+
+	int rc = real_access(pathname, mode);
+	if (rc == 0 || errno != ENOENT) return rc;
+
+	if (!is_flow_path(pathname)) {
+		errno = ENOENT;
+		return -1;
+	}
+
+	if (request_materialization(pathname) != 0) {
+		errno = ENOENT;
+		return -1;
+	}
+
+	return real_access(pathname, mode);
+}
+
+/* libmxl also stat()s the flow_def.json during reader setup. Same
+ * rationale as the access hook. */
+int stat(const char *pathname, struct stat *buf)
+{
+	if (!real_stat) {
+		errno = ENOSYS;
+		return -1;
+	}
+
+	int rc = real_stat(pathname, buf);
+	if (rc == 0 || errno != ENOENT) return rc;
+
+	if (!is_flow_path(pathname)) {
+		errno = ENOENT;
+		return -1;
+	}
+
+	if (request_materialization(pathname) != 0) {
+		errno = ENOENT;
+		return -1;
+	}
+
+	return real_stat(pathname, buf);
+}
+
+int lstat(const char *pathname, struct stat *buf)
+{
+	if (!real_lstat) {
+		errno = ENOSYS;
+		return -1;
+	}
+
+	int rc = real_lstat(pathname, buf);
+	if (rc == 0 || errno != ENOENT) return rc;
+
+	if (!is_flow_path(pathname)) {
+		errno = ENOENT;
+		return -1;
+	}
+
+	if (request_materialization(pathname) != 0) {
+		errno = ENOENT;
+		return -1;
+	}
+
+	return real_lstat(pathname, buf);
 }

@@ -133,9 +133,17 @@ agent's UDS.
 The narrowness of the path test is deliberate: the shim is loaded
 into every process the consumer pod runs, including the dynamic
 linker's own probes for libc / libpthread / locale files / config
-under `/etc`. `is_flow_def_path` is a pure string check (no
-syscall), so the cost on the hot path for every unrelated `openat`
-is a handful of memcmps.
+under `/etc`. `is_flow_path` is a pure string check (no syscall),
+so the cost on the hot path for every unrelated call is a handful
+of memcmps.
+
+Five libc entry points carry the hook: `openat`, `open`, `access`,
+`stat`, and `lstat`. libmxl uses `access` and `stat` to probe the
+`.mxl-flow` directory and the access file before it ever calls
+`open` for `flow_def.json`, so hooking `openat` alone would leave
+the first probe returning ENOENT and `mxlCreateFlowReader` would
+report `FLOW_NOT_FOUND` without the shim having a chance to wake
+the agent.
 
 The decision to use LD_PRELOAD rather than a kernel-level mechanism
 is forced by what libmxl exposes:

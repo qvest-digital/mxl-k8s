@@ -106,6 +106,9 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		r.closeEntry(req.NamespacedName)
 		controllerutil.RemoveFinalizer(&mirror, TargetFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
+			if apierrors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
 		}
 		l.Info("torn down target-side mirror")
@@ -113,9 +116,17 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	// Ensure the finalizer is in place before we own any handles.
+	// Concurrent reconcilers (source-side gateway, agent intent
+	// dispatcher) routinely race us on the same MxlFlowMirror in
+	// the moments after creation; treat an optimistic-concurrency
+	// conflict as a benign requeue rather than surfacing it as a
+	// stacktraced Reconciler error.
 	if !controllerutil.ContainsFinalizer(&mirror, TargetFinalizerName) {
 		controllerutil.AddFinalizer(&mirror, TargetFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
+			if apierrors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil
