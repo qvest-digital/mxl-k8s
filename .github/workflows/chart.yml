@@ -12,7 +12,15 @@ on:
       - 'charts/mxl-k8s/**'
       - 'config/crd/**'
       - '.github/workflows/chart.yml'
-    tags: ['charts/mxl-k8s/v*.*.*']
+  # release-please-action creates a GitHub release alongside the
+  # tag at chart-cut time. Using release:published here (instead
+  # of push:tags) sidesteps the GitHub Actions quirk that
+  # silently swallows tag-push events when push: also carries a
+  # paths filter (the path filter can't compute a meaningful
+  # diff for the first matching tag and the event is dropped).
+  # The meta job filters down to chart releases.
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -40,6 +48,9 @@ jobs:
     outputs:
       publish: ${{ steps.m.outputs.publish }}
       version: ${{ steps.m.outputs.version }}
+      release_tag: ${{ steps.m.outputs.release_tag }}
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
     steps:
       - id: m
         run: |
@@ -47,25 +58,38 @@ jobs:
           short_sha="${GITHUB_SHA:0:7}"
           publish=false
           version=""
+          release_tag=""
 
           case "$GITHUB_EVENT_NAME" in
             push)
-              if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-                # refs/tags/charts/mxl-k8s/vX.Y.Z[-rc.N]
-                version="${GITHUB_REF_NAME##*/v}"
-                publish=true
-              elif [ "$GITHUB_REF" = "refs/heads/main" ]; then
+              # Only branch=main pushes reach this case; tag pushes are
+              # handled via the release:published event below to avoid
+              # the paths-filter quirk that drops tag-push events.
+              if [ "$GITHUB_REF" = "refs/heads/main" ]; then
                 # SemVer-valid prerelease build for the floating dev channel.
                 # OCI translates "+" to "_" at push time.
                 version="0.0.0-dev+sha.${short_sha}"
                 publish=true
               fi
               ;;
+            release)
+              # release-please-action published a release. Filter to
+              # chart tags only; other components publish their own
+              # release events that this workflow must ignore.
+              case "$RELEASE_TAG" in
+                charts/mxl-k8s/v*.*.*)
+                  version="${RELEASE_TAG##*/v}"
+                  release_tag="$RELEASE_TAG"
+                  publish=true
+                  ;;
+              esac
+              ;;
           esac
 
           {
             echo "publish=${publish}"
             echo "version=${version}"
+            echo "release_tag=${release_tag}"
           } >> "$GITHUB_OUTPUT"
 
   lint:
