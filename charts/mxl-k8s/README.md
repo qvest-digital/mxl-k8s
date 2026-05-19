@@ -2,7 +2,7 @@
 
 Kubernetes control plane for MXL (Media eXchange Layer). Installs the operator, per-node agent and gateway, CRDs, and RBAC.
 
-![Version: 1.0.0-rc.1](https://img.shields.io/badge/Version-1.0.0--rc.1-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.0.0](https://img.shields.io/badge/AppVersion-0.0.0-informational?style=flat-square)
+![Version: 1.0.0-rc.2](https://img.shields.io/badge/Version-1.0.0--rc.2-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.0.0](https://img.shields.io/badge/AppVersion-0.0.0-informational?style=flat-square)
 
 ## Prerequisites
 
@@ -17,7 +17,7 @@ Kubernetes control plane for MXL (Media eXchange Layer). Installs the operator, 
 
 ```sh
 helm install mxl oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
-  --version 1.0.0-rc.1 \
+  --version 1.0.0-rc.2 \
   --namespace mxl-system --create-namespace
 ```
 
@@ -47,7 +47,7 @@ spec:
   chart:
     spec:
       chart: mxl-k8s
-      version: "1.0.0-rc.1"
+      version: "1.0.0-rc.2"
       sourceRef:
         kind: HelmRepository
         name: mxl-k8s
