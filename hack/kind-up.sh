@@ -26,7 +26,7 @@ declare -A IMAGES=(
   [docker/operator.Dockerfile]=local/mxl-operator:dev
   [docker/agent.Dockerfile]=local/mxl-domain-agent:dev
   [docker/gateway.Dockerfile]=local/mxl-fabrics-gateway:dev
-  [docker/shim.Dockerfile]=local/mxl-intent-shim:dev
+  [docker/shim.Dockerfile]=local/mxl-shim:dev
   [docker/demo-tools.Dockerfile]=local/mxl-demo-tools:dev
 )
 

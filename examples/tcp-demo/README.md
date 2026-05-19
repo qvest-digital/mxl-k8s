@@ -58,14 +58,14 @@ to a registry you control and replace the `image:` fields).
 docker build -f docker/operator.Dockerfile -t local/mxl-operator:dev .
 docker build -f docker/agent.Dockerfile    -t local/mxl-domain-agent:dev .
 docker build -f docker/gateway.Dockerfile  -t local/mxl-fabrics-gateway:dev .
-docker build -f docker/shim.Dockerfile     -t local/mxl-intent-shim:dev .
+docker build -f docker/shim.Dockerfile     -t local/mxl-shim:dev .
 ```
 
 If your runtime can't see the local docker daemon (e.g. k3s with
 containerd), import the images:
 
 ```sh
-for img in mxl-operator mxl-domain-agent mxl-fabrics-gateway mxl-intent-shim; do
+for img in mxl-operator mxl-domain-agent mxl-fabrics-gateway mxl-shim; do
   docker save local/${img}:dev | sudo k3s ctr images import -
 done
 ```
