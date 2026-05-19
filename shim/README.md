@@ -58,10 +58,13 @@ so the shim never asserts its own identity.
 
 ## What it hooks, and what it doesn't
 
-The shim overrides `openat(2)` only. Glibc routes `open(2)`,
-`fopen(3)`, `freopen(3)`, etc. through `openat`, so they all benefit.
-Direct syscalls (e.g. `syscall(SYS_openat, …)` from Go) bypass the
-shim — which is fine for libmxl, which uses libc's `open`.
+The shim overrides `openat(2)`, `open(2)`, `access(2)`, `stat(2)`,
+and `lstat(2)`. libmxl probes the flow_def.json with `access` and
+`stat` before it ever reaches `open`, so hooking `openat` alone
+left the very first `mxlCreateFlowReader` call returning
+`FLOW_NOT_FOUND` without the shim being consulted.
 
-Opens that don't return `ENOENT`, and opens whose target doesn't
-match `.../*.mxl-flow/flow_def.json`, fall straight through to glibc.
+Calls that don't return `ENOENT`, and calls whose target path
+doesn't match `.../*.mxl-flow/flow_def.json`, fall straight through
+to glibc. Direct syscalls (e.g. `syscall(SYS_openat, ...)` from Go)
+bypass the shim; libmxl uses libc symbols, so this is fine.
