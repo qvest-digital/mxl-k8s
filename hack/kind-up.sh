@@ -22,12 +22,19 @@ KUBECTL=(kubectl --context "kind-${CLUSTER_NAME}")
 MIRROR_TIMEOUT_SECS="${MIRROR_TIMEOUT_SECS:-180}"
 ROLLOUT_TIMEOUT_SECS="${ROLLOUT_TIMEOUT_SECS:-180}"
 
-declare -A IMAGES=(
-  [docker/operator.Dockerfile]=local/mxl-operator:dev
-  [docker/agent.Dockerfile]=local/mxl-domain-agent:dev
-  [docker/gateway.Dockerfile]=local/mxl-fabrics-gateway:dev
-  [docker/shim.Dockerfile]=local/mxl-shim:dev
-  [docker/demo-tools.Dockerfile]=local/mxl-demo-tools:dev
+IMAGE_DOCKERFILES=(
+  docker/operator.Dockerfile
+  docker/agent.Dockerfile
+  docker/gateway.Dockerfile
+  docker/shim.Dockerfile
+  docker/demo-tools.Dockerfile
+)
+IMAGE_TAGS=(
+  local/mxl-operator:dev
+  local/mxl-domain-agent:dev
+  local/mxl-fabrics-gateway:dev
+  local/mxl-shim:dev
+  local/mxl-demo-tools:dev
 )
 
 log()  { printf '\n=== %s ===\n' "$*" >&2; }
@@ -39,8 +46,9 @@ need kubectl
 
 log "Building images"
 cd "$REPO_ROOT"
-for dockerfile in "${!IMAGES[@]}"; do
-  tag="${IMAGES[$dockerfile]}"
+for i in "${!IMAGE_DOCKERFILES[@]}"; do
+  dockerfile="${IMAGE_DOCKERFILES[$i]}"
+  tag="${IMAGE_TAGS[$i]}"
   echo "  -> ${tag}"
   docker build -q -f "${dockerfile}" -t "${tag}" . > /dev/null
 done
@@ -53,7 +61,7 @@ else
 fi
 
 log "Loading images into the cluster"
-for tag in "${IMAGES[@]}"; do
+for tag in "${IMAGE_TAGS[@]}"; do
   echo "  -> ${tag}"
   kind load docker-image --name "$CLUSTER_NAME" "$tag"
 done
