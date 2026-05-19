@@ -20,8 +20,8 @@
       "release-type": "helm",
       "component": "charts/mxl-k8s",
       "extra-files": [
-        "charts/mxl-k8s/README.md",
-        "charts/mxl-k8s/README.md.gotmpl"
+        "README.md",
+        "README.md.gotmpl"
       ]
     }
   },
