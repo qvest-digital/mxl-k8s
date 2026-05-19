@@ -3,11 +3,33 @@ name: images
 on:
   push:
     branches: [main]
-    # Per-component release tags (e.g. gateway/v0.0.1, api/v1.2.3).
-    # release-please produces these with the slash separator so they
-    # double as Go submodule version tags.
+    # Manual escape hatch: a developer pushing a tag from a shell.
+    # release-please-driven publishes go through workflow_call from
+    # release-please.yml because tags created by GITHUB_TOKEN do not
+    # start downstream workflow runs.
     tags: ['*/v*.*.*']
   pull_request:
+  # Invoked from release-please.yml once a per-component release
+  # tag has just been cut (operator/agent/gateway/shim). The tag
+  # is passed in via release_tag; meta resolves the image to
+  # publish from the tag's prefix.
+  workflow_call:
+    inputs:
+      release_tag:
+        description: "Per-component release tag (e.g. agent/v1.0.0-rc.2)"
+        type: string
+        required: true
+  # Manual recovery: re-run an image publish without waiting for a
+  # new tag. Leave release_tag empty to build the :dev / :sha-X
+  # tags for the current main, or pass <component>/v<X> to
+  # republish that exact tag.
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Per-component release tag (e.g. agent/v1.0.0-rc.2). Leave empty for a dev build of HEAD."
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -31,6 +53,11 @@ jobs:
   # Tag-event builds bypass this filter entirely; a release tag is
   # an explicit "publish this image now" signal regardless of diff.
   changes:
+    # Diff-based filtering only makes sense for PR / push-to-branch
+    # events. Tag pushes, workflow_call and workflow_dispatch carry
+    # an explicit release_tag (or the dev-build sentinel) and
+    # bypass the per-image filter in meta.
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     outputs:
@@ -54,27 +81,38 @@ jobs:
             workflow:   ['.github/workflows/images.yml']
 
   # Compute the list of images to build and the registry references /
-  # tag lists each image should be published under. Centralised here so
-  # build and merge agree on what to publish.
+  # tag lists each image should be published under. Centralised here
+  # so build and merge agree on what to publish.
   #
-  # The images list is a JSON array consumed by the build matrix below.
-  # On a per-component tag push (e.g. gateway/v1.2.3) only the matching
-  # image is included. On main / PR events the list is filtered by the
-  # changes job; an unrelated diff publishes nothing.
+  # The images list is a JSON array consumed by the build matrix
+  # below. On a per-component tag push or a workflow_call/dispatch
+  # carrying release_tag, only the matching image is included. On
+  # main / PR events the list is filtered by the changes job; an
+  # unrelated diff publishes nothing.
   meta:
     needs: changes
+    # changes is skipped for tag pushes, workflow_call and
+    # workflow_dispatch (none of those rely on diff-based filtering),
+    # so meta must run even when its dependency was skipped.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     outputs:
       images: ${{ steps.m.outputs.images }}
       push: ${{ steps.m.outputs.push }}
       has_images: ${{ steps.m.outputs.has_images }}
     env:
-      CHANGED_OPERATOR:   ${{ needs.changes.outputs.operator }}
-      CHANGED_AGENT:      ${{ needs.changes.outputs.agent }}
-      CHANGED_GATEWAY:    ${{ needs.changes.outputs.gateway }}
-      CHANGED_SHIM:       ${{ needs.changes.outputs.shim }}
-      CHANGED_DEMO_TOOLS: ${{ needs.changes.outputs.demo_tools }}
-      CHANGED_WORKFLOW:   ${{ needs.changes.outputs.workflow }}
+      INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+      # When `changes` is skipped, needs.changes.outputs.<x> is the
+      # empty string. Defaulting to 'true' falls back to "build it"
+      # for the no-filter case (manual workflow_dispatch dev build);
+      # tag / release_tag paths bypass the wanted check entirely via
+      # `selected`.
+      CHANGED_OPERATOR:   ${{ needs.changes.outputs.operator   || 'true' }}
+      CHANGED_AGENT:      ${{ needs.changes.outputs.agent      || 'true' }}
+      CHANGED_GATEWAY:    ${{ needs.changes.outputs.gateway    || 'true' }}
+      CHANGED_SHIM:       ${{ needs.changes.outputs.shim       || 'true' }}
+      CHANGED_DEMO_TOOLS: ${{ needs.changes.outputs.demo_tools || 'true' }}
+      CHANGED_WORKFLOW:   ${{ needs.changes.outputs.workflow   || 'false' }}
     steps:
       - id: m
         run: |
@@ -110,23 +148,38 @@ jobs:
           selected=""
           declare -a extra_tags=()
 
-          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+          # tag_release applies the version-tag publish convention
+          # (:v<X>, plus :latest or :pre) from a "<component>/v<X>"
+          # ref. Shared by direct tag pushes and the release_tag
+          # input path so both produce identical tag lists.
+          tag_release() {
+            local ref="$1" version
+            selected="${ref%%/*}"
+            version="${ref#*/v}"
+            extra_tags+=("v${version}")
+            case "$version" in
+              *-*) extra_tags+=("pre") ;;
+              *)   extra_tags+=("latest") ;;
+            esac
+          }
+
+          if [ -n "${INPUT_RELEASE_TAG:-}" ]; then
+            push=true
+            case "$INPUT_RELEASE_TAG" in
+              */v*.*.*) ;;
+              *)
+                echo "::error::release_tag '${INPUT_RELEASE_TAG}' is not a <component>/v<X.Y.Z> tag"
+                exit 1
+                ;;
+            esac
+            tag_release "$INPUT_RELEASE_TAG"
+          elif [ "$GITHUB_EVENT_NAME" = "push" ]; then
             push=true
             if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-              # refs/tags/<component>/v<version>
-              ref="$GITHUB_REF_NAME"
-              selected="${ref%%/*}"
-              version="${ref#*/v}"
-              extra_tags+=("v${version}")
-              case "$version" in
-                # SemVer prereleases (anything with a dash after the
-                # MAJOR.MINOR.PATCH triplet) move :pre, not :latest.
-                *-*) extra_tags+=("pre") ;;
-                *)   extra_tags+=("latest") ;;
-              esac
+              tag_release "$GITHUB_REF_NAME"
             else
-              # Push to main: :dev always tracks HEAD; :sha-<short> is
-              # the content-addressed handle.
+              # Push to main: :dev always tracks HEAD; :sha-<short>
+              # is the content-addressed handle.
               extra_tags+=("dev" "sha-${short_sha}")
             fi
           elif [ "$GITHUB_EVENT_NAME" = "pull_request" ] \

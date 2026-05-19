@@ -28,8 +28,16 @@ jobs:
   release-please:
     runs-on: ubuntu-24.04
     outputs:
-      chart_released: ${{ steps.rp.outputs['charts/mxl-k8s--release_created'] }}
-      chart_tag:      ${{ steps.rp.outputs['charts/mxl-k8s--tag_name'] }}
+      chart_released:    ${{ steps.rp.outputs['charts/mxl-k8s--release_created'] }}
+      chart_tag:         ${{ steps.rp.outputs['charts/mxl-k8s--tag_name'] }}
+      operator_released: ${{ steps.rp.outputs['operator--release_created'] }}
+      operator_tag:      ${{ steps.rp.outputs['operator--tag_name'] }}
+      agent_released:    ${{ steps.rp.outputs['agent--release_created'] }}
+      agent_tag:         ${{ steps.rp.outputs['agent--tag_name'] }}
+      gateway_released:  ${{ steps.rp.outputs['gateway--release_created'] }}
+      gateway_tag:       ${{ steps.rp.outputs['gateway--tag_name'] }}
+      shim_released:     ${{ steps.rp.outputs['shim--release_created'] }}
+      shim_tag:          ${{ steps.rp.outputs['shim--tag_name'] }}
     steps:
       - id: rp
         uses: googleapis/release-please-action@v5
@@ -52,3 +60,52 @@ jobs:
     uses: ./.github/workflows/chart.yml
     with:
       release_tag: ${{ needs.release-please.outputs.chart_tag }}
+
+  # Per-component image publishes. Same workflow_call-instead-of-
+  # tag-event reason as the chart above: tags pushed by GITHUB_TOKEN
+  # do not start downstream runs, so images.yml has to be invoked
+  # directly. Each job is gated on its component's release_created
+  # so an unrelated release cycle costs nothing.
+  publish-operator-image:
+    needs: [release-please]
+    if: needs.release-please.outputs.operator_released == 'true'
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+    uses: ./.github/workflows/images.yml
+    with:
+      release_tag: ${{ needs.release-please.outputs.operator_tag }}
+
+  publish-agent-image:
+    needs: [release-please]
+    if: needs.release-please.outputs.agent_released == 'true'
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+    uses: ./.github/workflows/images.yml
+    with:
+      release_tag: ${{ needs.release-please.outputs.agent_tag }}
+
+  publish-gateway-image:
+    needs: [release-please]
+    if: needs.release-please.outputs.gateway_released == 'true'
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+    uses: ./.github/workflows/images.yml
+    with:
+      release_tag: ${{ needs.release-please.outputs.gateway_tag }}
+
+  publish-shim-image:
+    needs: [release-please]
+    if: needs.release-please.outputs.shim_released == 'true'
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+    uses: ./.github/workflows/images.yml
+    with:
+      release_tag: ${{ needs.release-please.outputs.shim_tag }}
