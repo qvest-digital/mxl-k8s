@@ -49,3 +49,17 @@ tests:
       - equal:
           path: spec.template.spec.volumes[0].hostPath.path
           value: /var/run/mxl
+
+  - it: runs in the host PID namespace so SO_PEERCRED returns host PIDs
+    asserts:
+      - equal:
+          path: spec.template.spec.hostPID
+          value: true
+
+  - it: hostPID is configurable
+    set:
+      agent.hostPID: false
+    asserts:
+      - equal:
+          path: spec.template.spec.hostPID
+          value: false

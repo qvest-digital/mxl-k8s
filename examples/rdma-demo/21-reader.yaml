@@ -20,7 +20,7 @@ spec:
           topologyKey: kubernetes.io/hostname
   initContainers:
     - name: install-intent-shim
-      image: local/mxl-intent-shim:dev
+      image: local/mxl-shim:dev
       imagePullPolicy: IfNotPresent
       volumeMounts:
         - name: intent-shim

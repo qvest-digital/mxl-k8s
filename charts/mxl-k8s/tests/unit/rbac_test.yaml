@@ -31,3 +31,14 @@ tests:
       - isKind:
           of: ClusterRoleBinding
         documentIndex: 1
+
+  - it: agent role can list pods so the intent dispatcher can resolve SO_PEERCRED PIDs
+    template: templates/rbac-agent.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: [pods]
+            verbs: [get, list, watch]

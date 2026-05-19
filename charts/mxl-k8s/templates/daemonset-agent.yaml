@@ -29,6 +29,7 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "agent" "values" .Values.agent) }}
+      hostPID: {{ .Values.agent.hostPID }}
       {{- with .Values.global.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

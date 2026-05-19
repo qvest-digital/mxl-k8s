@@ -50,7 +50,7 @@ template and adjust `hostNetwork`/`POD_IP` accordingly.
 docker build -f docker/operator.Dockerfile -t local/mxl-operator:dev .
 docker build -f docker/agent.Dockerfile    -t local/mxl-domain-agent:dev .
 docker build -f docker/gateway.Dockerfile  -t local/mxl-fabrics-gateway:dev .
-docker build -f docker/shim.Dockerfile     -t local/mxl-intent-shim:dev .
+docker build -f docker/shim.Dockerfile     -t local/mxl-shim:dev .
 
 kubectl apply -k examples/rdma-demo/
 ```
