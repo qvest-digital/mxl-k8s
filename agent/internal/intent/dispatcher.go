@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/podlookup"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -93,6 +94,13 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 		return fmt.Errorf("pod lookup: %w", err)
 	}
 
+	l := log.FromContext(ctx).WithName("intent").WithValues(
+		"flowID", flowID,
+		"pod", pod.GetNamespace()+"/"+pod.GetName(),
+		"pid", pid,
+	)
+	l.Info("intent request received")
+
 	sourceNode, ok, err := d.resolveSourceNode(wctx, flowID)
 	if err != nil {
 		return fmt.Errorf("resolve source node: %w", err)
@@ -106,6 +114,7 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 		// own MxlFlow publish or the producer crashed. Let the shim
 		// retry; if the file is genuinely gone, ENOENT is the right
 		// final answer.
+		l.Info("intent request short-circuited: flow originates locally")
 		return nil
 	}
 
@@ -114,7 +123,11 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 		return fmt.Errorf("ensure mirror: %w", err)
 	}
 
-	return d.waitReady(wctx, mirror)
+	if err := d.waitReady(wctx, mirror); err != nil {
+		return err
+	}
+	l.Info("intent request fulfilled", "sourceNode", sourceNode, "mirror", mirror.Name)
+	return nil
 }
 
 // FlowIDFromPath returns the flow id if path is under
