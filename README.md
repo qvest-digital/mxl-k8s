@@ -40,9 +40,10 @@ Four pieces, all running inside the cluster:
   `MxlFlowMirror` per (flow, target-node). Multiple consumers on
   the same node share a single mirror.
 - An **LD_PRELOAD shim** in consumer pods turns the first
-  `openat` on a not-yet-materialised flow into a synchronous
-  wait on the local agent. Consumer code calls
-  `mxlCreateFlowReader` the same way it does on a single node.
+  libmxl probe (`access`, `stat`, `open`, ...) for a not-yet-
+  materialised flow into a synchronous wait on the local agent.
+  Consumer code calls `mxlCreateFlowReader` the same way it does
+  on a single node.
 
 The CRDs (`MxlFlow`, `MxlReceiver`, `MxlFlowMirror`,
 `MxlDomain`, `MxlNodeCapabilities`) describe flows, who wants
@@ -67,12 +68,10 @@ identity provider, and upstream `dmf-mxl` respectively.
 
 `libmxl` and `libmxl-fabrics` are linked from
 [`dmf-mxl/mxl`](https://github.com/dmf-mxl/mxl) through the
-[`go-mxl`](https://github.com/qvest-digital/go-mxl) bindings. The
-first release will track upstream `dmf-mxl/mxl` directly once a
-small set of changes lands there. FlowReader / FlowWriter
-semantics, grain layout, and the shape of `flow_def.json` remain
-upstream's design; mxl-k8s is the cluster orchestration around
-them.
+[`go-mxl`](https://github.com/qvest-digital/go-mxl) bindings.
+FlowReader / FlowWriter semantics, grain layout, and the shape
+of `flow_def.json` remain upstream's design; mxl-k8s is the
+cluster orchestration around them.
 
 See [`ROADMAP.md`](ROADMAP.md) for the feature roadmap.
 

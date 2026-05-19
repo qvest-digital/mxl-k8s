@@ -6,10 +6,10 @@ pure Go.
 
 ## Toolchain
 
-- Go ≥ 1.26
-- A C/C++ toolchain (clang-19 or gcc), CMake ≥ 3.20, Ninja, pkg-config.
-- Linux kernel ≥ 5.9 on the host that will run the agent (for
-  `fanotify` directory-event support).
+- Go >= 1.26
+- A C/C++ toolchain (clang-19 or gcc), CMake >= 3.20, Ninja, pkg-config.
+- Linux kernel >= 5.17 on the host that will run the agent. The
+  agent's `fanotify` watcher needs `FAN_REPORT_DFID_NAME`.
 
 ## Pure-Go modules
 
@@ -81,11 +81,6 @@ pkg-config --exists libmxl libmxl-fabrics && echo OK
 for m in agent gateway; do (cd "$m" && go build ./... && go vet ./...); done
 ```
 
-> The `agent` module requires `github.com/qvest-digital/go-mxl` and the
-> `gateway` module requires `github.com/qvest-digital/go-mxl/fabrics`.
-> Both must be tagged on the proxy before these builds succeed without
-> a `go.work`-level replace.
-
 ## Integration tests
 
 Integration tests under the `mxl_integration` build tag exercise a real
@@ -96,10 +91,3 @@ libmxl install (and, for the gateway, real fabric endpoints):
 ```
 
 The default unit/vet/build jobs don't run these.
-
-## Future direction
-
-The local recipe above is the baseline. A devcontainer image that bakes
-in the toolchain, the pinned libmxl, and libfabric is on the roadmap;
-when it lands, this document will move the manual recipe to an appendix
-and recommend the devcontainer for everyday work.

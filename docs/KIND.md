@@ -67,14 +67,13 @@ mxl-domain-agent-...            1/1     Running   0
 mxl-fabrics-gateway-...         1/1     Running   0
 mxl-fabrics-gateway-...         1/1     Running   0
 mxl-operator-...                1/1     Running   0
-mxl-tcp-demo-reader             1/1     Running   1 or 2
+mxl-tcp-demo-reader             1/1     Running   0
 mxl-tcp-demo-writer             1/1     Running   0
 ```
 
-The reader's small restart count comes from the LD_PRELOAD shim
-exiting and being restarted by the kubelet a couple of times
-while the mirror materialises on its node. Once the mirror is
-`Ready` it stays up.
+The LD_PRELOAD shim blocks the reader's first libmxl probe until
+the agent has the mirror materialised, so the reader reaches
+`Running` without a CrashLoop.
 
 ```sh
 kubectl --context kind-mxl-k8s-demo -n mxl-system logs pod/mxl-tcp-demo-reader
