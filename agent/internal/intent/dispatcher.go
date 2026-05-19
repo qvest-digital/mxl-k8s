@@ -117,9 +117,13 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 	return d.waitReady(wctx, mirror)
 }
 
-// FlowIDFromPath returns the flow id if path is
-// <domain>/<uuid>.mxl-flow/flow_def.json. Exported so the UDS
-// server can use the same parser for early-reject decisions.
+// FlowIDFromPath returns the flow id if path is under
+// <domain>/<uuid>.mxl-flow -- the directory itself or any entry
+// inside it. libmxl probes the flow directory and the access
+// file before flow_def.json, so the shim's intercept fires on
+// whichever name hits ENOENT first; the dispatcher only needs
+// the flow id and does not care which entry triggered the
+// request. Exported so the UDS server can share the parser.
 func FlowIDFromPath(domain, path string) (string, bool) {
 	domain = filepath.Clean(domain)
 	path = filepath.Clean(path)
@@ -128,7 +132,7 @@ func FlowIDFromPath(domain, path string) (string, bool) {
 		return "", false
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
-	if len(parts) != 2 || parts[1] != "flow_def.json" {
+	if len(parts) == 0 {
 		return "", false
 	}
 	const suffix = ".mxl-flow"
