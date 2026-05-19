@@ -12,10 +12,12 @@ gateway → `libmxl-fabrics` TCP transfer between two k3s nodes.
 3. A consumer reader pod is scheduled on node-2 (forced via pod
    anti-affinity). An initContainer drops `libmxl-intent.so` into a
    shared volume; the main container loads it via `LD_PRELOAD`.
-4. The reader's first `mxlCreateFlowReader` opens
-   `/run/mxl/domain/<uuid>.mxl-flow/flow_def.json`. The file doesn't
-   exist yet → `openat()` returns `ENOENT` → the shim catches it
-   and calls the agent on `/run/mxl/agent.sock` with the path.
+4. The reader's first `mxlCreateFlowReader` probes the flow
+   directory under `/run/mxl/domain/<uuid>.mxl-flow/` (libmxl
+   calls `access`/`stat` on the directory and the access file
+   before it ever tries to open `flow_def.json`). The directory
+   doesn't exist yet, the probe returns `ENOENT`, the shim
+   catches it and calls the agent on `/run/mxl/agent.sock`.
 5. The agent's intent dispatcher resolves the calling pod via
    `SO_PEERCRED`, finds the flow's origin from `MxlFlow.status`,
    creates an `MxlFlowMirror` for `(flow, node-2)` with

@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/podlookup"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -93,6 +94,13 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 		return fmt.Errorf("pod lookup: %w", err)
 	}
 
+	l := log.FromContext(ctx).WithName("intent").WithValues(
+		"flowID", flowID,
+		"pod", pod.GetNamespace()+"/"+pod.GetName(),
+		"pid", pid,
+	)
+	l.Info("intent request received")
+
 	sourceNode, ok, err := d.resolveSourceNode(wctx, flowID)
 	if err != nil {
 		return fmt.Errorf("resolve source node: %w", err)
@@ -106,6 +114,7 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 		// own MxlFlow publish or the producer crashed. Let the shim
 		// retry; if the file is genuinely gone, ENOENT is the right
 		// final answer.
+		l.Info("intent request short-circuited: flow originates locally")
 		return nil
 	}
 
@@ -114,12 +123,20 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 		return fmt.Errorf("ensure mirror: %w", err)
 	}
 
-	return d.waitReady(wctx, mirror)
+	if err := d.waitReady(wctx, mirror); err != nil {
+		return err
+	}
+	l.Info("intent request fulfilled", "sourceNode", sourceNode, "mirror", mirror.Name)
+	return nil
 }
 
-// FlowIDFromPath returns the flow id if path is
-// <domain>/<uuid>.mxl-flow/flow_def.json. Exported so the UDS
-// server can use the same parser for early-reject decisions.
+// FlowIDFromPath returns the flow id if path is under
+// <domain>/<uuid>.mxl-flow -- the directory itself or any entry
+// inside it. libmxl probes the flow directory and the access
+// file before flow_def.json, so the shim's intercept fires on
+// whichever name hits ENOENT first; the dispatcher only needs
+// the flow id and does not care which entry triggered the
+// request. Exported so the UDS server can share the parser.
 func FlowIDFromPath(domain, path string) (string, bool) {
 	domain = filepath.Clean(domain)
 	path = filepath.Clean(path)
@@ -128,7 +145,7 @@ func FlowIDFromPath(domain, path string) (string, bool) {
 		return "", false
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
-	if len(parts) != 2 || parts[1] != "flow_def.json" {
+	if len(parts) == 0 {
 		return "", false
 	}
 	const suffix = ".mxl-flow"
