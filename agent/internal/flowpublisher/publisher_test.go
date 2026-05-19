@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -244,4 +245,84 @@ func TestInitialSync_WalksDomainAndPublishesEach(t *testing.T) {
 		"InitialSync must produce one CR per .mxl-flow directory and "+
 			"ignore non-matching entries; if this slips, the agent "+
 			"would either skip flows on cold start or produce garbage CRs")
+}
+
+func TestPublishAppeared_MirrorTargetMarksReadyNotOrigin(t *testing.T) {
+	scheme := newScheme(t)
+	domain := t.TempDir()
+	flowDir := filepath.Join(domain, validFlowID+".mxl-flow")
+	require.NoError(t, os.Mkdir(flowDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(flowDir, FlowDefName),
+		[]byte(`{"id":"`+validFlowID+`"}`), 0o644))
+
+	mirror := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "some-mirror",
+			Namespace: "mxl-system",
+		},
+		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
+			FlowID:     validFlowID,
+			SourceNode: "n0",
+			TargetNode: "n1",
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(mirror).
+		Build()
+
+	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
+
+	var got mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
+	require.Len(t, got.Status.Locations, 1)
+	assert.Equal(t, mxlv1alpha1.MxlFlowLocationReady, got.Status.Locations[0].Phase,
+		"a flow directory observed by an agent on a node that already "+
+			"hosts a mirror target for the same flow is a materialized "+
+			"copy, not an Origin; resolveSourceNode picks Origin to "+
+			"locate the producer, so misclassifying the target as "+
+			"Origin would route downstream lookups at a mirror")
+}
+
+func TestInitialSync_DemotesOriginForFlowsNoLongerOnDisk(t *testing.T) {
+	scheme := newScheme(t)
+	domain := t.TempDir()
+	// no flow dirs on disk
+
+	existing := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: ObjectMeta(validFlowID),
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: validFlowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{
+				{NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+				{NodeName: "other", Phase: mxlv1alpha1.MxlFlowLocationReady},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(existing).
+		Build()
+
+	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	require.NoError(t, p.InitialSync(context.Background()))
+
+	var got mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
+	byNode := map[string]mxlv1alpha1.MxlFlowLocationPhase{}
+	for _, l := range got.Status.Locations {
+		byNode[l.NodeName] = l.Phase
+	}
+	assert.Equal(t, mxlv1alpha1.MxlFlowLocationStale, byNode["n1"],
+		"an agent that owns a Origin location must demote it on cold "+
+			"start when the on-disk flow is gone; leaving the stale "+
+			"Origin behind misdirects resolveSourceNode to a node that "+
+			"no longer holds the flow")
+	assert.Equal(t, mxlv1alpha1.MxlFlowLocationReady, byNode["other"],
+		"other-node locations are out of this agent's scope; "+
+			"InitialSync must not touch them")
 }

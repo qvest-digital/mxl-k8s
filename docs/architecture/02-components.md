@@ -184,6 +184,10 @@ The eight steps in order:
    entry. `flowpublisher.PublishAppeared` reads `flow_def.json`,
    creates the cluster-scoped `MxlFlow` if absent, and patches
    `status.locations` to record `{nodeName: nodeA, phase: Origin}`.
+   `Origin` vs `Ready` is decided by whether an `MxlFlowMirror`
+   already names this node as `target`: producer-side directories
+   get `Origin`, mirror-target directories get `Ready` so
+   `resolveSourceNode` keeps pointing at the real writer.
 3. **User applies an `MxlReceiver`.** Spec carries `flowID` plus
    exactly one of `podSelector` / `podRef`.
 4. **Operator's `receiver.Reconciler` wakes** on the watch event,
