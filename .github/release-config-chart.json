@@ -8,15 +8,7 @@
   "prerelease": false,
   "packages": {
     "charts/mxl-k8s": {
-      "component": "charts/mxl-k8s",
-      "extra-files": [
-        {
-          "type": "json",
-          "path": ".github/prerelease-manifest.json",
-          "jsonpath": "$[\"charts/mxl-k8s\"]"
-        },
-        { "type": "generic", "path": "charts/mxl-k8s/Chart.yaml" }
-      ]
+      "component": "charts/mxl-k8s"
     }
   },
   "changelog-sections": [
