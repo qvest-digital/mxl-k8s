@@ -21,7 +21,7 @@ Every diagram is stored as a `*.drawio.svg` file under
 whose root element carries a URL-encoded `mxfile` in its `content`
 attribute, and whose body is a rendered preview of that XML.
 
-The XML inside `content="…"` is the source of truth; the SVG body
+The XML inside `content="..."` is the source of truth; the SVG body
 beneath it is a cache drawio regenerates on save. To edit:
 
 1. Open the file in VS Code with the

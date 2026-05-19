@@ -45,7 +45,7 @@ The agent replies with either:
 {"ok":true}
 ```
 
-(meaning the open should now succeed — the shim retries it) or:
+(meaning the open should now succeed -- the shim retries it) or:
 
 ```json
 {"ok":false,"error":"<reason>"}

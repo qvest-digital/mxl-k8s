@@ -361,7 +361,7 @@ func runTargetProgressLoop(
 // commitArrivedGrain advances the local flow's HeadIndex for a grain
 // whose payload + header were already filled in by the remote
 // initiator's RDMA write. OpenGrain returns a writable handle aliasing
-// the ring slot — we leave the slot bytes untouched and Commit so the
+// the ring slot -- we leave the slot bytes untouched and Commit so the
 // flow metadata catches up.
 func commitArrivedGrain(writer *mxl.Writer, idx uint64) error {
 	ga, err := writer.OpenGrain(idx)

@@ -3,9 +3,13 @@
 // shim) to ask for on-demand flow materialization.
 //
 // The wire protocol is one line-delimited JSON request per
-// connection:
+// connection. The path is any absolute path under a flow's
+// <uuid>.mxl-flow directory (the directory itself, the access
+// file, flow_def.json, ...). The dispatcher only uses the path
+// to extract the flow id, so it does not matter which entry the
+// shim happened to intercept first:
 //
-//	{"path":"/run/mxl/domain/<uuid>.mxl-flow/flow_def.json"}\n
+//	{"path":"/run/mxl/domain/<uuid>.mxl-flow/<anything>"}\n
 //
 // followed by one line-delimited JSON response from the agent:
 //
@@ -36,8 +40,9 @@ import (
 )
 
 // MaterializeDispatcher is the contract the Server expects from the
-// intent dispatcher: given a peer PID and a flow_def.json path, drive
-// the mirror to Ready (or surface a terminal error).
+// intent dispatcher: given a peer PID and an absolute path under a
+// flow's <uuid>.mxl-flow directory, drive the mirror to Ready (or
+// surface a terminal error).
 //
 // The narrow interface keeps the server testable without pulling in
 // the full intent package; *intent.Dispatcher satisfies it

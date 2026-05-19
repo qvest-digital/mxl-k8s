@@ -4,12 +4,12 @@
 
 mxl-k8s is a control plane that wraps two upstream shared libraries:
 
-- **libmxl** — a shared-memory media SDK. A producer process calls
+- **libmxl** -- a shared-memory media SDK. A producer process calls
   `mxlCreateFlowWriter` and a consumer process calls
   `mxlCreateFlowReader`. Both expect to see the same domain directory
   on the local filesystem; flows materialise as
   `<flowID>.mxl-flow/{flow_def.json, data, grains/}` under that path.
-- **libmxl-fabrics** — a cross-node transport for libmxl flows. It
+- **libmxl-fabrics** -- a cross-node transport for libmxl flows. It
   registers libmxl's shared-memory regions with libfabric, lets a
   remote initiator RDMA grain payload + header into them, and
   coordinates the handshake through a serialised `TargetInfo` blob
@@ -43,30 +43,30 @@ node, and then get out of the way of the data path.
 
 ## Actors
 
-- **Writer pod** — a user's producer. Calls libmxl to create the
+- **Writer pod** -- a user's producer. Calls libmxl to create the
   flow files on the producer node's tmpfs domain. mxl-k8s does not
   spawn or schedule it.
-- **Consumer pod** — a user's consumer. Calls libmxl to open a
+- **Consumer pod** -- a user's consumer. Calls libmxl to open a
   FlowReader. It opts into on-demand materialization by `LD_PRELOAD`-
   ing `libmxl-intent.so`, which intercepts the libc calls libmxl
   makes (`openat`, `open`, `access`, `stat`, `lstat`) against
   anything under a `.mxl-flow/` directory and asks the local agent
   to materialize the flow before retrying.
-- **Operator** (`operator/cmd/mxl-operator`) — single Deployment,
+- **Operator** (`operator/cmd/mxl-operator`) -- single Deployment,
   cluster-scoped. Its only active reconciler is
   `receiver.Reconciler`, which turns each `MxlReceiver` into one
   `MxlFlowMirror` per distinct target node. The other reconcilers
   it registers (`flow`, `mirror`, `domain`, `nodecaps`) are observer-
-  only — they log events and write nothing.
-- **Agent** (`agent/cmd/mxl-domain-agent`) — DaemonSet. Watches the
+  only -- they log events and write nothing.
+- **Agent** (`agent/cmd/mxl-domain-agent`) -- DaemonSet. Watches the
   node's tmpfs domain with `fanotify`, publishes `MxlFlow.status.
   locations` and `MxlDomain.status` for this node, and serves the
   intent UDS at `/run/mxl/agent.sock`.
-- **Gateway** (`gateway/cmd/mxl-fabrics-gateway`) — DaemonSet, runs
+- **Gateway** (`gateway/cmd/mxl-fabrics-gateway`) -- DaemonSet, runs
   with `hostNetwork: true`. Hosts the source and target
   `MxlFlowMirror` reconcilers and the capabilities publisher in one
   controller-runtime Manager.
-- **Kubernetes API server** — the only cluster-wide state. Every
+- **Kubernetes API server** -- the only cluster-wide state. Every
   cross-node coordination message (TargetInfo handoff, origin
   publication, capability advertisement) is a CR update.
 

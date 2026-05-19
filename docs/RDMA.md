@@ -12,10 +12,10 @@ on the worker nodes for either provider to actually work.
 
 - Kernel modules for the NIC vendor: `mlx5_ib` (Mellanox / NVIDIA
   ConnectX), `bnxt_re` (Broadcom Stingray), `irdma` (Intel E810),
-  `qedr` (Marvell FastLinQ), `efa` is its own provider — see
+  `qedr` (Marvell FastLinQ), `efa` is its own provider -- see
   below.
 - `rdma-core` userspace (provides `libibverbs`, `librdmacm`,
-  `ibstat`, `rdma`, …). Most distros' default package set.
+  `ibstat`, `rdma`, ...). Most distros' default package set.
 - `RLIMIT_MEMLOCK` set to `infinity` or at least multiple GiB.
   Common patterns:
   - `/etc/security/limits.d/rdma.conf`:
@@ -27,7 +27,7 @@ on the worker nodes for either provider to actually work.
     `LimitMEMLOCK=infinity` in the runtime's systemd unit.
   - The mxl-fabrics-gateway pod also asks for `SYS_RESOURCE` so
     it can raise its own limit if the host default is low.
-- `/dev/infiniband/{rdma_cm,uverbs0,…}` present and readable by
+- `/dev/infiniband/{rdma_cm,uverbs0,...}` present and readable by
   the container user. The gateway DaemonSet bind-mounts
   `/dev/infiniband` into the pod.
 - For RoCEv2 specifically: a network fabric configured with PFC
@@ -93,7 +93,7 @@ host setup is AWS-specific.
 - `--providers=efa` on the gateway DaemonSet.
 - `MxlFlowMirror.spec.provider: efa` (or
   `MxlReceiver.spec.provider: efa`).
-- Multus is *not* the right tool for EFA pods — EFA is exposed
+- Multus is *not* the right tool for EFA pods -- EFA is exposed
   via the host's network namespace. `hostNetwork: true` on the
   gateway DaemonSet (as in the rdma-demo example) keeps the
   configuration straightforward.
@@ -108,9 +108,9 @@ provider. A misconfiguration (e.g. `--providers=verbs` on a node
 without InfiniBand) surfaces at the first `MxlFlowMirror` Setup
 rather than at boot.
 
-Real per-provider probing — a synthetic flow created at startup
-to exercise each declared provider — is a deliberate follow-up;
-see the project's deferred-work memory.
+Real per-provider probing (a synthetic flow created at startup
+to exercise each declared provider) is a deliberate follow-up,
+not present in this release.
 
 ## Troubleshooting
 

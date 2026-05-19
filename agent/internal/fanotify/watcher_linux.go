@@ -51,7 +51,7 @@ type Watcher struct {
 }
 
 // New initializes a fanotify watcher in FAN_REPORT_DFID_NAME mode.
-// Requires kernel ≥ 5.17 and CAP_SYS_ADMIN.
+// Requires kernel >= 5.17 and CAP_SYS_ADMIN.
 func New() (*Watcher, error) {
 	fd, err := unix.FanotifyInit(
 		unix.FAN_CLASS_NOTIF|unix.FAN_REPORT_DFID_NAME|unix.FAN_CLOEXEC,

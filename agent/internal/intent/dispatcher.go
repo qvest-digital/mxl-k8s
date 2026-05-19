@@ -1,13 +1,14 @@
 // Package intent handles on-demand MxlFlowMirror materialization.
 //
-// A consumer pod that tries to open a flow_def.json for a flow not
-// yet present on this node hits ENOENT. The libmxl-intent.so shim
-// inside the pod intercepts that ENOENT and asks this dispatcher
-// (via the agent's UDS) to materialize the flow. Materialize walks
-// the same handshake the operator uses for declarative
-// MxlReceivers — look up the source node, ensure the
-// MxlFlowMirror, wait for the gateway to mark it Ready — and then
-// returns success so the shim can retry the open.
+// A consumer pod that probes a flow that has not yet materialised
+// on this node hits ENOENT (libmxl calls access/stat/open against
+// the <id>.mxl-flow directory and the files inside it). The
+// libmxl-intent.so shim intercepts that ENOENT and asks this
+// dispatcher (via the agent's UDS) to materialize the flow.
+// Materialize walks the same handshake the operator uses for
+// declarative MxlReceivers -- look up the source node, ensure the
+// MxlFlowMirror, wait for the gateway to mark it Ready -- and
+// returns success so the shim can retry the original call.
 package intent
 
 import (

@@ -3,6 +3,6 @@
 // modification events (CREATE / MOVED_TO / DELETE / MOVED_FROM) on
 // a single inode-marked directory.
 //
-// Requires kernel ≥ 5.17 and CAP_SYS_ADMIN. Building on non-Linux
+// Requires kernel >= 5.17 and CAP_SYS_ADMIN. Building on non-Linux
 // platforms yields an empty package.
 package fanotify

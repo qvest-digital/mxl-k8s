@@ -2,7 +2,7 @@
 
 mxl-k8s ships four runtime artefacts plus one wire-contract package.
 Each owns a specific slice of state and watches a specific set of CRDs.
-This page steps through them in turn — one focused diagram per
+This page steps through them in turn -- one focused diagram per
 component, showing the workflow rather than a labelled rectangle.
 
 ## CRD ownership at a glance
@@ -16,7 +16,7 @@ component, showing the workflow rather than a labelled rectangle.
 | `MxlNodeCapabilities` | Cluster (per-node) | gateway | gateway | operator (observe), gateway |
 
 The RBAC verbs that encode this table live in
-`+kubebuilder:rbac` markers next to each reconciler — most
+`+kubebuilder:rbac` markers next to each reconciler -- most
 authoritatively
 [`operator/internal/receiver/controller.go:35-40`](../../operator/internal/receiver/controller.go)
 and
@@ -24,7 +24,7 @@ and
 
 ## Operator
 
-`operator/cmd/mxl-operator` — single Deployment, cluster-scoped,
+`operator/cmd/mxl-operator` -- single Deployment, cluster-scoped,
 leader-elected (`LeaderElectionID:
 "mxl-operator.mxl.qvest-digital.com"`,
 [`main.go:56`](../../operator/cmd/mxl-operator/main.go)).
@@ -34,7 +34,7 @@ them mutates state, and that's the one that matters here:
 ![Operator: receiver.Reconciler reconcile workflow](./diagrams/02-operator.drawio.svg)
 
 The four other reconcilers (`flow`, `mirror`, `domain`, `nodecaps`)
-register at startup but log only — they're observer code paths that
+register at startup but log only -- they're observer code paths that
 exist to mark the reconciler scaffolding so future status-aggregation
 work has a hook. They write nothing.
 
@@ -55,7 +55,7 @@ Two correctness details worth flagging while looking at the diagram:
 
 ## Gateway
 
-`gateway/cmd/mxl-fabrics-gateway` — DaemonSet, `hostNetwork: true`.
+`gateway/cmd/mxl-fabrics-gateway` -- DaemonSet, `hostNetwork: true`.
 A single controller-runtime Manager hosts three concurrent
 activities, sharing one libmxl + libmxl-fabrics handle pair:
 
@@ -64,7 +64,7 @@ activities, sharing one libmxl + libmxl-fabrics handle pair:
 The two reconcilers are filtered on `spec.targetNode` and
 `spec.sourceNode` respectively. They operate on disjoint mirror sets
 (one mirror has exactly one of each), and they own their own
-finalizers — so libmxl + libfabric handles get torn down before the
+finalizers -- so libmxl + libfabric handles get torn down before the
 CR disappears, regardless of which side the gateway is acting on.
 
 The target-side lifecycle is worth its own diagram because the
@@ -76,7 +76,7 @@ fabric side *without* closing the `mxl.Writer`, so consumer pods'
 
 Two transitions in particular are easy to miss:
 
-- **Pod restart** lands in `Materializing` again, not `Ready` — the
+- **Pod restart** lands in `Materializing` again, not `Ready` -- the
   in-memory `targetEntry` map is empty after restart, the fast-path
   declines, and the slow path reopens the writer. This also rotates
   `TargetInfo`, which the source side picks up through its
@@ -85,7 +85,7 @@ Two transitions in particular are easy to miss:
   ([`target.go:375`](../../gateway/internal/mirror/target.go)),
   which closes only the fabric triple
   (`Regions`/`Target`/`Info`). The `mxl.Writer` is intentionally
-  retained — the on-disk flow definition and any consumer
+  retained -- the on-disk flow definition and any consumer
   `FlowReader` handles point at it.
 
 The choice of `ReadGrainNonBlocking` over the blocking variant is
@@ -97,9 +97,9 @@ builds.
 
 ## Agent
 
-`agent/cmd/mxl-domain-agent` — DaemonSet. Two concurrent workflows
+`agent/cmd/mxl-domain-agent` -- DaemonSet. Two concurrent workflows
 share a controller-runtime `client.Client` but are otherwise
-independent — fanotify can run with the intent socket disabled (set
+independent -- fanotify can run with the intent socket disabled (set
 `--intent-socket-path=""`) and vice versa.
 
 ![Agent: passive observation + active intent paths](./diagrams/02-agent.drawio.svg)
@@ -124,11 +124,11 @@ schedule.
 
 ## Shim
 
-`shim/libmxl-intent.c` — a tiny LD_PRELOAD library. No CRD access,
-no Kubernetes client, no daemon — it speaks only to the local
+`shim/libmxl-intent.c` -- a tiny LD_PRELOAD library. No CRD access,
+no Kubernetes client, no daemon -- it speaks only to the local
 agent's UDS.
 
-![Shim: openat() decision flow](./diagrams/02-shim.drawio.svg)
+![Shim: ENOENT decision flow](./diagrams/02-shim.drawio.svg)
 
 The narrowness of the path test is deliberate: the shim is loaded
 into every process the consumer pod runs, including the dynamic
@@ -149,26 +149,26 @@ The decision to use LD_PRELOAD rather than a kernel-level mechanism
 is forced by what libmxl exposes:
 
 - libmxl has no "flow not present" callback hook on the FlowReader
-  side — it just returns `FLOW_NOT_FOUND`.
+  side -- it just returns `FLOW_NOT_FOUND`.
 - fanotify `FAN_OPEN_PERM` would let us intercept `open` syscalls
   with a permission decision, but the kernel only consults
   permission events for paths that resolve to an inode. An `openat`
   that's about to return `ENOENT` never fires the event.
-- Intercepting the libc syscall stub in userspace, scoped to a
-  single suffix, is the simplest place where we can both see the
-  attempted open *and* still call the real `openat` after the
-  agent has materialized the file.
+- Intercepting libc symbols in userspace, scoped to paths under
+  `<id>.mxl-flow`, is the simplest place where the shim can both
+  see the attempted call *and* re-issue it after the agent has
+  materialised the file.
 
 ## `ipc/v1` is a contract, not a runtime
 
 [`ipc/v1/control.proto`](../../ipc/v1/control.proto) defines a
 `LocalControl` gRPC service (`OpenMirror`, `CloseMirror`,
-`ListLocalEndpoints`) intended for agent → gateway local control
+`ListLocalEndpoints`) intended for agent -> gateway local control
 over a UDS. The proto's own header is explicit: "Cross-node gateway
 coordination happens through the Kubernetes API by way of
 `MxlFlowMirror`; there is no gateway-to-gateway gRPC surface in this
 version." No code outside of the generated bindings imports
-`ipc/v1` in the current tree — it's a forward-looking contract,
+`ipc/v1` in the current tree -- it's a forward-looking contract,
 nothing more.
 
 ## End-to-end: applying an `MxlReceiver`
@@ -176,8 +176,8 @@ nothing more.
 The per-component workflows above describe what each process does in
 isolation. This sequence shows how they line up in time when a user
 applies an `MxlReceiver` and a cross-node mirror reaches `Ready`.
-The intent-driven path (LD_PRELOAD shim → agent UDS) joins at step
-5 — the agent and the operator's reconciler use the same
+The intent-driven path (LD_PRELOAD shim -> agent UDS) joins at step
+5 -- the agent and the operator's reconciler use the same
 deterministic `MirrorName`, so the on-demand path and the
 declarative path converge on a single `MxlFlowMirror`.
 
@@ -204,21 +204,21 @@ The eight steps in order:
    isn't ready, it sets `phase=Pending` with a 10s requeue and
    exits.
 5. **Operator creates one `MxlFlowMirror` per distinct target
-   node.** Mirrors where `target == sourceNode` are skipped — the
+   node.** Mirrors where `target == sourceNode` are skipped -- the
    writer's own node already has the flow.
 6. **Target-node gateway's `TargetReconciler` wakes** on the
    `MxlFlowMirror` event and walks the libmxl-fabrics handshake:
-   `mxl.Instance.NewWriter` → `fabrics.RegionsForFlowWriter` →
-   `fabrics.Instance.NewTarget` → `Target.Setup` →
+   `mxl.Instance.NewWriter` -> `fabrics.RegionsForFlowWriter` ->
+   `fabrics.Instance.NewTarget` -> `Target.Setup` ->
    `TargetInfo.MarshalString`. It patches
    `MxlFlowMirror.status.targetInfo` and `phase=Ready`, then starts
    the progress goroutine.
 7. **Source-node gateway's `SourceReconciler` wakes** on the
-   mirror's status update — it has `Watches(MxlFlowMirror)` *and*
+   mirror's status update -- it has `Watches(MxlFlowMirror)` *and*
    `Watches(MxlFlow)`. It opens
-   `mxl.Instance.NewReader` →
-   `fabrics.RegionsForFlowReader` → `fabrics.Instance.NewInitiator`
-   → `Initiator.Setup` → `ParseTargetInfo` → `AddTarget`, then
+   `mxl.Instance.NewReader` ->
+   `fabrics.RegionsForFlowReader` -> `fabrics.Instance.NewInitiator`
+   -> `Initiator.Setup` -> `ParseTargetInfo` -> `AddTarget`, then
    spawns the transfer goroutine.
 8. **Operator's `receiver.Reconciler` wakes** on the mirror's
    status update via its `Watches(MxlFlowMirror)` and patches

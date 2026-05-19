@@ -18,7 +18,7 @@ Three things matter here:
 
 - **`/run/mxl` is a tmpfs**, not a backed mount. The bytes live in
   page-cache RAM. Nothing survives a node reboot. mxl-k8s does not
-  provision the mount — that is left to the host's init system or a
+  provision the mount -- that is left to the host's init system or a
   privileged bootstrap step. The agent reports the state it observes
   via `MxlDomain.status` (`capacityBytes`, `freeBytes`,
   `fanotifyReady`), but does not create the mount itself.
@@ -27,7 +27,7 @@ Three things matter here:
   `<flowID>.mxl-flow/{flow_def.json,data,grains/}`; closing the
   writer removes them. This is why the gateway's TargetReconciler
   recovery path keeps `mxl.Writer` alive even when the libfabric
-  side died — releasing the writer would remove the on-disk flow
+  side died -- releasing the writer would remove the on-disk flow
   definition and invalidate every consumer pod's `FlowReader`
   handle on the same node.
 - **`agent.sock` is a per-node singleton.** The agent binds it at
@@ -58,7 +58,7 @@ Two things to read out of the diagram:
   libfabric memory region** over that mapping. libfabric needs to
   know the (virtual address, length, `rkey`) triple before a remote
   peer can RDMA into the region. Writer and consumer pods don't
-  participate in libfabric at all — they only see the libmxl
+  participate in libfabric at all -- they only see the libmxl
   HeadIndex semantics.
 
 The per-grain narrative captured in the diagram is the same one as
@@ -73,7 +73,7 @@ a single node:
 - **Target side.** The RDMA write lands in this node's registered
   region, which *is* a slice of this node's tmpfs file. The target
   gateway calls `ReadGrainNonBlocking` to learn the index, then
-  `Writer.OpenGrain(i).Commit` — a metadata-only HeadIndex bump
+  `Writer.OpenGrain(i).Commit` -- a metadata-only HeadIndex bump
   because the payload bytes were already placed by RDMA. The
   consumer's `FlowReader` sees the HeadIndex move (same tmpfs
   pages, mapped read-only) and `GetGrain` returns a pointer into
@@ -92,18 +92,18 @@ table:
 
 | Process | mounts `/run/mxl/domain` | mounts `/run/mxl/agent.sock` | linked / preloaded libraries |
 | --- | --- | --- | --- |
-| writer pod | rw | — | libmxl |
+| writer pod | rw | -- | libmxl |
 | consumer pod | rw | rw (bind-mount of the socket file) | libmxl + libmxl-intent.so via `LD_PRELOAD` |
 | agent DaemonSet | rw | rw (binds, listens) | libmxl |
-| gateway DaemonSet | rw | — | libmxl + libmxl-fabrics + libfabric provider |
+| gateway DaemonSet | rw | -- | libmxl + libmxl-fabrics + libfabric provider |
 
 The LD_PRELOAD shim is delivered through a small two-container
 pattern: an initContainer copies the prebuilt `libmxl-intent.so`
-into a shared `emptyDir`, the main container's
-`LD_PRELOAD=/var/run/mxl-intent/libmxl-intent.so` (or
-`MXL_INTENT_SOCK` plus a custom path) picks it up. The shim itself
-has no daemon, no Kubernetes client, and no state — see
-[02-components](./02-components.md#shim).
+into a shared `emptyDir`, and the main container's
+`LD_PRELOAD=/opt/mxl-intent/libmxl-intent.so` picks it up. The
+default agent socket path can be overridden with
+`MXL_INTENT_SOCK`. The shim itself has no daemon, no Kubernetes
+client, and no state -- see [02-components](./02-components.md#shim).
 
 ## Why these per-node choices
 
@@ -118,7 +118,7 @@ view:
   on the node maps the same memory. PersistentVolumes would mean
   per-pod views, which would defeat the zero-copy story.
 - **Bind-mount of `/run/mxl/agent.sock` into consumer pods.** The
-  alternative — a TCP listener on localhost — would force the shim
+  alternative -- a TCP listener on localhost -- would force the shim
   to use a different syscall path and lose `SO_PEERCRED`-based
   caller identification. A UDS file fits the shim's "intercept the
   libmxl probe and block" model with minimal surface.
@@ -148,26 +148,26 @@ Steps for one grain index *N*:
    reads the new `HeadIndex` from `Reader.Runtime()`, and for each
    `idx > lastSent` calls `GetGrainNonBlocking(idx)` followed by
    `Initiator.TransferGrain(idx, 0, slices)`. The grain is read
-   from the gateway's mapping of the *same tmpfs file* — the
+   from the gateway's mapping of the *same tmpfs file* -- the
    bytes never leave RAM on this node.
 3. **libfabric** performs an RDMA write into the target node's
    registered region. For the `tcp` provider this is a sequence of
    socket sends to the remote target; for `verbs`/EFA it is a real
    one-sided RDMA. In both cases the payload + grain header land
-   *directly in the target's ring slot* — no intermediate buffer
+   *directly in the target's ring slot* -- no intermediate buffer
    on the target gateway.
 4. **Target gateway's progress goroutine** polls
    `Target.ReadGrainNonBlocking`. On success it returns the index
    that just completed; on `ErrNotReady` it sleeps 1 ms and loops.
 5. **Target gateway** calls `commitArrivedGrain(writer, idx)`,
    which is `Writer.OpenGrain(idx)` followed immediately by
-   `Commit(TotalSlices, 0)`. This does not copy data — the payload
+   `Commit(TotalSlices, 0)`. This does not copy data -- the payload
    and header are already in place. The Commit only advances the
    local flow's `HeadIndex` so consumer FlowReaders on this node
    see the new grain.
 6. **Consumer pod's FlowReader** sees `HeadIndex >= N` on its next
    `GetGrain(N)` call. The grain bytes are returned via a pointer
-   into the consumer's mmap of the local data file — zero-copy on
+   into the consumer's mmap of the local data file -- zero-copy on
    the consumer side as well.
 
 Three details from the diagram are worth pulling out:
@@ -178,12 +178,12 @@ Three details from the diagram are worth pulling out:
   fatal "poll failed" in release builds (the `EINTR` filter is
   gated on `#if ENABLE_DEBUG`). Go's async preemption sends SIGURG
   to running goroutines ~50/sec since Go 1.14, and that's the
-  signal a blocking `ReadGrain` receives via the libfabric thread —
-  tearing the endpoint down every 10–60 seconds in steady state.
+  signal a blocking `ReadGrain` receives via the libfabric thread --
+  tearing the endpoint down every 10-60 seconds in steady state.
   Polling from Go avoids blocking inside libfabric and sidesteps
-  the signal-interaction. A workaround for the upstream libfabric
-  bug is carried in libmxl fork PR #17, but the non-blocking path
-  remains the correct shape regardless.
+  the signal interaction. An upstream-libfabric workaround exists
+  in the libmxl fork, but the non-blocking path is the correct
+  shape regardless of whether the workaround is in place.
 - **Why `Commit` is metadata-only on the target.** The payload +
   header bytes were RDMA'd into the ring slot by the remote
   initiator *before* `ReadGrain` reported the index as ready. What
@@ -210,6 +210,6 @@ is unreachable, `TransferGrain` errors are logged and the loop
 continues, falling further behind the writer until the producer
 wraps the ring and grains start being overwritten in tmpfs before
 they're sent. Consumer reads honour libmxl's normal grain-ring
-semantics — if the consumer is too slow it will start receiving
+semantics -- if the consumer is too slow it will start receiving
 "grain aged out" errors from `GetGrain`. mxl-k8s does not
 interpose on this; the ring is libmxl's, not ours.

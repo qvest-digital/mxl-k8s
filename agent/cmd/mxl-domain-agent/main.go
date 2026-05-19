@@ -87,7 +87,7 @@ func run(args []string) error {
 		NodeName:   cfg.NodeName,
 	}
 	if err := flowPub.InitialSync(ctx); err != nil {
-		// Initial sync failures are logged, not fatal — the fanotify
+		// Initial sync failures are logged, not fatal -- the fanotify
 		// stream will reconcile when entries change.
 		setupLog.Error(err, "initial flow sync failed")
 	}

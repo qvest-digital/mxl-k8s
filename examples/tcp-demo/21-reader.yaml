@@ -1,9 +1,10 @@
 # Consumer pod for the demo. Opens the flow on its local MXL domain
 # with the `read-grain` example binary from go-mxl, which prints a
 # one-line summary of each grain it observes. The libmxl-intent.so
-# LD_PRELOAD shim turns the initial ENOENT (the mirror hasn't
-# materialized yet on this node) into a synchronous wait on the
-# agent's UDS — so read-grain's first open already sees the
+# LD_PRELOAD shim turns libmxl's first ENOENT probe (access/stat
+# on the <flowID>.mxl-flow directory before the mirror has
+# materialised) into a synchronous wait on the agent's UDS, so
+# the reader's first mxlCreateFlowReader already sees the
 # mirrored flow.
 #
 # Anti-affinity forces the pod onto a different node than the
