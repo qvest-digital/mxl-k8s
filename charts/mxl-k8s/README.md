@@ -2,7 +2,7 @@
 
 Kubernetes control plane for MXL (Media eXchange Layer). Installs the operator, per-node agent and gateway, CRDs, and RBAC.
 
-![Version: 1.0.0-rc.2](https://img.shields.io/badge/Version-1.0.0--rc.2-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.0.0](https://img.shields.io/badge/AppVersion-0.0.0-informational?style=flat-square)
+![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 0.0.0](https://img.shields.io/badge/AppVersion-0.0.0-informational?style=flat-square)
 
 ## Prerequisites
 
@@ -15,17 +15,20 @@ Kubernetes control plane for MXL (Media eXchange Layer). Installs the operator, 
 
 ## Install via Helm CLI
 
+<!-- x-release-please-start-version -->
 ```sh
 helm install mxl oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
-  --version 1.0.0-rc.2 \
+  --version 1.0.0-rc.3 \
   --namespace mxl-system --create-namespace
 ```
+<!-- x-release-please-end -->
 
 The chart installs the CRDs from its `crds/` directory on first
 install. Helm itself never updates or removes them.
 
 ## Install via FluxCD
 
+<!-- x-release-please-start-version -->
 ```yaml
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
@@ -47,7 +50,7 @@ spec:
   chart:
     spec:
       chart: mxl-k8s
-      version: "1.0.0-rc.2"
+      version: "1.0.0-rc.3"
       sourceRef:
         kind: HelmRepository
         name: mxl-k8s
@@ -59,6 +62,7 @@ spec:
     crds: CreateReplace
   values: {}
 ```
+<!-- x-release-please-end -->
 
 Track `:dev` instead of a semver range by setting `version: ">=0.0.0-0"`
 on the HelmRelease. The chart is published as `0.0.0-dev+sha.<short>`

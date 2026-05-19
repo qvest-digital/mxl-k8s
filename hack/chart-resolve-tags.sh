@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Resolve <component>.image.tag in charts/mxl-k8s/values.yaml from
-# .github/{prerelease,release}-manifest.json so the chart pins per
+# .github/release-please-manifest.json so the chart pins per
 # component instead of falling back to a single chart-wide
 # Chart.AppVersion.
 #
 # Usage:
 #   hack/chart-resolve-tags.sh <mode-or-version>
 #
-# The single argument is either an explicit mode (dev | rc | stable)
-# or a chart version string, in which case the mode is auto-detected:
-#   - "0.0.0-dev*"       -> dev      (track main HEAD; pin "dev")
-#   - any "<X.Y.Z>-..."  -> rc       (read .github/prerelease-manifest.json)
-#   - any other          -> stable   (read .github/release-manifest.json)
+# The single argument is either an explicit mode (dev | release)
+# or a chart version string, in which case the mode is auto-
+# detected:
+#   - "0.0.0-dev*"  -> dev      (track main HEAD; pin "dev")
+#   - anything else -> release  (read .github/release-please-manifest.json)
 #
 # The script writes in place. After running locally,
 # `git checkout -- charts/mxl-k8s/values.yaml` reverts.
@@ -22,15 +22,15 @@
 
 set -euo pipefail
 
-arg="${1:?usage: $0 <dev|rc|stable|<chart-version>>}"
+arg="${1:?usage: $0 <dev|release|<chart-version>>}"
 values=charts/mxl-k8s/values.yaml
+manifest=.github/release-please-manifest.json
 components=(operator agent gateway)
 
 case "$arg" in
-  dev|rc|stable)  mode="$arg" ;;
-  0.0.0-dev*)     mode=dev ;;
-  *-*)            mode=rc ;;
-  *)              mode=stable ;;
+  dev|release)  mode="$arg" ;;
+  0.0.0-dev*)   mode=dev ;;
+  *)            mode=release ;;
 esac
 
 case "$mode" in
@@ -39,15 +39,9 @@ case "$mode" in
       yq -i ".${c}.image.tag = \"dev\"" "$values"
     done
     ;;
-  rc)
+  release)
     for c in "${components[@]}"; do
-      v=$(jq -r ".\"${c}\"" .github/prerelease-manifest.json)
-      yq -i ".${c}.image.tag = \"v${v}\"" "$values"
-    done
-    ;;
-  stable)
-    for c in "${components[@]}"; do
-      v=$(jq -r ".\"${c}\"" .github/release-manifest.json)
+      v=$(jq -r ".\"${c}\"" "$manifest")
       yq -i ".${c}.image.tag = \"v${v}\"" "$values"
     done
     ;;
