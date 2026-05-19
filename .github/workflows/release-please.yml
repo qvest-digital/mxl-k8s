@@ -47,6 +47,7 @@ jobs:
       gateway_released:  ${{ steps.rp.outputs['gateway--release_created'] }}
       shim_released:     ${{ steps.rp.outputs['shim--release_created'] }}
       chart_released:    ${{ steps.rp.outputs['charts/mxl-k8s--release_created'] }}
+      chart_tag:         ${{ steps.rp.outputs['charts/mxl-k8s--tag_name'] }}
     steps:
       - id: rp
         uses: googleapis/release-please-action@v5
@@ -141,8 +142,38 @@ jobs:
     if: >
       needs.prerelease.outputs.chart_released == 'true' ||
       (github.event_name == 'workflow_dispatch' && inputs.force_release == 'charts/mxl-k8s')
+    outputs:
+      chart_released: ${{ steps.rp.outputs['charts/mxl-k8s--release_created'] }}
+      chart_tag:      ${{ steps.rp.outputs['charts/mxl-k8s--tag_name'] }}
     steps:
-      - uses: googleapis/release-please-action@v5
+      - id: rp
+        uses: googleapis/release-please-action@v5
         with:
           config-file: .github/release-config-chart.json
           manifest-file: .github/release-manifest.json
+
+  # Once a charts/mxl-k8s tag is cut (rc from prerelease, or stable
+  # from release-chart), package and push the chart with per-component
+  # image tags pinned. This is a reusable workflow call because
+  # GITHUB_TOKEN-created release events do not start downstream
+  # workflow runs, so chart.yml cannot listen on release:published.
+  # workflow_call is explicitly excepted from that restriction.
+  package-chart-prerelease:
+    needs: [prerelease]
+    if: needs.prerelease.outputs.chart_released == 'true'
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/chart.yml
+    with:
+      release_tag: ${{ needs.prerelease.outputs.chart_tag }}
+
+  package-chart-stable:
+    needs: [release-chart]
+    if: needs.release-chart.outputs.chart_released == 'true'
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/chart.yml
+    with:
+      release_tag: ${{ needs.release-chart.outputs.chart_tag }}
