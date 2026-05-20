@@ -1,10 +1,14 @@
 # mxl-fabrics-gateway: cgo binary linking libmxl + libmxl-fabrics
 # (via github.com/qvest-digital/go-mxl/fabrics). Builds in go-mxl's
-# published builder image and ships in its runtime image so libmxl,
-# libmxl-fabrics, and libfabric are already in place.
+# published builder image. Final runtime image swapped to
+# jonasohland/mxl-base build that bundles libfabric 2.4 (Amazon
+# EFA-installer rdma-core/libfabric .debs) + Jonas's read-only-mmap
+# patched libmxl-fabrics — the combination he flagged in
+# dmf-mxl/mxl#516 as the working EFA userspace stack.
 # Build context: repo root.
 
 ARG GO_MXL_TAG=1.0.0-rc.5
+ARG MXL_BASE_REF=jonasohland/mxl:3518992-fabrics-efa
 
 FROM ghcr.io/qvest-digital/go-mxl-builder:${GO_MXL_TAG} AS builder
 WORKDIR /workspace
@@ -16,40 +20,24 @@ RUN git config --global --add safe.directory '*' && \
     go mod download && \
     go build -trimpath -ldflags="-s -w" -o /out/mxl-fabrics-gateway ./cmd/mxl-fabrics-gateway
 
-FROM ghcr.io/qvest-digital/go-mxl-runtime:${GO_MXL_TAG} AS efa-libfabric
+# Pull libmxl install from go-mxl-runtime so the cgo gateway binary
+# resolves its libmxl SONAMEs at runtime — Jonas's base ships
+# libmxl-fabrics but installs to a different prefix; we keep
+# /opt/libmxl/lib as the canonical install path the gateway expects.
+FROM ghcr.io/qvest-digital/go-mxl-runtime:${GO_MXL_TAG} AS libmxl-source
 
-# Debian trixie's libfabric1 is built WITHOUT --enable-efa (see
-# https://sources.debian.org/data/main/libf/libfabric/2.1.0-1.1/debian/rules)
-# and libibverbs has no EFA userspace provider. As a result the
-# gateway running on AWS EKS EFA nodes reports
-#   fi_getinfo: provider efa output empty list
-# and falls through to TCP. Layer the AWS EFA installer's
-# in-container subset (libfabric + libibverbs + EFA userspace
-# provider) on top of go-mxl-runtime so the upstream image gains a
-# real EFA path while the rest of the libmxl install stays untouched.
-ARG EFA_INSTALLER_VERSION=latest
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      ca-certificates curl tar xz-utils \
- && curl -fsSL "https://efa-installer.amazonaws.com/aws-efa-installer-${EFA_INSTALLER_VERSION}.tar.gz" \
-      -o /tmp/efa.tar.gz \
- && tar -xzf /tmp/efa.tar.gz -C /tmp \
- && cd /tmp/aws-efa-installer \
- # --skip-kmod / --skip-limit-conf / -k: don't touch host kernel
- # modules or rlimits — container talks to host-loaded EFA driver
- # through the device files the EFA k8s device plugin injects.
- # -n: no kernel-module rebuild.
- && ./efa_installer.sh -y -n --skip-kmod --skip-limit-conf \
- && cd / \
- && rm -rf /tmp/efa.tar.gz /tmp/aws-efa-installer \
- && rm -rf /var/lib/apt/lists/*
+FROM ${MXL_BASE_REF}
 
-# go-mxl-runtime sets LD_LIBRARY_PATH=/opt/libmxl/lib, which means
-# Debian's libfabric1 (no EFA provider) is found before the AWS
-# installer's libfabric in /opt/amazon/efa/lib. Prepend the AWS path
-# so libmxl-fabrics dlopen()s the EFA-capable build.
-ENV LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/libmxl/lib
+# Most jonasohland/mxl images run as the unprivileged `mxl` user;
+# layer copies + entrypoint need root permissions in the container.
+USER root
 
-FROM efa-libfabric
+COPY --from=libmxl-source /opt/libmxl/ /opt/libmxl/
+
+# Jonas's base installs libfabric (with EFA provider) into /usr/lib.
+# Keep /opt/libmxl/lib in front so libmxl + libmxl-fabrics linkage
+# stays consistent with the gateway binary's build environment.
+ENV LD_LIBRARY_PATH=/opt/libmxl/lib:/usr/lib:/usr/local/lib
+
 COPY --from=builder /out/mxl-fabrics-gateway /usr/local/bin/mxl-fabrics-gateway
 ENTRYPOINT ["/usr/local/bin/mxl-fabrics-gateway"]
