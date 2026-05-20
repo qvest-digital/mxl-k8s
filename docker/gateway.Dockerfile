@@ -44,6 +44,12 @@ RUN apt-get update \
  && rm -rf /tmp/efa.tar.gz /tmp/aws-efa-installer \
  && rm -rf /var/lib/apt/lists/*
 
+# go-mxl-runtime sets LD_LIBRARY_PATH=/opt/libmxl/lib, which means
+# Debian's libfabric1 (no EFA provider) is found before the AWS
+# installer's libfabric in /opt/amazon/efa/lib. Prepend the AWS path
+# so libmxl-fabrics dlopen()s the EFA-capable build.
+ENV LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/libmxl/lib
+
 FROM efa-libfabric
 COPY --from=builder /out/mxl-fabrics-gateway /usr/local/bin/mxl-fabrics-gateway
 ENTRYPOINT ["/usr/local/bin/mxl-fabrics-gateway"]
