@@ -128,8 +128,16 @@ across two worker nodes. Requires Docker, [`kind`][kind] >= 0.20,
 and `kubectl`. Linux host with a kernel >= 5.17 (the agent's
 `fanotify` needs `FAN_REPORT_DFID_NAME`).
 
+For docker run:
+
 ```sh
 make kind-up
+```
+
+or for podman:
+
+```sh
+make kind-down CONTAINER_RUNTIME=podman
 ```
 
 That builds every component image locally, brings up a
