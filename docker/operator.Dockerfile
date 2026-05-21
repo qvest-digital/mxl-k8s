@@ -3,7 +3,7 @@
 
 ARG GO_VERSION=1.26
 
-FROM golang:${GO_VERSION}-bookworm AS builder
+FROM docker.io/library/golang:${GO_VERSION}-bookworm AS builder
 
 WORKDIR /workspace
 COPY api/ api/

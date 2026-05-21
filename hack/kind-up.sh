@@ -60,7 +60,7 @@ if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
     echo "  Fix:  podman machine stop && podman machine set --rootful && podman machine start" >&2
     exit 1
   fi
-  mem=$(podman machine inspect 2>/dev/null | sed -n 's/.*"Memory": \([0-9]*\).*/\1/p')
+  mem=$(podman machine inspect 2>/dev/null | sed -n 's/.*"Memory": \([0-9]*\).*/\1/p' || true)
   if [[ -n "$mem" ]] && (( mem < 4096 )); then
     echo "WARNING: podman machine has ${mem} MB RAM; 4096+ MB recommended for a 3-node KIND cluster." >&2
     echo "  Fix:  podman machine stop && podman machine set --memory 4096 && podman machine start" >&2
