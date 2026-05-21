@@ -81,9 +81,16 @@ host setup is AWS-specific.
 - `/dev/infiniband/uverbs0` is present once the module is loaded;
   no PFC or DSCP knobs to fuss with (EFA is its own protocol on
   the Nitro fabric).
-- Use one of the EFA-capable instance families. AWS publishes
-  the list per-region; broadly anything in the `c5n`, `c6gn`,
-  `c7gn`, `p4d`, `p5`, `m5dn`, `r5n` families and several others.
+- libmxl-fabrics moves grains over one-sided RDMA writes: the
+  initiator registers its source region with `FI_WRITE` and the
+  target registers its destination region with `FI_REMOTE_WRITE`.
+  EFA support alone is therefore not sufficient -- the instance
+  must also support RDMA write. Pick a row whose RDMA-write
+  column reads `Yes` in AWS's [Supported instance types
+  table](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html#efa-instance-types).
+  Setting up a flow on an EFA-enabled instance without RDMA-write
+  support fails at memory-region registration; upstream context
+  is in [dmf-mxl/mxl#516](https://github.com/dmf-mxl/mxl/issues/516).
 
 ### Per-pod
 

@@ -267,7 +267,9 @@ selects the libmxl-fabrics provider for the cross-node transfer:
 - `verbs`: Linux verbs / `librdmacm` / RoCE / InfiniBand. Needs
   RDMA hardware, kernel modules, and `/dev/infiniband`. See
   [`docs/RDMA.md`](./RDMA.md).
-- `efa`: AWS Elastic Fabric Adapter. Needs EFA-capable instances.
+- `efa`: AWS Elastic Fabric Adapter. Host setup and the
+  instance-type requirement (EFA support alone is not enough)
+  are documented in [`docs/RDMA.md`](./RDMA.md).
 - `shm`: host-local shared memory. Used between gateway endpoints
   that share a node.
 - `auto`: let libmxl-fabrics pick a provider at runtime.
