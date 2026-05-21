@@ -137,7 +137,7 @@ make kind-up
 or for podman:
 
 ```sh
-make kind-down CONTAINER_RUNTIME=podman
+make kind-up CONTAINER_RUNTIME=podman
 ```
 
 That builds every component image locally, brings up a
