@@ -4,6 +4,11 @@
 set -euo pipefail
 
 CLUSTER_NAME="${KIND_CLUSTER:-mxl-k8s-demo}"
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
+
+if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+  export KIND_EXPERIMENTAL_PROVIDER=podman
+fi
 
 if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
   echo "Deleting KIND cluster ${CLUSTER_NAME}"
