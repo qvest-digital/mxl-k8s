@@ -4,7 +4,12 @@
 set -euo pipefail
 
 CLUSTER_NAME="${KIND_CLUSTER:-mxl-k8s-demo}"
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 KUBECTL=(kubectl --context "kind-${CLUSTER_NAME}")
+
+if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+  export KIND_EXPERIMENTAL_PROVIDER=podman
+fi
 
 if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
   echo "KIND cluster ${CLUSTER_NAME} not present. Run: make kind-up"

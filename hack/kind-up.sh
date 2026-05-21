@@ -8,19 +8,28 @@
 # reloads them, and re-applies the demo. Pair with `hack/kind-down.sh`
 # to start clean.
 #
-# Requires: docker, kind >= 0.20, kubectl, a Linux kernel >= 5.17 on
-# the host (KIND nodes share it; the agent's fanotify needs
+# Requires: docker or podman, kind >= 0.20, kubectl, a Linux kernel
+# >= 5.17 on the host (KIND nodes share it; the agent's fanotify needs
 # FAN_REPORT_DFID_NAME).
+#
+# Set CONTAINER_RUNTIME=podman (or pass via the Makefile) to use
+# Podman instead of Docker.
 
 set -euo pipefail
 
 CLUSTER_NAME="${KIND_CLUSTER:-mxl-k8s-demo}"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../" && pwd)"
 KIND_CONFIG="${REPO_ROOT}/hack/kind-config.yaml"
 KUBECTL=(kubectl --context "kind-${CLUSTER_NAME}")
 
+# When using podman, tell KIND to use the podman provider.
+if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+  export KIND_EXPERIMENTAL_PROVIDER=podman
+fi
+
 MIRROR_TIMEOUT_SECS="${MIRROR_TIMEOUT_SECS:-180}"
-ROLLOUT_TIMEOUT_SECS="${ROLLOUT_TIMEOUT_SECS:-180}"
+ROLLOUT_TIMEOUT_SECS="${ROLLOUT_TIMEOUT_SECS:-300}"
 
 IMAGE_DOCKERFILES=(
   docker/operator.Dockerfile
@@ -40,9 +49,23 @@ IMAGE_TAGS=(
 log()  { printf '\n=== %s ===\n' "$*" >&2; }
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing required tool: $1" >&2; exit 1; }; }
 
-need docker
+need "$CONTAINER_RUNTIME"
 need kind
 need kubectl
+
+# Podman preflight: KIND requires a rootful machine with enough RAM.
+if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+  if podman machine inspect 2>/dev/null | grep -q '"Rootful": false'; then
+    echo "ERROR: podman machine is not rootful. KIND requires rootful mode." >&2
+    echo "  Fix:  podman machine stop && podman machine set --rootful && podman machine start" >&2
+    exit 1
+  fi
+  mem=$(podman machine inspect 2>/dev/null | sed -n 's/.*"Memory": \([0-9]*\).*/\1/p')
+  if [[ -n "$mem" ]] && (( mem < 4096 )); then
+    echo "WARNING: podman machine has ${mem} MB RAM; 4096+ MB recommended for a 3-node KIND cluster." >&2
+    echo "  Fix:  podman machine stop && podman machine set --memory 4096 && podman machine start" >&2
+  fi
+fi
 
 log "Building images"
 cd "$REPO_ROOT"
@@ -50,20 +73,41 @@ for i in "${!IMAGE_DOCKERFILES[@]}"; do
   dockerfile="${IMAGE_DOCKERFILES[$i]}"
   tag="${IMAGE_TAGS[$i]}"
   echo "  -> ${tag}"
-  docker build -q -f "${dockerfile}" -t "${tag}" . > /dev/null
+  $CONTAINER_RUNTIME build -q -f "${dockerfile}" -t "${tag}" . > /dev/null
 done
 
-if ! kind get clusters | grep -qx "$CLUSTER_NAME"; then
+CLUSTER_REUSED=false
+if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
+  # Verify the existing cluster's nodes are actually running.
+  if ! $CONTAINER_RUNTIME ps --filter "label=io.x-k8s.kind.cluster=$CLUSTER_NAME" --format '{{.Status}}' 2>/dev/null | grep -qi "up\|running"; then
+    log "KIND cluster ${CLUSTER_NAME} exists but nodes are not running; recreating"
+    kind delete cluster --name "$CLUSTER_NAME"
+    kind create cluster --name "$CLUSTER_NAME" --config "$KIND_CONFIG" --wait 60s
+  else
+    log "KIND cluster ${CLUSTER_NAME} already exists; reusing"
+    CLUSTER_REUSED=true
+  fi
+else
   log "Creating KIND cluster ${CLUSTER_NAME}"
   kind create cluster --name "$CLUSTER_NAME" --config "$KIND_CONFIG" --wait 60s
-else
-  log "KIND cluster ${CLUSTER_NAME} already exists; reusing"
 fi
 
 log "Loading images into the cluster"
 for tag in "${IMAGE_TAGS[@]}"; do
   echo "  -> ${tag}"
-  kind load docker-image --name "$CLUSTER_NAME" "$tag"
+  if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+    # Podman stores unqualified images under localhost/, but Kubernetes
+    # resolves them as docker.io/. Re-tag so containerd inside the
+    # KIND nodes finds them under the name the pods actually request.
+    canonical="docker.io/${tag}"
+    $CONTAINER_RUNTIME tag "$tag" "$canonical" 2>/dev/null || true
+    tmptar="$(mktemp "${TMPDIR:-/tmp}/kind-image-XXXXXX")"
+    $CONTAINER_RUNTIME save -o "$tmptar" "$canonical"
+    kind load image-archive --name "$CLUSTER_NAME" "$tmptar"
+    rm -f "$tmptar"
+  else
+    kind load docker-image --name "$CLUSTER_NAME" "$tag"
+  fi
 done
 
 log "Installing CRDs"
@@ -82,19 +126,22 @@ log "Installing CRDs"
 log "Applying examples/tcp-demo"
 "${KUBECTL[@]}" apply -k "${REPO_ROOT}/examples/tcp-demo/"
 
-# kubelet caches images by tag, so re-loading a :dev image doesn't
-# get picked up by existing pods. Force a rollout restart of the
-# DaemonSets / Deployment, and replace the bare demo Pods so the
-# whole demo runs against the freshly-loaded images.
-if "${KUBECTL[@]}" -n mxl-system get deploy/mxl-operator >/dev/null 2>&1; then
-  log "Rolling out latest images"
-  "${KUBECTL[@]}" -n mxl-system rollout restart deploy/mxl-operator ds/mxl-domain-agent ds/mxl-fabrics-gateway || true
+# On re-runs the kubelet caches images by tag, so re-loading a :dev
+# image doesn't get picked up by existing pods. Force a rollout
+# restart and replace bare demo pods so everything runs against the
+# freshly-loaded images. Skip this on a brand-new cluster where the
+# first apply already schedules the correct images.
+if [[ "$CLUSTER_REUSED" == "true" ]]; then
+  if "${KUBECTL[@]}" -n mxl-system get deploy/mxl-operator >/dev/null 2>&1; then
+    log "Rolling out latest images"
+    "${KUBECTL[@]}" -n mxl-system rollout restart deploy/mxl-operator ds/mxl-domain-agent ds/mxl-fabrics-gateway || true
+  fi
+  # Wait for the deletes to complete -- re-applying while a pod is
+  # still Terminating leaves the new pod in limbo (apply observes
+  # the live object and treats it as a no-op).
+  "${KUBECTL[@]}" -n mxl-system delete pod mxl-tcp-demo-writer mxl-tcp-demo-reader --ignore-not-found --force --grace-period=0
+  "${KUBECTL[@]}" apply -k "${REPO_ROOT}/examples/tcp-demo/"
 fi
-# Wait for the deletes to complete -- re-applying while a pod is
-# still Terminating leaves the new pod in limbo (apply observes
-# the live object and treats it as a no-op).
-"${KUBECTL[@]}" -n mxl-system delete pod mxl-tcp-demo-writer mxl-tcp-demo-reader --ignore-not-found
-"${KUBECTL[@]}" apply -k "${REPO_ROOT}/examples/tcp-demo/"
 
 log "Waiting for control-plane workloads (timeout ${ROLLOUT_TIMEOUT_SECS}s)"
 "${KUBECTL[@]}" -n mxl-system rollout status deploy/mxl-operator         --timeout="${ROLLOUT_TIMEOUT_SECS}s"

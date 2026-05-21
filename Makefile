@@ -211,17 +211,21 @@ mocks-check: mocks
 # `make kind-status` prints a quick status summary.
 #
 # Override the cluster name with KIND_CLUSTER=<name>.
+# Use Podman instead of Docker: CONTAINER_RUNTIME=podman
+#   e.g. `make kind-up CONTAINER_RUNTIME=podman`
 
 KIND_CLUSTER ?= mxl-k8s-demo
+# Container runtime: "docker" (default) or "podman".
+CONTAINER_RUNTIME ?= docker
 
 .PHONY: kind-up
 kind-up:
-	KIND_CLUSTER=$(KIND_CLUSTER) bash hack/kind-up.sh
+	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) bash hack/kind-up.sh
 
 .PHONY: kind-down
 kind-down:
-	KIND_CLUSTER=$(KIND_CLUSTER) bash hack/kind-down.sh
+	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) bash hack/kind-down.sh
 
 .PHONY: kind-status
 kind-status:
-	KIND_CLUSTER=$(KIND_CLUSTER) bash hack/kind-status.sh
+	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) bash hack/kind-status.sh
