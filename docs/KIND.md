@@ -110,11 +110,27 @@ when the gateway has the fabric handles open and is transferring).
 make kind-down
 ```
 
-tears the cluster down. Image layers stay in your local Docker
-cache; the next `make kind-up` reuses them.
+tears the cluster down. Image layers stay in your local
+container-runtime cache; the next `make kind-up` reuses them.
 
 ## Cluster name
 
 `make kind-up` looks at the `KIND_CLUSTER` env var (default
 `mxl-k8s-demo`) so you can keep multiple parallel clusters if
 needed. The status / down targets read the same variable.
+
+## Container runtime
+
+Both Docker and Podman are supported. The default is Docker;
+select Podman with `CONTAINER_RUNTIME=podman`, which must be
+passed to every `kind-*` target you invoke:
+
+```sh
+make kind-up     CONTAINER_RUNTIME=podman
+make kind-status CONTAINER_RUNTIME=podman
+make kind-down   CONTAINER_RUNTIME=podman
+```
+
+With Podman the machine must be rootful and have enough memory
+for a three-node cluster; `kind-up.sh` checks this and prints
+the fix command if either condition isn't met.
