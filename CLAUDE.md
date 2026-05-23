@@ -3,6 +3,52 @@
 Rules for working in this repository. Read them before opening a PR or
 running an automated assistant against this tree.
 
+## STOP. Use a git worktree.
+
+Before ANY mutation of this repository -- edit, write, commit,
+branch create, push, rebase, `gh pr create` -- the very first
+action of the session is to set up a dedicated `git worktree`.
+This rule has no exceptions. There is no change small enough to
+skip it: typos, single-line fixes, doc-only PRs, even edits to
+this file itself all require the same worktree dance.
+
+The repository is worked on by multiple parallel sessions and
+editors at once. Two writers in the same tree corrupt staging
+state, step on each other's branches, and lose work without
+warning -- the rule exists to make that physically impossible,
+not to be polite about it.
+
+Worktrees ALWAYS live under `<repo>/.claude/worktrees/`. Not
+next to the repo, not in `/tmp`, not anywhere else -- that path
+is the project's established convention and the location the
+harness manages.
+
+The preferred path is to delegate the mutation to a sub-agent
+with `isolation: "worktree"` on the Agent call. The harness
+then creates `<repo>/.claude/worktrees/agent-<id>/` automatically
+with a unique id, so two concurrent sub-agents never share a
+path. Do not assume a worktree from earlier in the session is
+still mounted.
+
+For a manual worktree (no sub-agent), pick a short random tag
+so two sessions on the same topic never collide, and place the
+worktree under `.claude/worktrees/`:
+
+```sh
+git fetch origin
+id=$(openssl rand -hex 4)
+git worktree add .claude/worktrees/<topic>-$id -b <topic> origin/main
+cd .claude/worktrees/<topic>-$id
+```
+
+All subsequent edits, commits, and pushes happen from the
+worktree.
+
+The only thing allowed in the main checkout is read-only
+inspection: `git log`, `git diff`, `git status`, `gh pr view`,
+reading files, grep / find. Anything that touches the index, the
+working tree, the branch list, or the remote is out.
+
 ## Documentation
 
 - Keep `README.md` and code comments tight. State facts; don't speculate.
@@ -40,10 +86,6 @@ installed.
   prohibited. Force-pushing to a feature branch is only permitted
   with explicit approval, because another editor may be reviewing
   the branch or checked out against it.
-- Use a separate `git worktree` per branch when working alongside
-  other editors on the repository. Worktrees keep the main checkout
-  clean while sharing the object database, so parallel sessions do
-  not collide over staged changes or the working tree.
 - Merge PRs with **Squash and merge**. release-please derives version
   bumps and changelog entries from the resulting single commit on
   `main`, and a noisy merge of dozens of intermediate commits would
@@ -92,22 +134,31 @@ gets a changelog entry and how the version bumps. Two consequences:
 ### Working in a worktree
 
 From the main checkout, create a worktree pinned to a feature
-branch tracking `origin/main`:
+branch tracking `origin/main`. The worktree lives under
+`.claude/worktrees/`, the project's canonical worktree location,
+and gets a short random tag so two sessions on the same topic
+never share a path:
 
 ```sh
 git fetch origin
-git worktree add ../mxl-k8s.<topic> -b <topic> origin/main
-cd ../mxl-k8s.<topic>
+id=$(openssl rand -hex 4)
+git worktree add .claude/worktrees/<topic>-$id -b <topic> origin/main
+cd .claude/worktrees/<topic>-$id
 ```
 
 When the PR has merged, drop the worktree, the local branch, and
 the now-stale remote tracking ref:
 
 ```sh
-git worktree remove ../mxl-k8s.<topic>
+git worktree remove .claude/worktrees/<topic>-<id>
 git branch -D <topic>
 git fetch --prune origin
 ```
+
+`git worktree remove` is rarely needed when sub-agents manage the
+worktree: the harness cleans up its own `agent-<id>` directories.
+The teardown block above is for the manual `git worktree add`
+case.
 
 ## Commits
 
