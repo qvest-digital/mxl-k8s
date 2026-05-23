@@ -62,19 +62,18 @@ working tree, the branch list, or the remote is out.
 
 ## Multi-module workspace
 
-This repo is a Go workspace with five modules:
+This repo is a Go workspace with four modules:
 
 | Path | Module | CGo |
 | --- | --- | --- |
 | `api/` | `github.com/qvest-digital/mxl-k8s/api` | no |
-| `ipc/` | `github.com/qvest-digital/mxl-k8s/ipc` | no |
 | `operator/` | `github.com/qvest-digital/mxl-k8s/operator` | no |
 | `agent/` | `github.com/qvest-digital/mxl-k8s/agent` | libmxl (via `go-mxl`) |
 | `gateway/` | `github.com/qvest-digital/mxl-k8s/gateway` | libmxl + libmxl-fabrics (via `go-mxl/fabrics`) |
 
-`go.work` at the repo root enumerates all five `use` paths. Don't add
-a `replace` directive to it. `api`, `ipc`, and `operator` must not gain
-any CGo dependency — they have to build on a host without libmxl
+`go.work` at the repo root enumerates all four `use` paths. Don't add
+a `replace` directive to it. `api` and `operator` must not gain any
+CGo dependency -- they have to build on a host without libmxl
 installed.
 
 ## Branches and PRs
@@ -219,7 +218,7 @@ the work that produced it. The same rules apply to PR descriptions.
 
 ## Build
 
-- `api`, `ipc`, and `operator` are pure Go.
+- `api` and `operator` are pure Go.
 - `agent` and `gateway` are cgo. `libmxl` (and for the gateway,
   `libmxl-fabrics`) must be installed with headers and a pkg-config file
   before `go build` works in those modules. See `docs/BUILD.md`.
@@ -286,5 +285,5 @@ diff. Two consequences for contributors:
 
 ## When in doubt
 
-Ask the maintainer before changing the public Go API of `api` or `ipc`,
+Ask the maintainer before changing the public Go API of `api`,
 the module paths, or the release/tagging strategy.
