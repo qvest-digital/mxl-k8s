@@ -18,21 +18,31 @@ state, step on each other's branches, and lose work without
 warning -- the rule exists to make that physically impossible,
 not to be polite about it.
 
-The required moves (also documented under "Working in a worktree"
-below):
+Worktrees ALWAYS live under `<repo>/.claude/worktrees/`. Not
+next to the repo, not in `/tmp`, not anywhere else -- that path
+is the project's established convention and the location the
+harness manages.
+
+The preferred path is to delegate the mutation to a sub-agent
+with `isolation: "worktree"` on the Agent call. The harness
+then creates `<repo>/.claude/worktrees/agent-<id>/` automatically
+with a unique id, so two concurrent sub-agents never share a
+path. Do not assume a worktree from earlier in the session is
+still mounted.
+
+For a manual worktree (no sub-agent), pick a short random tag
+so two sessions on the same topic never collide, and place the
+worktree under `.claude/worktrees/`:
 
 ```sh
 git fetch origin
-git worktree add ../mxl-k8s.<topic> -b <topic> origin/main
-cd ../mxl-k8s.<topic>
+id=$(openssl rand -hex 4)
+git worktree add .claude/worktrees/<topic>-$id -b <topic> origin/main
+cd .claude/worktrees/<topic>-$id
 ```
 
 All subsequent edits, commits, and pushes happen from the
 worktree.
-
-When delegating to a sub-agent for any mutation, pass
-`isolation: "worktree"` on the Agent call. Do not assume a
-worktree from earlier in the session is still mounted.
 
 The only thing allowed in the main checkout is read-only
 inspection: `git log`, `git diff`, `git status`, `gh pr view`,
@@ -125,22 +135,31 @@ gets a changelog entry and how the version bumps. Two consequences:
 ### Working in a worktree
 
 From the main checkout, create a worktree pinned to a feature
-branch tracking `origin/main`:
+branch tracking `origin/main`. The worktree lives under
+`.claude/worktrees/`, the project's canonical worktree location,
+and gets a short random tag so two sessions on the same topic
+never share a path:
 
 ```sh
 git fetch origin
-git worktree add ../mxl-k8s.<topic> -b <topic> origin/main
-cd ../mxl-k8s.<topic>
+id=$(openssl rand -hex 4)
+git worktree add .claude/worktrees/<topic>-$id -b <topic> origin/main
+cd .claude/worktrees/<topic>-$id
 ```
 
 When the PR has merged, drop the worktree, the local branch, and
 the now-stale remote tracking ref:
 
 ```sh
-git worktree remove ../mxl-k8s.<topic>
+git worktree remove .claude/worktrees/<topic>-<id>
 git branch -D <topic>
 git fetch --prune origin
 ```
+
+`git worktree remove` is rarely needed when sub-agents manage the
+worktree: the harness cleans up its own `agent-<id>` directories.
+The teardown block above is for the manual `git worktree add`
+case.
 
 ## Commits
 
