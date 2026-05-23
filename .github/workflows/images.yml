@@ -492,18 +492,18 @@ jobs:
 
       - uses: azure/setup-kubectl@v4
 
-      # `make kind-up BUILD=<tag>` pulls images from GHCR; the
-      # per-PR tag the merge job just produced is private to the
-      # repo, so the runner must log in first.
+      # `make kind-up BUILD=<tag>` pulls images from GHCR. GHCR
+      # packages are private regardless of event, so the runner
+      # must log in first.
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Bring up KIND demo against PR-built images
+      - name: Bring up KIND demo against merge-published images
         env:
-          BUILD: pr-${{ github.event.number }}-${{ needs.meta.outputs.sha_short }}
+          BUILD: ${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.number, needs.meta.outputs.sha_short) || 'dev' }}
           IMAGE_REGISTRY_RAW: ghcr.io/${{ github.repository_owner }}/mxl-k8s
           KIND_CLUSTER: mxl-k8s-ci
           # Hosted runners are slower on first image pull than a
