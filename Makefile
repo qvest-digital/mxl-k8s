@@ -209,6 +209,11 @@ mocks-check: mocks
 #                    MxlFlowMirror to reach Ready.
 # `make kind-down`   deletes the cluster.
 # `make kind-status` prints a quick status summary.
+# `make kind-test`   runs the integration suite in
+#                    test/integration/kind against the cluster spun
+#                    up by `make kind-up`. Failure diagnostics land
+#                    under KIND_DIAG_DIR for the kind-integration
+#                    GitHub Actions job to upload as an artifact.
 #
 # Override the cluster name with KIND_CLUSTER=<name>.
 # Use Podman instead of Docker: CONTAINER_RUNTIME=podman
@@ -229,6 +234,8 @@ KIND_CLUSTER ?= mxl-k8s-demo
 CONTAINER_RUNTIME ?= docker
 # Image source: "local" (default) or a CI-produced image tag.
 BUILD ?= local
+# Where the integration suite writes failure diagnostics.
+KIND_DIAG_DIR ?= $(CURDIR)/kind-diagnostics
 
 .PHONY: kind-up
 kind-up:
@@ -241,3 +248,7 @@ kind-down:
 .PHONY: kind-status
 kind-status:
 	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) bash hack/kind-status.sh
+
+.PHONY: kind-test
+kind-test:
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND_DIAG_DIR=$(KIND_DIAG_DIR) bash test/integration/kind/run.sh

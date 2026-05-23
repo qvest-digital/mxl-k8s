@@ -161,3 +161,30 @@ any side effects:
 ```
 ERROR: BUILD must be 'local' or a non-empty image tag
 ```
+
+## Integration suite
+
+`make kind-test` runs the bash suite under
+[`test/integration/kind/`](../test/integration/kind/) against an
+already-running cluster. Cases assert the five CRDs reach
+`Established`, the operator and the agent / gateway DaemonSets
+finish rolling out, `/healthz` and `/readyz` on each probe port
+answer `200`, every `MxlFlowMirror` reaches `phase=Ready` with a
+non-empty `status.targetInfo`, and the reader pod's `idx=` log
+lines actually advance over a sample window (catches the "Ready
+but no grains flowing" failure mode).
+
+```sh
+make kind-up
+make kind-test
+make kind-down
+```
+
+The same suite drives the `kind-integration` GitHub Actions job in
+`.github/workflows/images.yml`: on a same-repo PR that touches
+anything `make kind-up` consumes, the job pulls the PR's per-tag
+images from GHCR (`BUILD=pr-<num>-<sha>`), brings up a cluster on
+the runner, and runs `make kind-test`. New assertions land as
+`test/integration/kind/cases/<NN>-<name>.sh`; no runner changes
+required. See the suite's [`README.md`](../test/integration/kind/README.md)
+for the case-authoring conventions.

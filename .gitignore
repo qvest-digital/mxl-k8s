@@ -27,6 +27,9 @@ profile.cov
 bin/
 testbin/
 
+# KIND integration suite failure diagnostics
+kind-diagnostics/
+
 # Editor/IDE
 # .idea/
 # .vscode/
