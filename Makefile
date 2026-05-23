@@ -229,3 +229,14 @@ kind-down:
 .PHONY: kind-status
 kind-status:
 	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) bash hack/kind-status.sh
+
+# `make kind-test` runs the integration test in test/integration/kind
+# against the cluster spun up by `make kind-up` (or `make kind`).
+# Diagnostics on failure are written under KIND_DIAG_DIR for the
+# kind-integration GitHub Actions job to upload as an artifact.
+KIND_DIAG_DIR ?= $(CURDIR)/kind-diagnostics
+
+.PHONY: kind-test
+kind-test:
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND_DIAG_DIR=$(KIND_DIAG_DIR) \
+	    bash test/integration/kind/kind-test.sh
