@@ -159,18 +159,6 @@ is forced by what libmxl exposes:
   see the attempted call *and* re-issue it after the agent has
   materialised the file.
 
-## `ipc/v1` is a contract, not a runtime
-
-[`ipc/v1/control.proto`](../../ipc/v1/control.proto) defines a
-`LocalControl` gRPC service (`OpenMirror`, `CloseMirror`,
-`ListLocalEndpoints`) intended for agent -> gateway local control
-over a UDS. The proto's own header is explicit: "Cross-node gateway
-coordination happens through the Kubernetes API by way of
-`MxlFlowMirror`; there is no gateway-to-gateway gRPC surface in this
-version." No code outside of the generated bindings imports
-`ipc/v1` in the current tree -- it's a forward-looking contract,
-nothing more.
-
 ## End-to-end: applying an `MxlReceiver`
 
 The per-component workflows above describe what each process does in

@@ -1,7 +1,5 @@
 CONTROLLER_TOOLS_VERSION ?= v0.18.0
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
-BUF_VERSION ?= v1.50.0
-BUF ?= go run github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
 
 GOTESTSUM_VERSION ?= v1.13.0
 GOTESTSUM ?= go run gotest.tools/gotestsum@$(GOTESTSUM_VERSION)
@@ -15,11 +13,11 @@ COVERAGE_DIR ?= $(CURDIR)/bin
 TEST_TIMEOUT ?= 5m
 TEST_ARGS ?= -race -timeout $(TEST_TIMEOUT)
 
-MODULES := api ipc operator agent gateway
-PURE_TEST_MODULES := api ipc operator agent
+MODULES := api operator agent gateway
+PURE_TEST_MODULES := api operator agent
 
 .PHONY: all
-all: gen-api gen-ipc lint build
+all: gen-api lint build
 
 .PHONY: lint
 lint:
@@ -48,26 +46,13 @@ gen-api:
 gen-rbac:
 	$(CONTROLLER_GEN) rbac:roleName=mxl-operator paths=./operator/... output:rbac:dir=./config/rbac
 
-.PHONY: gen-ipc
-gen-ipc:
-	cd ipc && $(BUF) generate
-
 CRD_GEN_PATHS := config/ api/v1alpha1/zz_generated.deepcopy.go
-IPC_GEN_PATHS := ipc/v1
 
 .PHONY: manifests-check
 manifests-check: gen-api gen-rbac
 	@if ! git diff --exit-code -- $(CRD_GEN_PATHS); then \
 		echo "Generated CRD/DeepCopy/RBAC files are out of sync."; \
 		echo "Run 'make gen-api gen-rbac' and commit the result."; \
-		exit 1; \
-	fi
-
-.PHONY: ipc-check
-ipc-check: gen-ipc
-	@if ! git diff --exit-code -- $(IPC_GEN_PATHS); then \
-		echo "Generated proto files are out of sync."; \
-		echo "Run 'make gen-ipc' and commit the result."; \
 		exit 1; \
 	fi
 
@@ -122,10 +107,10 @@ HELM_SCHEMA ?= $(shell go env GOPATH)/bin/helm-schema
 HELM_DOCS   ?= $(shell go env GOPATH)/bin/helm-docs
 
 .PHONY: generated-check
-generated-check: manifests-check ipc-check chart-check
+generated-check: manifests-check chart-check
 
 # --- Test targets ---
-# `make test`         runs unit tests across pure-Go modules (api, ipc,
+# `make test`         runs unit tests across pure-Go modules (api,
 #                     operator, agent). The operator suite needs the
 #                     kube-apiserver + etcd binaries that envtest provides;
 #                     they are fetched into $(ENVTEST_DIR) on demand and
