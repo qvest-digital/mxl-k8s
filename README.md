@@ -160,12 +160,11 @@ and what to look at if convergence stalls.
 
 ## Repository layout
 
-The repo is a Go workspace with five modules:
+The repo is a Go workspace with four modules:
 
 | Module | Path | Purpose |
 | --- | --- | --- |
 | `api` | `github.com/qvest-digital/mxl-k8s/api` | CRD types. |
-| `ipc` | `github.com/qvest-digital/mxl-k8s/ipc` | gRPC contract between agent and gateway. |
 | `operator` | `github.com/qvest-digital/mxl-k8s/operator` | Cluster operator that reconciles the CRDs. |
 | `agent` | `github.com/qvest-digital/mxl-k8s/agent` | Per-node DaemonSet. Links libmxl via [`go-mxl`][go-mxl]. |
 | `gateway` | `github.com/qvest-digital/mxl-k8s/gateway` | Per-node DaemonSet. Links libmxl-fabrics via [`go-mxl/fabrics`][go-mxl]. |

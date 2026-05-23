@@ -13,10 +13,10 @@ pure Go.
 
 ## Pure-Go modules
 
-`api`, `ipc`, and `operator` build without any system libraries:
+`api` and `operator` build without any system libraries:
 
 ```sh
-for m in api ipc operator; do (cd "$m" && go build ./... && go vet ./...); done
+for m in api operator; do (cd "$m" && go build ./... && go vet ./...); done
 ```
 
 ## CGo modules (libmxl + libmxl-fabrics)
