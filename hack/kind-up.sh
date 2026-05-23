@@ -25,6 +25,12 @@
 #
 # Set IMAGE_REGISTRY=<prefix> to override the registry prefix used
 # in BUILD=<tag> mode. Default is ghcr.io/qvest-digital/mxl-k8s.
+#
+# Set BUILT_COMPONENTS=<comma-list> in BUILD=<tag> mode to restrict
+# BUILD=<tag> to a subset of components; the rest are pulled at
+# BUILD_FALLBACK_TAG (default `dev`). Empty BUILT_COMPONENTS keeps
+# the all-components behavior, which is what a local `BUILD=<tag>`
+# invocation wants.
 
 set -euo pipefail
 
@@ -88,15 +94,34 @@ IMAGE_COMPONENTS=(
 
 # Resolve the image-tag list this run actually loads into KIND.
 # In local mode this is IMAGE_LOCAL_TAGS verbatim. In tag mode it
-# becomes ghcr.io/<owner>/mxl-k8s/<component>:<BUILD_TAG>.
+# becomes ghcr.io/<owner>/mxl-k8s/<component>:<BUILD_TAG>, with
+# BUILT_COMPONENTS optionally narrowing the BUILD_TAG to a subset
+# and BUILD_FALLBACK_TAG covering the rest.
 IMAGE_TAGS=()
 if [[ "$BUILD_MODE" == "local" ]]; then
   for tag in "${IMAGE_LOCAL_TAGS[@]}"; do
     IMAGE_TAGS+=("$tag")
   done
 else
+  BUILT_COMPONENTS_RAW="${BUILT_COMPONENTS:-}"
+  BUILT_COMPONENTS_ARRAY=()
+  if [[ -n "$BUILT_COMPONENTS_RAW" ]]; then
+    IFS=',' read -ra BUILT_COMPONENTS_ARRAY <<< "$BUILT_COMPONENTS_RAW"
+  fi
+  FALLBACK_TAG="${BUILD_FALLBACK_TAG:-dev}"
+
   for comp in "${IMAGE_COMPONENTS[@]}"; do
-    IMAGE_TAGS+=("${IMAGE_REGISTRY}/${comp}:${BUILD_TAG}")
+    tag_for_comp="$BUILD_TAG"
+    if [ ${#BUILT_COMPONENTS_ARRAY[@]} -gt 0 ]; then
+      in_built=false
+      for c in "${BUILT_COMPONENTS_ARRAY[@]}"; do
+        if [ "$c" = "$comp" ]; then in_built=true; break; fi
+      done
+      if [ "$in_built" != "true" ]; then
+        tag_for_comp="$FALLBACK_TAG"
+      fi
+    fi
+    IMAGE_TAGS+=("${IMAGE_REGISTRY}/${comp}:${tag_for_comp}")
   done
 fi
 
