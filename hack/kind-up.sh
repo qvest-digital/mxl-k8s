@@ -17,7 +17,7 @@
 #
 # Set BUILD=<tag> to skip the local image build and use CI-produced
 # images instead. With BUILD unset or BUILD=local (the default) the
-# script builds the five component images locally as before. With
+# script builds the five component images locally. With
 # BUILD=<tag> the script pulls
 # ghcr.io/<owner>/mxl-k8s/<component>:<tag> for every component,
 # kind-loads it, and rewrites the demo manifests to reference it
@@ -184,8 +184,7 @@ done
 # Render examples/tcp-demo once with kustomize, then rewrite each
 # component image reference to the resolved CI image. The rendered
 # manifest is applied below in place of the kustomization directory.
-# In local mode the kustomization is applied directly (byte-for-byte
-# identical behaviour to today).
+# In local mode the kustomization is applied directly.
 RENDERED_MANIFEST=""
 if [[ "$BUILD_MODE" == "tag" ]]; then
   RENDERED_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/mxl-kind-demo-XXXXXX.yaml")"
