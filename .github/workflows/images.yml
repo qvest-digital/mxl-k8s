@@ -469,6 +469,50 @@ jobs:
           first=$(echo '${{ matrix.image.tags }}' | cut -d, -f1)
           docker buildx imagetools inspect "$first"
 
+  # Retag the components the merge job skipped (no path change for
+  # them) from :dev to the BUILD tag the kind-integration step
+  # expects. `docker buildx imagetools create` writes a new tag
+  # against the existing manifest digest; no blob transfer, the
+  # multi-arch manifest list is preserved. Required so kind-up can
+  # pull every component at a single uniform tag without per-
+  # component fallback logic.
+  retag:
+    needs: [meta, merge]
+    if: ${{ !cancelled() && needs.meta.outputs.kind_wanted == 'true' && needs.merge.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retag skipped components to ${BUILD}
+        env:
+          BUILD: ${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.number, needs.meta.outputs.sha_short) || format('sha-{0}', needs.meta.outputs.sha_short) }}
+          META_IMAGES_JSON: ${{ needs.meta.outputs.images }}
+          IMAGE_REGISTRY_RAW: ghcr.io/${{ github.repository_owner }}/mxl-k8s
+        run: |
+          set -euo pipefail
+          IMAGE_REGISTRY=$(echo "$IMAGE_REGISTRY_RAW" | tr '[:upper:]' '[:lower:]')
+          # Components the kind smoke test expects to find at $BUILD.
+          # Keep aligned with the `all` array in the meta job and the
+          # IMAGE_COMPONENTS list in hack/kind-up.sh.
+          all_components=(operator agent gateway shim demo-tools)
+          built=$(echo "$META_IMAGES_JSON" | jq -r '[.[].name] | join(" ")')
+          for comp in "${all_components[@]}"; do
+            case " $built " in
+              *" $comp "*) continue ;;
+            esac
+            src="${IMAGE_REGISTRY}/${comp}:dev"
+            dst="${IMAGE_REGISTRY}/${comp}:${BUILD}"
+            echo "retag $src -> $dst"
+            docker buildx imagetools create --tag "$dst" "$src"
+          done
+
   # Bring up a 3-node KIND cluster on the runner, point `make kind-up`
   # at the per-PR multi-arch manifest the `merge` job just published,
   # and exercise the integration suite under test/integration/kind.
@@ -477,8 +521,8 @@ jobs:
   # design -- the kind path is a pre-release smoke test, not a
   # release gate.
   kind-integration:
-    needs: [meta, build, merge]
-    if: ${{ !cancelled() && needs.meta.outputs.kind_wanted == 'true' && needs.merge.result == 'success' }}
+    needs: [meta, build, merge, retag]
+    if: ${{ !cancelled() && needs.meta.outputs.kind_wanted == 'true' && needs.merge.result == 'success' && needs.retag.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -504,7 +548,6 @@ jobs:
       - name: Bring up KIND demo against merge-published images
         env:
           BUILD: ${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.number, needs.meta.outputs.sha_short) || format('sha-{0}', needs.meta.outputs.sha_short) }}
-          META_IMAGES_JSON: ${{ needs.meta.outputs.images }}
           IMAGE_REGISTRY_RAW: ghcr.io/${{ github.repository_owner }}/mxl-k8s
           KIND_CLUSTER: mxl-k8s-ci
           # Hosted runners are slower on first image pull than a
@@ -515,11 +558,8 @@ jobs:
         run: |
           set -euo pipefail
           IMAGE_REGISTRY=$(echo "$IMAGE_REGISTRY_RAW" | tr '[:upper:]' '[:lower:]')
-          BUILT_COMPONENTS=$(echo "$META_IMAGES_JSON" | jq -r '[.[].name] | join(",")')
           make kind-up \
             BUILD="$BUILD" \
-            BUILT_COMPONENTS="$BUILT_COMPONENTS" \
-            BUILD_FALLBACK_TAG="dev" \
             IMAGE_REGISTRY="$IMAGE_REGISTRY" \
             KIND_CLUSTER="$KIND_CLUSTER"
 
@@ -544,7 +584,7 @@ jobs:
   # conditional job individually and would block PRs that legitimately
   # skipped one.
   images-summary:
-    needs: [changes, meta, build, merge, kind-integration]
+    needs: [changes, meta, build, merge, retag, kind-integration]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
