@@ -503,7 +503,7 @@ jobs:
 
       - name: Bring up KIND demo against merge-published images
         env:
-          BUILD: ${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.number, needs.meta.outputs.sha_short) || 'dev' }}
+          BUILD: ${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.number, needs.meta.outputs.sha_short) || format('sha-{0}', needs.meta.outputs.sha_short) }}
           IMAGE_REGISTRY_RAW: ghcr.io/${{ github.repository_owner }}/mxl-k8s
           KIND_CLUSTER: mxl-k8s-ci
           # Hosted runners are slower on first image pull than a
