@@ -134,3 +134,30 @@ make kind-down   CONTAINER_RUNTIME=podman
 With Podman the machine must be rootful and have enough memory
 for a three-node cluster; `kind-up.sh` checks this and prints
 the fix command if either condition isn't met.
+
+## Image source (`BUILD`)
+
+`make kind-up` builds the five component images locally by default
+and `kind load`s them into the cluster. This is `BUILD=local` (or
+`BUILD` unset).
+
+To skip the local build and use a CI-published image instead, pass
+the image tag:
+
+```sh
+make kind-up BUILD=v1.0.0-rc.3
+make kind-up BUILD=sha-abc1234
+```
+
+`kind-up.sh` resolves every component to
+`ghcr.io/qvest-digital/mxl-k8s/<component>:<BUILD>`, pulls it,
+loads it into KIND, and rewrites the rendered demo manifests so
+the workloads pull the same reference. Override the registry
+prefix with `IMAGE_REGISTRY=<prefix>` if needed.
+
+Empty or otherwise invalid `BUILD` values exit non-zero before
+any side effects:
+
+```
+ERROR: BUILD must be 'local' or a non-empty image tag
+```

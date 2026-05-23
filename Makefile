@@ -213,14 +213,26 @@ mocks-check: mocks
 # Override the cluster name with KIND_CLUSTER=<name>.
 # Use Podman instead of Docker: CONTAINER_RUNTIME=podman
 #   e.g. `make kind-up CONTAINER_RUNTIME=podman`
+#
+# Image source selector (BUILD):
+#   unset / BUILD=local  build the five component images locally and
+#                        kind-load them (existing behaviour).
+#   BUILD=<tag>          skip the local build; pull
+#                        ghcr.io/<owner>/mxl-k8s/<component>:<tag> for
+#                        every component, kind-load it, and rewrite
+#                        the demo manifests to reference it.
+#   e.g. `make kind-up BUILD=sha-abc1234`
+#        `make kind-up BUILD=v1.0.0-rc.3`
 
 KIND_CLUSTER ?= mxl-k8s-demo
 # Container runtime: "docker" (default) or "podman".
 CONTAINER_RUNTIME ?= docker
+# Image source: "local" (default) or a CI-produced image tag.
+BUILD ?= local
 
 .PHONY: kind-up
 kind-up:
-	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) bash hack/kind-up.sh
+	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) BUILD=$(BUILD) bash hack/kind-up.sh
 
 .PHONY: kind-down
 kind-down:
