@@ -23,6 +23,17 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../" && pwd)"
 KIND_CONFIG="${REPO_ROOT}/hack/kind-config.yaml"
 KUBECTL=(kubectl --context "kind-${CLUSTER_NAME}")
 
+# When BUILD is set, use externally-built images under
+# ${IMAGE_REPO}/<name>:${BUILD} instead of rebuilding `local/mxl-*:dev`
+# locally. CI sets IMAGE_TARS=<dir> so each image loads from
+# <dir>/kind-image-<name>.tar (no GHCR round-trip); without IMAGE_TARS
+# the script falls back to pulling from the registry. The demo
+# manifests still reference `local/mxl-*:dev` in tree; the BUILD path
+# patches the live workloads with `kubectl set image` after apply.
+BUILD="${BUILD:-}"
+IMAGE_REPO="${IMAGE_REPO:-ghcr.io/qvest-digital/mxl-k8s}"
+IMAGE_TARS="${IMAGE_TARS:-}"
+
 # When using podman, tell KIND to use the podman provider.
 if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
   export KIND_EXPERIMENTAL_PROVIDER=podman
@@ -44,6 +55,16 @@ IMAGE_TAGS=(
   local/mxl-fabrics-gateway:dev
   local/mxl-shim:dev
   local/mxl-demo-tools:dev
+)
+# Parallel to IMAGE_TAGS. Names match the kind-image-<name>.tar
+# artefacts the images.yml workflow uploads and the components in
+# the meta script's `all` list.
+IMAGE_CI_NAMES=(
+  operator
+  agent
+  gateway
+  shim
+  demo-tools
 )
 
 log()  { printf '\n=== %s ===\n' "$*" >&2; }
@@ -67,14 +88,41 @@ if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
   fi
 fi
 
-log "Building images"
+log "Preparing images"
 cd "$REPO_ROOT"
-for i in "${!IMAGE_DOCKERFILES[@]}"; do
-  dockerfile="${IMAGE_DOCKERFILES[$i]}"
-  tag="${IMAGE_TAGS[$i]}"
-  echo "  -> ${tag}"
-  $CONTAINER_RUNTIME build -q -f "${dockerfile}" -t "${tag}" . > /dev/null
-done
+if [[ -z "$BUILD" ]]; then
+  # Local developer path: build the `local/mxl-*:dev` set from the
+  # working tree.
+  for i in "${!IMAGE_DOCKERFILES[@]}"; do
+    dockerfile="${IMAGE_DOCKERFILES[$i]}"
+    tag="${IMAGE_TAGS[$i]}"
+    echo "  -> ${tag} (building)"
+    $CONTAINER_RUNTIME build -q -f "${dockerfile}" -t "${tag}" . > /dev/null
+  done
+else
+  # CI path: every image already exists as ${IMAGE_REPO}/<name>:${BUILD}.
+  # With IMAGE_TARS set, load each one from a `docker save` archive
+  # (the artefact the images.yml build job uploaded); otherwise pull
+  # the manifest list off the registry. The build manifest deliberately
+  # mirrors the per-component naming the meta script in images.yml
+  # uses (operator / agent / gateway / shim / demo-tools).
+  for i in "${!IMAGE_CI_NAMES[@]}"; do
+    name="${IMAGE_CI_NAMES[$i]}"
+    ref="${IMAGE_REPO}/${name}:${BUILD}"
+    if [[ -n "$IMAGE_TARS" ]]; then
+      tar="${IMAGE_TARS}/kind-image-${name}.tar"
+      if [[ ! -f "$tar" ]]; then
+        echo "ERROR: BUILD=${BUILD} but ${tar} is missing." >&2
+        exit 1
+      fi
+      echo "  -> ${ref} (loading ${tar})"
+      $CONTAINER_RUNTIME load -i "$tar" >/dev/null
+    else
+      echo "  -> ${ref} (pulling)"
+      $CONTAINER_RUNTIME pull "$ref" >/dev/null
+    fi
+  done
+fi
 
 CLUSTER_REUSED=false
 if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
@@ -93,20 +141,33 @@ else
 fi
 
 log "Loading images into the cluster"
-for tag in "${IMAGE_TAGS[@]}"; do
-  echo "  -> ${tag}"
+if [[ -z "$BUILD" ]]; then
+  REFS_TO_LOAD=("${IMAGE_TAGS[@]}")
+else
+  REFS_TO_LOAD=()
+  for name in "${IMAGE_CI_NAMES[@]}"; do
+    REFS_TO_LOAD+=("${IMAGE_REPO}/${name}:${BUILD}")
+  done
+fi
+for ref in "${REFS_TO_LOAD[@]}"; do
+  echo "  -> ${ref}"
   if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
     # Podman stores unqualified images under localhost/, but Kubernetes
     # resolves them as docker.io/. Re-tag so containerd inside the
     # KIND nodes finds them under the name the pods actually request.
-    canonical="docker.io/${tag}"
-    $CONTAINER_RUNTIME tag "$tag" "$canonical" 2>/dev/null || true
+    # ghcr.io/* refs are already fully qualified and skip this step.
+    if [[ "$ref" != *"/"*"/"* ]]; then
+      canonical="docker.io/${ref}"
+      $CONTAINER_RUNTIME tag "$ref" "$canonical" 2>/dev/null || true
+    else
+      canonical="$ref"
+    fi
     tmptar="$(mktemp "${TMPDIR:-/tmp}/kind-image-XXXXXX")"
     $CONTAINER_RUNTIME save -o "$tmptar" "$canonical"
     kind load image-archive --name "$CLUSTER_NAME" "$tmptar"
     rm -f "$tmptar"
   else
-    kind load docker-image --name "$CLUSTER_NAME" "$tag"
+    kind load docker-image --name "$CLUSTER_NAME" "$ref"
   fi
 done
 
@@ -124,7 +185,45 @@ log "Installing CRDs"
   mxlnodecapabilities.mxl.qvest-digital.com
 
 log "Applying examples/tcp-demo"
-"${KUBECTL[@]}" apply -k "${REPO_ROOT}/examples/tcp-demo/"
+# When BUILD is set, redirect the demo's image references via a
+# throwaway kustomize overlay. kustomize's `images:` transformer
+# rewrites every container that references `local/mxl-*:dev` to the
+# externally-built ${IMAGE_REPO}/<name>:${BUILD} ref, including bare
+# Pods (`kubectl set image` does not support `kind: Pod`). The overlay
+# lives under the shell's temp dir so it never enters the repo.
+APPLY_DIR="${REPO_ROOT}/examples/tcp-demo/"
+DEMO_OVERLAY=""
+if [[ -n "$BUILD" ]]; then
+  DEMO_OVERLAY="$(mktemp -d "${TMPDIR:-/tmp}/kind-demo-overlay-XXXXXX")"
+  # kustomize rejects absolute paths in `resources`; symlink the
+  # in-tree base into the overlay so the relative path resolves.
+  ln -s "${REPO_ROOT}/examples/tcp-demo" "${DEMO_OVERLAY}/base"
+  cat > "${DEMO_OVERLAY}/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - base
+images:
+  - name: local/mxl-operator
+    newName: ${IMAGE_REPO}/operator
+    newTag: ${BUILD}
+  - name: local/mxl-domain-agent
+    newName: ${IMAGE_REPO}/agent
+    newTag: ${BUILD}
+  - name: local/mxl-fabrics-gateway
+    newName: ${IMAGE_REPO}/gateway
+    newTag: ${BUILD}
+  - name: local/mxl-shim
+    newName: ${IMAGE_REPO}/shim
+    newTag: ${BUILD}
+  - name: local/mxl-demo-tools
+    newName: ${IMAGE_REPO}/demo-tools
+    newTag: ${BUILD}
+EOF
+  APPLY_DIR="$DEMO_OVERLAY"
+  log "Using BUILD overlay at ${DEMO_OVERLAY}"
+fi
+"${KUBECTL[@]}" apply -k "$APPLY_DIR"
 
 # On re-runs the kubelet caches images by tag, so re-loading a :dev
 # image doesn't get picked up by existing pods. Force a rollout
@@ -140,7 +239,12 @@ if [[ "$CLUSTER_REUSED" == "true" ]]; then
   # still Terminating leaves the new pod in limbo (apply observes
   # the live object and treats it as a no-op).
   "${KUBECTL[@]}" -n mxl-system delete pod mxl-tcp-demo-writer mxl-tcp-demo-reader --ignore-not-found --force --grace-period=0
-  "${KUBECTL[@]}" apply -k "${REPO_ROOT}/examples/tcp-demo/"
+  "${KUBECTL[@]}" apply -k "$APPLY_DIR"
+fi
+
+# Clean up the BUILD overlay temp dir if we created one.
+if [[ -n "$DEMO_OVERLAY" ]]; then
+  rm -rf "$DEMO_OVERLAY"
 fi
 
 log "Waiting for control-plane workloads (timeout ${ROLLOUT_TIMEOUT_SECS}s)"

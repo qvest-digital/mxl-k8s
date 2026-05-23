@@ -71,6 +71,7 @@ jobs:
       shim:       ${{ steps.f.outputs.shim }}
       demo_tools: ${{ steps.f.outputs.demo_tools }}
       workflow:   ${{ steps.f.outputs.workflow }}
+      kind:       ${{ steps.f.outputs.kind }}
     steps:
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v4
@@ -83,6 +84,15 @@ jobs:
             shim:       ['docker/shim.Dockerfile', 'shim/**']
             demo_tools: ['docker/demo-tools.Dockerfile']
             workflow:   ['.github/workflows/images.yml']
+            kind:
+              - 'docker/**'
+              - 'hack/kind-*'
+              - 'examples/**'
+              - 'config/crd/**'
+              - 'config/rbac/**'
+              - 'charts/mxl-k8s/**'
+              - 'Makefile'
+              - '.github/workflows/images.yml'
 
   # Compute the list of images to build and the registry references /
   # tag lists each image should be published under. Centralised here
@@ -104,8 +114,19 @@ jobs:
       images: ${{ steps.m.outputs.images }}
       push: ${{ steps.m.outputs.push }}
       has_images: ${{ steps.m.outputs.has_images }}
+      kind_wanted: ${{ steps.m.outputs.kind_wanted }}
+      sha_short: ${{ steps.m.outputs.sha_short }}
     env:
       INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+      # kind-integration eligibility (kind_wanted in meta script):
+      # - PR: changes.kind == true OR PR carries the run-kind label
+      # - push to main (branch): changes.kind == true (and not a
+      #   release-please merge -- see push branch in meta)
+      # - workflow_dispatch with empty release_tag: always true
+      # - tag push or workflow_call with release_tag: false (the kind
+      #   path is a pre-release smoke test, not a release gate)
+      CHANGED_KIND:       ${{ needs.changes.outputs.kind       || 'false' }}
+      PR_LABELS_JSON:     ${{ toJSON(github.event.pull_request.labels.*.name) }}
       # head_commit is present on push events; empty otherwise. Used
       # to detect release-please's own merge commits and defer their
       # image publish to the workflow_call run that release-please.yml
@@ -268,7 +289,48 @@ jobs:
             echo "push=${push}"
             echo "images=${images}"
             echo "has_images=${has_images}"
+            echo "sha_short=${short_sha}"
           } >> "$GITHUB_OUTPUT"
+
+          # kind_wanted: whether kind-integration should run for this
+          # invocation. Computed here so the build job can decide
+          # whether to upload the per-image docker-save tarballs the
+          # kind-integration job consumes.
+          kind_wanted=false
+          case "$GITHUB_EVENT_NAME" in
+            pull_request)
+              if [ "$CHANGED_KIND" = "true" ]; then
+                kind_wanted=true
+              elif echo "${PR_LABELS_JSON:-[]}" | grep -q '"run-kind"'; then
+                kind_wanted=true
+              fi
+              ;;
+            push)
+              # Tag push: not a kind path. release-please merge: same.
+              if [ "$GITHUB_REF_TYPE" = "branch" ] \
+                  && [ "$GITHUB_REF" = "refs/heads/main" ] \
+                  && [ "$CHANGED_KIND" = "true" ] \
+                  && [ "$push" = "true" ]; then
+                kind_wanted=true
+              fi
+              ;;
+            workflow_dispatch)
+              # Manual run on HEAD (no release_tag) gets a kind run.
+              # release_tag backfills go through the workflow_call /
+              # release path -- those don't run kind.
+              if [ -z "${INPUT_RELEASE_TAG:-}" ]; then
+                kind_wanted=true
+              fi
+              ;;
+          esac
+
+          # Without any image to build there is nothing for kind to
+          # exercise; short-circuit so the job skips cleanly.
+          if [ "$has_images" != "true" ]; then
+            kind_wanted=false
+          fi
+
+          echo "kind_wanted=${kind_wanted}" >> "$GITHUB_OUTPUT"
 
   # Per-image, per-arch build. Each cell builds on the matching native
   # runner and (when push=true) writes a per-digest entry to GHCR. The
@@ -357,6 +419,32 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      # kind-integration consumes a single-arch (amd64) tarball per
+      # image; build it once here on the amd64 leg, reusing the build
+      # cache the digest push just populated. The tarball is named
+      # for the sha-<short> ref so the kind-integration job can `kind
+      # load image-archive` it and the demo manifests can reference
+      # ${IMAGE}:sha-<short> directly.
+      - name: Build kind tarball
+        if: needs.meta.outputs.kind_wanted == 'true' && matrix.runner.arch == 'amd64'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          platforms: linux/amd64
+          tags: ${{ matrix.image.image }}:sha-${{ needs.meta.outputs.sha_short }}
+          outputs: type=docker,dest=${{ runner.temp }}/kind-image-${{ matrix.image.name }}.tar
+          cache-from: type=gha,scope=${{ matrix.image.name }}-amd64
+
+      - name: Upload kind tarball
+        if: needs.meta.outputs.kind_wanted == 'true' && matrix.runner.arch == 'amd64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: kind-image-${{ matrix.image.name }}
+          path: ${{ runner.temp }}/kind-image-${{ matrix.image.name }}.tar
+          if-no-files-found: error
+          retention-days: 1
+
   # Stitch the per-arch digests of each image into one multi-arch
   # manifest list, applying the full tag list computed by meta.
   merge:
@@ -408,13 +496,84 @@ jobs:
           first=$(echo '${{ matrix.image.tags }}' | cut -d, -f1)
           docker buildx imagetools inspect "$first"
 
+  # Bring up a KIND cluster on the runner, load the per-image tarballs
+  # the build job uploaded, and exercise `make kind BUILD=sha-<short>`.
+  # Runs only when meta.kind_wanted is true (PR path filter or
+  # `run-kind` label; push to main matching the kind path filter; manual
+  # workflow_dispatch on HEAD). Tag-event / release publish runs skip
+  # kind by design -- the kind path is a pre-release smoke test, not a
+  # release gate.
+  kind-integration:
+    needs: [meta, build]
+    if: ${{ !cancelled() && needs.meta.outputs.kind_wanted == 'true' && needs.build.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download image tarballs
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/kind-images
+          pattern: kind-image-*
+          merge-multiple: true
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Create KIND cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: mxl-k8s-ci
+          config: hack/kind-config.yaml
+          wait: 60s
+
+      - name: Run make kind
+        env:
+          BUILD: sha-${{ needs.meta.outputs.sha_short }}
+          IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/mxl-k8s
+          IMAGE_TARS: ${{ runner.temp }}/kind-images
+          KIND_CLUSTER: mxl-k8s-ci
+        run: |
+          # IMAGE_REPO must be lowercased; github.repository_owner is
+          # already lowercased in the meta script but the action
+          # context carries the original case. Match that path.
+          IMAGE_REPO="$(echo "$IMAGE_REPO" | tr '[:upper:]' '[:lower:]')" \
+            make kind \
+              BUILD="$BUILD" \
+              IMAGE_REPO="$IMAGE_REPO" \
+              IMAGE_TARS="$IMAGE_TARS" \
+              KIND_CLUSTER="$KIND_CLUSTER"
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          mkdir -p "${RUNNER_TEMP}/kind-diagnostics"
+          ctx="kind-mxl-k8s-ci"
+          kubectl --context "$ctx" get all -A                                           > "${RUNNER_TEMP}/kind-diagnostics/all.txt"        2>&1
+          kubectl --context "$ctx" describe pods -A                                     > "${RUNNER_TEMP}/kind-diagnostics/pods.txt"       2>&1
+          kubectl --context "$ctx" -n mxl-system logs ds/mxl-fabrics-gateway --tail=200 > "${RUNNER_TEMP}/kind-diagnostics/gateway.log"   2>&1
+          kubectl --context "$ctx" -n mxl-system logs ds/mxl-domain-agent --tail=200    > "${RUNNER_TEMP}/kind-diagnostics/agent.log"     2>&1
+          kubectl --context "$ctx" -n mxl-system logs deploy/mxl-operator --tail=200    > "${RUNNER_TEMP}/kind-diagnostics/operator.log"  2>&1
+          kubectl --context "$ctx" -n mxl-system get mxlflowmirrors -o yaml             > "${RUNNER_TEMP}/kind-diagnostics/mirrors.yaml"  2>&1
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kind-diagnostics-${{ github.run_id }}
+          path: ${{ runner.temp }}/kind-diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
+
   # Branch-protection target. Always runs, succeeds only when every
   # required upstream job is in `success` or `skipped` state. Without
   # this gate, branch protection would need to enumerate every
   # conditional job individually and would block PRs that legitimately
   # skipped one.
   images-summary:
-    needs: [changes, meta, build, merge]
+    needs: [changes, meta, build, merge, kind-integration]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2

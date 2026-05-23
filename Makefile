@@ -218,6 +218,29 @@ KIND_CLUSTER ?= mxl-k8s-demo
 # Container runtime: "docker" (default) or "podman".
 CONTAINER_RUNTIME ?= docker
 
+# `make kind` accepts an externally-built image set via BUILD=<tag>;
+# with BUILD unset it behaves like `kind-up` (local docker build of
+# the `local/mxl-*:dev` set). CI uses BUILD=sha-<short> together with
+# IMAGE_TARS pointing at a directory of `docker save` tarballs the
+# build job uploaded; local users typically run `make kind-up` instead.
+#
+# BUILD=<tag>       use ${IMAGE_REPO}/<name>:${BUILD} for every image
+#                   (operator, agent, gateway, shim, demo-tools).
+# IMAGE_REPO=<ref>  registry prefix; defaults to the project's GHCR
+#                   namespace.
+# IMAGE_TARS=<dir>  load images from `<dir>/kind-image-<name>.tar`
+#                   instead of pulling from the registry. CI uses
+#                   this so kind never round-trips through GHCR.
+BUILD       ?=
+IMAGE_REPO  ?= ghcr.io/qvest-digital/mxl-k8s
+IMAGE_TARS  ?=
+
+.PHONY: kind
+kind:
+	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) \
+	BUILD=$(BUILD) IMAGE_REPO=$(IMAGE_REPO) IMAGE_TARS=$(IMAGE_TARS) \
+	    bash hack/kind-up.sh
+
 .PHONY: kind-up
 kind-up:
 	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) bash hack/kind-up.sh
