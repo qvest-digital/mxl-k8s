@@ -3,6 +3,42 @@
 Rules for working in this repository. Read them before opening a PR or
 running an automated assistant against this tree.
 
+## STOP. Use a git worktree.
+
+Before ANY mutation of this repository -- edit, write, commit,
+branch create, push, rebase, `gh pr create` -- the very first
+action of the session is to set up a dedicated `git worktree`.
+This rule has no exceptions. There is no change small enough to
+skip it: typos, single-line fixes, doc-only PRs, even edits to
+this file itself all require the same worktree dance.
+
+The repository is worked on by multiple parallel sessions and
+editors at once. Two writers in the same tree corrupt staging
+state, step on each other's branches, and lose work without
+warning -- the rule exists to make that physically impossible,
+not to be polite about it.
+
+The required moves (also documented under "Working in a worktree"
+below):
+
+```sh
+git fetch origin
+git worktree add ../mxl-k8s.<topic> -b <topic> origin/main
+cd ../mxl-k8s.<topic>
+```
+
+All subsequent edits, commits, and pushes happen from the
+worktree.
+
+When delegating to a sub-agent for any mutation, pass
+`isolation: "worktree"` on the Agent call. Do not assume a
+worktree from earlier in the session is still mounted.
+
+The only thing allowed in the main checkout is read-only
+inspection: `git log`, `git diff`, `git status`, `gh pr view`,
+reading files, grep / find. Anything that touches the index, the
+working tree, the branch list, or the remote is out.
+
 ## Documentation
 
 - Keep `README.md` and code comments tight. State facts; don't speculate.
@@ -41,10 +77,6 @@ installed.
   prohibited. Force-pushing to a feature branch is only permitted
   with explicit approval, because another editor may be reviewing
   the branch or checked out against it.
-- Use a separate `git worktree` per branch when working alongside
-  other editors on the repository. Worktrees keep the main checkout
-  clean while sharing the object database, so parallel sessions do
-  not collide over staged changes or the working tree.
 - Merge PRs with **Squash and merge**. release-please derives version
   bumps and changelog entries from the resulting single commit on
   `main`, and a noisy merge of dozens of intermediate commits would
