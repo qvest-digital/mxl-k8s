@@ -99,50 +99,17 @@ inside the pod's netns and cannot see host interfaces.
 A complete fixture demonstrating the bare-metal pattern lives at
 `charts/mxl-k8s/tests/values/full-rdma-nad.yaml`.
 
-The rare case libfabric cannot self-resolve a device even with
+The downward API exposes only the primary pod IP via
+`fieldRef: status.podIP`; addresses Multus assigns on secondary
+interfaces are not addressable through `fieldRef` today. In the
+rare case libfabric cannot self-resolve a device even with
 `FI_VERBS_IFACE` -- for example when whereabouts assigns an
 address with a CIDR libfabric does not match against any of the
-HCA's GIDs -- can be patched in via the `gateway.initContainers`
-passthrough. An init-container that resolves an interface IP and
-writes it into a downward-volume file, paired with a downward
-API `valueFrom: fieldRef: fieldPath: ...` cannot read the
-secondary IP today, so the init-container is the only
-chart-friendly way to inject it:
-
-```yaml
-gateway:
-  initContainers:
-    - name: resolve-rdma-ip
-      image: ghcr.io/qvest-digital/mxl-k8s/demo-tools:dev
-      command: ["sh", "-c"]
-      args:
-        - |
-          ip -4 -o addr show dev net1 \
-            | awk '{print $4}' | cut -d/ -f1 > /shared/rdma-ip
-      volumeMounts:
-        - name: rdma-ip
-          mountPath: /shared
-  extraVolumes:
-    - name: rdma-ip
-      emptyDir: {}
-  extraVolumeMounts:
-    - name: rdma-ip
-      mountPath: /shared
-  flags:
-    # Wrap the file contents through a shim or expand at entrypoint;
-    # `--bind-address=$(cat /shared/rdma-ip)` is not parsed by the
-    # gateway binary itself, so the wrapper has to do the expansion
-    # before exec'ing the gateway.
-    bindAddress: ""
-```
-
-The vast majority of clusters do not need this init-container.
-`FI_VERBS_IFACE` plus `--bind-address=` is sufficient.
-
-TODO: an `examples/rdma-demo-nad/` directory mirroring
-`examples/rdma-demo/` for the NAD-attached pattern is a planned
-follow-up. The `tests/values/full-rdma-nad.yaml` fixture and the
-worked example above cover the same ground until then.
+HCA's GIDs -- the workaround today is operator-side: pin
+whereabouts to a per-node static allocation and set
+`gateway.flags.bindAddress: <that-IP>` explicitly. Future
+versions may add a built-in bind-address file flag; until then,
+this is what the chart supports.
 
 ### Multus / SR-IOV
 
