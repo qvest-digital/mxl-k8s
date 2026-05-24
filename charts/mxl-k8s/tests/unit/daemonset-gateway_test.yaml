@@ -28,6 +28,14 @@ tests:
           path: spec.template.spec.containers[0].args
           content: --providers=tcp,verbs,shm
 
+  - it: explicit empty string flag renders a bare --key= arg
+    set:
+      gateway.flags.bindAddress: ""
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --bind-address=
+
   - it: rdma.enabled adds IPC_LOCK + SYS_RESOURCE and the /dev/infiniband mount
     set:
       gateway.rdma.enabled: true
