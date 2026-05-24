@@ -17,14 +17,14 @@
 #
 # Set BUILD=<tag> to skip the local image build and use CI-produced
 # images instead. With BUILD unset or BUILD=local (the default) the
-# script builds the five component images locally. With
-# BUILD=<tag> the script pulls
-# ghcr.io/<owner>/mxl-k8s/<component>:<tag> for every component,
-# kind-loads it, and rewrites the demo manifests to reference it
-# via a generated kustomize overlay.
+# script builds the five component images locally as
+# ${IMAGE_REGISTRY}/<component>:dev. With BUILD=<tag> the script
+# pulls ${IMAGE_REGISTRY}/<component>:<tag> for every component and
+# kind-loads it. Local and tag modes produce identically-shaped
+# refs; only the tag differs.
 #
-# Set IMAGE_REGISTRY=<prefix> to override the registry prefix used
-# in BUILD=<tag> mode. Default is ghcr.io/qvest-digital/mxl-k8s.
+# Set IMAGE_REGISTRY=<prefix> to override the registry prefix.
+# Default is ghcr.io/qvest-digital/mxl-k8s.
 
 set -euo pipefail
 
@@ -46,10 +46,12 @@ case "$BUILD" in
     ;;
   local)
     BUILD_MODE=local
+    TAG=dev
     ;;
   *)
     BUILD_MODE=tag
     BUILD_TAG="$BUILD"
+    TAG="$BUILD_TAG"
     ;;
 esac
 
@@ -61,22 +63,15 @@ fi
 MIRROR_TIMEOUT_SECS="${MIRROR_TIMEOUT_SECS:-180}"
 ROLLOUT_TIMEOUT_SECS="${ROLLOUT_TIMEOUT_SECS:-300}"
 
-# Parallel arrays: Dockerfile / local dev tag / CI component name /
-# image reference as it appears in examples/*-demo manifests. Kept
-# index-aligned so bash 3.2 (no associative arrays) can iterate them.
+# Parallel arrays: Dockerfile / CI component name. Kept index-aligned
+# so bash 3.2 (no associative arrays) can iterate them. The image
+# reference for each component is always ${IMAGE_REGISTRY}/<comp>:${TAG}.
 IMAGE_DOCKERFILES=(
   docker/operator.Dockerfile
   docker/agent.Dockerfile
   docker/gateway.Dockerfile
   docker/shim.Dockerfile
   docker/demo-tools.Dockerfile
-)
-IMAGE_LOCAL_TAGS=(
-  local/mxl-operator:dev
-  local/mxl-domain-agent:dev
-  local/mxl-fabrics-gateway:dev
-  local/mxl-shim:dev
-  local/mxl-demo-tools:dev
 )
 IMAGE_COMPONENTS=(
   operator
@@ -86,19 +81,10 @@ IMAGE_COMPONENTS=(
   demo-tools
 )
 
-# Resolve the image-tag list this run actually loads into KIND.
-# In local mode this is IMAGE_LOCAL_TAGS verbatim. In tag mode it
-# becomes ghcr.io/<owner>/mxl-k8s/<component>:<BUILD_TAG>.
 IMAGE_TAGS=()
-if [[ "$BUILD_MODE" == "local" ]]; then
-  for tag in "${IMAGE_LOCAL_TAGS[@]}"; do
-    IMAGE_TAGS+=("$tag")
-  done
-else
-  for comp in "${IMAGE_COMPONENTS[@]}"; do
-    IMAGE_TAGS+=("${IMAGE_REGISTRY}/${comp}:${BUILD_TAG}")
-  done
-fi
+for comp in "${IMAGE_COMPONENTS[@]}"; do
+  IMAGE_TAGS+=("${IMAGE_REGISTRY}/${comp}:${TAG}")
+done
 
 log()  { printf '\n=== %s ===\n' "$*" >&2; }
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing required tool: $1" >&2; exit 1; }; }
@@ -180,46 +166,8 @@ for tag in "${IMAGE_TAGS[@]}"; do
   fi
 done
 
-# In BUILD=<tag> mode the demo manifests still reference local/...:dev.
-# Render examples/tcp-demo once with kustomize, then rewrite each
-# component image reference to the resolved CI image. The rendered
-# manifest is applied below in place of the kustomization directory.
-# In local mode the kustomization is applied directly.
-RENDERED_MANIFEST=""
-if [[ "$BUILD_MODE" == "tag" ]]; then
-  RENDERED_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/mxl-kind-demo-XXXXXX.yaml")"
-  trap 'rm -f "$RENDERED_MANIFEST"' EXIT
-  "${KUBECTL[@]}" kustomize "${REPO_ROOT}/examples/tcp-demo/" > "${RENDERED_MANIFEST}.in"
-  # Stream-replace local/<name>:dev with the resolved CI reference.
-  # IMAGE_LOCAL_TAGS[i] always maps to IMAGE_TAGS[i] by index.
-  sed_args=()
-  for i in "${!IMAGE_LOCAL_TAGS[@]}"; do
-    src="${IMAGE_LOCAL_TAGS[$i]}"
-    dst="${IMAGE_TAGS[$i]}"
-    # Escape '/' and '&' for sed's replacement field.
-    src_esc=$(printf '%s' "$src" | sed -e 's/[\/&]/\\&/g')
-    dst_esc=$(printf '%s' "$dst" | sed -e 's/[\/&]/\\&/g')
-    sed_args+=("-e" "s/${src_esc}/${dst_esc}/g")
-  done
-  sed "${sed_args[@]}" "${RENDERED_MANIFEST}.in" > "$RENDERED_MANIFEST"
-  rm -f "${RENDERED_MANIFEST}.in"
-  # Sanity check: every IMAGE_LOCAL_TAGS reference must be gone from
-  # the rendered output. If one remains, the demo would silently pull
-  # a local/...:dev image that isn't loaded.
-  for src in "${IMAGE_LOCAL_TAGS[@]}"; do
-    if grep -q "$src" "$RENDERED_MANIFEST"; then
-      echo "ERROR: image ${src} still present in rendered demo manifest" >&2
-      exit 1
-    fi
-  done
-fi
-
 apply_demo() {
-  if [[ "$BUILD_MODE" == "tag" ]]; then
-    "${KUBECTL[@]}" apply -f "$RENDERED_MANIFEST"
-  else
-    "${KUBECTL[@]}" apply -k "${REPO_ROOT}/examples/tcp-demo/"
-  fi
+  "${KUBECTL[@]}" apply -k "${REPO_ROOT}/examples/tcp-demo/"
 }
 
 log "Installing CRDs"
