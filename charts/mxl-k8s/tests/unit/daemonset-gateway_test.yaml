@@ -136,3 +136,23 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].resources.limits["rdma/hca_shared_devices"]
           value: 1
+
+  - it: full-rdma-nad fixture renders the NAD-attached pattern
+    values:
+      - ../values/full-rdma-nad.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --bind-address=
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests["rdma/hca_shared_devices"]
+          value: 1
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits["rdma/hca_shared_devices"]
+          value: 1
+      - equal:
+          path: spec.template.metadata.annotations["k8s.v1.cni.cncf.io/networks"]
+          value: network/rdma-roce
+      - equal:
+          path: spec.template.spec.hostNetwork
+          value: false

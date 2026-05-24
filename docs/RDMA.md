@@ -51,13 +51,107 @@ on the worker nodes for either provider to actually work.
   - `FI_LOG_LEVEL=Info` (or `Debug`): noisy but invaluable when
     diagnosing why a Setup fails.
 
+### Choosing host vs. NAD-attached networking
+
+The chart defaults to `gateway.hostNetwork: true` because the
+fabric `TargetInfo` embeds a `host:port` a peer dials, and a CNI
+overlay IP is not reachable cross-node. That default fits KIND
+and any single-NIC topology where the same interface carries
+both cluster traffic and RDMA traffic.
+
+On clusters with a dedicated RDMA fabric -- typical for bare-metal
+RoCEv2 deployments where the RoCE NIC sits on its own VLAN, often
+bonded -- hostNetwork pins the gateway's bind address to `POD_IP`,
+which the downward API resolves to the cluster-network interface,
+not the RDMA fabric. `rdma_bind_addr` returns ENODEV. The cure is
+to disable hostNetwork, attach a NAD that places the pod on the
+RDMA fabric, and let libfabric pick the in-pod netdev:
+
+```yaml
+gateway:
+  hostNetwork: false
+  dnsPolicy: ClusterFirst
+  podAnnotations:
+    k8s.v1.cni.cncf.io/networks: network/rdma-roce
+  flags:
+    # Explicit empty -> --bind-address= (bare equals). Suppresses
+    # the POD_IP fallback so libfabric+FI_VERBS_IFACE pick the
+    # in-pod RDMA netdev.
+    bindAddress: ""
+  rdma:
+    enabled: true
+    # `k8s-rdma-shared-dev-plugin` or similar advertises the HCA
+    # as an extended resource. The chart merges `<name>: 1` into
+    # requests and limits when this is set.
+    resourceName: rdma/hca_shared_devices
+    extraEnv:
+      - name: FI_VERBS_IFACE
+        # In-pod netdev name (typically `net1` when the NAD is the
+        # pod's only secondary network). NOT the host PF.
+        value: net1
+```
+
+`FI_VERBS_IFACE` names the in-pod netdev -- usually `net1` for a
+single secondary attachment, `net2` for the second, and so on.
+The host PF name (e.g. `enp65s0f0`) is wrong; libfabric runs
+inside the pod's netns and cannot see host interfaces.
+
+A complete fixture demonstrating the bare-metal pattern lives at
+`charts/mxl-k8s/tests/values/full-rdma-nad.yaml`.
+
+The rare case libfabric cannot self-resolve a device even with
+`FI_VERBS_IFACE` -- for example when whereabouts assigns an
+address with a CIDR libfabric does not match against any of the
+HCA's GIDs -- can be patched in via the `gateway.initContainers`
+passthrough. An init-container that resolves an interface IP and
+writes it into a downward-volume file, paired with a downward
+API `valueFrom: fieldRef: fieldPath: ...` cannot read the
+secondary IP today, so the init-container is the only
+chart-friendly way to inject it:
+
+```yaml
+gateway:
+  initContainers:
+    - name: resolve-rdma-ip
+      image: ghcr.io/qvest-digital/mxl-k8s/demo-tools:dev
+      command: ["sh", "-c"]
+      args:
+        - |
+          ip -4 -o addr show dev net1 \
+            | awk '{print $4}' | cut -d/ -f1 > /shared/rdma-ip
+      volumeMounts:
+        - name: rdma-ip
+          mountPath: /shared
+  extraVolumes:
+    - name: rdma-ip
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: rdma-ip
+      mountPath: /shared
+  flags:
+    # Wrap the file contents through a shim or expand at entrypoint;
+    # `--bind-address=$(cat /shared/rdma-ip)` is not parsed by the
+    # gateway binary itself, so the wrapper has to do the expansion
+    # before exec'ing the gateway.
+    bindAddress: ""
+```
+
+The vast majority of clusters do not need this init-container.
+`FI_VERBS_IFACE` plus `--bind-address=` is sufficient.
+
+TODO: an `examples/rdma-demo-nad/` directory mirroring
+`examples/rdma-demo/` for the NAD-attached pattern is a planned
+follow-up. The `tests/values/full-rdma-nad.yaml` fixture and the
+worked example above cover the same ground until then.
+
 ### Multus / SR-IOV
 
 If pods can't share the host's RDMA NIC (for example because
 multiple tenants need isolation, or the NIC supports SR-IOV and
 you want one VF per pod), use Multus to attach a dedicated VF as
 a secondary network. The gateway then runs *without* `hostNetwork`
-and binds verbs to the secondary interface via `FI_VERBS_IFACE`.
+and binds verbs to the secondary interface via `FI_VERBS_IFACE`,
+following the NAD-attached pattern above.
 
 A working pattern: a `NetworkAttachmentDefinition` per RDMA
 fabric, an SR-IOV device plugin allocating VFs to pods, and the
