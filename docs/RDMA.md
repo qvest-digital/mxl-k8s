@@ -65,7 +65,10 @@ bonded -- hostNetwork pins the gateway's bind address to `POD_IP`,
 which the downward API resolves to the cluster-network interface,
 not the RDMA fabric. `rdma_bind_addr` returns ENODEV. The cure is
 to disable hostNetwork, attach a NAD that places the pod on the
-RDMA fabric, and let libfabric pick the in-pod netdev:
+RDMA fabric, and let libfabric pick the in-pod netdev. The
+snippet below is a Helm values override for `charts/mxl-k8s`,
+applied via `helm install -f <file>` (or merged into a
+HelmRelease's `values:`):
 
 ```yaml
 gateway:
@@ -93,14 +96,16 @@ gateway:
 
 `FI_VERBS_IFACE` names the in-pod netdev -- usually `net1` for a
 single secondary attachment, `net2` for the second, and so on.
-The host PF name (e.g. `enp65s0f0`) is wrong; libfabric runs
-inside the pod's netns and cannot see host interfaces.
+With `hostNetwork: false` the gateway runs in the pod's netns and
+cannot see the host PF, so a host-side name like `enp65s0f0` does
+not resolve. (With `hostNetwork: true` the gateway shares the host
+netns and the host PF name is what `FI_VERBS_IFACE` must use.)
 
 A complete fixture demonstrating the bare-metal pattern lives at
 `charts/mxl-k8s/tests/values/full-rdma-nad.yaml`.
 
 The downward API exposes only the primary pod IP via
-`fieldRef: status.podIP`; addresses Multus assigns on secondary
+`fieldRef: status.podIP`; addresses e.g. Multus assigns on secondary
 interfaces are not addressable through `fieldRef` today. In the
 rare case libfabric cannot self-resolve a device even with
 `FI_VERBS_IFACE` -- for example when whereabouts assigns an
