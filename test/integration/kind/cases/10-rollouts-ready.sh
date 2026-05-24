@@ -8,9 +8,9 @@ set -euo pipefail
 . "$KIND_TEST_LIB"
 
 WORKLOADS=(
-  deploy/mxl-operator
-  ds/mxl-domain-agent
-  ds/mxl-fabrics-gateway
+  deploy/mxl-k8s-operator
+  ds/mxl-k8s-agent
+  ds/mxl-k8s-gateway
 )
 
 for w in "${WORKLOADS[@]}"; do
@@ -21,7 +21,7 @@ for w in "${WORKLOADS[@]}"; do
 done
 
 "${KUBECTL[@]}" -n "$NAMESPACE" wait --for=condition=Ready pod \
-    -l 'app.kubernetes.io/name in (mxl-operator,mxl-domain-agent,mxl-fabrics-gateway)' \
+    -l 'app.kubernetes.io/name in (mxl-k8s-operator,mxl-k8s-agent,mxl-k8s-gateway)' \
     --timeout="${ROLLOUT_TIMEOUT_SECS}s" \
   || fail "control-plane pods did not all become Ready"
 echo "  control-plane pods: Ready"

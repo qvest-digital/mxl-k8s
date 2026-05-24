@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # kind-up.sh -- bring up a KIND cluster, build & load the mxl-k8s
-# images, apply examples/tcp-demo, and wait for the MxlFlowMirror
-# to reach Ready.
+# images, install the mxl-k8s Helm chart, apply the demo workload
+# from examples/kind/demo, and wait for the MxlFlowMirror to reach
+# Ready.
 #
 # Idempotent: re-running the script reuses an existing cluster,
 # rebuilds the images (Docker caching keeps unchanged layers fast),
-# reloads them, and re-applies the demo. Pair with `hack/kind-down.sh`
-# to start clean.
+# reloads them, and re-installs the chart. Pair with
+# `hack/kind-down.sh` to start clean.
 #
 # Requires: docker or podman, kind >= 0.20, kubectl, a Linux kernel
 # >= 5.17 on the host (KIND nodes share it; the agent's fanotify needs
@@ -92,6 +93,7 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "missing required tool: $1" >
 need "$CONTAINER_RUNTIME"
 need kind
 need kubectl
+need helm
 
 # Podman preflight: KIND requires a rootful machine with enough RAM.
 if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
@@ -141,15 +143,15 @@ else
   kind create cluster --name "$CLUSTER_NAME" --config "$KIND_CONFIG" --wait 60s
 fi
 
-log "Loading images into the cluster"
-for tag in "${IMAGE_TAGS[@]}"; do
-  echo "  -> ${tag}"
+load_image() {
+  local tag="$1"
   if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
     # Podman stores unqualified images under localhost/, but Kubernetes
     # resolves them as docker.io/. Re-tag so containerd inside the
     # KIND nodes finds them under the name the pods actually request.
     # Skip the docker.io re-tag for already-qualified references (CI
     # images already carry a registry component).
+    local canonical
     case "$tag" in
       */*/*) canonical="$tag" ;;
       *)     canonical="docker.io/${tag}" ;;
@@ -157,6 +159,7 @@ for tag in "${IMAGE_TAGS[@]}"; do
     if [[ "$canonical" != "$tag" ]]; then
       $CONTAINER_RUNTIME tag "$tag" "$canonical" 2>/dev/null || true
     fi
+    local tmptar
     tmptar="$(mktemp "${TMPDIR:-/tmp}/kind-image-XXXXXX")"
     $CONTAINER_RUNTIME save -o "$tmptar" "$canonical"
     kind load image-archive --name "$CLUSTER_NAME" "$tmptar"
@@ -164,18 +167,52 @@ for tag in "${IMAGE_TAGS[@]}"; do
   else
     kind load docker-image --name "$CLUSTER_NAME" "$tag"
   fi
-done
-
-apply_demo() {
-  "${KUBECTL[@]}" apply -k "${REPO_ROOT}/examples/tcp-demo/"
 }
 
-log "Installing CRDs"
-# Apply the CRDs in their own pass first so the demo's resources
-# (MxlReceiver / MxlFlow / etc.) can be discovered when the next
-# apply hits them. kubectl's discovery cache won't refresh inside
-# a single apply.
-"${KUBECTL[@]}" apply -k "${REPO_ROOT}/config/crd/"
+log "Loading images into the cluster"
+for tag in "${IMAGE_TAGS[@]}"; do
+  echo "  -> ${tag}"
+  load_image "$tag"
+done
+
+# The demo workload (writer/reader) and the shim init-container in
+# examples/tcp-demo/ pin shim and demo-tools to :dev. In local mode
+# that matches what we just loaded; in tag mode we also need a :dev
+# alias so the demo pods schedule against the freshly-loaded image.
+if [[ "$TAG" != "dev" ]]; then
+  log "Aliasing demo images to :dev"
+  for comp in shim demo-tools; do
+    src="${IMAGE_REGISTRY}/${comp}:${TAG}"
+    dst="${IMAGE_REGISTRY}/${comp}:dev"
+    echo "  -> ${dst}"
+    $CONTAINER_RUNTIME tag "$src" "$dst"
+    load_image "$dst"
+  done
+fi
+
+log "Installing the mxl-k8s Helm chart"
+# Helm 3 installs charts/mxl-k8s/crds/ on first install automatically
+# and leaves them in place on upgrades. No separate kubectl apply -k
+# config/crd/ pass is needed.
+helm upgrade --install mxl-k8s "${REPO_ROOT}/charts/mxl-k8s" \
+  --kube-context "kind-${CLUSTER_NAME}" \
+  --namespace mxl-system --create-namespace \
+  -f "${REPO_ROOT}/examples/kind/values.yaml" \
+  --set operator.image.tag="$TAG" \
+  --set agent.image.tag="$TAG" \
+  --set gateway.image.tag="$TAG" \
+  --wait --timeout="${ROLLOUT_TIMEOUT_SECS}s"
+
+apply_demo() {
+  # --load-restrictor=LoadRestrictionsNone lets the overlay reference
+  # the writer/receiver/reader manifests in ../../tcp-demo without
+  # duplicating them under examples/kind/demo/.
+  "${KUBECTL[@]}" kustomize --load-restrictor=LoadRestrictionsNone \
+      "${REPO_ROOT}/examples/kind/demo/" \
+    | "${KUBECTL[@]}" apply -f -
+}
+
+log "Waiting for CRDs to establish"
 "${KUBECTL[@]}" wait --for=condition=Established --timeout=60s crd \
   mxldomains.mxl.qvest-digital.com \
   mxlflows.mxl.qvest-digital.com \
@@ -183,30 +220,21 @@ log "Installing CRDs"
   mxlreceivers.mxl.qvest-digital.com \
   mxlnodecapabilities.mxl.qvest-digital.com
 
-log "Applying examples/tcp-demo"
+log "Applying the demo workload"
 apply_demo
 
 # On re-runs the kubelet caches images by tag, so re-loading a :dev
-# image doesn't get picked up by existing pods. Force a rollout
-# restart and replace bare demo pods so everything runs against the
-# freshly-loaded images. Skip this on a brand-new cluster where the
-# first apply already schedules the correct images.
+# image doesn't get picked up by existing demo pods. Force the bare
+# pods to be recreated so they pick up the freshly-loaded images.
+# The chart's --wait above already covers the operator/agent/gateway
+# rollout on re-runs.
 if [[ "$CLUSTER_REUSED" == "true" ]]; then
-  if "${KUBECTL[@]}" -n mxl-system get deploy/mxl-operator >/dev/null 2>&1; then
-    log "Rolling out latest images"
-    "${KUBECTL[@]}" -n mxl-system rollout restart deploy/mxl-operator ds/mxl-domain-agent ds/mxl-fabrics-gateway || true
-  fi
   # Wait for the deletes to complete -- re-applying while a pod is
   # still Terminating leaves the new pod in limbo (apply observes
   # the live object and treats it as a no-op).
   "${KUBECTL[@]}" -n mxl-system delete pod mxl-tcp-demo-writer mxl-tcp-demo-reader --ignore-not-found --force --grace-period=0
   apply_demo
 fi
-
-log "Waiting for control-plane workloads (timeout ${ROLLOUT_TIMEOUT_SECS}s)"
-"${KUBECTL[@]}" -n mxl-system rollout status deploy/mxl-operator         --timeout="${ROLLOUT_TIMEOUT_SECS}s"
-"${KUBECTL[@]}" -n mxl-system rollout status ds/mxl-domain-agent         --timeout="${ROLLOUT_TIMEOUT_SECS}s"
-"${KUBECTL[@]}" -n mxl-system rollout status ds/mxl-fabrics-gateway      --timeout="${ROLLOUT_TIMEOUT_SECS}s"
 
 log "Waiting for MxlFlowMirror to reach Ready (timeout ${MIRROR_TIMEOUT_SECS}s)"
 deadline=$(( $(date +%s) + MIRROR_TIMEOUT_SECS ))
@@ -228,7 +256,7 @@ if [[ "$phase" != *=Ready* ]]; then
   "${KUBECTL[@]}" -n mxl-system describe mxlflowmirrors || true
   echo
   echo "Recent gateway logs:"
-  "${KUBECTL[@]}" -n mxl-system logs ds/mxl-fabrics-gateway --tail=80 || true
+  "${KUBECTL[@]}" -n mxl-system logs ds/mxl-k8s-gateway --tail=80 || true
   exit 1
 fi
 
@@ -237,7 +265,7 @@ cat <<EOF
 KIND cluster '${CLUSTER_NAME}' is up and the demo is converged.
 
   Status:    make kind-status
-  Logs:      kubectl --context kind-${CLUSTER_NAME} -n mxl-system logs ds/mxl-fabrics-gateway
+  Logs:      kubectl --context kind-${CLUSTER_NAME} -n mxl-system logs ds/mxl-k8s-gateway
   Reader:    kubectl --context kind-${CLUSTER_NAME} -n mxl-system logs pod/mxl-tcp-demo-reader
   Tear down: make kind-down
 EOF

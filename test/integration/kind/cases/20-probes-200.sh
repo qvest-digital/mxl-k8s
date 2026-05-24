@@ -10,9 +10,9 @@ set -euo pipefail
 # Parallel arrays: workload label / probe port. Kept index-aligned
 # so bash 3.2 (no associative arrays) can iterate them.
 WORKLOADS=(
-  mxl-operator
-  mxl-domain-agent
-  mxl-fabrics-gateway
+  mxl-k8s-operator
+  mxl-k8s-agent
+  mxl-k8s-gateway
 )
 PORTS=(
   8081

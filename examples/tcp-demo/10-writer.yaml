@@ -15,7 +15,7 @@ metadata:
 spec:
   containers:
     - name: writer
-      image: local/mxl-demo-tools:dev
+      image: ghcr.io/qvest-digital/mxl-k8s/demo-tools:dev
       command: ["/usr/local/bin/write-grain"]
       args:
         - "-domain"

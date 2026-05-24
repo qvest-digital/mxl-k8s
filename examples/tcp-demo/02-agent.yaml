@@ -22,7 +22,7 @@ spec:
       hostPID: true
       containers:
         - name: agent
-          image: local/mxl-domain-agent:dev
+          image: ghcr.io/qvest-digital/mxl-k8s/agent:dev
           imagePullPolicy: IfNotPresent
           args:
             - --domain-path=/run/mxl/domain
