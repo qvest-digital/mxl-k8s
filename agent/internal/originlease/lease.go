@@ -11,6 +11,8 @@ package originlease
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	apiv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -37,6 +39,14 @@ const (
 	// duration so two missed renewals still leave the Lease fresh.
 	DefaultRenewInterval = 10 * time.Second
 )
+
+// renewTimeout caps the wall-clock budget a single Renew call may
+// spend on conflict retries. Smaller than DefaultRenewInterval so a
+// partition-induced retry storm cannot stretch one Renew past the
+// next loop tick and starve subsequent flows. Declared as a var so
+// the package's own tests can shrink it; production callers must
+// not reassign it.
+var renewTimeout = 5 * time.Second
 
 // Manager owns the per-flow Lease lifecycle for one node. Renew,
 // Release, and IsFresh are safe to call concurrently; each request
@@ -80,7 +90,10 @@ func (m *Manager) Renew(ctx context.Context, flowID string) error {
 	name := LeaseName(flowID, m.NodeName)
 	holder := m.NodeName
 
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	ctx, cancel := context.WithTimeout(ctx, renewTimeout)
+	defer cancel()
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var existing coordinationv1.Lease
 		err := m.Client.Get(ctx, types.NamespacedName{Namespace: LeaseNamespace, Name: name}, &existing)
 		if apierrors.IsNotFound(err) {
@@ -110,6 +123,19 @@ func (m *Manager) Renew(ctx context.Context, flowID string) error {
 		existing.Spec.RenewTime = &now
 		return m.Client.Update(ctx, &existing)
 	})
+	// k8s.io/client-go retry.OnError treats context.DeadlineExceeded
+	// as wait.Interrupted and swallows it to nil when no prior
+	// conflict was recorded. Re-surface the bounded ctx's error so a
+	// timeout-induced Renew never reports success.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if err == nil {
+			return ctxErr
+		}
+		if !errors.Is(err, ctxErr) {
+			return fmt.Errorf("%w: %w", ctxErr, err)
+		}
+	}
+	return err
 }
 
 // Release deletes the Lease for flowID. A missing Lease is treated

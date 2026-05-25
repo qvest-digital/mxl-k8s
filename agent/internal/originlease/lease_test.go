@@ -2,6 +2,7 @@ package originlease
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -146,6 +148,55 @@ func TestManager_IsFreshMissingLeaseReturnsFalse(t *testing.T) {
 			"Origin node may not have published yet, or may have already "+
 			"Released the Lease on vanish")
 	assert.False(t, fresh)
+}
+
+// blockingClient wraps a controller-runtime client and parks every
+// Get call until the caller's context cancels. The fake client never
+// blocks on its own; the wrapper supplies the "API server is
+// unreachable" behaviour the bounded-timeout assertion requires.
+type blockingClient struct {
+	client.Client
+}
+
+func (b *blockingClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestRenew_BoundedTimeout(t *testing.T) {
+	// Shrink the renew budget so the test does not actually wait
+	// five seconds for the bound to fire. Restore the production
+	// value on exit so a later test in the same binary sees the
+	// real timeout.
+	prev := renewTimeout
+	renewTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { renewTimeout = prev })
+
+	inner := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	m := New(&blockingClient{Client: inner}, testNode)
+
+	// Hand Renew a caller ctx with a generous deadline so the bound
+	// the function applies internally is the only thing that can
+	// fire. Without the bound a partition would let RetryOnConflict
+	// burn the full caller ctx and overrun the renew interval.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err := m.Renew(ctx, testFlowID)
+	elapsed := time.Since(start)
+
+	require.Error(t, err,
+		"a Renew that hits an unresponsive API server must surface "+
+			"an error; otherwise a partitioned agent would silently "+
+			"believe its Lease was renewed")
+	assert.True(t, errors.Is(err, context.DeadlineExceeded),
+		"Renew must wrap context.DeadlineExceeded so callers can "+
+			"distinguish a timeout-induced failure from a genuine "+
+			"conflict or apiserver error; got %v", err)
+	assert.Less(t, elapsed, time.Second,
+		"Renew must honour its internal timeout, not the caller's "+
+			"five-second deadline; took %s", elapsed)
 }
 
 func ptr[T any](v T) *T       { return &v }
