@@ -284,6 +284,177 @@ func withFlowOriginStatus(c client.Client, flow *mxlv1alpha1.MxlFlow, node strin
 	return c.Status().Update(context.Background(), &live)
 }
 
+func TestReceiver_ReconvergesAfterProducerReschedule(t *testing.T) {
+	ctx := context.Background()
+	ns := env.NewNamespace(t)
+	r := &receiver.Reconciler{Client: env.Client, Scheme: env.Scheme}
+
+	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-a", "worker-target")))
+
+	flow := newFlow(t, "worker-source-1")
+	require.NoError(t, env.Client.Create(ctx,
+		testutil.NewReceiver(ns, "r", testutil.WithReceiverFlowID(flow.Spec.ID))))
+
+	// First pass: mirror points at the original source node.
+	reconcile(t, r, ns, "r")
+
+	var mirrors mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
+	require.Len(t, mirrors.Items, 1)
+	assert.Equal(t, "worker-source-1", mirrors.Items[0].Spec.SourceNode)
+	originalUID := mirrors.Items[0].UID
+
+	// Producer reschedules to a new node: flow rewrites its Origin
+	// location. The receiver must update the existing mirror in
+	// place (same UID) so the gateway can re-open the initiator
+	// against the new source.
+	require.NoError(t, withFlowOriginStatus(env.Client, flow, "worker-source-2"))
+	reconcile(t, r, ns, "r")
+
+	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
+	require.Len(t, mirrors.Items, 1,
+		"the producer reschedule must rewrite the existing mirror, not "+
+			"create a second one; a delete+create would interrupt the data plane")
+	assert.Equal(t, originalUID, mirrors.Items[0].UID,
+		"merge-patch must keep the same object UID; a destroy+create cycle "+
+			"would tear down the running fabrics initiator on the gateway side")
+	assert.Equal(t, "worker-source-2", mirrors.Items[0].Spec.SourceNode)
+}
+
+func TestReceiver_GCDeletesOrphanMirrorsAfterPodMove(t *testing.T) {
+	ctx := context.Background()
+	ns := env.NewNamespace(t)
+	r := &receiver.Reconciler{Client: env.Client, Scheme: env.Scheme}
+
+	pod := testutil.NewPod(ns, "consumer-a", "node-a")
+	require.NoError(t, env.Client.Create(ctx, pod))
+
+	flow := newFlow(t, "node-src")
+	require.NoError(t, env.Client.Create(ctx,
+		testutil.NewReceiver(ns, "r", testutil.WithReceiverFlowID(flow.Spec.ID))))
+
+	reconcile(t, r, ns, "r")
+
+	var mirrors mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
+	require.Len(t, mirrors.Items, 1)
+	assert.Equal(t, "node-a", mirrors.Items[0].Spec.TargetNode)
+
+	// Pod moves to a new node. The orphan mirror on node-a must
+	// disappear and a fresh mirror for node-b must appear; otherwise
+	// the gateway on node-a would keep holding the libfabric target
+	// open for a consumer that no longer reads it. Force grace=0
+	// because envtest has no kubelet to finalize the pod removal;
+	// without it the pod would linger with DeletionTimestamp set and
+	// the receiver would see both pods at once.
+	zero := int64(0)
+	require.NoError(t, env.Client.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: &zero}))
+	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-b", "node-b")))
+	reconcile(t, r, ns, "r")
+
+	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
+	gotTargets := map[string]struct{}{}
+	for _, m := range mirrors.Items {
+		gotTargets[m.Spec.TargetNode] = struct{}{}
+	}
+	assert.Equal(t, map[string]struct{}{"node-b": {}}, gotTargets,
+		"the orphan mirror for node-a must be GC'd and a new mirror for "+
+			"node-b created; the receiver label is what scopes the GC to "+
+			"this receiver's own mirrors")
+}
+
+func TestReceiver_FinalizerCascadesDeleteToLabeledMirrors(t *testing.T) {
+	ctx := context.Background()
+	ns := env.NewNamespace(t)
+	r := &receiver.Reconciler{Client: env.Client, Scheme: env.Scheme}
+
+	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-a", "node-a")))
+	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-b", "node-b")))
+
+	flow := newFlow(t, "node-src")
+	rec := testutil.NewReceiver(ns, "r", testutil.WithReceiverFlowID(flow.Spec.ID))
+	require.NoError(t, env.Client.Create(ctx, rec))
+
+	reconcile(t, r, ns, "r")
+
+	var mirrors mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
+	require.Len(t, mirrors.Items, 2,
+		"setup precondition: two distinct nodes must produce two mirrors")
+
+	// In production the gateway source and target reconcilers each
+	// stamp their own finalizer on the mirror so the libfabric
+	// initiator and target descriptors get torn down before the API
+	// object disappears. Simulate that here so the test exercises
+	// the requeue-until-clean branch of handleDeletion as well as
+	// the eventual final remove.
+	const fakeGatewayFinalizer = "test.mxl.qvest-digital.com/keepalive"
+	for i := range mirrors.Items {
+		mirrors.Items[i].Finalizers = append(mirrors.Items[i].Finalizers, fakeGatewayFinalizer)
+		require.NoError(t, env.Client.Update(ctx, &mirrors.Items[i]))
+	}
+
+	got := mustGetReceiver(t, env.Client, ns, "r")
+	require.Contains(t, got.Finalizers, receiver.MxlReceiverFinalizer,
+		"the reconciler stamps its finalizer on first contact so the "+
+			"cascade delete below has somewhere to hook in")
+
+	require.NoError(t, env.Client.Delete(ctx, got))
+
+	res := reconcile(t, r, ns, "r")
+	assert.NotZero(t, res.RequeueAfter,
+		"with mirrors still terminating the receiver reconcile must requeue, "+
+			"not remove its finalizer prematurely")
+
+	var pending mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, env.Client.List(ctx, &pending, client.InNamespace(ns)))
+	require.Len(t, pending.Items, 2,
+		"the cascade Delete request hits the API server but the mirror "+
+			"finalizer keeps the objects around until the gateway side "+
+			"clears it")
+	for i := range pending.Items {
+		assert.False(t, pending.Items[i].DeletionTimestamp.IsZero(),
+			"every labeled mirror must carry a DeletionTimestamp after the "+
+				"receiver delete kicks off the cascade")
+		// Now let the "gateway" finish its teardown so the mirror can
+		// finalize and the next receiver reconcile can remove its
+		// own finalizer.
+		require.NoError(t, clearGatewayFinalizer(env.Client, &pending.Items[i], fakeGatewayFinalizer))
+	}
+
+	reconcile(t, r, ns, "r")
+
+	var after mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, env.Client.List(ctx, &after, client.InNamespace(ns)))
+	assert.Empty(t, after.Items, "labeled mirrors must be gone")
+
+	// And the receiver itself must now be deletable: the finalizer
+	// is removed, so envtest finishes its delete.
+	err := env.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: "r"}, &mxlv1alpha1.MxlReceiver{})
+	assert.True(t, apierrors.IsNotFound(err),
+		"the cascade must end with the receiver actually gone; got %v", err)
+}
+
+// clearGatewayFinalizer removes the named finalizer from the mirror,
+// simulating the source-side / target-side gateway finishing its
+// teardown. Used by the cascade test where envtest has no real
+// gateway running.
+func clearGatewayFinalizer(c client.Client, m *mxlv1alpha1.MxlFlowMirror, finalizer string) error {
+	var live mxlv1alpha1.MxlFlowMirror
+	if err := c.Get(context.Background(),
+		types.NamespacedName{Namespace: m.Namespace, Name: m.Name}, &live); err != nil {
+		return err
+	}
+	kept := live.Finalizers[:0]
+	for _, f := range live.Finalizers {
+		if f != finalizer {
+			kept = append(kept, f)
+		}
+	}
+	live.Finalizers = kept
+	return c.Update(context.Background(), &live)
+}
+
 // Defensive: ensure a stray apierrors import does not break under
 // future refactor; the helpers above use IsNotFound semantics through
 // the controller-runtime client.

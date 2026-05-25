@@ -10,11 +10,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -348,4 +350,209 @@ func TestMirrorToReceivers_NonMirrorObjectReturnsNil(t *testing.T) {
 		"the mapper guards against a misconfigured Watches by ignoring "+
 			"non-MxlFlowMirror events; if this regresses, every Pod event "+
 			"would enqueue every receiver in the cluster")
+}
+
+func Test_ensureMirror_UpdatesSourceNodeOnRescheduling(t *testing.T) {
+	ctx := context.Background()
+	const (
+		flowID = "11111111-2222-3333-4444-555555555555"
+		recvNS = "ns"
+		recvN  = "r"
+		oldSrc = "n-old"
+		newSrc = "n-new"
+		tgt    = "n-target"
+	)
+
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: recvNS, Name: recvN},
+		Spec: mxlv1alpha1.MxlReceiverSpec{
+			FlowID:   flowID,
+			Provider: mxlv1alpha1.ProviderTCP,
+		},
+	}
+
+	// A pre-existing mirror with the old source node and an
+	// agent-stamped Requestor. The patch must update SourceNode and
+	// stamp the receiver label, but must not clobber Requestor.
+	existing := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: recvNS,
+			Name:      mirrorName(flowID, tgt),
+		},
+		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
+			FlowID:     flowID,
+			SourceNode: oldSrc,
+			TargetNode: tgt,
+			Provider:   mxlv1alpha1.ProviderTCP,
+			Requestor: &mxlv1alpha1.PodRef{
+				Namespace: recvNS,
+				Name:      "consumer-pod",
+				UID:       "pod-uid",
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(unitScheme(t)).
+		WithObjects(existing).
+		Build()
+	r := &Reconciler{Client: c}
+
+	got, err := r.ensureMirror(ctx, recv, newSrc, nodeTarget{node: tgt, namespace: recvNS})
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	var live mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: recvNS, Name: existing.Name}, &live))
+	assert.Equal(t, newSrc, live.Spec.SourceNode,
+		"a producer rescheduling onto a different node must rewrite the "+
+			"existing mirror's SourceNode; without that the source-side "+
+			"gateway on the old node would keep trying to read a flow that "+
+			"no longer has a writer there")
+	assert.Equal(t, tgt, live.Spec.TargetNode, "TargetNode is the mirror's identity key and must not be rewritten")
+	assert.Equal(t, mxlv1alpha1.ProviderTCP, live.Spec.Provider)
+	require.NotNil(t, live.Spec.Requestor, "merge-patch must preserve agent-owned Requestor")
+	assert.Equal(t, "consumer-pod", live.Spec.Requestor.Name)
+	assert.Equal(t, recvN, live.Labels[mxlv1alpha1.LabelCreatedByReceiver],
+		"the receiver label is what the GC pass uses to recognise its own mirrors")
+}
+
+func Test_ensureMirror_StampsLabelOnCreate(t *testing.T) {
+	ctx := context.Background()
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r"},
+		Spec: mxlv1alpha1.MxlReceiverSpec{
+			FlowID:   "11111111-2222-3333-4444-555555555555",
+			Provider: mxlv1alpha1.ProviderTCP,
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).Build()
+	r := &Reconciler{Client: c}
+
+	m, err := r.ensureMirror(ctx, recv, "n-src", nodeTarget{node: "n-tgt", namespace: "ns"})
+	require.NoError(t, err)
+	assert.Equal(t, "r", m.Labels[mxlv1alpha1.LabelCreatedByReceiver])
+}
+
+func Test_PodWatch_EnqueuesReceiversOnNodeChange(t *testing.T) {
+	ctx := context.Background()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "consumer"},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(unitScheme(t)).
+		WithObjects(
+			&mxlv1alpha1.MxlReceiver{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r-a"},
+				Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: "f-a"},
+			},
+			&mxlv1alpha1.MxlReceiver{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r-b"},
+				Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: "f-b"},
+			},
+			&mxlv1alpha1.MxlReceiver{
+				// Different namespace - must not be enqueued by an event
+				// in "ns"; the pod and the receiver have to share a
+				// namespace for the selector match to apply.
+				ObjectMeta: metav1.ObjectMeta{Namespace: "other", Name: "r-other"},
+				Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: "f-a"},
+			},
+		).
+		Build()
+	r := &Reconciler{Client: c}
+
+	out := r.podToReceivers(ctx, pod)
+	names := make([]string, 0, len(out))
+	for _, req := range out {
+		assert.Equal(t, "ns", req.Namespace)
+		names = append(names, req.Name)
+	}
+	sort.Strings(names)
+	assert.Equal(t, []string{"r-a", "r-b"}, names,
+		"a pod event must enqueue every receiver in the pod's namespace; "+
+			"the reconciler then re-evaluates the selector. Cross-namespace "+
+			"receivers stay out so each namespace's intent stays its own.")
+
+	// Predicate gates: Update is suppressed when spec.nodeName has not
+	// changed. Without this the receiver would re-reconcile on every
+	// pod status tick (container ready, IP assignment, conditions).
+	pred := podNodeChangePredicate()
+	assert.False(t, pred.Update(event.UpdateEvent{
+		ObjectOld: &corev1.Pod{Spec: corev1.PodSpec{NodeName: "n1"}},
+		ObjectNew: &corev1.Pod{Spec: corev1.PodSpec{NodeName: "n1"}},
+	}), "pod status churn must not enqueue the receiver")
+	assert.True(t, pred.Update(event.UpdateEvent{
+		ObjectOld: &corev1.Pod{Spec: corev1.PodSpec{NodeName: ""}},
+		ObjectNew: &corev1.Pod{Spec: corev1.PodSpec{NodeName: "n1"}},
+	}), "initial scheduling decision must enqueue the receiver")
+	assert.True(t, pred.Update(event.UpdateEvent{
+		ObjectOld: &corev1.Pod{Spec: corev1.PodSpec{NodeName: "n1"}},
+		ObjectNew: &corev1.Pod{Spec: corev1.PodSpec{NodeName: "n2"}},
+	}), "rescheduling onto a different node must enqueue the receiver")
+	assert.True(t, pred.Create(event.CreateEvent{Object: pod}))
+	assert.True(t, pred.Delete(event.DeleteEvent{Object: pod}))
+}
+
+func Test_FlowWatch_EnqueuesReceiversOnOriginRotation(t *testing.T) {
+	ctx := context.Background()
+
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: metav1.ObjectMeta{Name: "f-a"},
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: "f-a"},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(unitScheme(t)).
+		WithIndex(&mxlv1alpha1.MxlReceiver{}, flowIDIndex, func(o client.Object) []string {
+			recv, ok := o.(*mxlv1alpha1.MxlReceiver)
+			if !ok || recv.Spec.FlowID == "" {
+				return nil
+			}
+			return []string{recv.Spec.FlowID}
+		}).
+		WithObjects(
+			&mxlv1alpha1.MxlReceiver{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns-1", Name: "r-match-1"},
+				Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: "f-a"},
+			},
+			&mxlv1alpha1.MxlReceiver{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns-2", Name: "r-match-2"},
+				Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: "f-a"},
+			},
+			&mxlv1alpha1.MxlReceiver{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns-1", Name: "r-skip"},
+				Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: "f-other"},
+			},
+		).
+		Build()
+	r := &Reconciler{Client: c}
+
+	out := r.flowToReceivers(ctx, flow)
+	gotKeys := make(map[client.ObjectKey]struct{}, len(out))
+	for _, req := range out {
+		gotKeys[req.NamespacedName] = struct{}{}
+	}
+	assert.Equal(t, map[client.ObjectKey]struct{}{
+		{Namespace: "ns-1", Name: "r-match-1"}: {},
+		{Namespace: "ns-2", Name: "r-match-2"}: {},
+	}, gotKeys,
+		"every receiver whose spec.flowID matches the flow ID must be "+
+			"enqueued, across every namespace; the operator owns receivers "+
+			"cluster-wide and an origin rotation has to wake them all.")
+}
+
+func Test_FlowWatch_NonFlowObjectReturnsNil(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).Build()
+	r := &Reconciler{Client: c}
+	assert.Nil(t, r.flowToReceivers(ctx, &corev1.Pod{}))
+}
+
+func Test_PodWatch_NonPodObjectReturnsNil(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).Build()
+	r := &Reconciler{Client: c}
+	assert.Nil(t, r.podToReceivers(ctx, &mxlv1alpha1.MxlFlow{}))
 }
