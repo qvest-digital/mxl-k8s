@@ -190,6 +190,15 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string
 	var existing mxlv1alpha1.MxlFlowMirror
 	err := d.Client.Get(ctx, types.NamespacedName{Namespace: pod.GetNamespace(), Name: name}, &existing)
 	if err == nil {
+		// A mirror with the same (flow, target node) name already
+		// exists. The pre-existing object is functionally
+		// sufficient for this consumer pod; reuse it as-is. The
+		// labels and Requestor field stay untouched: in particular
+		// when the receiver reconciler authored the mirror
+		// (LabelCreatedByReceiver, no Requestor), stamping the
+		// intent label here would split the GC contract -- both
+		// reconcilers would then claim the same mirror, racing on
+		// delete.
 		return &existing, nil
 	}
 	if !apierrors.IsNotFound(err) {
@@ -205,6 +214,10 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: pod.GetNamespace(),
 			Name:      name,
+			Labels: map[string]string{
+				mxlv1alpha1.LabelCreatedByIntent: d.NodeName,
+				mxlv1alpha1.LabelRequestorPodUID: string(pod.GetUID()),
+			},
 		},
 		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
 			FlowID:     flowID,

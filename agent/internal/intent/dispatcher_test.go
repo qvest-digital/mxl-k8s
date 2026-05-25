@@ -381,6 +381,115 @@ func TestEnsureMirror_Idempotent(t *testing.T) {
 	assert.Equal(t, first.Name, second.Name)
 }
 
+// TestEnsureMirror_StampsIntentLabels asserts the contract the
+// operator's intent-GC controller depends on: every mirror the
+// agent creates must carry LabelCreatedByIntent (with the local
+// node name as value) and LabelRequestorPodUID (with the consumer
+// pod's UID), and Spec.Requestor must name the pod. Without these
+// the GC cannot tell intent-created mirrors apart from
+// receiver-created ones and cannot detect pod replacement.
+func TestEnsureMirror_StampsIntentLabels(t *testing.T) {
+	scheme := newScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		Build()
+
+	d := &Dispatcher{
+		Client:     c,
+		DomainPath: "/run/mxl/domain",
+		NodeName:   "n-target",
+		Provider:   mxlv1alpha1.ProviderTCP,
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "consumer", UID: "uid-42"},
+	}
+
+	got, err := d.ensureMirror(context.Background(), flowID, "n-src", pod)
+	require.NoError(t, err)
+
+	var live mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Namespace: "ns", Name: got.Name}, &live))
+
+	assert.Equal(t, "n-target", live.Labels[mxlv1alpha1.LabelCreatedByIntent],
+		"LabelCreatedByIntent must carry the local node name so the GC "+
+			"can tell which agent stamped the mirror")
+	assert.Equal(t, "uid-42", live.Labels[mxlv1alpha1.LabelRequestorPodUID],
+		"LabelRequestorPodUID lets a label selector find every mirror "+
+			"tied to a given pod UID without unmarshalling spec")
+	require.NotNil(t, live.Spec.Requestor)
+	assert.Equal(t, "consumer", live.Spec.Requestor.Name)
+	assert.Equal(t, "ns", live.Spec.Requestor.Namespace)
+	assert.Equal(t, "uid-42", live.Spec.Requestor.UID)
+	_, receiverLabel := live.Labels[mxlv1alpha1.LabelCreatedByReceiver]
+	assert.False(t, receiverLabel,
+		"a mirror the agent created must not carry the receiver label; "+
+			"the receiver reconciler would then try to GC it and race "+
+			"the intent reconciler")
+}
+
+// TestEnsureMirror_ExistingReceiverMirror_LeftIntact asserts that
+// when the receiver reconciler has already created a mirror for the
+// same (flow, target node), the agent reuses it without rewriting
+// ownership: no intent label is added, the receiver label stays,
+// and Spec.Requestor remains nil. Otherwise the two reconcilers
+// would both claim the mirror and race on deletion.
+func TestEnsureMirror_ExistingReceiverMirror_LeftIntact(t *testing.T) {
+	scheme := newScheme(t)
+	existing := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns",
+			Name:      MirrorName(flowID, "n-target"),
+			Labels: map[string]string{
+				mxlv1alpha1.LabelCreatedByReceiver: "rcv-1",
+			},
+		},
+		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
+			FlowID:     flowID,
+			SourceNode: "n-src",
+			TargetNode: "n-target",
+			Provider:   mxlv1alpha1.ProviderTCP,
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(existing).
+		Build()
+
+	d := &Dispatcher{
+		Client:     c,
+		DomainPath: "/run/mxl/domain",
+		NodeName:   "n-target",
+		Provider:   mxlv1alpha1.ProviderTCP,
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "consumer", UID: "uid-7"},
+	}
+
+	got, err := d.ensureMirror(context.Background(), flowID, "n-src", pod)
+	require.NoError(t, err)
+	assert.Equal(t, existing.Name, got.Name)
+
+	var live mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Namespace: "ns", Name: existing.Name}, &live))
+
+	assert.Equal(t, "rcv-1", live.Labels[mxlv1alpha1.LabelCreatedByReceiver],
+		"the receiver label must survive: deleting it would orphan the "+
+			"mirror from the receiver's GC pass")
+	_, intentLabel := live.Labels[mxlv1alpha1.LabelCreatedByIntent]
+	assert.False(t, intentLabel,
+		"the agent must not claim co-ownership of a receiver-owned "+
+			"mirror; the intent reconciler would then race the receiver "+
+			"reconciler to delete it")
+	assert.Nil(t, live.Spec.Requestor,
+		"writing Spec.Requestor onto a receiver-owned mirror would "+
+			"trip the intent GC into deleting it when the consumer "+
+			"pod goes away, even though the receiver still wants it")
+}
+
 func TestEnsureMirror_EmptyProviderDefaultsToAuto(t *testing.T) {
 	scheme := newScheme(t)
 	c := fake.NewClientBuilder().
