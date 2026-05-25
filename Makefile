@@ -188,10 +188,12 @@ mocks-check: mocks
 	fi
 
 # --- KIND demo helpers ---
-# `make kind-up`     builds the four component images, creates (or
+# `make kind-up`     builds the five component images, creates (or
 #                    reuses) a 3-node KIND cluster, loads the images,
-#                    applies examples/tcp-demo, and waits for the
-#                    MxlFlowMirror to reach Ready.
+#                    installs the mxl-k8s Helm chart against
+#                    examples/kind/values.yaml, applies the demo
+#                    workload from examples/kind/demo/, and waits
+#                    for the MxlFlowMirror to reach Ready.
 # `make kind-down`   deletes the cluster.
 # `make kind-status` prints a quick status summary.
 # `make kind-test`   runs the integration suite in
@@ -200,17 +202,20 @@ mocks-check: mocks
 #                    under KIND_DIAG_DIR for the kind-integration
 #                    GitHub Actions job to upload as an artifact.
 #
+# Requires: docker (or podman), kind, kubectl, helm.
+#
 # Override the cluster name with KIND_CLUSTER=<name>.
 # Use Podman instead of Docker: CONTAINER_RUNTIME=podman
 #   e.g. `make kind-up CONTAINER_RUNTIME=podman`
 #
 # Image source selector (BUILD):
-#   unset / BUILD=local  build the five component images locally and
+#   unset / BUILD=local  build the five component images locally as
+#                        ghcr.io/qvest-digital/mxl-k8s/<comp>:dev and
 #                        kind-load them (existing behaviour).
 #   BUILD=<tag>          skip the local build; pull
 #                        ghcr.io/<owner>/mxl-k8s/<component>:<tag> for
-#                        every component, kind-load it, and rewrite
-#                        the demo manifests to reference it.
+#                        every component, kind-load it, and install
+#                        the chart with --set <comp>.image.tag=<tag>.
 #   e.g. `make kind-up BUILD=sha-abc1234`
 #        `make kind-up BUILD=v1.0.0-rc.3`
 

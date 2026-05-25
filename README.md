@@ -125,8 +125,8 @@ IRSA), and the FluxCD `HelmRelease` snippet.
 
 The repo ships a KIND cluster that runs an end-to-end TCP flow
 across two worker nodes. Requires Docker, [`kind`][kind] >= 0.20,
-and `kubectl`. Linux host with a kernel >= 5.17 (the agent's
-`fanotify` needs `FAN_REPORT_DFID_NAME`).
+`kubectl`, and `helm`. Linux host with a kernel >= 5.17 (the
+agent's `fanotify` needs `FAN_REPORT_DFID_NAME`).
 
 For docker run:
 
@@ -142,10 +142,12 @@ make kind-up CONTAINER_RUNTIME=podman
 
 That builds every component image locally, brings up a
 three-node KIND cluster (control plane plus two workers),
-applies the [`examples/tcp-demo`](examples/tcp-demo/) bundle, and
-waits for the `MxlFlowMirror` to reach `Ready`. After about a
-minute the writer pod is producing grains on one worker and the
-reader pod is consuming them on the other.
+installs the `mxl-k8s` Helm chart against the overlay in
+[`examples/kind/`](examples/kind/), applies the demo writer/
+reader workload from [`examples/kind/demo/`](examples/kind/demo/),
+and waits for the `MxlFlowMirror` to reach `Ready`. After about
+a minute the writer pod is producing grains on one worker and
+the reader pod is consuming them on the other.
 
 ```sh
 kubectl --context kind-mxl-k8s-demo -n mxl-system logs pod/mxl-tcp-demo-reader

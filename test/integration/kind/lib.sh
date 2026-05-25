@@ -113,7 +113,7 @@ collect_diagnostics() {
       mxldomains,mxlflows,mxlflowmirrors,mxlreceivers,mxlnodecapabilities \
       -o yaml \
       > "$KIND_DIAG_DIR/mxl-resources.yaml" 2>&1 || true
-  for app in mxl-operator mxl-domain-agent mxl-fabrics-gateway; do
+  for app in mxl-k8s-operator mxl-k8s-agent mxl-k8s-gateway; do
     "${KUBECTL[@]}" -n "$NAMESPACE" logs \
         -l "app.kubernetes.io/name=${app}" \
         --all-containers --prefix --tail=400 \

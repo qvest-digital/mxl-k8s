@@ -51,13 +51,79 @@ on the worker nodes for either provider to actually work.
   - `FI_LOG_LEVEL=Info` (or `Debug`): noisy but invaluable when
     diagnosing why a Setup fails.
 
+### Choosing host vs. NAD-attached networking
+
+The chart defaults to `gateway.hostNetwork: true` because the
+fabric `TargetInfo` embeds a `host:port` a peer dials, and a CNI
+overlay IP is not reachable cross-node. That default fits KIND
+and any single-NIC topology where the same interface carries
+both cluster traffic and RDMA traffic.
+
+On clusters with a dedicated RDMA fabric -- typical for bare-metal
+RoCEv2 deployments where the RoCE NIC sits on its own VLAN, often
+bonded -- hostNetwork pins the gateway's bind address to `POD_IP`,
+which the downward API resolves to the cluster-network interface,
+not the RDMA fabric. `rdma_bind_addr` returns ENODEV. The cure is
+to disable hostNetwork, attach a NAD that places the pod on the
+RDMA fabric, and let libfabric pick the in-pod netdev. The
+snippet below is a Helm values override for `charts/mxl-k8s`,
+applied via `helm install -f <file>` (or merged into a
+HelmRelease's `values:`):
+
+```yaml
+gateway:
+  hostNetwork: false
+  dnsPolicy: ClusterFirst
+  podAnnotations:
+    k8s.v1.cni.cncf.io/networks: network/rdma-roce
+  flags:
+    # Explicit empty -> --bind-address= (bare equals). Suppresses
+    # the POD_IP fallback so libfabric+FI_VERBS_IFACE pick the
+    # in-pod RDMA netdev.
+    bindAddress: ""
+  rdma:
+    enabled: true
+    # `k8s-rdma-shared-dev-plugin` or similar advertises the HCA
+    # as an extended resource. The chart merges `<name>: 1` into
+    # requests and limits when this is set.
+    resourceName: rdma/hca_shared_devices
+    extraEnv:
+      - name: FI_VERBS_IFACE
+        # In-pod netdev name (typically `net1` when the NAD is the
+        # pod's only secondary network). NOT the host PF.
+        value: net1
+```
+
+`FI_VERBS_IFACE` names the in-pod netdev -- usually `net1` for a
+single secondary attachment, `net2` for the second, and so on.
+With `hostNetwork: false` the gateway runs in the pod's netns and
+cannot see the host PF, so a host-side name like `enp65s0f0` does
+not resolve. (With `hostNetwork: true` the gateway shares the host
+netns and the host PF name is what `FI_VERBS_IFACE` must use.)
+
+A complete fixture demonstrating the bare-metal pattern lives at
+`charts/mxl-k8s/tests/values/full-rdma-nad.yaml`.
+
+The downward API exposes only the primary pod IP via
+`fieldRef: status.podIP`; addresses e.g. Multus assigns on secondary
+interfaces are not addressable through `fieldRef` today. In the
+rare case libfabric cannot self-resolve a device even with
+`FI_VERBS_IFACE` -- for example when whereabouts assigns an
+address with a CIDR libfabric does not match against any of the
+HCA's GIDs -- the workaround today is operator-side: pin
+whereabouts to a per-node static allocation and set
+`gateway.flags.bindAddress: <that-IP>` explicitly. Future
+versions may add a built-in bind-address file flag; until then,
+this is what the chart supports.
+
 ### Multus / SR-IOV
 
 If pods can't share the host's RDMA NIC (for example because
 multiple tenants need isolation, or the NIC supports SR-IOV and
 you want one VF per pod), use Multus to attach a dedicated VF as
 a secondary network. The gateway then runs *without* `hostNetwork`
-and binds verbs to the secondary interface via `FI_VERBS_IFACE`.
+and binds verbs to the secondary interface via `FI_VERBS_IFACE`,
+following the NAD-attached pattern above.
 
 A working pattern: a `NetworkAttachmentDefinition` per RDMA
 fabric, an SR-IOV device plugin allocating VFs to pods, and the

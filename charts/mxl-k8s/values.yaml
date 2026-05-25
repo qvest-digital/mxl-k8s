@@ -323,7 +323,11 @@ gateway:
     # @schema
     domainPath: /run/mxl/domain
     # -- Bind address for libmxl-fabrics endpoints. Default uses the
-    # downward-API POD_IP so each gateway binds its node IP.
+    # downward-API POD_IP so each gateway binds its node IP. An
+    # explicit empty string ("") emits `--bind-address=` (bare equals),
+    # which suppresses the POD_IP fallback so libfabric picks the
+    # interface; useful when the gateway runs on a Multus-attached
+    # NAD and the RDMA fabric is a secondary netdev.
     bindAddress: $(POD_IP)
     # @schema
     # items:
@@ -369,6 +373,12 @@ gateway:
     # @schema
     infinibandHostPath: /dev/infiniband
     extraEnv: []
+    # -- Extended-resource name advertised by a Kubernetes
+    # device plugin (for example `rdma/hca_shared_devices`
+    # from k8s-rdma-shared-dev-plugin). When non-empty, the
+    # gateway container gets `<resourceName>: 1` on both
+    # requests and limits. Empty disables the request.
+    resourceName: ""
   serviceAccount:
     create: true
     name: ""

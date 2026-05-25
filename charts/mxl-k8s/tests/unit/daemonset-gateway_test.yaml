@@ -28,6 +28,14 @@ tests:
           path: spec.template.spec.containers[0].args
           content: --providers=tcp,verbs,shm
 
+  - it: explicit empty string flag renders a bare --key= arg
+    set:
+      gateway.flags.bindAddress: ""
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --bind-address=
+
   - it: rdma.enabled adds IPC_LOCK + SYS_RESOURCE and the /dev/infiniband mount
     set:
       gateway.rdma.enabled: true
@@ -95,3 +103,56 @@ tests:
           content:
             name: FI_VERBS_IFACE
             value: net1
+
+  - it: default rdma.resourceName emits no extended resource
+    asserts:
+      - isNull:
+          path: spec.template.spec.containers[0].resources.requests["rdma/hca_shared_devices"]
+      - isNull:
+          path: spec.template.spec.containers[0].resources.limits["rdma/hca_shared_devices"]
+
+  - it: rdma.resourceName injects the extended resource on requests and limits
+    set:
+      gateway.rdma.resourceName: rdma/hca_shared_devices
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests["rdma/hca_shared_devices"]
+          value: 1
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits["rdma/hca_shared_devices"]
+          value: 1
+
+  - it: rdma.resourceName coexists with user-supplied resource entries
+    set:
+      gateway.rdma.resourceName: rdma/hca_shared_devices
+      gateway.resources.requests.cpu: 250m
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.cpu
+          value: 250m
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests["rdma/hca_shared_devices"]
+          value: 1
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits["rdma/hca_shared_devices"]
+          value: 1
+
+  - it: full-rdma-nad fixture renders the NAD-attached pattern
+    values:
+      - ../values/full-rdma-nad.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --bind-address=
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests["rdma/hca_shared_devices"]
+          value: 1
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits["rdma/hca_shared_devices"]
+          value: 1
+      - equal:
+          path: spec.template.metadata.annotations["k8s.v1.cni.cncf.io/networks"]
+          value: network/rdma-roce
+      - equal:
+          path: spec.template.spec.hostNetwork
+          value: false

@@ -18,7 +18,7 @@ spec:
       serviceAccountName: mxl-operator
       containers:
         - name: operator
-          image: local/mxl-operator:dev
+          image: ghcr.io/qvest-digital/mxl-k8s/operator:dev
           imagePullPolicy: IfNotPresent
           ports:
             - name: probe

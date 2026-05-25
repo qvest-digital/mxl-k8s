@@ -22,7 +22,7 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: gateway
-          image: local/mxl-fabrics-gateway:dev
+          image: ghcr.io/qvest-digital/mxl-k8s/gateway:dev
           imagePullPolicy: IfNotPresent
           args:
             - --domain-path=/run/mxl/domain

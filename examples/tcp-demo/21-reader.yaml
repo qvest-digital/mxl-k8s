@@ -29,14 +29,14 @@ spec:
           topologyKey: kubernetes.io/hostname
   initContainers:
     - name: install-intent-shim
-      image: local/mxl-shim:dev
+      image: ghcr.io/qvest-digital/mxl-k8s/shim:dev
       imagePullPolicy: IfNotPresent
       volumeMounts:
         - name: intent-shim
           mountPath: /shared
   containers:
     - name: reader
-      image: local/mxl-demo-tools:dev
+      image: ghcr.io/qvest-digital/mxl-k8s/demo-tools:dev
       command: ["/usr/local/bin/read-grain"]
       args:
         - "-domain"
