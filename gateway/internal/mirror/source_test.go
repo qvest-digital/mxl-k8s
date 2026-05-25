@@ -11,13 +11,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
+	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
@@ -629,4 +633,185 @@ func TestBackoffFor_Schedule(t *testing.T) {
 		assert.Equalf(t, tc.want, backoffFor(tc.attempts),
 			"backoffFor(%d)", tc.attempts)
 	}
+}
+
+// mirrorFlowIDIndexer is the same indexer the production
+// SetupWithManager registers; declared once here so every Lease
+// watch test wires the fake client with the identical key/value
+// shape and a typo in either place fails at compile time rather
+// than as a silent empty list at runtime.
+var mirrorFlowIDIndexer = func(obj client.Object) []string {
+	m, ok := obj.(*mxlv1alpha1.MxlFlowMirror)
+	if !ok || m.Spec.FlowID == "" {
+		return nil
+	}
+	return []string{m.Spec.FlowID}
+}
+
+func TestSource_LeaseWatch_NodeFiltered(t *testing.T) {
+	// The Lease name encodes (flowID, nodeName). A Lease for another
+	// node must not wake this gateway's source reconciler - an N-pod,
+	// M-flow cluster would otherwise produce N*M wakeups on every
+	// renew tick. A Lease for this node with no matching mirror at
+	// the gateway must return nil too: the agent renews Leases for
+	// every flow it hosts, and only the subset whose mirrors live
+	// here is interesting.
+	scheme := newSourceTestScheme(t)
+	// ParseLeaseName splits on the last dash, so node names used in
+	// LeaseName round-trip cleanly only when they contain no dash.
+	const (
+		flowID = "11111111-2222-3333-4444-555555555555"
+		myNode = "nodea"
+	)
+
+	managed := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "m-managed"},
+		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
+			FlowID:     flowID,
+			SourceNode: myNode,
+			TargetNode: "nodeb",
+		},
+	}
+	// Mirror at this gateway but with a different flowID - the
+	// field-index lookup must exclude it.
+	otherFlow := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "m-other-flow"},
+		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
+			FlowID:     "other-flow",
+			SourceNode: myNode,
+			TargetNode: "nodeb",
+		},
+	}
+	// Mirror for the right flow but with SourceNode on another
+	// gateway - the SourceNode in-memory filter must exclude it.
+	foreignSource := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "m-foreign"},
+		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
+			FlowID:     flowID,
+			SourceNode: "nodex",
+			TargetNode: "nodeb",
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&mxlv1alpha1.MxlFlowMirror{}, mirrorFlowIDIndex, mirrorFlowIDIndexer).
+		WithObjects(managed, otherFlow, foreignSource).
+		Build()
+	r := &SourceReconciler{Client: c, NodeName: myNode}
+
+	t.Run("local lease for managed flow enqueues only the local mirror", func(t *testing.T) {
+		lease := &coordinationv1.Lease{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: mxlv1alpha1.LeaseNamespace,
+				Name:      mxlv1alpha1.LeaseName(flowID, myNode),
+			},
+		}
+		got := r.leaseToMirrors(context.Background(), lease)
+		require.Len(t, got, 1,
+			"the field index returns both mirrors for flowID, then the "+
+				"in-memory SourceNode filter drops the one whose source "+
+				"is on another gateway; one match remains")
+		assert.Equal(t, client.ObjectKey{Namespace: "ns1", Name: "m-managed"},
+			got[0].NamespacedName)
+	})
+
+	t.Run("lease for another node returns nil", func(t *testing.T) {
+		lease := &coordinationv1.Lease{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: mxlv1alpha1.LeaseNamespace,
+				Name:      mxlv1alpha1.LeaseName(flowID, "nodex"),
+			},
+		}
+		assert.Empty(t, r.leaseToMirrors(context.Background(), lease),
+			"without the per-pod nodeName filter every gateway pod would "+
+				"wake on every renew tick for every flow")
+	})
+
+	t.Run("lease for unknown flow returns nil", func(t *testing.T) {
+		lease := &coordinationv1.Lease{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: mxlv1alpha1.LeaseNamespace,
+				Name:      mxlv1alpha1.LeaseName("nomirrorhere", myNode),
+			},
+		}
+		assert.Empty(t, r.leaseToMirrors(context.Background(), lease),
+			"a Lease the agent publishes for a flow no local mirror "+
+				"references must not generate a reconcile request")
+	})
+}
+
+func TestSource_LeaseInMxlSystemPredicate(t *testing.T) {
+	pred := leaseInMxlSystem()
+
+	cases := []struct {
+		ns   string
+		want bool
+	}{
+		{ns: mxlv1alpha1.LeaseNamespace, want: true},
+		{ns: "kube-system", want: false},
+		{ns: "kube-node-lease", want: false},
+		{ns: "default", want: false},
+		{ns: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.ns, func(t *testing.T) {
+			obj := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{Namespace: tc.ns, Name: "x"},
+			}
+			assert.Equal(t, tc.want, pred.Create(event.CreateEvent{Object: obj}))
+			assert.Equal(t, tc.want, pred.Delete(event.DeleteEvent{Object: obj}))
+			assert.Equal(t, tc.want, pred.Update(event.UpdateEvent{ObjectOld: obj, ObjectNew: obj}))
+			assert.Equal(t, tc.want, pred.Generic(event.GenericEvent{Object: obj}))
+		})
+	}
+}
+
+func TestSource_LeaseToMirrors_MalformedNameDropped(t *testing.T) {
+	scheme := newSourceTestScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&mxlv1alpha1.MxlFlowMirror{}, mirrorFlowIDIndex, mirrorFlowIDIndexer).
+		WithObjects(&mxlv1alpha1.MxlFlowMirror{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "m1"},
+			Spec: mxlv1alpha1.MxlFlowMirrorSpec{
+				FlowID:     "flow-id",
+				SourceNode: "node-a",
+				TargetNode: "node-b",
+			},
+		}).
+		Build()
+	r := &SourceReconciler{Client: c, NodeName: "node-a"}
+
+	cases := []string{
+		"unrelated-lease",         // no mxl-flow- prefix
+		"mxl-flow-",               // empty remainder
+		"mxl-flow-only-prefix",    // no trailing -node
+		"mxl-flow-flow-id-",       // empty node segment
+		"kube-controller-manager", // leader election lease
+	}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			lease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: mxlv1alpha1.LeaseNamespace,
+					Name:      name,
+				},
+			}
+			assert.Empty(t, r.leaseToMirrors(context.Background(), lease),
+				"a Lease whose name does not match the LeaseName format "+
+					"must not enqueue anything; otherwise an unrelated "+
+					"coordination Lease that leaked into mxl-system would "+
+					"wake every source-side mirror on this gateway")
+		})
+	}
+}
+
+func TestSource_LeaseToMirrors_NonLeaseObjectReturnsNil(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newSourceTestScheme(t)).Build()
+	r := &SourceReconciler{Client: c, NodeName: "node-a"}
+	assert.Nil(t, r.leaseToMirrors(context.Background(), &corev1.Pod{}),
+		"the mapper guards against a misconfigured Watches by ignoring "+
+			"non-Lease events; without this every Pod event would feed "+
+			"ParseLeaseName a pod name")
 }

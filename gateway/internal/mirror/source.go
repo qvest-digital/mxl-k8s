@@ -9,16 +9,19 @@ import (
 	"sync/atomic"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
@@ -38,6 +41,14 @@ const SourceFinalizerName = "gateway.mxl.qvest-digital.com/source-side"
 // reconciler uses a different manager so the two never collide on
 // the same conditions entry.
 const sourceFieldOwner = "mxl-source-gateway"
+
+// mirrorFlowIDIndex is the field-index key registered against
+// MxlFlowMirror on spec.flowID. The Lease watch uses it to map a
+// Lease event back to the matching MxlFlowMirrors without a cluster-
+// wide scan. The string matches the operator's flowIDIndex on
+// MxlReceiver verbatim so a cross-package audit can confirm both
+// indexers point at the same logical key.
+const mirrorFlowIDIndex = "spec.flowID"
 
 // errAddTargetFailed wraps a libmxl-fabrics AddTarget failure so the
 // reconciler can errors.Is detect it and engage bounded backoff
@@ -752,12 +763,21 @@ func observedState(entry *sourceEntry) sourceProgressState {
 // SetupWithManager wires the reconciler into the controller-runtime
 // Manager.
 //
-// The Watches on MxlFlow closes the writer-startup race: when an
-// agent on the source node publishes a new MxlFlow (or updates its
-// Origin location) the reconciler is woken immediately for any
+// The MxlFlow watch closes the writer-startup race: when an agent
+// on the source node publishes a new MxlFlow (or updates its Origin
+// location) the reconciler is woken immediately for any
 // MxlFlowMirror with the matching flowID, instead of waiting out
 // the exponential backoff that started when the local FlowReader
 // open returned FLOW_NOT_FOUND before the writer had created it.
+//
+// The Lease watch covers the symmetric case on the renew side:
+// without it a freshly-renewed Origin Lease only reaches the source
+// reconciler at the next MxlFlow status flush, so the same liveness
+// signal that wakes the receiver lags arbitrarily on the source.
+// The spec.flowID field index keeps the per-event work O(matches)
+// instead of a cluster-wide MxlFlowMirror scan.
+//
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch
 func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.sources == nil {
 		r.sources = make(map[types.NamespacedName]*sourceEntry)
@@ -773,14 +793,82 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			ProgressInterval: r.ProgressInterval,
 		}
 	}
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&mxlv1alpha1.MxlFlowMirror{},
+		mirrorFlowIDIndex,
+		func(obj client.Object) []string {
+			m, ok := obj.(*mxlv1alpha1.MxlFlowMirror)
+			if !ok || m.Spec.FlowID == "" {
+				return nil
+			}
+			return []string{m.Spec.FlowID}
+		},
+	); err != nil {
+		return fmt.Errorf("index MxlFlowMirror by %s: %w", mirrorFlowIDIndex, err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&mxlv1alpha1.MxlFlowMirror{}).
 		Watches(
 			&mxlv1alpha1.MxlFlow{},
 			handler.EnqueueRequestsFromMapFunc(r.flowToMirrors),
 		).
+		Watches(
+			&coordinationv1.Lease{},
+			handler.EnqueueRequestsFromMapFunc(r.leaseToMirrors),
+			builder.WithPredicates(leaseInMxlSystem()),
+		).
 		Named("mxlflowmirror-source").
 		Complete(r)
+}
+
+// leaseInMxlSystem confines the Lease watch to the namespace the
+// agent publishes Origin Leases in. Leader-election Leases in
+// kube-system and node Leases in kube-node-lease would otherwise
+// wake every source reconciler on every renew tick. The receiver
+// reconciler uses the same predicate; the two packages cannot share
+// it because gateway and operator are separate modules with no
+// shared internal package.
+func leaseInMxlSystem() predicate.Predicate {
+	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
+		return obj.GetNamespace() == mxlv1alpha1.LeaseNamespace
+	})
+}
+
+// leaseToMirrors maps an Origin Lease event to reconcile requests
+// for source-side MxlFlowMirrors on this gateway's node. The Lease
+// name encodes (flowID, nodeName); a Lease whose nodeName is not
+// r.NodeName is dropped so an N-pod, M-flow cluster does not see
+// N*M wakeups per renew tick. Matches are narrowed to mirrors whose
+// SourceNode equals r.NodeName: the field index is single-key on
+// spec.flowID, the SourceNode filter is the in-memory second pass.
+func (r *SourceReconciler) leaseToMirrors(ctx context.Context, obj client.Object) []reconcile.Request {
+	lease, ok := obj.(*coordinationv1.Lease)
+	if !ok {
+		return nil
+	}
+	flowID, nodeName, ok := mxlv1alpha1.ParseLeaseName(lease.Name)
+	if !ok {
+		return nil
+	}
+	if nodeName != r.NodeName {
+		return nil
+	}
+	var mirrors mxlv1alpha1.MxlFlowMirrorList
+	if err := r.List(ctx, &mirrors, client.MatchingFields{mirrorFlowIDIndex: flowID}); err != nil {
+		return nil
+	}
+	out := make([]reconcile.Request, 0, len(mirrors.Items))
+	for i := range mirrors.Items {
+		m := &mirrors.Items[i]
+		if m.Spec.SourceNode != r.NodeName {
+			continue
+		}
+		out = append(out, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(m),
+		})
+	}
+	return out
 }
 
 // flowToMirrors maps an MxlFlow event to reconcile requests for any
