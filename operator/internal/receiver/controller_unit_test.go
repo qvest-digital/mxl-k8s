@@ -637,11 +637,11 @@ func TestReceiver_LeaseToReceivers_MalformedNameDropped(t *testing.T) {
 	r := &Reconciler{Client: c}
 
 	cases := []string{
-		"unrelated-lease",                // no mxl-flow- prefix
-		"mxl-flow-",                      // empty remainder
-		"mxl-flow-only-prefix",           // no trailing -node
-		"mxl-flow-flow-id-",              // empty node segment
-		"kube-controller-manager",        // leader election lease
+		"unrelated-lease",         // no mxl-flow- prefix
+		"mxl-flow-",               // empty remainder
+		"mxl-flow-only-prefix",    // no trailing -node
+		"mxl-flow-flow-id-",       // empty node segment
+		"kube-controller-manager", // leader election lease
 	}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
