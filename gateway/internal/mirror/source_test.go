@@ -373,6 +373,22 @@ func TestRunTransferLoop_TracksProgressAndLastSentAt(t *testing.T) {
 	}
 }
 
+// fakeOpener is the inline initiatorOpener used by the Reconcile
+// tests. openFn is whatever the scenario wants the call to return;
+// calls counts every invocation so tests can assert reopen / fast-
+// path branching without inspecting the entry. Mirrors the style of
+// the operator's fakeLeaseChecker - an inline test fake instead of
+// a mockery-generated mock.
+type fakeOpener struct {
+	openFn func(flowID, targetInfoStr string, provider fabrics.Provider) (*sourceEntry, error)
+	calls  atomic.Int32
+}
+
+func (f *fakeOpener) open(flowID, targetInfoStr string, provider fabrics.Provider) (*sourceEntry, error) {
+	f.calls.Add(1)
+	return f.openFn(flowID, targetInfoStr, provider)
+}
+
 func newSourceTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -419,8 +435,10 @@ func TestReconcile_AddTargetFailureSurfacesConditionAndCapsBackoffAt30s(t *testi
 		Client:   c,
 		Scheme:   scheme,
 		NodeName: "node-a",
-		openInitiatorFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
-			return nil, errors.Join(errAddTargetFailed, addErr)
+		opener: &fakeOpener{
+			openFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
+				return nil, errors.Join(errAddTargetFailed, addErr)
+			},
 		},
 		sources:  map[types.NamespacedName]*sourceEntry{},
 		attempts: map[types.NamespacedName]uint32{},
@@ -494,24 +512,24 @@ func TestReconcile_FlowOriginRotationReopensReader(t *testing.T) {
 		WithObjects(mirror, flow).
 		Build()
 
-	var openCalls atomic.Int32
-	openFn := func(string, string, fabrics.Provider) (*sourceEntry, error) {
-		openCalls.Add(1)
-		// A real openInitiator would spawn the transfer goroutine and
-		// hand it the entry as tracker. The test never wires that up,
-		// so the entry stays inert and closeSourceHandles below is a
-		// no-op.
-		return &sourceEntry{infoStr: "info-1"}, nil
+	opener := &fakeOpener{
+		openFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
+			// A real opener would spawn the transfer goroutine and
+			// hand it the entry as tracker. The test never wires that
+			// up, so the entry stays inert and closeSourceHandles
+			// below is a no-op.
+			return &sourceEntry{infoStr: "info-1"}, nil
+		},
 	}
 
 	r := &SourceReconciler{
-		Client:          c,
-		Scheme:          scheme,
-		NodeName:        "node-a",
-		openInitiatorFn: openFn,
-		FlushInterval:   time.Hour,
-		sources:         map[types.NamespacedName]*sourceEntry{},
-		attempts:        map[types.NamespacedName]uint32{},
+		Client:        c,
+		Scheme:        scheme,
+		NodeName:      "node-a",
+		opener:        opener,
+		FlushInterval: time.Hour,
+		sources:       map[types.NamespacedName]*sourceEntry{},
+		attempts:      map[types.NamespacedName]uint32{},
 	}
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
@@ -520,13 +538,13 @@ func TestReconcile_FlowOriginRotationReopensReader(t *testing.T) {
 	// First reconcile: opens the initiator, records the origin timestamp.
 	_, err := r.Reconcile(context.Background(), req)
 	require.NoError(t, err)
-	require.Equal(t, int32(1), openCalls.Load())
+	require.Equal(t, int32(1), opener.calls.Load())
 	t.Cleanup(func() { r.closeEntry(key) })
 
 	// Same timestamp on the MxlFlow: no rotation, no reopen.
 	_, err = r.Reconcile(context.Background(), req)
 	require.NoError(t, err)
-	assert.Equal(t, int32(1), openCalls.Load(),
+	assert.Equal(t, int32(1), opener.calls.Load(),
 		"a Reconcile with no origin rotation must hit the fast path; "+
 			"opening the initiator twice would tear down the live transfer "+
 			"goroutine every controller-runtime tick")
@@ -541,7 +559,7 @@ func TestReconcile_FlowOriginRotationReopensReader(t *testing.T) {
 
 	_, err = r.Reconcile(context.Background(), req)
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), openCalls.Load(),
+	assert.Equal(t, int32(2), opener.calls.Load(),
 		"a fresher Origin LastObserved must reopen the FlowReader so the "+
 			"gateway tails the rebound writer instead of the stale handle")
 }
@@ -567,8 +585,10 @@ func TestSource_SeedAttemptsFromStatus(t *testing.T) {
 		Client:   c,
 		Scheme:   scheme,
 		NodeName: "node-a",
-		openInitiatorFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
-			return nil, errors.Join(errAddTargetFailed, errors.New("offline"))
+		opener: &fakeOpener{
+			openFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
+				return nil, errors.Join(errAddTargetFailed, errors.New("offline"))
+			},
 		},
 		sources:  map[types.NamespacedName]*sourceEntry{},
 		attempts: map[types.NamespacedName]uint32{},

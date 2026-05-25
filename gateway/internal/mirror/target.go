@@ -331,8 +331,9 @@ func (r *TargetReconciler) openFabricSide(writer *mxl.Writer, provider fabrics.P
 
 // openFabricSideDispatch routes the fabric-side open through the
 // test seam when set, falling back to the cgo openFabricSide in
-// production. Mirrors the openInitiatorFn arrangement on the source
-// reconciler.
+// production. The source reconciler routes the equivalent libmxl-
+// fabrics Initiator setup through the initiatorOpener interface
+// instead, but the seam serves the same purpose.
 func (r *TargetReconciler) openFabricSideDispatch(writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Regions, *fabrics.Target, *fabrics.TargetInfo, string, error) {
 	if r.openFabricSideFn != nil {
 		return r.openFabricSideFn(writer, provider)

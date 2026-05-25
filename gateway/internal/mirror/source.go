@@ -79,10 +79,13 @@ type SourceReconciler struct {
 	// when the observed state has transitioned. Defaults to 1s.
 	FlushInterval time.Duration
 
-	// openInitiatorFn is overridable so tests exercise Reconcile's
-	// branching without a real libmxl-fabrics. Production leaves it
-	// nil and the reconciler falls back to (*SourceReconciler).openInitiator.
-	openInitiatorFn func(flowID, targetInfoStr string, provider fabrics.Provider) (*sourceEntry, error)
+	// opener is the seam onto the cgo-dependent libmxl-fabrics
+	// Initiator setup path. SetupWithManager binds it to a
+	// libmxlOpener built from Handles + NodeName + BindAddress;
+	// tests build their own inline fake. The production binary
+	// therefore never carries a swappable function pointer that a
+	// later caller could redirect.
+	opener initiatorOpener
 
 	mu       sync.Mutex
 	sources  map[types.NamespacedName]*sourceEntry
@@ -243,11 +246,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 	r.mu.Unlock()
 
-	open := r.openInitiatorFn
-	if open == nil {
-		open = r.openInitiator
-	}
-	entry, err := open(mirror.Spec.FlowID, mirror.Status.TargetInfo, provider)
+	entry, err := r.opener.open(mirror.Spec.FlowID, mirror.Status.TargetInfo, provider)
 	if err != nil {
 		if errors.Is(err, errAddTargetFailed) {
 			return r.handleAddTargetFailure(ctx, req.NamespacedName, err)
@@ -354,16 +353,26 @@ func originRotated(baseline, observed *time.Time) bool {
 	return observed.After(*baseline)
 }
 
-// openInitiator opens a FlowReader on the local flow, registers its
-// regions with libmxl-fabrics, creates and sets up an Initiator,
-// AddTarget()s the remote info, and starts the per-flow transfer
-// goroutine.
-func (r *SourceReconciler) openInitiator(flowID, targetInfoStr string, provider fabrics.Provider) (*sourceEntry, error) {
-	mxlInst := r.Handles.MXL()
+// libmxlOpener is the production initiatorOpener implementation. It
+// opens a FlowReader on the local flow, registers its regions with
+// libmxl-fabrics, creates and sets up an Initiator, AddTarget()s the
+// remote info, and starts the per-flow transfer goroutine. The
+// fields are the subset of SourceReconciler state the open path
+// reads; the reconciler hands a fully populated value at
+// SetupWithManager time.
+type libmxlOpener struct {
+	Handles          *instance.Handles
+	NodeName         string
+	BindAddress      string
+	ProgressInterval time.Duration
+}
+
+func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provider) (*sourceEntry, error) {
+	mxlInst := o.Handles.MXL()
 	if mxlInst == nil {
 		return nil, fmt.Errorf("mxl instance closed")
 	}
-	fabInst := r.Handles.Fabrics()
+	fabInst := o.Handles.Fabrics()
 	if fabInst == nil {
 		return nil, fmt.Errorf("fabrics instance closed")
 	}
@@ -384,7 +393,7 @@ func (r *SourceReconciler) openInitiator(flowID, targetInfoStr string, provider 
 		return nil, fmt.Errorf("NewInitiator: %w", err)
 	}
 	if err := initiator.Setup(fabrics.InitiatorConfig{
-		Endpoint: fabrics.EndpointAddress{Node: r.BindAddress},
+		Endpoint: fabrics.EndpointAddress{Node: o.BindAddress},
 		Provider: provider,
 		Regions:  regions,
 	}); err != nil {
@@ -420,7 +429,7 @@ func (r *SourceReconciler) openInitiator(flowID, targetInfoStr string, provider 
 		done:      done,
 	}
 
-	progressInterval := r.ProgressInterval
+	progressInterval := o.ProgressInterval
 	if progressInterval <= 0 {
 		progressInterval = 2 * time.Millisecond
 	}
@@ -755,6 +764,14 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if r.attempts == nil {
 		r.attempts = make(map[types.NamespacedName]uint32)
+	}
+	if r.opener == nil {
+		r.opener = &libmxlOpener{
+			Handles:          r.Handles,
+			NodeName:         r.NodeName,
+			BindAddress:      r.BindAddress,
+			ProgressInterval: r.ProgressInterval,
+		}
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&mxlv1alpha1.MxlFlowMirror{}).

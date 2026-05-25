@@ -1,5 +1,7 @@
 package mirror
 
+import "github.com/qvest-digital/go-mxl/fabrics"
+
 // The two per-mirror progress loops below sit at the heart of every
 // data-plane bug the gateway has shipped. They are also the only
 // pieces of this package whose state machine can be exercised
@@ -13,6 +15,21 @@ package mirror
 // closures that record every call and return whatever the scenario
 // needs. No interface gymnastics, no mockery boilerplate; the loops
 // stay where they were, and only their parameter list changed.
+
+// initiatorOpener is the source reconciler's seam onto the
+// cgo-dependent libmxl-fabrics Initiator setup path. Production
+// binds it to libmxlOpener, which is a thin struct wrapping the
+// existing FlowReader + Regions + Initiator + AddTarget sequence.
+// Tests bind it to an inline fake whose open method returns canned
+// sourceEntry values without touching libmxl or libmxl-fabrics.
+//
+// The interface keeps the production binary free of a swappable
+// function pointer that a malicious or buggy caller could redirect
+// at runtime: the field on SourceReconciler is an interface value
+// the constructor sets once and never reassigns.
+type initiatorOpener interface {
+	open(flowID, targetInfoStr string, provider fabrics.Provider) (*sourceEntry, error)
+}
 
 // RuntimeProbe asks the source-side flow reader for the current head
 // index. Production reads it from mxl.Reader.Runtime(); tests return
