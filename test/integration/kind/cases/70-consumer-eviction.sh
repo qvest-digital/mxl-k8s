@@ -12,7 +12,7 @@ set -euo pipefail
 . "$KIND_TEST_LIB"
 
 READER_POD="${READER_POD:-mxl-tcp-demo-reader}"
-REAPPLY_DIR="${REAPPLY_DIR:-${PWD}/examples/kind/demo}"
+READER_MANIFEST="${READER_MANIFEST:-${PWD}/examples/tcp-demo/21-reader.yaml}"
 GC_TIMEOUT_SECS="${GC_TIMEOUT_SECS:-30}"
 
 # Establish baseline: at least one mirror exists so the assertion
@@ -46,9 +46,12 @@ if [ -n "$remaining" ]; then
 fi
 echo "  mirrors GC'd within budget"
 
-# Restore the reader so subsequent cases see a converged demo.
-"${KUBECTL[@]}" apply -k "$REAPPLY_DIR" >/dev/null \
-  || fail "re-apply ${REAPPLY_DIR} failed"
+# Restore the reader so subsequent cases see a converged demo. A
+# per-pod apply (not the all-in-one tcp-demo kustomization) leaves
+# the rest of the cluster untouched and avoids spawning legacy
+# DaemonSets that the kustomize-only manifest set would.
+"${KUBECTL[@]}" -n "$NAMESPACE" apply -f "$READER_MANIFEST" >/dev/null \
+  || fail "re-apply ${READER_MANIFEST} failed"
 "${KUBECTL[@]}" -n "$NAMESPACE" wait --for=condition=Ready \
     "pod/${READER_POD}" --timeout="${ROLLOUT_TIMEOUT_SECS}s" \
   || fail "${READER_POD} did not return to Ready after restore"

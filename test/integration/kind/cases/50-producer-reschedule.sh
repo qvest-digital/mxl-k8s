@@ -13,7 +13,7 @@ set -euo pipefail
 . "$KIND_TEST_LIB"
 
 WRITER_POD="${WRITER_POD:-mxl-tcp-demo-writer}"
-REAPPLY_DIR="${REAPPLY_DIR:-${PWD}/examples/kind/demo}"
+WRITER_MANIFEST="${WRITER_MANIFEST:-${PWD}/examples/tcp-demo/10-writer.yaml}"
 RECOVERY_TIMEOUT_SECS="${RECOVERY_TIMEOUT_SECS:-90}"
 
 mirror=$("${KUBECTL[@]}" -n "$NAMESPACE" get mxlfm \
@@ -31,10 +31,13 @@ echo "  mirror=${mirror} sourceNode=${orig_source} writer.uid=${orig_uid}"
     --grace-period=0 --force --ignore-not-found \
   || fail "delete pod/${WRITER_POD} failed"
 
-# Re-apply the demo kustomization to recreate the writer pod.
-# apply is idempotent for the other manifests.
-"${KUBECTL[@]}" apply -k "$REAPPLY_DIR" >/dev/null \
-  || fail "re-apply ${REAPPLY_DIR} failed"
+# Re-apply just the writer manifest to recreate the pod. The
+# flow-config ConfigMap and MxlReceiver were installed at kind-up
+# time and persist across the writer's delete, so a per-pod apply
+# leaves the rest of the demo untouched and avoids spawning legacy
+# DaemonSets that the all-in-one tcp-demo kustomization would.
+"${KUBECTL[@]}" -n "$NAMESPACE" apply -f "$WRITER_MANIFEST" >/dev/null \
+  || fail "re-apply ${WRITER_MANIFEST} failed"
 
 "${KUBECTL[@]}" -n "$NAMESPACE" wait --for=condition=Ready \
     "pod/${WRITER_POD}" --timeout="${ROLLOUT_TIMEOUT_SECS}s" \
