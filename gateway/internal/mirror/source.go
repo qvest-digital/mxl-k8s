@@ -231,6 +231,18 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	provider := mapProvider(mirror.Spec.Provider)
 
+	// Seed the in-memory AddTarget attempts counter from the persisted
+	// status.attemptCount so a gateway pod restart does not reset the
+	// backoff for a target that has been unreachable across the bounce.
+	// Only the counter is restored: the next attempt fires immediately
+	// rather than waiting out a remembered backoff window, which keeps
+	// the design's "one free retry on restart" budget intact.
+	r.mu.Lock()
+	if _, ok := r.attempts[req.NamespacedName]; !ok && mirror.Status.AttemptCount > 0 {
+		r.attempts[req.NamespacedName] = uint32(mirror.Status.AttemptCount)
+	}
+	r.mu.Unlock()
+
 	open := r.openInitiatorFn
 	if open == nil {
 		open = r.openInitiator

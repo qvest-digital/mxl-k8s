@@ -546,6 +546,49 @@ func TestReconcile_FlowOriginRotationReopensReader(t *testing.T) {
 			"gateway tails the rebound writer instead of the stale handle")
 }
 
+func TestSource_SeedAttemptsFromStatus(t *testing.T) {
+	// A gateway pod restart drops every in-memory counter. Without a
+	// seed from status, a mirror whose target has been unreachable
+	// long enough to climb the backoff schedule resets to attempts=0
+	// and the next reconcile retries the AddTarget immediately. The
+	// seed restores the counter so the geometric backoff resumes
+	// from the persisted attemptCount; the timestamp is deliberately
+	// not restored so one free retry on restart still fires.
+	scheme := newSourceTestScheme(t)
+	mirror := mirrorWithFinalizer("m1", "ns1", "node-a", "flow-1", "stale-info")
+	mirror.Status.AttemptCount = 5
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	r := &SourceReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		NodeName: "node-a",
+		openInitiatorFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
+			return nil, errors.Join(errAddTargetFailed, errors.New("offline"))
+		},
+		sources:  map[types.NamespacedName]*sourceEntry{},
+		attempts: map[types.NamespacedName]uint32{},
+	}
+
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	_, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	require.NoError(t, err)
+
+	r.mu.Lock()
+	got := r.attempts[key]
+	r.mu.Unlock()
+	assert.Equal(t, uint32(6), got,
+		"seed must restore the persisted attemptCount (5) before the "+
+			"failed AddTarget on this reconcile bumps it to 6; without "+
+			"the seed the counter would have started from 0 and a "+
+			"long-unreachable target would re-enter fast retries on "+
+			"every gateway pod restart")
+}
+
 func TestBackoffFor_Schedule(t *testing.T) {
 	// 100ms * 2^(attempts-1) capped at 30s. The bookend cases catch
 	// off-by-one regressions in the geometric series.
