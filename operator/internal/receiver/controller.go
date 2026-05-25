@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -471,10 +472,21 @@ func (r *Reconciler) markBound(ctx context.Context, recv *mxlv1alpha1.MxlReceive
 // that change the desired-mirror set: a previously-bound mirror
 // disappears (manual cleanup, gateway crash, peer-side GC); a
 // consumer pod's node changes; the flow's Origin location rotates
-// to a different node. The field index on spec.flowID lets the
-// flow-to-receivers map function avoid a cluster-wide receiver
-// scan on each MxlFlow event.
+// to a different node; an Origin Lease in mxl-system is created,
+// renewed, or expires. The field index on spec.flowID lets the
+// flow-to-receivers and lease-to-receivers map functions avoid a
+// cluster-wide receiver scan on each event.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return r.setupWithManagerAgainst(mgr, r)
+}
+
+// setupWithManagerAgainst is the wiring helper SetupWithManager
+// dispatches through. The target argument is the reconcile.Reconciler
+// the controller hands work to; production always passes r so the
+// receiver's own Reconcile observes the dispatches. Tests can pass a
+// recording wrapper so the same Watches and predicates fire against
+// an observable target without forking the wiring.
+func (r *Reconciler) setupWithManagerAgainst(mgr ctrl.Manager, target reconcile.Reconciler) error {
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
 		&mxlv1alpha1.MxlReceiver{},
@@ -505,8 +517,13 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&mxlv1alpha1.MxlFlow{},
 			handler.EnqueueRequestsFromMapFunc(r.flowToReceivers),
 		).
+		Watches(
+			&coordinationv1.Lease{},
+			handler.EnqueueRequestsFromMapFunc(r.leaseToReceivers),
+			builder.WithPredicates(leaseInMxlSystem()),
+		).
 		Named("mxlreceiver").
-		Complete(r)
+		Complete(target)
 }
 
 // mirrorToReceivers maps an MxlFlowMirror event to reconcile
@@ -586,6 +603,45 @@ func (r *Reconciler) flowToReceivers(ctx context.Context, obj client.Object) []r
 		})
 	}
 	return out
+}
+
+// leaseToReceivers maps a coordination.k8s.io Lease event in the
+// mxl-system namespace to reconcile requests for every MxlReceiver
+// whose spec.flowID matches the flow ID encoded in the Lease name.
+// The Lease is the authoritative liveness signal for an Origin
+// location; without this map the receiver only reconverged on the
+// next Pod or MxlFlow event, so demote and promote on Lease
+// expiry lagged arbitrarily.
+func (r *Reconciler) leaseToReceivers(ctx context.Context, obj client.Object) []reconcile.Request {
+	lease, ok := obj.(*coordinationv1.Lease)
+	if !ok {
+		return nil
+	}
+	flowID, _, ok := mxlv1alpha1.ParseLeaseName(lease.Name)
+	if !ok {
+		return nil
+	}
+	var receivers mxlv1alpha1.MxlReceiverList
+	if err := r.List(ctx, &receivers, client.MatchingFields{flowIDIndex: flowID}); err != nil {
+		return nil
+	}
+	out := make([]reconcile.Request, 0, len(receivers.Items))
+	for i := range receivers.Items {
+		out = append(out, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(&receivers.Items[i]),
+		})
+	}
+	return out
+}
+
+// leaseInMxlSystem keeps the Lease watch confined to the namespace
+// the agent publishes Origin Leases in. Other Leases (kube-system
+// leader election, kube-node-lease) would otherwise wake every
+// receiver on every renew tick.
+func leaseInMxlSystem() predicate.Predicate {
+	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
+		return obj.GetNamespace() == mxlv1alpha1.LeaseNamespace
+	})
 }
 
 // podNodeChangePredicate keeps the pod watch from firing on every

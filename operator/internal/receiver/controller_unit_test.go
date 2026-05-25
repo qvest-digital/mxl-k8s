@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -559,4 +560,128 @@ func Test_PodWatch_NonPodObjectReturnsNil(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).Build()
 	r := &Reconciler{Client: c}
 	assert.Nil(t, r.podToReceivers(ctx, &mxlv1alpha1.MxlFlow{}))
+}
+
+func Test_LeaseWatch_EnqueuesReceiversByFlowID(t *testing.T) {
+	ctx := context.Background()
+	const flowID = "11111111-2222-3333-4444-555555555555"
+
+	lease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: mxlv1alpha1.LeaseNamespace,
+			Name:      mxlv1alpha1.LeaseName(flowID, "nodea"),
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(unitScheme(t)).
+		WithIndex(&mxlv1alpha1.MxlReceiver{}, flowIDIndex, func(o client.Object) []string {
+			recv, ok := o.(*mxlv1alpha1.MxlReceiver)
+			if !ok || recv.Spec.FlowID == "" {
+				return nil
+			}
+			return []string{recv.Spec.FlowID}
+		}).
+		WithObjects(
+			&mxlv1alpha1.MxlReceiver{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns-1", Name: "r-match-1"},
+				Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: flowID},
+			},
+			&mxlv1alpha1.MxlReceiver{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns-2", Name: "r-match-2"},
+				Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: flowID},
+			},
+			&mxlv1alpha1.MxlReceiver{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns-1", Name: "r-skip"},
+				Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: "f-other"},
+			},
+		).
+		Build()
+	r := &Reconciler{Client: c}
+
+	out := r.leaseToReceivers(ctx, lease)
+	got := make(map[client.ObjectKey]struct{}, len(out))
+	for _, req := range out {
+		got[req.NamespacedName] = struct{}{}
+	}
+	assert.Equal(t, map[client.ObjectKey]struct{}{
+		{Namespace: "ns-1", Name: "r-match-1"}: {},
+		{Namespace: "ns-2", Name: "r-match-2"}: {},
+	}, got,
+		"every receiver whose spec.flowID matches the flow ID encoded in "+
+			"the Lease name must be enqueued, across every namespace; the "+
+			"Lease is the canonical liveness signal so demote and promote "+
+			"on Lease expiry must reach every receiver bound to that flow.")
+}
+
+func Test_LeaseWatch_NonLeaseObjectReturnsNil(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).Build()
+	r := &Reconciler{Client: c}
+	assert.Nil(t, r.leaseToReceivers(ctx, &corev1.Pod{}),
+		"the mapper guards against a misconfigured Watches by ignoring "+
+			"non-Lease events; without this every Pod event would feed "+
+			"ParseLeaseName a pod name and either spuriously enqueue or "+
+			"silently drop.")
+}
+
+func TestReceiver_LeaseToReceivers_MalformedNameDropped(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientBuilder().
+		WithScheme(unitScheme(t)).
+		WithObjects(&mxlv1alpha1.MxlReceiver{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r"},
+			Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: "f-a"},
+		}).
+		Build()
+	r := &Reconciler{Client: c}
+
+	cases := []string{
+		"unrelated-lease",                // no mxl-flow- prefix
+		"mxl-flow-",                      // empty remainder
+		"mxl-flow-only-prefix",           // no trailing -node
+		"mxl-flow-flow-id-",              // empty node segment
+		"kube-controller-manager",        // leader election lease
+	}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			lease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: mxlv1alpha1.LeaseNamespace,
+					Name:      name,
+				},
+			}
+			assert.Empty(t, r.leaseToReceivers(ctx, lease),
+				"a Lease whose name does not match the LeaseName format must "+
+					"not enqueue anything; otherwise an unrelated coordination "+
+					"Lease (leader election, kube-node-lease) that leaked into "+
+					"mxl-system would wake every receiver in the cluster")
+		})
+	}
+}
+
+func TestReceiver_LeaseInMxlSystemPredicate(t *testing.T) {
+	pred := leaseInMxlSystem()
+
+	cases := []struct {
+		ns   string
+		want bool
+	}{
+		{ns: mxlv1alpha1.LeaseNamespace, want: true},
+		{ns: "kube-system", want: false},
+		{ns: "kube-node-lease", want: false},
+		{ns: "default", want: false},
+		{ns: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.ns, func(t *testing.T) {
+			obj := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{Namespace: tc.ns, Name: "x"},
+			}
+			assert.Equal(t, tc.want, pred.Create(event.CreateEvent{Object: obj}))
+			assert.Equal(t, tc.want, pred.Delete(event.DeleteEvent{Object: obj}))
+			assert.Equal(t, tc.want, pred.Update(event.UpdateEvent{ObjectOld: obj, ObjectNew: obj}))
+			assert.Equal(t, tc.want, pred.Generic(event.GenericEvent{Object: obj}))
+		})
+	}
 }
