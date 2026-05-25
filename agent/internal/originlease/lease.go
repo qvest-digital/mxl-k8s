@@ -11,9 +11,9 @@ package originlease
 
 import (
 	"context"
-	"fmt"
 	"time"
 
+	apiv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,11 +22,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// LeaseNamespace is the namespace every per-flow Origin Lease lives
-// in. Pinned so the agent's Role can be scoped to a single namespace
-// instead of cluster-scoped, and so the operator and dispatcher know
-// where to look without a list call.
-const LeaseNamespace = "mxl-system"
+// LeaseNamespace re-exports the shared api/v1alpha1 constant so
+// existing call sites here keep compiling unchanged.
+const LeaseNamespace = apiv1alpha1.LeaseNamespace
 
 const (
 	// DefaultLeaseDuration is the renewal window stamped on every
@@ -59,12 +57,11 @@ func New(c client.Client, nodeName string) *Manager {
 	}
 }
 
-// LeaseName produces the per-(flow, node) Lease name. Both the
-// renewer and the checker compute it from the same inputs so the
-// dispatcher and the operator never disagree on which Lease backs a
-// given Origin location.
+// LeaseName re-exports the shared api/v1alpha1 helper. The agent and
+// the operator must agree on the name; the shared definition lives
+// in api so both sides cannot drift.
 func LeaseName(flowID, nodeName string) string {
-	return fmt.Sprintf("mxl-flow-%s-%s", flowID, nodeName)
+	return apiv1alpha1.LeaseName(flowID, nodeName)
 }
 
 // Renew upserts the Lease for flowID held by this node. Create on

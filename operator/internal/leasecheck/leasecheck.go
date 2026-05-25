@@ -7,19 +7,19 @@ package leasecheck
 
 import (
 	"context"
-	"fmt"
 	"time"
 
+	apiv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// LeaseNamespace mirrors the agent-side constant. Pinned so the
+// LeaseNamespace re-exports the shared api/v1alpha1 constant so the
 // operator can run with a Role scoped to a single namespace instead
 // of cluster-scoped RBAC.
-const LeaseNamespace = "mxl-system"
+const LeaseNamespace = apiv1alpha1.LeaseNamespace
 
 // DefaultLeaseDuration is the freshness window applied when a Lease
 // omits LeaseDurationSeconds. The agent writes 30s explicitly;
@@ -31,11 +31,12 @@ type Checker struct {
 	Client client.Client
 }
 
-// LeaseName mirrors the agent-side naming convention. Drift between
-// the two sides would silently turn every IsFresh call into a
-// not-found-treated-as-stale and demote every Origin.
+// LeaseName re-exports the shared api/v1alpha1 helper. The agent and
+// the operator must agree on the name; the shared definition lives
+// in api so drift between the two sides is impossible by
+// construction.
 func LeaseName(flowID, nodeName string) string {
-	return fmt.Sprintf("mxl-flow-%s-%s", flowID, nodeName)
+	return apiv1alpha1.LeaseName(flowID, nodeName)
 }
 
 // IsFresh reports whether the Lease for (flowID, nodeName) was
