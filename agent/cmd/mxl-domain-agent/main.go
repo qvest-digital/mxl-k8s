@@ -150,13 +150,24 @@ func run(args []string) error {
 
 	select {
 	case <-ctx.Done():
-		return nil
 	case err := <-watchErr:
 		if err != nil && ctx.Err() == nil {
 			return fmt.Errorf("fanotify watcher: %w", err)
 		}
-		return nil
 	}
+
+	// Release every Lease this node currently holds so the operator's
+	// freshness check sees the Origins drop immediately on graceful
+	// shutdown. Without this the Leases sit unrenewed and the operator
+	// only notices after the 30s window elapses - well past pod
+	// eviction in the common case. Bounded to 5s so a partitioned
+	// apiserver does not stretch terminationGracePeriodSeconds.
+	releaseCtx, cancelRelease := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelRelease()
+	if err := flowPub.ReleaseAll(releaseCtx); err != nil {
+		setupLog.Error(err, "release leases on shutdown")
+	}
+	return nil
 }
 
 // runDispatcher routes fanotify events to the flow publisher.

@@ -218,6 +218,30 @@ func (p *Publisher) InitialSync(ctx context.Context) error {
 	return p.demoteVanishedLocalOrigins(ctx, onDisk)
 }
 
+// ReleaseAll deletes the Lease for every flow currently on disk.
+// Called from the agent's shutdown path so the operator's freshness
+// check sees a NotFound (and trips OriginFresh=False via the Lease
+// delete watch) the moment the pod is gracefully evicted instead of
+// after the 30s renewal window elapses. Errors per flow are logged
+// and the loop continues so one stuck Release does not orphan the
+// rest. A nil Lease (test wiring without a manager) is a no-op.
+func (p *Publisher) ReleaseAll(ctx context.Context) error {
+	if p.Lease == nil {
+		return nil
+	}
+	ids, err := p.localFlowIDs()
+	if err != nil {
+		return fmt.Errorf("list local flow dirs: %w", err)
+	}
+	l := log.FromContext(ctx).WithName("flowpublisher.release")
+	for id := range ids {
+		if err := p.Lease.Release(ctx, id); err != nil {
+			l.Error(err, "release lease on shutdown", "flowID", id)
+		}
+	}
+	return nil
+}
+
 // localFlowIDs returns the set of flow IDs whose directories live
 // under p.DomainPath right now.
 func (p *Publisher) localFlowIDs() (map[string]struct{}, error) {
