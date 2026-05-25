@@ -75,6 +75,11 @@ type TargetReconciler struct {
 	// re-establish instead of short-circuiting. Defaults to 10s.
 	DegradedAfter time.Duration
 
+	// openFabricSideFn is overridable so tests exercise the recovery
+	// path without a real libmxl-fabrics. Production leaves it nil
+	// and the reconciler falls back to (*TargetReconciler).openFabricSide.
+	openFabricSideFn func(writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Regions, *fabrics.Target, *fabrics.TargetInfo, string, error)
+
 	mu      sync.Mutex
 	targets map[types.NamespacedName]*targetEntry
 }
@@ -204,8 +209,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if err := r.Get(ctx, types.NamespacedName{Name: mirror.Spec.FlowID}, &flow); err != nil {
 		if apierrors.IsNotFound(err) {
 			if mirror.Status.Phase != mxlv1alpha1.MxlFlowMirrorMaterializing {
-				mirror.Status.Phase = mxlv1alpha1.MxlFlowMirrorMaterializing
-				if err := r.Status().Update(ctx, &mirror); err != nil {
+				if err := r.applyTargetStatus(ctx, &mirror, mxlv1alpha1.MxlFlowMirrorMaterializing, nil, nil, nil); err != nil {
 					return ctrl.Result{}, err
 				}
 			}
@@ -235,10 +239,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	r.targets[req.NamespacedName] = entry
 	r.mu.Unlock()
 
-	mirror.Status.TargetInfo = entry.infoStr
-	mirror.Status.Phase = mxlv1alpha1.MxlFlowMirrorReady
-	mirror.Status.ObservedGeneration = mirror.Generation
-	if err := r.Status().Update(ctx, &mirror); err != nil {
+	if err := r.applyTargetStatus(ctx, &mirror, mxlv1alpha1.MxlFlowMirrorReady, &entry.infoStr, nil, nil); err != nil {
 		// Status update lost; close the entry so the next pass can
 		// retry cleanly.
 		r.closeEntry(req.NamespacedName)
@@ -272,7 +273,7 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, flowDef string, 
 	if err != nil {
 		return nil, fmt.Errorf("NewWriter: %w", err)
 	}
-	regions, target, info, s, err := r.openFabricSide(writer, provider)
+	regions, target, info, s, err := r.openFabricSideDispatch(writer, provider)
 	if err != nil {
 		_ = writer.Close()
 		return nil, err
@@ -326,6 +327,17 @@ func (r *TargetReconciler) openFabricSide(writer *mxl.Writer, provider fabrics.P
 		return nil, nil, nil, "", fmt.Errorf("TargetInfo.MarshalString: %w", err)
 	}
 	return regions, target, info, s, nil
+}
+
+// openFabricSideDispatch routes the fabric-side open through the
+// test seam when set, falling back to the cgo openFabricSide in
+// production. Mirrors the openInitiatorFn arrangement on the source
+// reconciler.
+func (r *TargetReconciler) openFabricSideDispatch(writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Regions, *fabrics.Target, *fabrics.TargetInfo, string, error) {
+	if r.openFabricSideFn != nil {
+		return r.openFabricSideFn(writer, provider)
+	}
+	return r.openFabricSide(writer, provider)
 }
 
 // startProgressLoop wires the progress goroutine for an entry and
@@ -511,11 +523,17 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 	// new progress loop records.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := r.markMaterializing(ctx, key); err != nil && !apierrors.IsNotFound(err) {
-		l.Error(err, "mark Materializing during recovery")
+	if mirror, err := r.fetchMirror(ctx, key); err != nil {
+		if !apierrors.IsNotFound(err) {
+			l.Error(err, "get mirror during recovery")
+		}
+	} else if mirror.Status.Phase != mxlv1alpha1.MxlFlowMirrorMaterializing {
+		if err := r.applyTargetStatus(ctx, mirror, mxlv1alpha1.MxlFlowMirrorMaterializing, nil, nil, nil); err != nil && !apierrors.IsNotFound(err) {
+			l.Error(err, "mark Materializing during recovery")
+		}
 	}
 
-	regions, target, info, s, err := r.openFabricSide(entry.writer, entry.provider)
+	regions, target, info, s, err := r.openFabricSideDispatch(entry.writer, entry.provider)
 	if err != nil {
 		l.Error(err, "rebuild fabric side")
 		// Drop the entry so the next Reconcile rebuilds from scratch
@@ -523,7 +541,9 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 		r.mu.Lock()
 		delete(r.targets, key)
 		r.mu.Unlock()
-		_ = entry.writer.Close()
+		if entry.writer != nil {
+			_ = entry.writer.Close()
+		}
 		return
 	}
 	entry.regions = regions
@@ -532,20 +552,30 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 	entry.infoStr = s
 	r.startProgressLoop(entry, key)
 
-	var mirror mxlv1alpha1.MxlFlowMirror
-	if err := r.Get(ctx, key, &mirror); err != nil {
+	mirror, err := r.fetchMirror(ctx, key)
+	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			l.Error(err, "get mirror during recovery")
 		}
 		return
 	}
-	mirror.Status.TargetInfo = s
-	mirror.Status.Phase = mxlv1alpha1.MxlFlowMirrorReady
-	if err := r.Status().Update(ctx, &mirror); err != nil {
+	if err := r.applyTargetStatus(ctx, mirror, mxlv1alpha1.MxlFlowMirrorReady, &s, nil, nil); err != nil {
 		l.Error(err, "publish rebuilt TargetInfo")
 		return
 	}
 	l.Info("rebuilt fabric side after fatal ReadGrain")
+}
+
+// fetchMirror reads the freshest cached MxlFlowMirror so the SSA
+// payload built from it carries the current Generation. Status writes
+// must never reuse a stale Generation: the operator's
+// observedGeneration gate depends on it being current.
+func (r *TargetReconciler) fetchMirror(ctx context.Context, key types.NamespacedName) (*mxlv1alpha1.MxlFlowMirror, error) {
+	var mirror mxlv1alpha1.MxlFlowMirror
+	if err := r.Get(ctx, key, &mirror); err != nil {
+		return nil, err
+	}
+	return &mirror, nil
 }
 
 func closeTargetHandles(e *targetEntry) {
@@ -575,16 +605,53 @@ func closeTargetHandles(e *targetEntry) {
 	}
 }
 
-func (r *TargetReconciler) markMaterializing(ctx context.Context, key types.NamespacedName) error {
-	var mirror mxlv1alpha1.MxlFlowMirror
-	if err := r.Get(ctx, key, &mirror); err != nil {
-		return err
+// applyTargetStatus writes mirror.status via server-side apply with
+// FieldOwner=mxl-target-gateway. It is the only path that mutates
+// status on this reconciler: routing every write through one field
+// manager keeps LastTransitionTime stable across reconciles and lets
+// every write stamp observedGeneration off the freshly-cached object.
+//
+// targetInfo, lastGrainAt and cond are optional; nil pointers omit
+// the corresponding key from the SSA payload so the manager does not
+// claim ownership of fields it has nothing to say about.
+func (r *TargetReconciler) applyTargetStatus(
+	ctx context.Context,
+	mirror *mxlv1alpha1.MxlFlowMirror,
+	phase mxlv1alpha1.MxlFlowMirrorPhase,
+	targetInfo *string,
+	lastGrainAt *time.Time,
+	cond *metav1.Condition,
+) error {
+	patch := &unstructured.Unstructured{}
+	patch.SetGroupVersionKind(mxlv1alpha1.GroupVersion.WithKind("MxlFlowMirror"))
+	patch.SetNamespace(mirror.Namespace)
+	patch.SetName(mirror.Name)
+	status := map[string]any{
+		"phase":              string(phase),
+		"observedGeneration": mirror.Generation,
 	}
-	if mirror.Status.Phase == mxlv1alpha1.MxlFlowMirrorMaterializing {
-		return nil
+	if targetInfo != nil {
+		status["targetInfo"] = *targetInfo
 	}
-	mirror.Status.Phase = mxlv1alpha1.MxlFlowMirrorMaterializing
-	return r.Status().Update(ctx, &mirror)
+	if lastGrainAt != nil {
+		status["lastGrainAt"] = lastGrainAt.UTC().Format(time.RFC3339)
+	}
+	if cond != nil {
+		status["conditions"] = []any{map[string]any{
+			"type":               cond.Type,
+			"status":             string(cond.Status),
+			"reason":             cond.Reason,
+			"message":            cond.Message,
+			"lastTransitionTime": cond.LastTransitionTime.UTC().Format(time.RFC3339),
+		}}
+	}
+	if err := unstructured.SetNestedField(patch.Object, status, "status"); err != nil {
+		return fmt.Errorf("build SSA payload: %w", err)
+	}
+	return r.Status().Patch(ctx, patch, client.Apply,
+		client.FieldOwner(targetFieldOwner),
+		client.ForceOwnership,
+	)
 }
 
 // degradedAfter returns the configured grain-commit freshness window,
@@ -757,10 +824,15 @@ func targetStateEqual(a, b targetProgressState) bool {
 }
 
 // publishTargetProgress writes the TargetProgress condition, Phase,
-// and LastGrainAt onto the MxlFlowMirror's status using server-side
-// apply with FieldOwner=mxl-target-gateway, distinct from the
-// source-side and operator owners so writes never collide.
+// and LastGrainAt onto the MxlFlowMirror's status. The mirror is
+// re-fetched from the cache on every call so the SSA payload stamps
+// the current Generation rather than a value captured at flusher
+// start.
 func (r *TargetReconciler) publishTargetProgress(ctx context.Context, key types.NamespacedName, state targetProgressState) error {
+	mirror, err := r.fetchMirror(ctx, key)
+	if err != nil {
+		return fmt.Errorf("get mirror for status flush: %w", err)
+	}
 	cond := metav1.Condition{
 		Type:               mxlv1alpha1.ConditionTypeTargetProgress,
 		Status:             state.status,
@@ -768,30 +840,7 @@ func (r *TargetReconciler) publishTargetProgress(ctx context.Context, key types.
 		Message:            state.message,
 		LastTransitionTime: metav1.Now(),
 	}
-	patch := &unstructured.Unstructured{}
-	patch.SetGroupVersionKind(mxlv1alpha1.GroupVersion.WithKind("MxlFlowMirror"))
-	patch.SetNamespace(key.Namespace)
-	patch.SetName(key.Name)
-	status := map[string]any{
-		"phase": string(state.phase),
-		"conditions": []any{map[string]any{
-			"type":               cond.Type,
-			"status":             string(cond.Status),
-			"reason":             cond.Reason,
-			"message":            cond.Message,
-			"lastTransitionTime": cond.LastTransitionTime.UTC().Format(time.RFC3339),
-		}},
-	}
-	if state.lastCommitAt != nil {
-		status["lastGrainAt"] = state.lastCommitAt.UTC().Format(time.RFC3339)
-	}
-	if err := unstructured.SetNestedField(patch.Object, status, "status"); err != nil {
-		return fmt.Errorf("build SSA payload: %w", err)
-	}
-	return r.Status().Patch(ctx, patch, client.Apply,
-		client.FieldOwner(targetFieldOwner),
-		client.ForceOwnership,
-	)
+	return r.applyTargetStatus(ctx, mirror, state.phase, nil, state.lastCommitAt, &cond)
 }
 
 // SetupWithManager wires the reconciler into the controller-runtime

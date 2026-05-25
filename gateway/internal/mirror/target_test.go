@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
+	"github.com/qvest-digital/go-mxl/mxl"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -466,4 +467,131 @@ func TestReconcile_FastPathBypassedWhenLastGrainStale(t *testing.T) {
 				"otherwise a crashed gateway whose status survived but whose "+
 				"writer is gone never re-establishes")
 	})
+}
+
+func TestTarget_StatusStampsObservedGeneration(t *testing.T) {
+	// Every target-side status write must carry the mirror's current
+	// Generation. Operators gate user-visible "the controller has seen
+	// this spec" feedback on observedGeneration; a stale value freezes
+	// the UI on the previous spec's state.
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{})
+	mirror.Generation = 7
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	r := &TargetReconciler{
+		Client:        c,
+		Scheme:        scheme,
+		NodeName:      "node-a",
+		DegradedAfter: 50 * time.Millisecond,
+		targets:       map[types.NamespacedName]*targetEntry{},
+	}
+	// The MxlFlow is absent so the reconcile lands on the flow-not-
+	// found branch, which exercises the applyTargetStatus path with
+	// the minimal payload (phase + observedGeneration only).
+	req := reconcile.Request{NamespacedName: key}
+	_, err := r.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &got))
+	assert.Equal(t, int64(7), got.Status.ObservedGeneration,
+		"every applyTargetStatus call must stamp the mirror's current "+
+			"Generation; a missing or stale observedGeneration would let "+
+			"observers think a fresh spec is still being processed")
+}
+
+func TestTarget_FlowNotFoundOmitsTargetInfoAndLastGrain(t *testing.T) {
+	// The flow-not-found pre-open branch publishes Phase=Materializing
+	// only. Stamping a TargetInfo or LastGrainAt at this point would
+	// fabricate fields the gateway has not yet earned: there is no
+	// fabrics.Target, and no grain has ever landed.
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{})
+	mirror.Generation = 3
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	r := &TargetReconciler{
+		Client:        c,
+		Scheme:        scheme,
+		NodeName:      "node-a",
+		DegradedAfter: 50 * time.Millisecond,
+		targets:       map[types.NamespacedName]*targetEntry{},
+	}
+	req := reconcile.Request{NamespacedName: key}
+	_, err := r.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &got))
+	assert.Equal(t, mxlv1alpha1.MxlFlowMirrorMaterializing, got.Status.Phase)
+	assert.Equal(t, int64(3), got.Status.ObservedGeneration)
+	assert.Empty(t, got.Status.TargetInfo,
+		"pre-open Materializing must not claim a TargetInfo; the SSA "+
+			"payload omits the key so the field stays unset until the "+
+			"handshake produces one")
+	assert.Nil(t, got.Status.LastGrainAt,
+		"pre-open Materializing must not claim a LastGrainAt; the SSA "+
+			"payload omits the key so the field stays unset until the "+
+			"flusher records a real commit")
+}
+
+func TestTarget_RecoverFromFatalErrorClearsRecoveringOnRebuildFailure(t *testing.T) {
+	// Codifies the comment above target.go's defer entry.recovering.Store(false):
+	// when openFabricSide returns an error during recovery the flusher
+	// must not stay parked. A stuck recovering=true silences the
+	// per-mirror status flusher indefinitely.
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{
+		Phase:      mxlv1alpha1.MxlFlowMirrorReady,
+		TargetInfo: "info-1",
+	})
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	entry := &targetEntry{}
+	// done is non-nil and already closed so recoverFromFatalError's
+	// wait-for-progress-loop does not block.
+	closedDone := make(chan struct{})
+	close(closedDone)
+	entry.done = closedDone
+
+	rebuildErr := errors.New("fabrics rebuild refused")
+	r := &TargetReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		NodeName: "node-a",
+		targets:  map[types.NamespacedName]*targetEntry{key: entry},
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Regions, *fabrics.Target, *fabrics.TargetInfo, string, error) {
+			return nil, nil, nil, "", rebuildErr
+		},
+	}
+
+	r.recoverFromFatalError(key)
+
+	assert.False(t, entry.recovering.Load(),
+		"recovering must clear after a failed rebuild; a stuck true value "+
+			"would silence the flusher forever and the gateway would never "+
+			"publish another phase transition")
+
+	r.mu.Lock()
+	_, present := r.targets[key]
+	r.mu.Unlock()
+	assert.False(t, present,
+		"a failed rebuild must drop the entry so the next Reconcile rebuilds "+
+			"from scratch instead of operating on torn-down fabric handles")
 }
