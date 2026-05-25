@@ -210,22 +210,53 @@ func (r *Reconciler) podToMirrors(ctx context.Context, obj client.Object) []reco
 	return out
 }
 
+// systemNamespacesDenied is the set of cluster-control namespaces
+// whose Pod churn the intent GC must ignore. Static control-plane
+// pods, kube-proxy, CoreDNS, and similar workloads churn frequently
+// enough that letting their events through would dominate the
+// reconcile queue with wakeups for namespaces the agent never
+// creates intent mirrors in. mxl-system stays accepted so the agent
+// itself or other operator-managed workloads there can still
+// trigger GC if they ever held an intent mirror.
+var systemNamespacesDenied = map[string]struct{}{
+	"kube-system":     {},
+	"kube-public":     {},
+	"kube-node-lease": {},
+}
+
+// isSystemNamespace reports whether the named namespace is one the
+// pod watch must drop events from.
+func isSystemNamespace(ns string) bool {
+	_, deny := systemNamespacesDenied[ns]
+	return deny
+}
+
 // podLifecyclePredicate keeps the pod watch from firing on noisy
 // status ticks. The GC only cares about pod disappearance and UID
 // replacement, both of which surface as Delete or Create events
 // (a recreated pod with the same name gets a fresh UID). Update
 // events fire only when the pod's UID itself changes, which the
 // API server treats as a delete+create pair, but keeping the
-// predicate strict guards against future API behavior.
+// predicate strict guards against future API behavior. Events
+// from kube-system, kube-public, and kube-node-lease are dropped
+// first: the agent never authors intent mirrors there, so wakeups
+// from those namespaces are pure overhead.
 func podLifecyclePredicate() predicate.Predicate {
 	return predicate.Funcs{
-		CreateFunc:  func(_ event.CreateEvent) bool { return true },
-		DeleteFunc:  func(_ event.DeleteEvent) bool { return true },
+		CreateFunc: func(e event.CreateEvent) bool {
+			return !isSystemNamespace(e.Object.GetNamespace())
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			return !isSystemNamespace(e.Object.GetNamespace())
+		},
 		GenericFunc: func(_ event.GenericEvent) bool { return false },
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			oldPod, oldOK := e.ObjectOld.(*corev1.Pod)
 			newPod, newOK := e.ObjectNew.(*corev1.Pod)
 			if !oldOK || !newOK {
+				return false
+			}
+			if isSystemNamespace(newPod.Namespace) {
 				return false
 			}
 			return oldPod.UID != newPod.UID

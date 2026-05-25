@@ -16,6 +16,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -272,6 +273,53 @@ func TestReconcile_IntentMirror_AlreadyDeleting_DropsFinalizer(t *testing.T) {
 		"the intent reconciler must remove only its own finalizer; other "+
 			"finalizers belong to peers (the gateway, the receiver) and "+
 			"removing them would race their teardown")
+}
+
+// TestPodPredicate_DenyKubeSystem locks in the namespace deny-list
+// on the intent GC's pod watch. Without it, churn on
+// kube-system (kube-proxy, CoreDNS, kubelet-managed static pods)
+// dominates the reconcile queue with wakeups for namespaces the
+// agent never authors mirrors in.
+func TestPodPredicate_DenyKubeSystem(t *testing.T) {
+	pred := podLifecyclePredicate()
+
+	pod := func(ns string, uid string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "p", UID: types.UID(uid)},
+		}
+	}
+
+	denied := []string{"kube-system", "kube-public", "kube-node-lease"}
+	for _, ns := range denied {
+		t.Run("deny/"+ns, func(t *testing.T) {
+			obj := pod(ns, "uid-1")
+			assert.False(t, pred.Create(event.CreateEvent{Object: obj}),
+				"Create event from %s must be dropped: the agent never "+
+					"authors intent mirrors there, so wakeups from those "+
+					"namespaces are pure overhead", ns)
+			assert.False(t, pred.Delete(event.DeleteEvent{Object: obj}),
+				"Delete event from %s must be dropped", ns)
+			assert.False(t, pred.Update(event.UpdateEvent{
+				ObjectOld: pod(ns, "uid-old"),
+				ObjectNew: pod(ns, "uid-new"),
+			}), "Update event from %s must be dropped even when UID changes", ns)
+		})
+	}
+
+	allowed := []string{"mxl-system", "default", "app"}
+	for _, ns := range allowed {
+		t.Run("allow/"+ns, func(t *testing.T) {
+			obj := pod(ns, "uid-1")
+			assert.True(t, pred.Create(event.CreateEvent{Object: obj}),
+				"Create event from %s must pass", ns)
+			assert.True(t, pred.Delete(event.DeleteEvent{Object: obj}),
+				"Delete event from %s must pass", ns)
+			assert.True(t, pred.Update(event.UpdateEvent{
+				ObjectOld: pod(ns, "uid-old"),
+				ObjectNew: pod(ns, "uid-new"),
+			}), "Update event from %s with UID change must pass", ns)
+		})
+	}
 }
 
 var _ = client.IgnoreNotFound

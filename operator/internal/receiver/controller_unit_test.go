@@ -660,6 +660,51 @@ func TestReceiver_LeaseToReceivers_MalformedNameDropped(t *testing.T) {
 	}
 }
 
+func TestPodPredicate_DenyKubeSystem(t *testing.T) {
+	pred := podNodeChangePredicate()
+
+	pod := func(ns string, node string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "p"},
+			Spec:       corev1.PodSpec{NodeName: node},
+		}
+	}
+
+	denied := []string{"kube-system", "kube-public", "kube-node-lease"}
+	for _, ns := range denied {
+		t.Run("deny/"+ns, func(t *testing.T) {
+			obj := pod(ns, "n1")
+			assert.False(t, pred.Create(event.CreateEvent{Object: obj}),
+				"Create event from %s must be dropped before the reconcile "+
+					"queue: the receiver never schedules consumer pods there, "+
+					"so every wakeup it would cause is waste", ns)
+			assert.False(t, pred.Delete(event.DeleteEvent{Object: obj}),
+				"Delete event from %s must be dropped", ns)
+			assert.False(t, pred.Update(event.UpdateEvent{
+				ObjectOld: pod(ns, "n1"),
+				ObjectNew: pod(ns, "n2"),
+			}), "Update event from %s must be dropped even when node changes", ns)
+		})
+	}
+
+	allowed := []string{"mxl-system", "default", "app"}
+	for _, ns := range allowed {
+		t.Run("allow/"+ns, func(t *testing.T) {
+			obj := pod(ns, "n1")
+			assert.True(t, pred.Create(event.CreateEvent{Object: obj}),
+				"Create event from %s must pass; the operator schedules "+
+					"consumer pods into application namespaces and may also "+
+					"co-locate with the agent in mxl-system", ns)
+			assert.True(t, pred.Delete(event.DeleteEvent{Object: obj}),
+				"Delete event from %s must pass", ns)
+			assert.True(t, pred.Update(event.UpdateEvent{
+				ObjectOld: pod(ns, ""),
+				ObjectNew: pod(ns, "n1"),
+			}), "Update event from %s with node change must pass", ns)
+		})
+	}
+}
+
 func TestReceiver_LeaseInMxlSystemPredicate(t *testing.T) {
 	pred := leaseInMxlSystem()
 

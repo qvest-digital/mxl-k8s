@@ -644,19 +644,52 @@ func leaseInMxlSystem() predicate.Predicate {
 	})
 }
 
+// systemNamespacesDenied is the set of cluster-control namespaces
+// whose Pod churn the receiver and mirror watches must ignore.
+// Static control-plane pods, kube-proxy, CoreDNS, and similar
+// kubelet- or DaemonSet-driven workloads churn frequently enough
+// that letting their events through would dominate the reconcile
+// queue with wakeups for namespaces the operator never schedules
+// flow consumers into. mxl-system stays accepted: Origin Leases
+// live there (caught by a separate Watches) and the receiver may
+// legitimately bind pods that the operator co-locates with the
+// agent.
+var systemNamespacesDenied = map[string]struct{}{
+	"kube-system":     {},
+	"kube-public":     {},
+	"kube-node-lease": {},
+}
+
+// isSystemNamespace reports whether the named namespace is one the
+// pod watches must drop events from.
+func isSystemNamespace(ns string) bool {
+	_, deny := systemNamespacesDenied[ns]
+	return deny
+}
+
 // podNodeChangePredicate keeps the pod watch from firing on every
 // pod status tick. The receiver only cares about pod placement, so
 // Create and Delete always pass; Update passes only when
-// spec.nodeName changed.
+// spec.nodeName changed. Events from kube-system, kube-public, and
+// kube-node-lease are dropped before the placement check: the
+// receiver never schedules consumer pods into those namespaces, so
+// every wakeup they would cause is waste.
 func podNodeChangePredicate() predicate.Predicate {
 	return predicate.Funcs{
-		CreateFunc:  func(_ event.CreateEvent) bool { return true },
-		DeleteFunc:  func(_ event.DeleteEvent) bool { return true },
+		CreateFunc: func(e event.CreateEvent) bool {
+			return !isSystemNamespace(e.Object.GetNamespace())
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			return !isSystemNamespace(e.Object.GetNamespace())
+		},
 		GenericFunc: func(_ event.GenericEvent) bool { return false },
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			oldPod, oldOK := e.ObjectOld.(*corev1.Pod)
 			newPod, newOK := e.ObjectNew.(*corev1.Pod)
 			if !oldOK || !newOK {
+				return false
+			}
+			if isSystemNamespace(newPod.Namespace) {
 				return false
 			}
 			return oldPod.Spec.NodeName != newPod.Spec.NodeName
