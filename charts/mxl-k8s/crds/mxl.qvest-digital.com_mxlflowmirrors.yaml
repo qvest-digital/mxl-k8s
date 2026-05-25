@@ -118,6 +118,13 @@ spec:
           status:
             description: MxlFlowMirrorStatus reports the runtime state of a mirror.
             properties:
+              attemptCount:
+                description: |-
+                  AttemptCount is the number of consecutive failed AddTarget
+                  attempts since the last successful reconcile. Reset to zero
+                  when the source gateway succeeds.
+                format: int32
+                type: integer
               conditions:
                 description: Conditions describes the current state of the mirror.
                 items:
@@ -178,6 +185,20 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              lastError:
+                description: |-
+                  LastError is the most recent reconcile error message recorded
+                  by the source gateway when bounded backoff is engaged. Empty
+                  after a successful reconcile.
+                type: string
+              lastGrainAt:
+                description: |-
+                  LastGrainAt is the wall-clock time of the most recent grain
+                  commit observed by the target gateway. Used to demote Ready
+                  to Degraded when no grains have flowed for the freshness
+                  window.
+                format: date-time
+                type: string
               observedGeneration:
                 description: ObservedGeneration is the spec generation last reconciled.
                 format: int64
@@ -188,6 +209,7 @@ spec:
                 - Pending
                 - Materializing
                 - Ready
+                - Degraded
                 - Failed
                 type: string
               targetInfo:

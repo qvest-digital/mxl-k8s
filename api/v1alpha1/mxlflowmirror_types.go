@@ -5,7 +5,7 @@ import (
 )
 
 // MxlFlowMirrorPhase is the lifecycle state of a mirror.
-// +kubebuilder:validation:Enum=Pending;Materializing;Ready;Failed
+// +kubebuilder:validation:Enum=Pending;Materializing;Ready;Degraded;Failed
 type MxlFlowMirrorPhase string
 
 const (
@@ -15,9 +15,15 @@ const (
 	// MxlFlowMirrorMaterializing means the gateway is establishing
 	// the libmxl-fabrics connection.
 	MxlFlowMirrorMaterializing MxlFlowMirrorPhase = "Materializing"
-	// MxlFlowMirrorReady means the mirror is live and grains are
-	// flowing.
+	// MxlFlowMirrorReady means the handshake is complete and grain
+	// activity has been observed within the freshness window.
 	MxlFlowMirrorReady MxlFlowMirrorPhase = "Ready"
+	// MxlFlowMirrorDegraded means the handshake is complete but no
+	// grain progress has been observed for longer than the target
+	// gateway's freshness window. The mirror may recover without
+	// operator intervention; inspect status.conditions for the
+	// reason.
+	MxlFlowMirrorDegraded MxlFlowMirrorPhase = "Degraded"
 	// MxlFlowMirrorFailed means the mirror failed permanently.
 	// Inspect status.conditions for the cause.
 	MxlFlowMirrorFailed MxlFlowMirrorPhase = "Failed"
@@ -75,6 +81,25 @@ type MxlFlowMirrorStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// LastGrainAt is the wall-clock time of the most recent grain
+	// commit observed by the target gateway. Used to demote Ready
+	// to Degraded when no grains have flowed for the freshness
+	// window.
+	// +optional
+	LastGrainAt *metav1.Time `json:"lastGrainAt,omitempty"`
+
+	// LastError is the most recent reconcile error message recorded
+	// by the source gateway when bounded backoff is engaged. Empty
+	// after a successful reconcile.
+	// +optional
+	LastError string `json:"lastError,omitempty"`
+
+	// AttemptCount is the number of consecutive failed AddTarget
+	// attempts since the last successful reconcile. Reset to zero
+	// when the source gateway succeeds.
+	// +optional
+	AttemptCount int32 `json:"attemptCount,omitempty"`
 }
 
 // +kubebuilder:object:root=true
