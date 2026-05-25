@@ -168,7 +168,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		"flowID", recv.Spec.FlowID,
 		"sourceNode", res.Node,
 		"desired", len(desired))
-	return r.markBound(ctx, &recv, primary)
+	result, err := r.markBound(ctx, &recv, primary)
+	if err != nil {
+		return result, err
+	}
+	// Schedule a Reconcile just past the Lease deadline so an
+	// agent that stops renewing trips OriginFresh=False even though
+	// k8s emits no event for a Lease passing its window. Graceful
+	// agent shutdown deletes the Lease and the Lease watch covers
+	// that fast path; this requeue is the safety net for an
+	// ungraceful exit (OOMKill, node loss) where no Lease event
+	// ever fires.
+	if !res.Deadline.IsZero() {
+		wake := time.Until(res.Deadline) + time.Second
+		if wake > 0 && (result.RequeueAfter == 0 || wake < result.RequeueAfter) {
+			result.RequeueAfter = wake
+		}
+	}
+	return result, nil
 }
 
 // handleDeletion removes mirrors created on this receiver's behalf,

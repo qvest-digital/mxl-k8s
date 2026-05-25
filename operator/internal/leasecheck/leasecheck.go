@@ -42,10 +42,15 @@ func LeaseName(flowID, nodeName string) string {
 // IsFresh reports whether the Lease for (flowID, nodeName) was
 // renewed inside its declared duration. Missing Lease counts as not
 // fresh: an Origin location without a Lease is either an agent that
-// has not yet published or one that already Released.
-func (c *Checker) IsFresh(ctx context.Context, flowID, nodeName string) (bool, error) {
+// has not yet published or one that already Released. The returned
+// deadline is RenewTime+LeaseDuration so the receiver reconciler
+// can schedule a Reconcile right after the deadline elapses; k8s
+// emits no event when an unrenewed Lease passes its window, so
+// without this wake-up the operator never re-checks freshness.
+// Deadline is zero when the Lease is missing or has no RenewTime.
+func (c *Checker) IsFresh(ctx context.Context, flowID, nodeName string) (bool, time.Time, error) {
 	if c == nil || c.Client == nil {
-		return false, nil
+		return false, time.Time{}, nil
 	}
 	var lease coordinationv1.Lease
 	err := c.Client.Get(ctx, types.NamespacedName{
@@ -54,17 +59,17 @@ func (c *Checker) IsFresh(ctx context.Context, flowID, nodeName string) (bool, e
 	}, &lease)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, nil
+			return false, time.Time{}, nil
 		}
-		return false, err
+		return false, time.Time{}, err
 	}
 	if lease.Spec.RenewTime == nil {
-		return false, nil
+		return false, time.Time{}, nil
 	}
 	duration := DefaultLeaseDuration
 	if lease.Spec.LeaseDurationSeconds != nil && *lease.Spec.LeaseDurationSeconds > 0 {
 		duration = time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second
 	}
 	deadline := lease.Spec.RenewTime.Time.Add(duration)
-	return time.Now().Before(deadline), nil
+	return time.Now().Before(deadline), deadline, nil
 }

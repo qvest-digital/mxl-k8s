@@ -2,6 +2,7 @@ package receiver
 
 import (
 	"context"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -13,21 +14,27 @@ import (
 // renewed origin Lease for flowID. The receiver consults it before
 // trusting a status.locations[?].phase == Origin entry so a
 // partitioned or crashed agent's stale Origin does not become the
-// answer resolveSourceNode hands back.
+// answer resolveSourceNode hands back. The returned deadline is the
+// moment after which IsFresh would flip to false; the reconciler
+// uses it to schedule a RequeueAfter so an unrenewed Lease is
+// noticed even when k8s emits no event for time passing.
 type LeaseChecker interface {
-	IsFresh(ctx context.Context, flowID, nodeName string) (bool, error)
+	IsFresh(ctx context.Context, flowID, nodeName string) (fresh bool, deadline time.Time, err error)
 }
 
 // originResolution distinguishes the three outcomes the controller
 // has to react to differently: a fresh Origin was found (Node set,
-// Found true), no Origin location exists yet (Found false, all
-// other fields zero), or one or more Origins exist but every one
-// has a stale or missing Lease (Found false, AllStale true). The
-// controller writes the OriginFresh condition based on AllStale.
+// Found true, Deadline = the moment the Lease falls stale), no
+// Origin location exists yet (Found false, all other fields zero),
+// or one or more Origins exist but every one has a stale or missing
+// Lease (Found false, AllStale true). The controller writes the
+// OriginFresh condition based on AllStale and schedules a
+// RequeueAfter Deadline when one is set.
 type originResolution struct {
 	Node     string
 	Found    bool
 	AllStale bool
+	Deadline time.Time
 }
 
 // resolveSourceNode walks flow.Status.Locations and returns the
@@ -53,12 +60,12 @@ func (r *Reconciler) resolveSourceNode(ctx context.Context, flowID string) (orig
 		if r.Lease == nil {
 			return originResolution{Node: loc.NodeName, Found: true}, nil
 		}
-		fresh, err := r.Lease.IsFresh(ctx, flowID, loc.NodeName)
+		fresh, deadline, err := r.Lease.IsFresh(ctx, flowID, loc.NodeName)
 		if err != nil {
 			return originResolution{}, err
 		}
 		if fresh {
-			return originResolution{Node: loc.NodeName, Found: true}, nil
+			return originResolution{Node: loc.NodeName, Found: true, Deadline: deadline}, nil
 		}
 	}
 	return originResolution{AllStale: sawOrigin}, nil

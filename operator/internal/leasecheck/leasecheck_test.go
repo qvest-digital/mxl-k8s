@@ -42,9 +42,13 @@ func TestChecker_FreshLeaseReturnsTrue(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(lease).Build()
 	chk := &Checker{Client: c}
-	fresh, err := chk.IsFresh(context.Background(), testFlowID, testNode)
+	fresh, deadline, err := chk.IsFresh(context.Background(), testFlowID, testNode)
 	require.NoError(t, err)
 	assert.True(t, fresh)
+	assert.True(t, deadline.After(time.Now()),
+		"a fresh Lease must report a future deadline so the reconciler "+
+			"can schedule a RequeueAfter precisely at expiry; otherwise "+
+			"an unrenewed Lease would never trip OriginFresh=False")
 }
 
 func TestChecker_ExpiredLeaseReturnsFalse(t *testing.T) {
@@ -62,22 +66,30 @@ func TestChecker_ExpiredLeaseReturnsFalse(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(lease).Build()
 	chk := &Checker{Client: c}
-	fresh, err := chk.IsFresh(context.Background(), testFlowID, testNode)
+	fresh, deadline, err := chk.IsFresh(context.Background(), testFlowID, testNode)
 	require.NoError(t, err)
 	assert.False(t, fresh,
 		"a Lease whose RenewTime+duration sits in the past must be reported "+
 			"stale; the receiver uses this to demote a partitioned Origin")
+	assert.True(t, deadline.Before(time.Now()),
+		"an expired Lease still returns the past deadline so the caller "+
+			"can distinguish 'no Lease at all' (zero deadline) from "+
+			"'Lease exists but unrenewed' for diagnostics")
 }
 
 func TestChecker_MissingLeaseReturnsFalseWithoutError(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme(t)).Build()
 	chk := &Checker{Client: c}
-	fresh, err := chk.IsFresh(context.Background(), testFlowID, testNode)
+	fresh, deadline, err := chk.IsFresh(context.Background(), testFlowID, testNode)
 	require.NoError(t, err,
 		"a missing Lease is the normal startup state, not a controller "+
 			"error; otherwise the reconcile loop would back off on every "+
 			"unbacked Origin")
 	assert.False(t, fresh)
+	assert.True(t, deadline.IsZero(),
+		"a missing Lease must report a zero deadline so the receiver knows "+
+			"to omit the RequeueAfter rather than wake up immediately on "+
+			"the past-time default")
 }
 
 func TestLeaseName_MatchesAgentSideConvention(t *testing.T) {
