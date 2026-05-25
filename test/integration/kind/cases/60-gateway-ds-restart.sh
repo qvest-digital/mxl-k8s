@@ -9,7 +9,7 @@ set -euo pipefail
 # shellcheck source=../lib.sh
 . "$KIND_TEST_LIB"
 
-GATEWAY_DS="${GATEWAY_DS:-mxl-fabrics-gateway}"
+GATEWAY_DS="${GATEWAY_DS:-mxl-k8s-gateway}"
 RECOVERY_TIMEOUT_SECS="${RECOVERY_TIMEOUT_SECS:-60}"
 
 # Confirm at least one mirror exists before the restart; otherwise

@@ -12,7 +12,7 @@ set -euo pipefail
 . "$KIND_TEST_LIB"
 
 READER_POD="${READER_POD:-mxl-tcp-demo-reader}"
-REAPPLY_DIR="${REAPPLY_DIR:-${PWD}/examples/tcp-demo}"
+REAPPLY_DIR="${REAPPLY_DIR:-${PWD}/examples/kind/demo}"
 GC_TIMEOUT_SECS="${GC_TIMEOUT_SECS:-30}"
 
 # Establish baseline: at least one mirror exists so the assertion

@@ -14,7 +14,7 @@ set -euo pipefail
 # shellcheck source=../lib.sh
 . "$KIND_TEST_LIB"
 
-AGENT_DS="${AGENT_DS:-mxl-domain-agent}"
+AGENT_DS="${AGENT_DS:-mxl-k8s-agent}"
 RECEIVER_NAME="${RECEIVER_NAME:-tcp-demo}"
 GATE_LABEL_KEY="${GATE_LABEL_KEY:-mxl-test-agent-eligible}"
 GATE_LABEL_VAL="${GATE_LABEL_VAL:-yes}"
