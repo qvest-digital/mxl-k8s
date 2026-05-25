@@ -279,7 +279,7 @@ func TestTarget_FlusherPublishesDegradedAfterIdle(t *testing.T) {
 		DegradedAfter: 10 * time.Millisecond,
 		targets:       map[types.NamespacedName]*targetEntry{},
 	}
-	entry := &targetEntry{}
+	entry := &targetEntry{infoStr: "info-1"}
 	stale := time.Now().Add(-time.Minute)
 	entry.lastCommitAt.Store(&stale)
 
@@ -340,7 +340,7 @@ func TestTarget_FlusherPublishesReadyOnGrainResume(t *testing.T) {
 		DegradedAfter: 50 * time.Millisecond,
 		targets:       map[types.NamespacedName]*targetEntry{},
 	}
-	entry := &targetEntry{}
+	entry := &targetEntry{infoStr: "info-1"}
 	// Park lastCommitAt outside the freshness window so the first
 	// flusher tick publishes Degraded.
 	stale := time.Now().Add(-time.Minute)
@@ -386,6 +386,67 @@ func TestTarget_FlusherPublishesReadyOnGrainResume(t *testing.T) {
 
 	cancel()
 	<-done
+}
+
+func TestTarget_FlusherPreservesTargetInfo(t *testing.T) {
+	// The unified SSA writer routes every status mutation through one
+	// FieldOwner. SSA releases ownership of any field a subsequent
+	// patch from the same owner omits, so a flusher tick that did not
+	// re-stamp status.targetInfo would let the apiserver strip the
+	// field after the second tick. Consumers polling status.targetInfo
+	// would then see it vanish from under a still-Ready mirror, which
+	// the 30-mirror-ready kind-integration case caught in CI.
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{
+		Phase:      mxlv1alpha1.MxlFlowMirrorReady,
+		TargetInfo: "info-1",
+	})
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	r := &TargetReconciler{
+		Client:        c,
+		Scheme:        scheme,
+		NodeName:      "node-a",
+		FlushInterval: 5 * time.Millisecond,
+		DegradedAfter: time.Hour,
+		targets:       map[types.NamespacedName]*targetEntry{},
+	}
+	entry := &targetEntry{infoStr: "info-1"}
+	fresh := time.Now()
+	entry.lastCommitAt.Store(&fresh)
+	entry.commits.Add(1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go r.runFlusher(ctx, done, key, entry)
+
+	// Let the flusher run several ticks so any field-ownership churn
+	// would have surfaced; one tick alone would not.
+	require.Eventually(t, func() bool {
+		var got mxlv1alpha1.MxlFlowMirror
+		if err := c.Get(context.Background(), key, &got); err != nil {
+			return false
+		}
+		return got.Status.Phase == mxlv1alpha1.MxlFlowMirrorReady &&
+			len(got.Status.Conditions) > 0
+	}, time.Second, 5*time.Millisecond)
+
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+	<-done
+
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &got))
+	assert.Equal(t, "info-1", got.Status.TargetInfo,
+		"flusher must re-stamp status.targetInfo on every SSA payload; "+
+			"omitting it releases FieldOwner ownership and the apiserver "+
+			"strips the field, leaving a Ready mirror that consumers "+
+			"cannot dial")
 }
 
 func TestReconcile_FastPathBypassedWhenLastGrainStale(t *testing.T) {

@@ -751,7 +751,7 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		}
 		last = state
 		first = false
-		if err := r.publishTargetProgress(ctx, key, state); err != nil {
+		if err := r.publishTargetProgress(ctx, key, state, entry); err != nil {
 			ctrl.Log.WithName("target-flush").Error(err, "publish",
 				"mirror", key, "reason", state.reason)
 		}
@@ -825,11 +825,14 @@ func targetStateEqual(a, b targetProgressState) bool {
 }
 
 // publishTargetProgress writes the TargetProgress condition, Phase,
-// and LastGrainAt onto the MxlFlowMirror's status. The mirror is
-// re-fetched from the cache on every call so the SSA payload stamps
-// the current Generation rather than a value captured at flusher
-// start.
-func (r *TargetReconciler) publishTargetProgress(ctx context.Context, key types.NamespacedName, state targetProgressState) error {
+// LastGrainAt, and TargetInfo onto the MxlFlowMirror's status. The
+// mirror is re-fetched from the cache on every call so the SSA
+// payload stamps the current Generation rather than a value captured
+// at flusher start. TargetInfo is re-stamped on every flush because
+// SSA with a single FieldOwner releases ownership of fields omitted
+// from a subsequent payload; without re-stamping the apiserver would
+// strip status.targetInfo after the second flush.
+func (r *TargetReconciler) publishTargetProgress(ctx context.Context, key types.NamespacedName, state targetProgressState, entry *targetEntry) error {
 	mirror, err := r.fetchMirror(ctx, key)
 	if err != nil {
 		return fmt.Errorf("get mirror for status flush: %w", err)
@@ -841,7 +844,7 @@ func (r *TargetReconciler) publishTargetProgress(ctx context.Context, key types.
 		Message:            state.message,
 		LastTransitionTime: metav1.Now(),
 	}
-	return r.applyTargetStatus(ctx, mirror, state.phase, nil, state.lastCommitAt, &cond)
+	return r.applyTargetStatus(ctx, mirror, state.phase, &entry.infoStr, state.lastCommitAt, &cond)
 }
 
 // SetupWithManager wires the reconciler into the controller-runtime
