@@ -75,11 +75,12 @@ func run(args []string) error {
 	}
 
 	if err := (&mirror.TargetReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		NodeName:    cfg.NodeName,
-		BindAddress: cfg.BindAddress,
-		Handles:     handles,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		NodeName:      cfg.NodeName,
+		BindAddress:   cfg.BindAddress,
+		Handles:       handles,
+		DegradedAfter: cfg.DegradedAfter,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup target reconciler: %w", err)
 	}

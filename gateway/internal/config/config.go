@@ -44,6 +44,12 @@ type Config struct {
 	// ResyncPeriod is how often the gateway refreshes
 	// MxlNodeCapabilities status.
 	ResyncPeriod time.Duration
+
+	// DegradedAfter is the inactivity window the target-side
+	// reconciler uses to demote a Ready mirror to Degraded and to
+	// invalidate its Reconcile fast-path. Matches the operator-side
+	// MxlFlowMirror freshness expectation.
+	DegradedAfter time.Duration
 }
 
 // FromFlags populates a Config from command-line flags.
@@ -66,6 +72,8 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"Address the metrics endpoint binds to.")
 	fs.DurationVar(&c.ResyncPeriod, "resync-period", 30*time.Second,
 		"How often to refresh MxlNodeCapabilities status.")
+	fs.DurationVar(&c.DegradedAfter, "degraded-after", 10*time.Second,
+		"Grain-commit inactivity after which the target gateway demotes a mirror to Degraded.")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}

@@ -719,6 +719,12 @@
               "required": [],
               "title": "bindAddress"
             },
+            "degradedAfter": {
+              "default": "10s",
+              "description": "Grain-commit inactivity after which the target gateway demotes a mirror to Degraded. Same threshold gates the Reconcile fast-path so a stale Ready status falls through to re-establish.",
+              "required": [],
+              "title": "degradedAfter"
+            },
             "domainPath": {
               "default": "/run/mxl/domain",
               "description": " pattern: ^/.+ @schema",

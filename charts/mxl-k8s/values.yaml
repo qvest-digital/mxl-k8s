@@ -336,6 +336,11 @@ gateway:
     providers:
       - tcp
     resyncPeriod: 30s
+    # -- Grain-commit inactivity after which the target gateway
+    # demotes a mirror to Degraded. Same threshold gates the
+    # Reconcile fast-path so a stale Ready status falls through to
+    # re-establish.
+    degradedAfter: 10s
     # @schema
     # pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$
     # @schema
