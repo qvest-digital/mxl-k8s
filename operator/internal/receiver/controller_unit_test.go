@@ -264,18 +264,19 @@ func TestResolveSourceNode(t *testing.T) {
 			Build()
 		r := &Reconciler{Client: c}
 
-		node, ok, err := r.resolveSourceNode(ctx, "flow-a")
+		res, err := r.resolveSourceNode(ctx, "flow-a")
 		require.NoError(t, err)
-		assert.True(t, ok)
-		assert.Equal(t, "n-origin", node)
+		assert.True(t, res.Found)
+		assert.Equal(t, "n-origin", res.Node)
 	})
 
 	t.Run("flow not found returns false without error", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(unitScheme(t)).Build()
 		r := &Reconciler{Client: c}
-		_, ok, err := r.resolveSourceNode(ctx, "missing")
+		res, err := r.resolveSourceNode(ctx, "missing")
 		require.NoError(t, err)
-		assert.False(t, ok)
+		assert.False(t, res.Found)
+		assert.False(t, res.AllStale)
 	})
 
 	t.Run("no Origin location returns false without error", func(t *testing.T) {
@@ -293,12 +294,15 @@ func TestResolveSourceNode(t *testing.T) {
 			}).
 			Build()
 		r := &Reconciler{Client: c}
-		_, ok, err := r.resolveSourceNode(ctx, "flow-a")
+		res, err := r.resolveSourceNode(ctx, "flow-a")
 		require.NoError(t, err)
-		assert.False(t, ok,
+		assert.False(t, res.Found,
 			"a flow without an Origin location is not yet a usable source; "+
 				"the reconciler must mark its receivers Pending rather than "+
 				"misroute the mirror to a Mirroring/Stale node")
+		assert.False(t, res.AllStale,
+			"AllStale is the 'origin existed but lease expired' signal; "+
+				"a flow that never had an Origin should not raise it")
 	})
 }
 

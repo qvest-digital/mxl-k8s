@@ -490,6 +490,88 @@ func TestEnsureMirror_ExistingReceiverMirror_LeftIntact(t *testing.T) {
 			"pod goes away, even though the receiver still wants it")
 }
 
+// fakeLeaseChecker hands back a canned IsFresh answer per (flowID,
+// node) pair so tests can drive resolveSourceNode's skip-stale logic
+// without spinning up a coordination.k8s.io fake.
+type fakeLeaseChecker struct {
+	fresh map[string]bool
+}
+
+func (f *fakeLeaseChecker) IsFresh(_ context.Context, flowID, node string) (bool, error) {
+	v, ok := f.fresh[flowID+"/"+node]
+	return ok && v, nil
+}
+
+func TestResolveSourceNode_SkipsStaleOriginByLease(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme(t)
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: metav1.ObjectMeta{Name: flowID},
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: flowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{
+				// Stale Origin first: the dispatcher must skip it and
+				// keep scanning rather than return it.
+				{NodeName: "n-stale", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+				{NodeName: "n-fresh", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(flow).
+		Build()
+	d := &Dispatcher{
+		Client:   c,
+		NodeName: "n1",
+		Lease: &fakeLeaseChecker{fresh: map[string]bool{
+			flowID + "/n-fresh": true,
+			// n-stale intentionally absent: missing = not fresh.
+		}},
+	}
+
+	node, ok, err := d.resolveSourceNode(ctx, flowID)
+	require.NoError(t, err)
+	assert.True(t, ok,
+		"a second Origin with a fresh Lease must be the dispatcher's "+
+			"answer even when an earlier Origin entry is present but stale; "+
+			"otherwise a partitioned producer permanently masks a recovered one")
+	assert.Equal(t, "n-fresh", node)
+}
+
+func TestResolveSourceNode_AllStaleOriginsReturnsNotOK(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme(t)
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: metav1.ObjectMeta{Name: flowID},
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: flowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{
+				{NodeName: "n-stale-1", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+				{NodeName: "n-stale-2", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(flow).
+		Build()
+	d := &Dispatcher{
+		Client:   c,
+		NodeName: "n1",
+		Lease:    &fakeLeaseChecker{fresh: map[string]bool{}},
+	}
+
+	_, ok, err := d.resolveSourceNode(ctx, flowID)
+	require.NoError(t, err)
+	assert.False(t, ok,
+		"when every Origin's Lease is expired the dispatcher must report "+
+			"no source; routing a Materialize call at a stale Origin would "+
+			"only hand the shim back a 'no grains' wait until the timeout")
+}
+
 func TestEnsureMirror_EmptyProviderDefaultsToAuto(t *testing.T) {
 	scheme := newScheme(t)
 	c := fake.NewClientBuilder().

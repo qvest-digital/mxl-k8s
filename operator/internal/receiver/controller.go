@@ -48,7 +48,19 @@ const flowIDIndex = "spec.flowID"
 type Reconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// Lease, when set, gates Origin location picks on a fresh
+	// per-(flow, node) Lease. Nil falls back to picking the first
+	// Origin without any liveness check -- the pre-Lease behaviour
+	// the unit tests built around.
+	Lease LeaseChecker
 }
+
+// MxlOperatorFieldManager is the field-manager name the receiver
+// uses for SSA writes to MxlFlow.Status conditions it owns. Stable
+// so any later refactor can identify the entries left in
+// managedFields by this controller.
+const MxlOperatorFieldManager = "mxl-operator"
 
 // nodeTarget is one (node, namespace) pair derived from a receiver's
 // pod selection. Mirrors are created in the pod's namespace, which
@@ -98,18 +110,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("resolve targets: %w", err)
 	}
 
-	sourceNode, sourceOK, err := r.resolveSourceNode(ctx, recv.Spec.FlowID)
+	res, err := r.resolveSourceNode(ctx, recv.Spec.FlowID)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("resolve source node: %w", err)
+	}
+	if err := r.applyOriginFreshCondition(ctx, recv.Spec.FlowID, res); err != nil {
+		l.Error(err, "apply OriginFresh condition", "flowID", recv.Spec.FlowID)
 	}
 
 	// The desired set is the (node, namespace) pairs whose target
 	// differs from the source. Same-node consumers read the local
 	// flow directly without a mirror.
 	desired := map[mirrorKey]nodeTarget{}
-	if sourceOK {
+	if res.Found {
 		for _, t := range targets {
-			if t.node == sourceNode {
+			if t.node == res.Node {
 				continue
 			}
 			desired[mirrorKey{namespace: t.namespace, name: mirrorName(recv.Spec.FlowID, t.node)}] = t
@@ -123,16 +138,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if len(targets) == 0 {
 		return r.markPending(ctx, &recv, "no target pods scheduled yet")
 	}
-	if !sourceOK {
-		return r.markPending(ctx, &recv, "MxlFlow not yet known or no Origin location")
+	if !res.Found {
+		reason := "MxlFlow not yet known or no Origin location"
+		if res.AllStale {
+			reason = "all Origin locations have an expired Lease"
+		}
+		return r.markPending(ctx, &recv, reason)
 	}
 
 	var primary *mxlv1alpha1.MirrorRef
 	for _, t := range targets {
-		if t.node == sourceNode {
+		if t.node == res.Node {
 			continue
 		}
-		mirror, err := r.ensureMirror(ctx, &recv, sourceNode, t)
+		mirror, err := r.ensureMirror(ctx, &recv, res.Node, t)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("ensure mirror for %s in %s: %w", t.node, t.namespace, err)
 		}
@@ -146,7 +165,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	l.V(1).Info("reconciled",
 		"flowID", recv.Spec.FlowID,
-		"sourceNode", sourceNode,
+		"sourceNode", res.Node,
 		"desired", len(desired))
 	return r.markBound(ctx, &recv, primary)
 }

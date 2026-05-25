@@ -23,6 +23,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/agent/internal/flowpublisher"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/intent"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/intentsock"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/originlease"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/podlookup"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/statfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -81,10 +82,12 @@ func run(args []string) error {
 		return err
 	}
 
+	leaseMgr := originlease.New(kClient, cfg.NodeName)
 	flowPub := &flowpublisher.Publisher{
 		Client:     kClient,
 		DomainPath: cfg.DomainPath,
 		NodeName:   cfg.NodeName,
+		Lease:      leaseMgr,
 	}
 	if err := flowPub.InitialSync(ctx); err != nil {
 		// Initial sync failures are logged, not fatal -- the fanotify
@@ -114,6 +117,10 @@ func run(args []string) error {
 
 	go domainPub.RunRefreshLoop(ctx, cfg.ResyncPeriod)
 
+	go flowPub.RunRenewLoop(ctx, originlease.DefaultRenewInterval)
+
+	go flowPub.RunLocalRescan(ctx, 30*time.Second)
+
 	if cfg.IntentSocketPath != "" {
 		intentDispatcher := &intent.Dispatcher{
 			Client:             kClient,
@@ -121,6 +128,7 @@ func run(args []string) error {
 			DomainPath:         cfg.DomainPath,
 			NodeName:           cfg.NodeName,
 			MaterializeTimeout: cfg.MaterializeTimeout,
+			Lease:              leaseMgr,
 		}
 		intentServer := &intentsock.Server{
 			SocketPath: cfg.IntentSocketPath,

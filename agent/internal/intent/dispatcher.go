@@ -40,6 +40,14 @@ const (
 // under DomainPath; tests inject a closure that fakes the lookup.
 type FlowChecker func(flowID string) bool
 
+// LeaseChecker is the slice of the originlease.Manager surface the
+// dispatcher needs to skip Origin locations whose Lease has expired.
+// Kept as an interface so tests can drive resolveSourceNode without
+// a coordination.k8s.io fake fixture.
+type LeaseChecker interface {
+	IsFresh(ctx context.Context, flowID, nodeName string) (bool, error)
+}
+
 // Dispatcher resolves a libmxl-intent.so request into an
 // MxlFlowMirror reconciliation that completes (Ready) or fails.
 type Dispatcher struct {
@@ -64,6 +72,12 @@ type Dispatcher struct {
 	// FlowChecker overrides the filesystem-based local-flow check.
 	// Nil falls back to the default stat under DomainPath.
 	FlowChecker FlowChecker
+
+	// Lease, when set, gates resolveSourceNode's Origin picks on a
+	// fresh Lease. Nil keeps the pre-Lease behaviour the existing
+	// tests built around. The dispatcher only consults the checker;
+	// the operator owns the OriginFresh condition writeback.
+	Lease LeaseChecker
 }
 
 // Materialize ensures that the flow referenced by path is, or will
@@ -177,7 +191,17 @@ func (d *Dispatcher) resolveSourceNode(ctx context.Context, flowID string) (stri
 		return "", false, err
 	}
 	for _, loc := range flow.Status.Locations {
-		if loc.Phase == mxlv1alpha1.MxlFlowLocationOrigin {
+		if loc.Phase != mxlv1alpha1.MxlFlowLocationOrigin {
+			continue
+		}
+		if d.Lease == nil {
+			return loc.NodeName, true, nil
+		}
+		fresh, err := d.Lease.IsFresh(ctx, flowID, loc.NodeName)
+		if err != nil {
+			return "", false, err
+		}
+		if fresh {
 			return loc.NodeName, true, nil
 		}
 	}
