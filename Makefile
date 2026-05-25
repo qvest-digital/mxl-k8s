@@ -13,6 +13,10 @@ COVERAGE_DIR ?= $(CURDIR)/bin
 TEST_TIMEOUT ?= 5m
 TEST_ARGS ?= -race -timeout $(TEST_TIMEOUT)
 
+GRAPHIFY_VERSION ?= 0.8.18
+GRAPHIFY ?= uvx --from graphifyy==$(GRAPHIFY_VERSION) graphify
+GRAPHIFY_PATH ?= .
+
 MODULES := api operator agent gateway
 PURE_TEST_MODULES := api operator agent
 
@@ -108,6 +112,44 @@ HELM_DOCS   ?= $(shell go env GOPATH)/bin/helm-docs
 
 .PHONY: generated-check
 generated-check: manifests-check chart-check
+
+# --- Graphify developer setup ---
+# Graphify's PyPI package is named graphifyy and its CLI is graphify.
+# Override GRAPHIFY="graphify" to use a locally installed binary instead
+# of uvx. graphify-install writes project-scoped Hermes config and points
+# Git at this repo's versioned hooks under .githooks/.
+.PHONY: graphify-install
+graphify-install: graphify-project-install graphify-hooks-install
+
+.PHONY: graphify-project-install
+graphify-project-install:
+	$(GRAPHIFY) install --project --platform hermes
+
+.PHONY: graphify-hooks-install
+graphify-hooks-install:
+	git config core.hooksPath .githooks
+
+.PHONY: graphify-hooks-uninstall
+graphify-hooks-uninstall:
+	git config --unset core.hooksPath
+
+.PHONY: graphify-update
+graphify-update:
+	$(GRAPHIFY) update $(GRAPHIFY_PATH)
+
+.PHONY: graphify-check
+graphify-check:
+	$(GRAPHIFY) check-update $(GRAPHIFY_PATH)
+
+.PHONY: graphify-hook-status
+graphify-hook-status:
+	@hooks_path=$$(git config --get core.hooksPath || true); \
+	if [ "$$hooks_path" = ".githooks" ]; then \
+		echo "repo hooks: installed ($$hooks_path)"; \
+	else \
+		echo "repo hooks: not installed"; \
+	fi
+	$(GRAPHIFY) check-update $(GRAPHIFY_PATH)
 
 # --- Test targets ---
 # `make test`         runs unit tests across pure-Go modules (api,

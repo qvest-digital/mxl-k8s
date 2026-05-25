@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+repo=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$repo" || exit 0
+
+if ! command -v uvx >/dev/null 2>&1 && ! command -v graphify >/dev/null 2>&1; then
+    exit 0
+fi
+
+changed=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git diff --name-only HEAD 2>/dev/null || true)
+[ -n "$changed" ] || exit 0
+
+if ! printf '%s\n' "$changed" | grep -E '(^|/)(Makefile|Dockerfile)$|\.(go|mod|sum|sh|ya?ml|json|md|c|h|cpp|hpp|proto|toml|txt)$' >/dev/null 2>&1; then
+    exit 0
+fi
+
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/mxl-k8s"
+mkdir -p "$cache_dir"
+log_file="$cache_dir/graphify-hook.log"
+
+(
+    echo "[graphify] post-commit rebuild started at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    make --no-print-directory graphify-update GRAPHIFY_PATH=.
+) >"$log_file" 2>&1 &

@@ -91,3 +91,34 @@ libmxl install (and, for the gateway, real fabric endpoints):
 ```
 
 The default unit/vet/build jobs don't run these.
+
+## Graphify developer setup
+
+Graphify is an optional local knowledge-graph tool. The PyPI package is
+`graphifyy`, and the installed CLI is `graphify`. The repo Makefile uses
+`uvx` by default so developers do not need to add a Python virtualenv to
+the tree.
+
+Install the project-scoped Hermes config and enable the repo hooks:
+
+```sh
+make graphify-install
+```
+
+That command runs `graphify install --project --platform hermes` and
+sets `core.hooksPath` to `.githooks`. The committed hooks start
+`make graphify-update` in the background after commits that touch
+code, docs, config, or manifests. The checkout hook refreshes an
+existing graph after branch switches.
+
+Run or check Graphify manually with:
+
+```sh
+make graphify-update
+make graphify-check
+make graphify-hook-status
+```
+
+Set `GRAPHIFY="graphify"` to use an already installed binary instead of
+`uvx --from graphifyy==0.8.18 graphify`. Disable the repo hooks with
+`make graphify-hooks-uninstall`.
