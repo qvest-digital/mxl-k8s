@@ -345,12 +345,11 @@ func TestReceiver_GCDeletesOrphanMirrorsAfterPodMove(t *testing.T) {
 		"the receiver must own the mirror it created same-namespace; without "+
 			"the OwnerReference apiserver GC has nothing to act on")
 
-	// Pod moves to a new node. The orphan mirror on node-a must
-	// lose this receiver's OwnerReference -- apiserver GC then
-	// removes it out-of-band once the owner list empties. envtest
-	// does not run the GC controller, so the assertion is on owner
-	// list state, not on object existence. Force grace=0 because
-	// envtest has no kubelet to finalize the pod removal.
+	// Pod moves to a new node. The orphan mirror on node-a is the
+	// receiver's sole owner; removeOwnerRef drops it and then issues
+	// r.Delete because native apiserver GC does not reap a dependent
+	// whose ownerReferences becomes empty via an Update. Force grace=0
+	// because envtest has no kubelet to finalize the pod removal.
 	zero := int64(0)
 	require.NoError(t, env.Client.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: &zero}))
 	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-b", "node-b")))
@@ -363,14 +362,10 @@ func TestReceiver_GCDeletesOrphanMirrorsAfterPodMove(t *testing.T) {
 		gotTargets[m.Spec.TargetNode] = struct{}{}
 		gotOwners[m.Spec.TargetNode] = len(m.OwnerReferences)
 	}
-	assert.Equal(t, map[string]struct{}{"node-a": {}, "node-b": {}}, gotTargets,
-		"the receiver does not Delete same-namespace mirrors directly; "+
-			"removing its OwnerReference is the only action and apiserver GC "+
-			"finishes the job out-of-band")
-	assert.Equal(t, 0, gotOwners["node-a"],
-		"the orphan mirror for node-a must have its receiver OwnerReference "+
-			"removed; apiserver GC will then delete the object once its owner "+
-			"list is empty")
+	assert.Equal(t, map[string]struct{}{"node-b": {}}, gotTargets,
+		"the orphan mirror on node-a must be deleted by the operator once "+
+			"its last receiver owner is removed; apiserver GC will not reap "+
+			"a dependent whose ownerReferences was emptied via an update")
 	assert.Equal(t, 1, gotOwners["node-b"],
 		"the freshly-created mirror for node-b must carry the receiver as an owner")
 }
@@ -403,13 +398,12 @@ func TestReceiver_FinalizerCompletesWhenOwnerRefsCleared(t *testing.T) {
 	require.NoError(t, env.Client.Delete(ctx, live))
 
 	// One reconcile pass on a same-namespace receiver releases the
-	// owner refs and removes the finalizer. envtest does not run
-	// the apiserver-GC controller, so the mirrors stay around with
-	// an empty OwnerReferences list; in a real cluster GC removes
-	// them once no owner remains. The contract verified here is
-	// that the receiver itself unblocks immediately after dropping
-	// the refs -- it must not wait on the mirror object actually
-	// disappearing.
+	// owner refs and removes the finalizer. When the receiver was the
+	// sole owner of each mirror, removeOwnerRef also issues r.Delete
+	// because native apiserver GC does not reap a dependent whose
+	// ownerReferences becomes empty via an Update. The receiver itself
+	// unblocks immediately after dropping the refs -- it must not wait
+	// on the mirror Delete propagating.
 	res := reconcile(t, r, ns, "r")
 	assert.Zero(t, res.RequeueAfter,
 		"same-namespace ownership is by OwnerReferences; receiver deletion "+
@@ -417,11 +411,9 @@ func TestReceiver_FinalizerCompletesWhenOwnerRefsCleared(t *testing.T) {
 			"apiserver GC")
 
 	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
-	for _, m := range mirrors.Items {
-		assert.False(t, hasOwnerUID(&m, live.UID),
-			"every mirror must have lost the receiver OwnerReference; "+
-				"otherwise apiserver GC would never remove it")
-	}
+	assert.Empty(t, mirrors.Items,
+		"the receiver was the sole owner of both mirrors; removeOwnerRef "+
+			"must have deleted them once their ownerReferences emptied")
 
 	err := env.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: "r"}, &mxlv1alpha1.MxlReceiver{})
 	assert.True(t, apierrors.IsNotFound(err),
@@ -625,7 +617,7 @@ func TestHandleDeletion_DeletesCrossNsMirror(t *testing.T) {
 			"cross-ns mirror finalises; got %v", err)
 }
 
-func TestGcOrphanMirrors_RemovesOwnerRef_SameNs(t *testing.T) {
+func TestGcOrphanMirrors_DeletesOrphanedMirror_SameNs(t *testing.T) {
 	ctx := context.Background()
 	ns := env.NewNamespace(t)
 	r := &receiver.Reconciler{Client: env.Client, Scheme: env.Scheme}
@@ -644,26 +636,29 @@ func TestGcOrphanMirrors_RemovesOwnerRef_SameNs(t *testing.T) {
 	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
 	require.Len(t, mirrors.Items, 1)
 	require.True(t, hasOwnerUID(&mirrors.Items[0], rec.UID))
+	origMirrorName := mirrors.Items[0].Name
 
 	zero := int64(0)
 	require.NoError(t, env.Client.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: &zero}))
 	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-b", "node-b")))
 	reconcile(t, r, ns, "r")
 
+	// The orphan mirror's last owning receiver is dropped by
+	// removeOwnerRef, which then issues r.Delete because native
+	// Kubernetes GC does not reap a dependent whose owner refs is
+	// emptied via update -- only when an owner is deleted does the
+	// GC controller act. The new desired mirror is created in the
+	// same reconcile pass and carries the receiver as its sole owner.
 	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
 	gotByTarget := map[string]mxlv1alpha1.MxlFlowMirror{}
 	for _, m := range mirrors.Items {
 		gotByTarget[m.Spec.TargetNode] = m
 	}
-	require.Contains(t, gotByTarget, "node-a")
+	_, stillHasA := gotByTarget["node-a"]
+	assert.False(t, stillHasA,
+		"orphan mirror %s on node-a must be deleted once its last owner is gone", origMirrorName)
 	require.Contains(t, gotByTarget, "node-b")
-	assert.False(t, hasOwnerUID(&mirrors.Items[0], rec.UID) && hasOwnerUID(&mirrors.Items[1], rec.UID),
-		"the orphan must lose this receiver's owner ref while the desired "+
-			"mirror keeps it; otherwise apiserver GC has nothing to act on")
-	mA := gotByTarget["node-a"]
 	mB := gotByTarget["node-b"]
-	assert.False(t, hasOwnerUID(&mA, rec.UID),
-		"the obsolete-target mirror must have the receiver owner ref removed")
 	assert.True(t, hasOwnerUID(&mB, rec.UID),
 		"the new-target mirror must carry the receiver as an owner")
 }

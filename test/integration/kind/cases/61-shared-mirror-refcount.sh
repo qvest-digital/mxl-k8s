@@ -116,6 +116,34 @@ trap '"${KUBECTL[@]}" delete mxlflow "$TEST_FLOW" --ignore-not-found >/dev/null 
   "{\"status\":{\"locations\":[{\"nodeName\":\"$SOURCE_NODE\",\"phase\":\"Origin\"}]}}" \
   >/dev/null || fail "patch flow status.locations failed"
 
+# The receiver gates origin picks on a fresh per-(flowID, nodeName)
+# coordination.k8s.io/v1 Lease in mxl-system that the agent renews in
+# production. The synthetic flow above has no writer pod so no agent
+# publishes the Lease; without one the receiver's resolveSourceNode
+# marks the origin AllStale and parks the receiver at Pending,
+# blocking the owner-ref bookkeeping this case exists to assert.
+# Seed a long-window Lease so the receiver sees the origin as fresh
+# for the whole test (and clean it up on exit).
+LEASE_NAME="mxl-flow-${TEST_FLOW}-${SOURCE_NODE}"
+NOW_RFC3339="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+"${KUBECTL[@]}" -n mxl-system apply -f - <<EOF >/dev/null \
+  || fail "create origin lease ${LEASE_NAME} failed"
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: ${LEASE_NAME}
+spec:
+  holderIdentity: 61-shared-mirror-refcount-test
+  leaseDurationSeconds: 3600
+  acquireTime: ${NOW_RFC3339}
+  renewTime: ${NOW_RFC3339}
+EOF
+trap '
+  "${KUBECTL[@]}" -n mxl-system delete lease "${LEASE_NAME}" --ignore-not-found >/dev/null 2>&1 || true
+  "${KUBECTL[@]}" delete mxlflow "$TEST_FLOW" --ignore-not-found >/dev/null 2>&1 || true
+  cleanup
+' EXIT
+
 "${KUBECTL[@]}" -n "$TEST_NS" apply -f - <<EOF >/dev/null
 apiVersion: mxl.qvest-digital.com/v1alpha1
 kind: MxlReceiver

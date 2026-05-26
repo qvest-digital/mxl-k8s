@@ -663,8 +663,23 @@ func (r *Reconciler) ensureOwnerRef(ctx context.Context, recv *mxlv1alpha1.MxlRe
 // removeOwnerRef removes the OwnerReference whose UID matches recv
 // from mirror. No-op when absent. Same retry shape as ensureOwnerRef
 // so a stale resourceVersion under contention does not surface as a
-// reconcile error. Logs the resulting owner count at V(1) so a
-// running operator can observe refcount activity.
+// reconcile error.
+//
+// When the removal empties the OwnerReferences slice, the function
+// issues a Delete on the mirror. Native Kubernetes garbage collection
+// does not delete a dependent whose ownerReferences becomes empty via
+// an Update -- the cascade only fires when an owner is deleted and
+// foreground/background propagation finds its dependents, or when an
+// owner UID becomes dangling. An ownerless dependent created by ref
+// removal is a perfectly valid state to the apiserver and would
+// persist forever. Two concurrent receivers calling removeOwnerRef
+// for the same mirror cannot both observe remaining==0: the
+// RetryOnConflict loop serialises the Update, the loser re-Gets and
+// sees the winner's already-shorter slice. Double-delete in a
+// reconcile race is IsNotFound-tolerated.
+//
+// Logs the resulting owner count at V(1) so a running operator can
+// observe refcount activity.
 func (r *Reconciler) removeOwnerRef(ctx context.Context, recv *mxlv1alpha1.MxlReceiver, mirror *mxlv1alpha1.MxlFlowMirror) error {
 	key := types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}
 	var remaining int
@@ -695,6 +710,11 @@ func (r *Reconciler) removeOwnerRef(ctx context.Context, recv *mxlv1alpha1.MxlRe
 			return err
 		}
 		remaining = len(kept)
+		if remaining == 0 {
+			if err := r.Delete(ctx, &live); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("delete orphaned mirror: %w", err)
+			}
+		}
 		return nil
 	})
 	if err != nil {
