@@ -860,6 +860,118 @@ func TestPublishSourceProgress_IncludesLastSentAt(t *testing.T) {
 			"compares it against lastCommitAt to decide whether to rebuild")
 }
 
+func TestSourceStateEqual_DereferencesLastSentAtPointers(t *testing.T) {
+	// observedState allocates a fresh *time.Time on every flusher tick
+	// (copying the atomic-loaded value through a local variable to
+	// detach it from the pointer that recordTransfer stored). The
+	// dedupe must therefore compare timestamps by value: a struct-level
+	// == would always disagree once lastSentAt is non-nil and the
+	// flusher would publish on every tick. Codifies the contract:
+	// equality holds when the wall-clock value is the same, not when
+	// the pointer is the same.
+	now := time.Now()
+	a := sourceProgressState{
+		status:  metav1.ConditionTrue,
+		reason:  mxlv1alpha1.ReasonHandshakeComplete,
+		message: "initiator running",
+	}
+	b := a
+
+	// Two distinct *time.Time values with the same wall-clock equal.
+	t1 := now
+	t2 := now
+	a.lastSentAt = &t1
+	b.lastSentAt = &t2
+	assert.True(t, sourceStateEqual(a, b),
+		"two states whose lastSentAt pointers reference distinct copies of "+
+			"the same wall-clock must compare equal; without this the source "+
+			"flusher would publish status on every tick after the first "+
+			"transfer and burn through the apiserver write budget")
+
+	// Different wall-clock values are not equal.
+	later := now.Add(time.Millisecond)
+	b.lastSentAt = &later
+	assert.False(t, sourceStateEqual(a, b),
+		"a fresh lastSentAt timestamp must defeat the dedupe so the next "+
+			"SSA payload carries the new value; the target-side watchdog "+
+			"relies on the freshness of this field")
+
+	// nil/non-nil asymmetry is not equal.
+	b.lastSentAt = nil
+	assert.False(t, sourceStateEqual(a, b))
+	a.lastSentAt = nil
+	assert.True(t, sourceStateEqual(a, b),
+		"two states both missing lastSentAt must compare equal regardless "+
+			"of other field defaults; otherwise the pre-transfer ticks would "+
+			"churn writes for an unchanged state")
+}
+
+func TestSource_FlusherSuppressesIdenticalTicksAfterFirstTransfer(t *testing.T) {
+	// After one successful transfer the entry's lastSentAt stays
+	// frozen until the next transferGrain call. The flusher must
+	// detect that the observed state has not changed and skip the
+	// publish; otherwise every tick after the first grain would write
+	// status with a duplicate condition and accumulate apiserver load
+	// proportional to the flusher tick frequency.
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithFinalizer(key.Name, key.Namespace, "node-a", "flow-1", "info-1")
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	r := &SourceReconciler{
+		Client:        c,
+		Scheme:        scheme,
+		NodeName:      "node-a",
+		FlushInterval: 2 * time.Millisecond,
+		sources:       map[types.NamespacedName]*sourceEntry{},
+		attempts:      map[types.NamespacedName]uint32{},
+	}
+
+	entry := &sourceEntry{}
+	entry.progress.Store(1)
+	transferAt := time.Now()
+	entry.lastSentAt.Store(&transferAt)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go r.runFlusher(ctx, done, key, entry, 2*time.Millisecond)
+
+	// Wait for the first publish so the assertion has a known
+	// baseline ResourceVersion to compare against.
+	require.Eventually(t, func() bool {
+		var got mxlv1alpha1.MxlFlowMirror
+		if err := c.Get(context.Background(), key, &got); err != nil {
+			return false
+		}
+		return got.Status.LastSentAt != nil
+	}, time.Second, time.Millisecond,
+		"flusher must publish the first state so the dedupe has a baseline")
+
+	var baseline mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &baseline))
+	baselineRV := baseline.ResourceVersion
+
+	// Let several more ticks fire without changing any tracker on the
+	// entry. The dedupe must suppress every one of them.
+	time.Sleep(40 * time.Millisecond)
+
+	cancel()
+	<-done
+
+	var after mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &after))
+	assert.Equal(t, baselineRV, after.ResourceVersion,
+		"ResourceVersion must not advance when nothing has changed on the "+
+			"entry; a comparison that treated fresh *time.Time allocations as "+
+			"distinct would write status on every flusher tick and let the "+
+			"source gateway flood the apiserver with redundant patches")
+}
+
 func TestPublishSourceProgress_OmitsLastSentAtWhenNeverTransferred(t *testing.T) {
 	// Before any grain has been transferred, lastSentAt must stay
 	// absent: a zero-time stamp would let the target-side watchdog

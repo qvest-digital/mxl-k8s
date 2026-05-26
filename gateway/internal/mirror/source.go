@@ -730,7 +730,7 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		case <-t.C:
 		}
 		state := observedState(entry)
-		if !first && state == last {
+		if !first && sourceStateEqual(state, last) {
 			continue
 		}
 		if err := r.publishSourceProgress(ctx, key, state); err != nil {
@@ -741,6 +741,27 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		last = state
 		first = false
 	}
+}
+
+// sourceStateEqual reports whether two sourceProgressState values
+// would publish identical SSA payloads. lastSentAt is compared by
+// value rather than pointer identity: observedState allocates a
+// fresh *time.Time on every tick (copying the atomic-loaded value),
+// so a struct-level == on the two states would always disagree once
+// lastSentAt is set, defeating the dedupe and turning a single
+// successful transfer into a status write every flusher tick.
+func sourceStateEqual(a, b sourceProgressState) bool {
+	if a.status != b.status || a.reason != b.reason ||
+		a.message != b.message || a.attempts != b.attempts {
+		return false
+	}
+	if (a.lastSentAt == nil) != (b.lastSentAt == nil) {
+		return false
+	}
+	if a.lastSentAt != nil && !a.lastSentAt.Equal(*b.lastSentAt) {
+		return false
+	}
+	return true
 }
 
 // observedState derives the SourceProgress condition the flusher

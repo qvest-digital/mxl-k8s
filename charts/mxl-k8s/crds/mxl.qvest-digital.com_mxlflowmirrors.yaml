@@ -209,6 +209,7 @@ spec:
                   but target is wedged" (rebuild) from "source is idle"
                   (leave alone). Unset before the first transfer.
                 format: date-time
+                nullable: true
                 type: string
               observedGeneration:
                 description: ObservedGeneration is the spec generation last reconciled.

@@ -97,6 +97,7 @@ type MxlFlowMirrorStatus struct {
 	// but target is wedged" (rebuild) from "source is idle"
 	// (leave alone). Unset before the first transfer.
 	// +optional
+	// +nullable
 	LastSentAt *metav1.Time `json:"lastSentAt,omitempty"`
 
 	// LastError is the most recent reconcile error message recorded

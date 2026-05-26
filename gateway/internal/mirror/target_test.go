@@ -658,6 +658,68 @@ func TestTarget_RecoverFromFatalErrorClearsRecoveringOnRebuildFailure(t *testing
 			"from scratch instead of operating on torn-down fabric handles")
 }
 
+func TestTarget_RecoverFromFatalErrorCancelsRunningProgressLoop(t *testing.T) {
+	// Codifies the watchdog-spawn contract: recoverFromFatalError must
+	// cancel the previous progress loop before waiting on its done
+	// channel. The onFatal caller has already exited the loop, so its
+	// cancel is a no-op; the watchdog caller has not, because no fatal
+	// ReadGrain ever fires on a silent libmxl-fabrics wedge. Without
+	// the explicit cancel the <-entry.done wait blocks forever, pins
+	// entry.recovering=true, and the flusher skips every subsequent
+	// tick. The kind-integration case 60 reproduced exactly that:
+	// after the first watchdog spawn the entry stayed wedged for the
+	// full STUCK_SECS window because no further recovery could fire.
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{
+		Phase:      mxlv1alpha1.MxlFlowMirrorReady,
+		TargetInfo: "info-1",
+	})
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	// done stays open until entry.cancel runs: the test asserts that
+	// recoverFromFatalError closes it via its own cancel rather than
+	// blocking on a loop that no fatal signal will ever stop.
+	openDone := make(chan struct{})
+	entry := &targetEntry{}
+	entry.done = openDone
+	entry.cancel = func() { close(openDone) }
+
+	rebuildErr := errors.New("fabrics rebuild refused")
+	r := &TargetReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		NodeName: "node-a",
+		targets:  map[types.NamespacedName]*targetEntry{key: entry},
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Regions, *fabrics.Target, *fabrics.TargetInfo, string, error) {
+			return nil, nil, nil, "", rebuildErr
+		},
+	}
+
+	finished := make(chan struct{})
+	go func() {
+		r.recoverFromFatalError(key)
+		close(finished)
+	}()
+
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recoverFromFatalError did not return; the watchdog spawn path " +
+			"must cancel the progress loop before waiting on its done channel, " +
+			"otherwise a silent libmxl-fabrics wedge pins recovering=true forever")
+	}
+
+	assert.False(t, entry.recovering.Load(),
+		"recovering must clear once recoverFromFatalError returns; otherwise "+
+			"the flusher's next tick skips the watchdog block and no further "+
+			"recovery can fire")
+}
+
 func TestRecordCommit_FirstCommitResetsRecoveryAttempts(t *testing.T) {
 	// recordCommit must zero recoveryAttempts on the first commit
 	// after each fabric open so a previously-rebuilt-successfully
