@@ -658,6 +658,68 @@ func TestTarget_RecoverFromFatalErrorClearsRecoveringOnRebuildFailure(t *testing
 			"from scratch instead of operating on torn-down fabric handles")
 }
 
+func TestTarget_RecoverFromFatalErrorCancelsRunningProgressLoop(t *testing.T) {
+	// Codifies the watchdog-spawn contract: recoverFromFatalError must
+	// cancel the previous progress loop before waiting on its done
+	// channel. The onFatal caller has already exited the loop, so its
+	// cancel is a no-op; the watchdog caller has not, because no fatal
+	// ReadGrain ever fires on a silent libmxl-fabrics wedge. Without
+	// the explicit cancel the <-entry.done wait blocks forever, pins
+	// entry.recovering=true, and the flusher skips every subsequent
+	// tick. The kind-integration case 60 reproduced exactly that:
+	// after the first watchdog spawn the entry stayed wedged for the
+	// full STUCK_SECS window because no further recovery could fire.
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{
+		Phase:      mxlv1alpha1.MxlFlowMirrorReady,
+		TargetInfo: "info-1",
+	})
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	// done stays open until entry.cancel runs: the test asserts that
+	// recoverFromFatalError closes it via its own cancel rather than
+	// blocking on a loop that no fatal signal will ever stop.
+	openDone := make(chan struct{})
+	entry := &targetEntry{}
+	entry.done = openDone
+	entry.cancel = func() { close(openDone) }
+
+	rebuildErr := errors.New("fabrics rebuild refused")
+	r := &TargetReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		NodeName: "node-a",
+		targets:  map[types.NamespacedName]*targetEntry{key: entry},
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Regions, *fabrics.Target, *fabrics.TargetInfo, string, error) {
+			return nil, nil, nil, "", rebuildErr
+		},
+	}
+
+	finished := make(chan struct{})
+	go func() {
+		r.recoverFromFatalError(key)
+		close(finished)
+	}()
+
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recoverFromFatalError did not return; the watchdog spawn path " +
+			"must cancel the progress loop before waiting on its done channel, " +
+			"otherwise a silent libmxl-fabrics wedge pins recovering=true forever")
+	}
+
+	assert.False(t, entry.recovering.Load(),
+		"recovering must clear once recoverFromFatalError returns; otherwise "+
+			"the flusher's next tick skips the watchdog block and no further "+
+			"recovery can fire")
+}
+
 func TestRecordCommit_FirstCommitResetsRecoveryAttempts(t *testing.T) {
 	// recordCommit must zero recoveryAttempts on the first commit
 	// after each fabric open so a previously-rebuilt-successfully
@@ -1107,4 +1169,166 @@ func TestRunFlusher_RecoveryGate_NoDoubleSpawnUnderRace(t *testing.T) {
 	assert.Equal(t, uint32(1), f.entry.recoveryAttempts.Load(),
 		"recoveryAttempts must be exactly 1 after a single spawn; a higher "+
 			"value would mean two ticks raced past the CAS gate")
+}
+
+// armPostHandshakeWedge configures the fixture so the watchdog's
+// post-handshake branch trips on the next tick: one commit landed
+// after the fabric side opened, then commits stopped while
+// mirror.Status.LastSentAt kept advancing past the stuck-handshake
+// window. fabricOpenedAt sits inside the window so the
+// neverHandshook predicate stays false; the discrimination has to
+// come from the cross-side LastSentAt delta alone.
+//
+// The mirror status is re-fetched from the fake client before each
+// update so concurrent flusher writes (and a re-arm inside the
+// recoverFn callback) do not collide on resourceVersion.
+func (f *targetWatchdogFixture) armPostHandshakeWedge(t *testing.T, sentAfterCommit time.Duration) {
+	t.Helper()
+	now := time.Now()
+	openedAt := now.Add(-100 * time.Millisecond)
+	f.entry.fabricOpenedAt.Store(&openedAt)
+	f.entry.commitsAtFabricOpen.Store(0)
+	f.entry.commits.Store(1)
+	commitAt := now.Add(-sentAfterCommit - 50*time.Millisecond)
+	f.entry.lastCommitAt.Store(&commitAt)
+
+	sentAt := commitAt.Add(sentAfterCommit)
+	for i := 0; i < 5; i++ {
+		var current mxlv1alpha1.MxlFlowMirror
+		require.NoError(t, f.c.Get(context.Background(), f.key, &current))
+		current.Status.LastSentAt = &metav1.Time{Time: sentAt}
+		if err := f.c.Status().Update(context.Background(), &current); err == nil {
+			return
+		}
+	}
+	t.Fatal("armPostHandshakeWedge: status update raced concurrent writes after 5 attempts")
+}
+
+func TestRunFlusher_PostHandshakeWedge_TriggersRecovery(t *testing.T) {
+	// PR #85's neverHandshook discriminator (commits == commitsAtFabricOpen)
+	// flips to false the moment the first grain commits, leaving the
+	// watchdog blind to a wedge that develops *after* the handshake -
+	// the exact pattern kind testcase 60 hits when a fresh target
+	// receives one grain, the fabric stalls, and recovery never fires.
+	// LastSentAt > lastCommitAt + window means the source is still
+	// sending; the target must rebuild.
+	f := newTargetWatchdogFixture(t, 4)
+	f.r.StuckHandshakeAfter = 10 * time.Millisecond
+	f.armPostHandshakeWedge(t, 5*time.Second)
+	f.startFlusher(t)
+	defer f.stopFlusher(t)
+
+	select {
+	case <-f.spawnCh:
+	case <-time.After(time.Second):
+		t.Fatal("watchdog did not spawn recovery on a post-handshake wedge; " +
+			"the discriminator must also trigger when lastSentAt outpaces " +
+			"lastCommitAt by more than the stuck-handshake window")
+	}
+
+	require.Eventually(t, func() bool {
+		return f.entry.recoveryAttempts.Load() >= 1
+	}, time.Second, 5*time.Millisecond,
+		"a post-handshake wedge must increment recoveryAttempts so the cap "+
+			"branch can still terminate a permanently wedged target")
+}
+
+func TestRunFlusher_PostHandshakeIdleFlow_DoesNotTrigger(t *testing.T) {
+	// The discriminator must not fire when the source is genuinely
+	// idle: LastSentAt absent (or trailing lastCommitAt) means no
+	// grains are being sent, and rebuilding the fabric side in that
+	// state would churn perfectly healthy mirrors on every quiet
+	// window. Codifies the "idle is not a wedge" half of the design.
+	f := newTargetWatchdogFixture(t, 4)
+	f.r.StuckHandshakeAfter = 10 * time.Millisecond
+	// One commit landed after open; lastSentAt is left unset on the
+	// mirror status (the typical "source has stopped pushing" shape).
+	now := time.Now()
+	openedAt := now.Add(-100 * time.Millisecond)
+	f.entry.fabricOpenedAt.Store(&openedAt)
+	f.entry.commitsAtFabricOpen.Store(0)
+	f.entry.commits.Store(1)
+	commitAt := now.Add(-time.Second)
+	f.entry.lastCommitAt.Store(&commitAt)
+
+	f.startFlusher(t)
+	defer f.stopFlusher(t)
+
+	select {
+	case <-f.spawnCh:
+		t.Fatal("watchdog spawned recovery on an idle flow; the post-handshake " +
+			"branch must require mirror.Status.LastSentAt to outpace " +
+			"lastCommitAt before triggering a rebuild")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	assert.Equal(t, uint32(0), f.entry.recoveryAttempts.Load(),
+		"an idle flow must leave recoveryAttempts at zero; otherwise a "+
+			"long quiet window followed by a real wedge would trip the cap "+
+			"on the first true rebuild and surface a false terminal Failed")
+}
+
+func TestRunFlusher_PostHandshakeWedge_RespectsCapAndPublishesFailed(t *testing.T) {
+	// The post-handshake branch must share the same cap budget as
+	// neverHandshook: after maxStuckRebuilds spawns the flusher
+	// publishes Phase=Failed with StuckHandshakeCapReached and exits.
+	// Without sharing the cap a permanently wedged target would loop
+	// rebuild forever and never surface a terminal state to operators.
+	f := newTargetWatchdogFixture(t, int(maxStuckRebuilds)+2)
+	f.r.StuckHandshakeAfter = 10 * time.Millisecond
+	f.armPostHandshakeWedge(t, 5*time.Second)
+	// Re-arm only the entry-side state on every spawn: the mirror
+	// status already carries a LastSentAt far ahead of lastCommitAt
+	// from the initial armPostHandshakeWedge, so the post-handshake
+	// branch keeps tripping without further Status writes (which
+	// would race the flusher's fetchMirror on the fake client).
+	f.r.recoverFn = func(types.NamespacedName) {
+		f.spawnCh <- struct{}{}
+		now := time.Now()
+		openedAt := now.Add(-100 * time.Millisecond)
+		f.entry.fabricOpenedAt.Store(&openedAt)
+		f.entry.recovering.Store(false)
+	}
+	f.startFlusher(t)
+
+	for i := uint32(0); i < maxStuckRebuilds; i++ {
+		select {
+		case <-f.spawnCh:
+		case <-time.After(time.Second):
+			t.Fatalf("post-handshake watchdog did not spawn recovery attempt %d", i+1)
+		}
+	}
+
+	select {
+	case <-f.spawnCh:
+		t.Fatal("post-handshake watchdog spawned more than maxStuckRebuilds " +
+			"recoveries; the cap branch must take over before another spawn")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	select {
+	case <-f.done:
+	case <-time.After(time.Second):
+		t.Fatal("flusher did not exit after the post-handshake cap branch fired")
+	}
+	f.cancel = nil
+
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, f.c.Get(context.Background(), f.key, &got))
+	assert.Equal(t, mxlv1alpha1.MxlFlowMirrorFailed, got.Status.Phase,
+		"the cap branch must publish Phase=Failed regardless of which "+
+			"wedge shape (neverHandshook vs postHandshakeWedge) drove it")
+
+	foundCond := false
+	for _, cond := range got.Status.Conditions {
+		if cond.Type == mxlv1alpha1.ConditionTypeTargetProgress &&
+			cond.Reason == ReasonStuckHandshakeCapReached {
+			foundCond = true
+			break
+		}
+	}
+	assert.True(t, foundCond,
+		"post-handshake cap must carry reason StuckHandshakeCapReached so "+
+			"operators see the same terminal signal whether the handshake "+
+			"never landed or only landed once before wedging")
 }

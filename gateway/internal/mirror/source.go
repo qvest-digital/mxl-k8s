@@ -634,6 +634,12 @@ type sourceProgressState struct {
 	reason   string
 	message  string
 	attempts uint32
+	// lastSentAt carries the wall-clock of the most recent successful
+	// TransferGrain forward into the SSA payload. The target-side
+	// stuck-handshake watchdog reads it to discriminate "source is
+	// sending but target is wedged" from "source is idle". Unset
+	// before the first transfer.
+	lastSentAt *time.Time
 }
 
 // publishSourceProgress writes a single SourceProgress condition
@@ -670,6 +676,14 @@ func (r *SourceReconciler) publishSourceProgress(ctx context.Context, key types.
 	} else {
 		status["attemptCount"] = int64(0)
 		status["lastError"] = ""
+	}
+	if state.lastSentAt != nil {
+		// Re-stamped on every publish that carries it: SSA with a
+		// single FieldOwner releases ownership of fields omitted from
+		// a later payload, so dropping the key after the first
+		// publish would let the apiserver strip it and break the
+		// target-side stuck-handshake discriminator.
+		status["lastSentAt"] = state.lastSentAt.UTC().Format(time.RFC3339)
 	}
 	if err := unstructured.SetNestedField(patch.Object, status, "status"); err != nil {
 		return fmt.Errorf("build SSA payload: %w", err)
@@ -716,7 +730,7 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		case <-t.C:
 		}
 		state := observedState(entry)
-		if !first && state == last {
+		if !first && sourceStateEqual(state, last) {
 			continue
 		}
 		if err := r.publishSourceProgress(ctx, key, state); err != nil {
@@ -729,9 +743,38 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 	}
 }
 
+// sourceStateEqual reports whether two sourceProgressState values
+// would publish identical SSA payloads. lastSentAt is compared by
+// value rather than pointer identity: observedState allocates a
+// fresh *time.Time on every tick (copying the atomic-loaded value),
+// so a struct-level == on the two states would always disagree once
+// lastSentAt is set, defeating the dedupe and turning a single
+// successful transfer into a status write every flusher tick.
+func sourceStateEqual(a, b sourceProgressState) bool {
+	if a.status != b.status || a.reason != b.reason ||
+		a.message != b.message || a.attempts != b.attempts {
+		return false
+	}
+	if (a.lastSentAt == nil) != (b.lastSentAt == nil) {
+		return false
+	}
+	if a.lastSentAt != nil && !a.lastSentAt.Equal(*b.lastSentAt) {
+		return false
+	}
+	return true
+}
+
 // observedState derives the SourceProgress condition the flusher
-// should publish from the atomics on the entry.
+// should publish from the atomics on the entry. lastSentAt is
+// propagated into every state so the target-side watchdog gets a
+// freshness signal regardless of which condition is currently being
+// published.
 func observedState(entry *sourceEntry) sourceProgressState {
+	var sent *time.Time
+	if p := entry.lastSentAt.Load(); p != nil {
+		t := *p
+		sent = &t
+	}
 	attempts := entry.addTargetAttempts.Load()
 	if attempts > 0 {
 		msg := ""
@@ -739,30 +782,34 @@ func observedState(entry *sourceEntry) sourceProgressState {
 			msg = *p
 		}
 		return sourceProgressState{
-			status:   metav1.ConditionFalse,
-			reason:   mxlv1alpha1.ReasonAddTargetFailed,
-			message:  msg,
-			attempts: attempts,
+			status:     metav1.ConditionFalse,
+			reason:     mxlv1alpha1.ReasonAddTargetFailed,
+			message:    msg,
+			attempts:   attempts,
+			lastSentAt: sent,
 		}
 	}
 	if entry.agedOutAt.Load() != nil {
 		return sourceProgressState{
-			status:  metav1.ConditionFalse,
-			reason:  mxlv1alpha1.ReasonReaderAgedOut,
-			message: "source reader fell behind writer; advanced past missed grains",
+			status:     metav1.ConditionFalse,
+			reason:     mxlv1alpha1.ReasonReaderAgedOut,
+			message:    "source reader fell behind writer; advanced past missed grains",
+			lastSentAt: sent,
 		}
 	}
 	if entry.progress.Load() > 0 {
 		return sourceProgressState{
-			status:  metav1.ConditionTrue,
-			reason:  mxlv1alpha1.ReasonRecovered,
-			message: "grain progress observed",
+			status:     metav1.ConditionTrue,
+			reason:     mxlv1alpha1.ReasonRecovered,
+			message:    "grain progress observed",
+			lastSentAt: sent,
 		}
 	}
 	return sourceProgressState{
-		status:  metav1.ConditionTrue,
-		reason:  mxlv1alpha1.ReasonHandshakeComplete,
-		message: "initiator running",
+		status:     metav1.ConditionTrue,
+		reason:     mxlv1alpha1.ReasonHandshakeComplete,
+		message:    "initiator running",
+		lastSentAt: sent,
 	}
 }
 

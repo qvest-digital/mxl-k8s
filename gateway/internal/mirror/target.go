@@ -602,6 +602,18 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 	entry.recovering.Store(true)
 	defer entry.recovering.Store(false)
 
+	// Cancel the previous progress loop before waiting on its done
+	// channel. The onFatal caller has already exited the loop, so the
+	// cancel is a no-op for that path. The stuck-handshake watchdog
+	// caller has not: ReadGrain keeps reporting ErrNotReady on a wedge
+	// that no fatal signal will resolve, so without the explicit cancel
+	// the wait below would block forever and pin entry.recovering=true.
+	// The flusher would then skip every subsequent tick, no further
+	// recovery would ever spawn, and the cap branch could never fire.
+	if entry.cancel != nil {
+		entry.cancel()
+	}
+
 	// Wait for the previous progress loop to finish before swapping
 	// its target/regions/info pointers.
 	if entry.done != nil {
@@ -851,8 +863,10 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		if entry.recovering.Load() {
 			continue
 		}
-		// Stuck-handshake watchdog. A libmxl-fabrics target whose
-		// remote initiator never sent FI_CONNECTED keeps reporting
+		// Stuck-handshake watchdog. Two wedge shapes need recovery:
+		//
+		// neverHandshook: a libmxl-fabrics target whose remote
+		// initiator never sent FI_CONNECTED keeps reporting
 		// ErrNotReady forever - the progress loop never raises
 		// onFatal, so recoverFromFatalError never fires, and the
 		// flusher would otherwise just oscillate between Ready and
@@ -860,15 +874,36 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// no commit has landed since the fabric side opened and the
 		// stuck-handshake window has elapsed.
 		//
+		// postHandshakeWedge: the handshake succeeded and at least
+		// one grain committed, then the fabric side wedged silently.
+		// commits > commitsAtFabricOpen makes neverHandshook false
+		// forever, so it cannot catch this. Cross-side coordination
+		// via mirror.Status.LastSentAt distinguishes a wedge ("source
+		// is sending but target is not committing") from a legitimately
+		// idle flow ("source is not sending either"); idle flows must
+		// not trigger recovery.
+		//
 		// A nil fabricOpenedAt guards entries that the flusher runs
 		// against without a real openTarget/recovery handoff (existing
 		// flusher tests construct bare targetEntry values and drive
 		// the flusher directly): the watchdog must not fire on an
 		// entry whose fabric side was never actually opened.
 		openedAt := entry.fabricOpenedAt.Load()
-		if openedAt != nil &&
+		neverHandshook := openedAt != nil &&
 			entry.commits.Load() == entry.commitsAtFabricOpen.Load() &&
-			time.Since(*openedAt) > r.stuckHandshakeAfter() {
+			time.Since(*openedAt) > r.stuckHandshakeAfter()
+		postHandshakeWedge := false
+		if openedAt != nil && entry.commits.Load() > entry.commitsAtFabricOpen.Load() {
+			lastCommit := entry.lastCommitAt.Load()
+			if lastCommit != nil {
+				if mirror, err := r.fetchMirror(ctx, key); err == nil &&
+					mirror.Status.LastSentAt != nil &&
+					mirror.Status.LastSentAt.Time.Sub(*lastCommit) > r.stuckHandshakeAfter() {
+					postHandshakeWedge = true
+				}
+			}
+		}
+		if neverHandshook || postHandshakeWedge {
 			if entry.recoveryAttempts.Load() >= maxStuckRebuilds {
 				// Cap reached: rebuilds keep failing to attract a
 				// commit. Publish a terminal Phase=Failed so operators
@@ -929,6 +964,38 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 				// same entry. CAS makes the spawn atomic. The
 				// goroutine clears recovering via the deferred
 				// Store(false) inside recoverFromFatalError.
+				//
+				// Re-check the wedge predicate after acquiring the
+				// gate: a progress-loop commit landing between the
+				// read above and the CAS would update commits +
+				// lastCommitAt and reset recoveryAttempts via
+				// recordCommit. Without the re-check the watchdog
+				// would still spawn a rebuild against an entry that
+				// just made progress, which both wastes the rebuild
+				// budget and would be visible as an extra
+				// recoveryAttempts bump after the reset. Re-fetching
+				// the mirror covers the post-handshake variant: a
+				// LastSentAt change that lands in the same window
+				// must be observed before the spawn commits.
+				openedAt2 := entry.fabricOpenedAt.Load()
+				neverHandshook2 := openedAt2 != nil &&
+					entry.commits.Load() == entry.commitsAtFabricOpen.Load() &&
+					time.Since(*openedAt2) > r.stuckHandshakeAfter()
+				postHandshakeWedge2 := false
+				if openedAt2 != nil && entry.commits.Load() > entry.commitsAtFabricOpen.Load() {
+					lastCommit2 := entry.lastCommitAt.Load()
+					if lastCommit2 != nil {
+						if mirror, err := r.fetchMirror(ctx, key); err == nil &&
+							mirror.Status.LastSentAt != nil &&
+							mirror.Status.LastSentAt.Time.Sub(*lastCommit2) > r.stuckHandshakeAfter() {
+							postHandshakeWedge2 = true
+						}
+					}
+				}
+				if !neverHandshook2 && !postHandshakeWedge2 {
+					entry.recovering.Store(false)
+					continue
+				}
 				attempt := entry.recoveryAttempts.Add(1)
 				log.FromContext(ctx).Info("stuck handshake; triggering recovery",
 					"mirror", key, "attempt", attempt)
