@@ -326,3 +326,107 @@ func TestInitialSync_DemotesOriginForFlowsNoLongerOnDisk(t *testing.T) {
 		"other-node locations are out of this agent's scope; "+
 			"InitialSync must not touch them")
 }
+
+// fakeLease records Renew/Release calls and lets a test return a
+// canned error from either method. Used to assert the Publisher's
+// Lease wiring without exercising the real coordination.k8s.io API.
+type fakeLease struct {
+	renewed    []string
+	released   []string
+	renewErr   error
+	releaseErr error
+}
+
+func (f *fakeLease) Renew(_ context.Context, flowID string) error {
+	f.renewed = append(f.renewed, flowID)
+	return f.renewErr
+}
+
+func (f *fakeLease) Release(_ context.Context, flowID string) error {
+	f.released = append(f.released, flowID)
+	return f.releaseErr
+}
+
+func TestPublisher_RenewsLeaseOnAppeared(t *testing.T) {
+	scheme := newScheme(t)
+	domain := t.TempDir()
+	flowDir := filepath.Join(domain, validFlowID+".mxl-flow")
+	require.NoError(t, os.Mkdir(flowDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(flowDir, FlowDefName),
+		[]byte(`{"id":"`+validFlowID+`"}`), 0o644))
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		Build()
+
+	lease := &fakeLease{}
+	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1", Lease: lease}
+
+	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
+	assert.Equal(t, []string{validFlowID}, lease.renewed,
+		"the publisher must renew the Origin Lease right after the location "+
+			"flips to Origin; otherwise the operator would treat the brand-new "+
+			"Origin as stale on first read")
+	assert.Empty(t, lease.released)
+}
+
+func TestPublisher_AppearedAsMirrorTargetDoesNotRenewLease(t *testing.T) {
+	scheme := newScheme(t)
+	domain := t.TempDir()
+	flowDir := filepath.Join(domain, validFlowID+".mxl-flow")
+	require.NoError(t, os.Mkdir(flowDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(flowDir, FlowDefName),
+		[]byte(`{"id":"`+validFlowID+`"}`), 0o644))
+
+	mirror := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "mxl-system"},
+		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
+			FlowID:     validFlowID,
+			SourceNode: "n0",
+			TargetNode: "n1",
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(mirror).
+		Build()
+
+	lease := &fakeLease{}
+	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1", Lease: lease}
+	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
+	assert.Empty(t, lease.renewed,
+		"a mirror target's local copy is not the authoritative flow; "+
+			"renewing a Lease for it would let the receiver pick the "+
+			"mirror as Origin and direct further lookups at a copy")
+}
+
+func TestPublisher_ReleasesLeaseOnVanished(t *testing.T) {
+	scheme := newScheme(t)
+	existing := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: ObjectMeta(validFlowID),
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: validFlowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{
+				{NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(existing).
+		Build()
+
+	lease := &fakeLease{}
+	p := &Publisher{Client: c, DomainPath: "/tmp", NodeName: "n1", Lease: lease}
+
+	require.NoError(t, p.PublishVanished(context.Background(), validFlowID+".mxl-flow"))
+	assert.Equal(t, []string{validFlowID}, lease.released,
+		"the publisher must release the Origin Lease when the on-disk "+
+			"flow vanishes so consumers stop treating the now-Stale Origin "+
+			"as a fresh source")
+}

@@ -40,6 +40,14 @@ const (
 // under DomainPath; tests inject a closure that fakes the lookup.
 type FlowChecker func(flowID string) bool
 
+// LeaseChecker is the slice of the originlease.Manager surface the
+// dispatcher needs to skip Origin locations whose Lease has expired.
+// Kept as an interface so tests can drive resolveSourceNode without
+// a coordination.k8s.io fake fixture.
+type LeaseChecker interface {
+	IsFresh(ctx context.Context, flowID, nodeName string) (bool, error)
+}
+
 // Dispatcher resolves a libmxl-intent.so request into an
 // MxlFlowMirror reconciliation that completes (Ready) or fails.
 type Dispatcher struct {
@@ -64,6 +72,12 @@ type Dispatcher struct {
 	// FlowChecker overrides the filesystem-based local-flow check.
 	// Nil falls back to the default stat under DomainPath.
 	FlowChecker FlowChecker
+
+	// Lease, when set, gates resolveSourceNode's Origin picks on a
+	// fresh Lease. Nil keeps the pre-Lease behaviour the existing
+	// tests built around. The dispatcher only consults the checker;
+	// the operator owns the OriginFresh condition writeback.
+	Lease LeaseChecker
 }
 
 // Materialize ensures that the flow referenced by path is, or will
@@ -177,7 +191,17 @@ func (d *Dispatcher) resolveSourceNode(ctx context.Context, flowID string) (stri
 		return "", false, err
 	}
 	for _, loc := range flow.Status.Locations {
-		if loc.Phase == mxlv1alpha1.MxlFlowLocationOrigin {
+		if loc.Phase != mxlv1alpha1.MxlFlowLocationOrigin {
+			continue
+		}
+		if d.Lease == nil {
+			return loc.NodeName, true, nil
+		}
+		fresh, err := d.Lease.IsFresh(ctx, flowID, loc.NodeName)
+		if err != nil {
+			return "", false, err
+		}
+		if fresh {
 			return loc.NodeName, true, nil
 		}
 	}
@@ -190,6 +214,15 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string
 	var existing mxlv1alpha1.MxlFlowMirror
 	err := d.Client.Get(ctx, types.NamespacedName{Namespace: pod.GetNamespace(), Name: name}, &existing)
 	if err == nil {
+		// A mirror with the same (flow, target node) name already
+		// exists. The pre-existing object is functionally
+		// sufficient for this consumer pod; reuse it as-is. The
+		// labels and Requestor field stay untouched: in particular
+		// when the receiver reconciler authored the mirror
+		// (LabelCreatedByReceiver, no Requestor), stamping the
+		// intent label here would split the GC contract -- both
+		// reconcilers would then claim the same mirror, racing on
+		// delete.
 		return &existing, nil
 	}
 	if !apierrors.IsNotFound(err) {
@@ -205,6 +238,10 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: pod.GetNamespace(),
 			Name:      name,
+			Labels: map[string]string{
+				mxlv1alpha1.LabelCreatedByIntent: d.NodeName,
+				mxlv1alpha1.LabelRequestorPodUID: string(pod.GetUID()),
+			},
 		},
 		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
 			FlowID:     flowID,

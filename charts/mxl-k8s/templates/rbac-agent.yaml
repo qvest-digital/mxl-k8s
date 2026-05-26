@@ -33,4 +33,32 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "agent" "values" .Values.agent) }}
     namespace: {{ include "mxlk8s.namespace" . }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "agent" "values" .Values.agent) }}-leases
+  namespace: {{ include "mxlk8s.namespace" . }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "agent") | nindent 4 }}
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "agent" "values" .Values.agent) }}-leases
+  namespace: {{ include "mxlk8s.namespace" . }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "agent") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "agent" "values" .Values.agent) }}-leases
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "agent" "values" .Values.agent) }}
+    namespace: {{ include "mxlk8s.namespace" . }}
 {{- end }}
