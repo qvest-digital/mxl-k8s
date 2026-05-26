@@ -893,19 +893,97 @@ func TestReconcile_StaleOwnerRef_DroppedOnReconcile(t *testing.T) {
 		"the legitimate rb owner must survive: ra's reconcile must not touch "+
 			"a sibling receiver's claim on the shared mirror")
 
-	// MEDIUM-6 finding: the reconciler does NOT prune owner refs to
-	// unknown receivers. ensureMirror only appends via ensureOwnerRef
-	// and gcOrphanMirrors only walks mirrors this receiver already
-	// owns, so a grafted ghost UID survives every reconcile. The
-	// assertion is left as a soft observation rather than a failing
-	// require so the rest of the coverage stays green; tightening
-	// this would need a separate production change to re-state the
-	// owner-ref set against the desired receivers per reconcile.
-	if hasOwnerUID(&live, ghostUID) {
-		t.Logf("known limitation: ghost owner ref %s survived reconcile; "+
-			"production code does not currently prune unknown owners "+
-			"(see MEDIUM-6 follow-up)", ghostUID)
-	}
+	// gcOrphanMirrors now scrubs OwnerReferences whose UID does not
+	// resolve to a live MxlReceiver in the mirror's namespace. A
+	// leftover ghost would keep the mirror alive forever -- the last
+	// legitimate owner could leave and the precondition-Delete in
+	// removeOwnerRef would still see len(owners) == 1 and never fire.
+	require.False(t, hasOwnerUID(&live, ghostUID),
+		"foreign owner ref must be reaped on the next reconcile; a "+
+			"leftover ghost UID keeps the mirror alive forever")
+}
+
+func TestReconcile_GhostOwnerRef_AllowsDeletionWhenLastLegitimateLeaves(t *testing.T) {
+	ctx := context.Background()
+	ns := env.NewNamespace(t)
+	r := &receiver.Reconciler{Client: env.Client, Scheme: env.Scheme}
+
+	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-a", "node-target",
+		testutil.WithPodLabels(map[string]string{"app": "consumer-a"}))))
+	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-b", "node-target",
+		testutil.WithPodLabels(map[string]string{"app": "consumer-b"}))))
+
+	flow := newFlow(t, "node-source")
+	require.NoError(t, env.Client.Create(ctx, testutil.NewReceiver(ns, "ra",
+		testutil.WithReceiverFlowID(flow.Spec.ID),
+		testutil.WithReceiverSelector(map[string]string{"app": "consumer-a"}))))
+	require.NoError(t, env.Client.Create(ctx, testutil.NewReceiver(ns, "rb",
+		testutil.WithReceiverFlowID(flow.Spec.ID),
+		testutil.WithReceiverSelector(map[string]string{"app": "consumer-b"}))))
+
+	reconcile(t, r, ns, "ra")
+	reconcile(t, r, ns, "rb")
+
+	var mirrors mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
+	require.Len(t, mirrors.Items, 1,
+		"setup precondition: ra and rb must converge on a single shared mirror")
+	mirror := mirrors.Items[0]
+	require.Len(t, mirror.OwnerReferences, 2,
+		"setup precondition: both receivers must own the shared mirror before the ghost is grafted in")
+
+	// Graft a ghost OwnerReference pointing at a non-existent
+	// receiver. Without the scrub, the precondition-Delete tail in
+	// removeOwnerRef would never fire: owners would walk 3 -> 2 -> 1
+	// as ra and rb left, never reaching the empty list that triggers
+	// the Delete.
+	const ghostUID = "00000000-0000-0000-0000-000000000000"
+	mirror.OwnerReferences = append(mirror.OwnerReferences, metav1.OwnerReference{
+		APIVersion:         mxlv1alpha1.GroupVersion.String(),
+		Kind:               "MxlReceiver",
+		Name:               "ghost",
+		UID:                ghostUID,
+		Controller:         utilptr.To(false),
+		BlockOwnerDeletion: utilptr.To(false),
+	})
+	require.NoError(t, env.Client.Update(ctx, &mirror))
+
+	// Live-path reconcile runs gcOrphanMirrors, which scrubs the
+	// ghost UID out of the OwnerReferences slice.
+	reconcile(t, r, ns, "ra")
+
+	var live mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, env.Client.Get(ctx,
+		types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}, &live))
+	require.False(t, hasOwnerUID(&live, ghostUID),
+		"the scrub in gcOrphanMirrors must drop the ghost UID on the "+
+			"first live reconcile after it is grafted in")
+	require.Len(t, live.OwnerReferences, 2,
+		"the scrub must drop only the ghost; both legitimate owner refs survive")
+
+	// Drop rb first: owners walk 2 -> 1, mirror persists.
+	rb := mustGetReceiver(t, env.Client, ns, "rb")
+	require.NoError(t, env.Client.Delete(ctx, rb))
+	reconcile(t, r, ns, "rb")
+
+	require.NoError(t, env.Client.Get(ctx,
+		types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}, &live))
+	require.Len(t, live.OwnerReferences, 1,
+		"rb's handleDeletion must drop only its own ref; ra still co-owns the mirror")
+
+	// Drop ra: owners walk 1 -> 0, the precondition-Delete tail in
+	// removeOwnerRef fires because the ghost is no longer there to
+	// keep the slice non-empty.
+	ra := mustGetReceiver(t, env.Client, ns, "ra")
+	require.NoError(t, env.Client.Delete(ctx, ra))
+	reconcile(t, r, ns, "ra")
+
+	err := env.Client.Get(ctx,
+		types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}, &live)
+	assert.True(t, apierrors.IsNotFound(err),
+		"once the last legitimate owner leaves and the scrub has already "+
+			"reaped the ghost, removeOwnerRef must issue the bare-empty "+
+			"Delete and the apiserver must surface NotFound; got %v", err)
 }
 
 func TestReconcile_LegacyLabelOnlyMirror_AdoptsOwnerRef(t *testing.T) {
