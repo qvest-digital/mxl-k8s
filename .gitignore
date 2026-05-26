@@ -37,7 +37,7 @@ kind-diagnostics/
 # Per-session git worktrees managed by the Claude Code harness
 .claude/worktrees/
 
-# Local OMC scratch state; keep only user-authored skills under .omc/skills/
+# Local OMC scratch state; keep skills under .omc/skills/
 !.omc/
 .omc/*
 !.omc/skills/
