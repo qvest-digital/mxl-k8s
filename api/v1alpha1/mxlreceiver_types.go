@@ -81,6 +81,13 @@ type MxlReceiverStatus struct {
 // MxlReceiver expresses a consumer Pod's intent to read an MXL flow.
 // The operator translates each MxlReceiver into one MxlFlowMirror per
 // distinct target node.
+//
+// If another receiver already targets the same (flowID, target node),
+// the existing MxlFlowMirror is reused and this receiver is appended
+// to its metadata.ownerReferences as a non-controller owner. Deleting
+// the receiver removes its owner ref from each mirror it shares; the
+// mirror is torn down by the operator only when its last owner ref
+// goes away. The owners on a mirror are visible via kubectl describe.
 type MxlReceiver struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

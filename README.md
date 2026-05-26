@@ -38,7 +38,11 @@ Four pieces, all running inside the cluster:
 - A cluster-scoped **operator** reconciles `MxlReceiver` intent
   ("this pod wants to consume that flow") into one
   `MxlFlowMirror` per (flow, target-node). Multiple consumers on
-  the same node share a single mirror.
+  the same node share a single mirror; the share is refcounted
+  through the mirror's `metadata.ownerReferences`, so removing
+  one consumer leaves the mirror in place for the others and the
+  operator tears the mirror down only when the last owner ref is
+  gone.
 - An **LD_PRELOAD shim** in consumer pods turns the first
   libmxl probe (`access`, `stat`, `open`, ...) for a not-yet-
   materialised flow into a synchronous wait on the local agent.
