@@ -851,8 +851,10 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		if entry.recovering.Load() {
 			continue
 		}
-		// Stuck-handshake watchdog. A libmxl-fabrics target whose
-		// remote initiator never sent FI_CONNECTED keeps reporting
+		// Stuck-handshake watchdog. Two wedge shapes need recovery:
+		//
+		// neverHandshook: a libmxl-fabrics target whose remote
+		// initiator never sent FI_CONNECTED keeps reporting
 		// ErrNotReady forever - the progress loop never raises
 		// onFatal, so recoverFromFatalError never fires, and the
 		// flusher would otherwise just oscillate between Ready and
@@ -860,15 +862,36 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// no commit has landed since the fabric side opened and the
 		// stuck-handshake window has elapsed.
 		//
+		// postHandshakeWedge: the handshake succeeded and at least
+		// one grain committed, then the fabric side wedged silently.
+		// commits > commitsAtFabricOpen makes neverHandshook false
+		// forever, so it cannot catch this. Cross-side coordination
+		// via mirror.Status.LastSentAt distinguishes a wedge ("source
+		// is sending but target is not committing") from a legitimately
+		// idle flow ("source is not sending either"); idle flows must
+		// not trigger recovery.
+		//
 		// A nil fabricOpenedAt guards entries that the flusher runs
 		// against without a real openTarget/recovery handoff (existing
 		// flusher tests construct bare targetEntry values and drive
 		// the flusher directly): the watchdog must not fire on an
 		// entry whose fabric side was never actually opened.
 		openedAt := entry.fabricOpenedAt.Load()
-		if openedAt != nil &&
+		neverHandshook := openedAt != nil &&
 			entry.commits.Load() == entry.commitsAtFabricOpen.Load() &&
-			time.Since(*openedAt) > r.stuckHandshakeAfter() {
+			time.Since(*openedAt) > r.stuckHandshakeAfter()
+		postHandshakeWedge := false
+		if openedAt != nil && entry.commits.Load() > entry.commitsAtFabricOpen.Load() {
+			lastCommit := entry.lastCommitAt.Load()
+			if lastCommit != nil {
+				if mirror, err := r.fetchMirror(ctx, key); err == nil &&
+					mirror.Status.LastSentAt != nil &&
+					mirror.Status.LastSentAt.Time.Sub(*lastCommit) > r.stuckHandshakeAfter() {
+					postHandshakeWedge = true
+				}
+			}
+		}
+		if neverHandshook || postHandshakeWedge {
 			if entry.recoveryAttempts.Load() >= maxStuckRebuilds {
 				// Cap reached: rebuilds keep failing to attract a
 				// commit. Publish a terminal Phase=Failed so operators

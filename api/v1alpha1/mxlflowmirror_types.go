@@ -89,6 +89,16 @@ type MxlFlowMirrorStatus struct {
 	// +optional
 	LastGrainAt *metav1.Time `json:"lastGrainAt,omitempty"`
 
+	// LastSentAt is the wall-clock time of the most recent grain
+	// the source-side gateway successfully handed to libmxl-fabrics
+	// for transfer. Set on every source-side flusher tick once the
+	// initiator is live. Target-side recovery uses the delta between
+	// LastSentAt and LastGrainAt to distinguish "source is sending
+	// but target is wedged" (rebuild) from "source is idle"
+	// (leave alone). Unset before the first transfer.
+	// +optional
+	LastSentAt *metav1.Time `json:"lastSentAt,omitempty"`
+
 	// LastError is the most recent reconcile error message recorded
 	// by the source gateway when bounded backoff is engaged. Empty
 	// after a successful reconcile.

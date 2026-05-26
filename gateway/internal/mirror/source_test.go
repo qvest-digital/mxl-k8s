@@ -815,3 +815,83 @@ func TestSource_LeaseToMirrors_NonLeaseObjectReturnsNil(t *testing.T) {
 			"non-Lease events; without this every Pod event would feed "+
 			"ParseLeaseName a pod name")
 }
+
+func TestPublishSourceProgress_IncludesLastSentAt(t *testing.T) {
+	// The target-side stuck-handshake watchdog discriminates a wedged
+	// post-handshake target from a legitimately idle flow by comparing
+	// mirror.Status.LastSentAt against the local lastCommitAt. The
+	// source-side SSA payload must carry that timestamp on every
+	// publish that has one; omitting it after the first publish would
+	// release SSA field-ownership and let the apiserver strip the
+	// field on the next tick.
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithFinalizer(key.Name, key.Namespace, "node-a", "flow-1", "info-1")
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	r := &SourceReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		NodeName: "node-a",
+		sources:  map[types.NamespacedName]*sourceEntry{},
+		attempts: map[types.NamespacedName]uint32{},
+	}
+
+	sent := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, r.publishSourceProgress(context.Background(), key, sourceProgressState{
+		status:     metav1.ConditionTrue,
+		reason:     mxlv1alpha1.ReasonHandshakeComplete,
+		message:    "initiator running",
+		lastSentAt: &sent,
+	}))
+
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &got))
+	require.NotNil(t, got.Status.LastSentAt,
+		"publishSourceProgress with a non-nil lastSentAt must stamp "+
+			"status.lastSentAt; without it the target-side watchdog cannot "+
+			"tell a wedged post-handshake target from an idle flow")
+	assert.True(t, got.Status.LastSentAt.Time.Equal(sent),
+		"the stamped timestamp must round-trip: target-side recovery "+
+			"compares it against lastCommitAt to decide whether to rebuild")
+}
+
+func TestPublishSourceProgress_OmitsLastSentAtWhenNeverTransferred(t *testing.T) {
+	// Before any grain has been transferred, lastSentAt must stay
+	// absent: a zero-time stamp would let the target-side watchdog
+	// compute a delta against an arbitrary point in 0001-01-01 and
+	// trip the wedge condition immediately.
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithFinalizer(key.Name, key.Namespace, "node-a", "flow-1", "info-1")
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	r := &SourceReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		NodeName: "node-a",
+		sources:  map[types.NamespacedName]*sourceEntry{},
+		attempts: map[types.NamespacedName]uint32{},
+	}
+
+	require.NoError(t, r.publishSourceProgress(context.Background(), key, sourceProgressState{
+		status:  metav1.ConditionTrue,
+		reason:  mxlv1alpha1.ReasonHandshakeComplete,
+		message: "initiator running",
+	}))
+
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &got))
+	assert.Nil(t, got.Status.LastSentAt,
+		"a sourceProgressState with nil lastSentAt must omit the key from "+
+			"the SSA payload; stamping a zero time would trigger an immediate "+
+			"target-side rebuild on every freshly created mirror")
+}

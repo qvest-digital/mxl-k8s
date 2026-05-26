@@ -634,6 +634,12 @@ type sourceProgressState struct {
 	reason   string
 	message  string
 	attempts uint32
+	// lastSentAt carries the wall-clock of the most recent successful
+	// TransferGrain forward into the SSA payload. The target-side
+	// stuck-handshake watchdog reads it to discriminate "source is
+	// sending but target is wedged" from "source is idle". Unset
+	// before the first transfer.
+	lastSentAt *time.Time
 }
 
 // publishSourceProgress writes a single SourceProgress condition
@@ -670,6 +676,14 @@ func (r *SourceReconciler) publishSourceProgress(ctx context.Context, key types.
 	} else {
 		status["attemptCount"] = int64(0)
 		status["lastError"] = ""
+	}
+	if state.lastSentAt != nil {
+		// Re-stamped on every publish that carries it: SSA with a
+		// single FieldOwner releases ownership of fields omitted from
+		// a later payload, so dropping the key after the first
+		// publish would let the apiserver strip it and break the
+		// target-side stuck-handshake discriminator.
+		status["lastSentAt"] = state.lastSentAt.UTC().Format(time.RFC3339)
 	}
 	if err := unstructured.SetNestedField(patch.Object, status, "status"); err != nil {
 		return fmt.Errorf("build SSA payload: %w", err)
@@ -730,8 +744,16 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 }
 
 // observedState derives the SourceProgress condition the flusher
-// should publish from the atomics on the entry.
+// should publish from the atomics on the entry. lastSentAt is
+// propagated into every state so the target-side watchdog gets a
+// freshness signal regardless of which condition is currently being
+// published.
 func observedState(entry *sourceEntry) sourceProgressState {
+	var sent *time.Time
+	if p := entry.lastSentAt.Load(); p != nil {
+		t := *p
+		sent = &t
+	}
 	attempts := entry.addTargetAttempts.Load()
 	if attempts > 0 {
 		msg := ""
@@ -739,30 +761,34 @@ func observedState(entry *sourceEntry) sourceProgressState {
 			msg = *p
 		}
 		return sourceProgressState{
-			status:   metav1.ConditionFalse,
-			reason:   mxlv1alpha1.ReasonAddTargetFailed,
-			message:  msg,
-			attempts: attempts,
+			status:     metav1.ConditionFalse,
+			reason:     mxlv1alpha1.ReasonAddTargetFailed,
+			message:    msg,
+			attempts:   attempts,
+			lastSentAt: sent,
 		}
 	}
 	if entry.agedOutAt.Load() != nil {
 		return sourceProgressState{
-			status:  metav1.ConditionFalse,
-			reason:  mxlv1alpha1.ReasonReaderAgedOut,
-			message: "source reader fell behind writer; advanced past missed grains",
+			status:     metav1.ConditionFalse,
+			reason:     mxlv1alpha1.ReasonReaderAgedOut,
+			message:    "source reader fell behind writer; advanced past missed grains",
+			lastSentAt: sent,
 		}
 	}
 	if entry.progress.Load() > 0 {
 		return sourceProgressState{
-			status:  metav1.ConditionTrue,
-			reason:  mxlv1alpha1.ReasonRecovered,
-			message: "grain progress observed",
+			status:     metav1.ConditionTrue,
+			reason:     mxlv1alpha1.ReasonRecovered,
+			message:    "grain progress observed",
+			lastSentAt: sent,
 		}
 	}
 	return sourceProgressState{
-		status:  metav1.ConditionTrue,
-		reason:  mxlv1alpha1.ReasonHandshakeComplete,
-		message: "initiator running",
+		status:     metav1.ConditionTrue,
+		reason:     mxlv1alpha1.ReasonHandshakeComplete,
+		message:    "initiator running",
+		lastSentAt: sent,
 	}
 }
 

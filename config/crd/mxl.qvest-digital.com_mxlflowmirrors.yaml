@@ -199,6 +199,17 @@ spec:
                   window.
                 format: date-time
                 type: string
+              lastSentAt:
+                description: |-
+                  LastSentAt is the wall-clock time of the most recent grain
+                  the source-side gateway successfully handed to libmxl-fabrics
+                  for transfer. Set on every source-side flusher tick once the
+                  initiator is live. Target-side recovery uses the delta between
+                  LastSentAt and LastGrainAt to distinguish "source is sending
+                  but target is wedged" (rebuild) from "source is idle"
+                  (leave alone). Unset before the first transfer.
+                format: date-time
+                type: string
               observedGeneration:
                 description: ObservedGeneration is the spec generation last reconciled.
                 format: int64
