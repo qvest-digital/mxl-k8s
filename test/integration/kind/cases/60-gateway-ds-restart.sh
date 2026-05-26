@@ -10,7 +10,11 @@ set -euo pipefail
 . "$KIND_TEST_LIB"
 
 GATEWAY_DS="${GATEWAY_DS:-mxl-k8s-gateway}"
-RECOVERY_TIMEOUT_SECS="${RECOVERY_TIMEOUT_SECS:-60}"
+# libmxl-fabrics' RCTarget cycles "remote shutdown -> listen" a few
+# times before a stable connection re-forms after both gateway pods
+# restart, so 60s is too tight; 180s tracks observed real-world
+# settle time on the CI runner.
+RECOVERY_TIMEOUT_SECS="${RECOVERY_TIMEOUT_SECS:-180}"
 
 # Confirm at least one mirror exists before the restart; otherwise
 # the assertion below is vacuous.
