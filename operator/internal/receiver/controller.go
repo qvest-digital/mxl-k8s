@@ -63,11 +63,31 @@ type Reconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// APIReader bypasses the controller-runtime cache for reads
+	// whose correctness depends on observing the latest write. The
+	// deletion path must use it: an owner ref added by a sibling
+	// receiver moments before the receiver under deletion runs must
+	// be visible, otherwise listOwnedSameNsMirrors returns an empty
+	// list and the finalizer is removed with a stale owner ref still
+	// on the mirror. Nil falls back to the cached Client; production
+	// wires mgr.GetAPIReader() and the envtest direct client bypasses
+	// the cache anyway.
+	APIReader client.Reader
+
 	// Lease, when set, gates Origin location picks on a fresh
 	// per-(flow, node) Lease. Nil falls back to picking the first
 	// Origin without any liveness check -- the pre-Lease behaviour
 	// the unit tests built around.
 	Lease LeaseChecker
+}
+
+// liveReader returns the APIReader when set, otherwise the cached
+// Client. Callsites that need a write-visible read go through this.
+func (r *Reconciler) liveReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // MxlOperatorFieldManager is the field-manager name the receiver
@@ -213,12 +233,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // owner list is empty. Cross-namespace mirrors have a per-receiver
 // name suffix and no sibling, so this path Deletes them directly.
 // Idempotent against partial progress.
+//
+// All lookups go through the APIReader (when set). The cached client
+// can lag the apiserver by a controller-manager resync interval, so
+// an owner ref added by a sibling receiver moments before this path
+// runs would otherwise be invisible -- the finalizer would come off
+// the receiver while a stale UID still sat in OwnerReferences.
 func (r *Reconciler) handleDeletion(ctx context.Context, recv *mxlv1alpha1.MxlReceiver) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(recv, MxlReceiverFinalizer) {
 		return ctrl.Result{}, nil
 	}
 
-	sameNs, err := r.listOwnedSameNsMirrors(ctx, recv)
+	sameNs, err := r.listOwnedSameNsMirrorsFrom(ctx, r.liveReader(), recv)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("list same-ns owned mirrors: %w", err)
 	}
@@ -229,7 +255,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, recv *mxlv1alpha1.MxlRe
 		}
 	}
 
-	crossNs, err := r.listOwnedCrossNsMirrors(ctx, recv)
+	crossNs, err := r.listOwnedCrossNsMirrorsFrom(ctx, r.liveReader(), recv)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("list cross-ns owned mirrors: %w", err)
 	}
@@ -249,7 +275,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, recv *mxlv1alpha1.MxlRe
 	// Same-namespace mirrors do not block the receiver: dropping
 	// the owner ref is the receiver's only obligation; apiserver
 	// GC happens out-of-band once the last owner ref is gone.
-	remaining, err := r.listOwnedCrossNsMirrors(ctx, recv)
+	remaining, err := r.listOwnedCrossNsMirrorsFrom(ctx, r.liveReader(), recv)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("re-list cross-ns owned mirrors: %w", err)
 	}
@@ -268,41 +294,103 @@ func (r *Reconciler) handleDeletion(ctx context.Context, recv *mxlv1alpha1.MxlRe
 }
 
 // listOwnedSameNsMirrors returns every MxlFlowMirror in the
-// receiver's own namespace that carries the receiver's UID in
-// metadata.ownerReferences. The lookup goes through the
-// ownerUIDIndex field index when the client has it registered (the
-// production controller-runtime cache does); otherwise it falls
-// back to a namespace List and a client-side filter on
-// OwnerReferences. The fallback covers two cases: an envtest
-// direct client that bypasses the cache, and any future cache
-// regression where the field-index extractor reports unexpected
-// keys -- the plan's mid-flight surprise rule says reach for the
-// client-side filter rather than re-introducing label-based GC.
+// receiver's own namespace that this receiver owns. Reads through
+// the cached controller-runtime client; deletion-path callers must
+// use listOwnedSameNsMirrorsFrom with the APIReader instead.
 func (r *Reconciler) listOwnedSameNsMirrors(ctx context.Context, recv *mxlv1alpha1.MxlReceiver) ([]mxlv1alpha1.MxlFlowMirror, error) {
-	var mirrors mxlv1alpha1.MxlFlowMirrorList
-	err := r.List(ctx, &mirrors,
+	return r.listOwnedSameNsMirrorsFrom(ctx, r.Client, recv)
+}
+
+// listOwnedSameNsMirrorsFrom is the same lookup but with an
+// explicit reader so the deletion path can pass the APIReader.
+//
+// Ownership is the union of two sets so the upgrade from the
+// label-only design self-heals: (a) mirrors whose
+// metadata.ownerReferences carries this receiver's UID, and (b)
+// mirrors stamped with LabelCreatedByReceiver=<recv.Name> that have
+// no owner reference to any MxlReceiver yet. The latter covers
+// pre-upgrade mirrors created by an earlier operator version that
+// only stamped the label; without it a same-namespace legacy mirror
+// would leak when the receiver is deleted before the bind path got
+// to stamp the owner ref. Mirrors that carry an owner ref to a
+// different receiver are NOT swept by the label fallback -- their
+// ownership has already migrated to the ref form.
+//
+// The owner-ref leg goes through the ownerUIDIndex field index when
+// the client has it registered (the production controller-runtime
+// cache does); otherwise it falls back to a namespace List and a
+// client-side filter, covering both an envtest direct client and
+// any future cache regression. The label leg always uses the label
+// selector because the cluster-scoped APIReader has no field index.
+func (r *Reconciler) listOwnedSameNsMirrorsFrom(ctx context.Context, reader client.Reader, recv *mxlv1alpha1.MxlReceiver) ([]mxlv1alpha1.MxlFlowMirror, error) {
+	seen := map[string]struct{}{}
+	out := make([]mxlv1alpha1.MxlFlowMirror, 0)
+
+	var byRef mxlv1alpha1.MxlFlowMirrorList
+	err := reader.List(ctx, &byRef,
 		client.InNamespace(recv.Namespace),
 		client.MatchingFields{ownerUIDIndex: string(recv.UID)},
 	)
-	if err == nil {
-		return mirrors.Items, nil
-	}
-	if !isFieldIndexUnsupported(err) {
-		return nil, err
-	}
-	if err := r.List(ctx, &mirrors, client.InNamespace(recv.Namespace)); err != nil {
-		return nil, err
-	}
-	out := mirrors.Items[:0]
-	for i := range mirrors.Items {
-		for _, or := range mirrors.Items[i].OwnerReferences {
-			if or.UID == recv.UID {
-				out = append(out, mirrors.Items[i])
-				break
+	switch {
+	case err == nil:
+		for i := range byRef.Items {
+			if _, dup := seen[byRef.Items[i].Name]; dup {
+				continue
+			}
+			seen[byRef.Items[i].Name] = struct{}{}
+			out = append(out, byRef.Items[i])
+		}
+	case isFieldIndexUnsupported(err):
+		var all mxlv1alpha1.MxlFlowMirrorList
+		if err := reader.List(ctx, &all, client.InNamespace(recv.Namespace)); err != nil {
+			return nil, err
+		}
+		for i := range all.Items {
+			for _, or := range all.Items[i].OwnerReferences {
+				if or.UID == recv.UID {
+					if _, dup := seen[all.Items[i].Name]; dup {
+						break
+					}
+					seen[all.Items[i].Name] = struct{}{}
+					out = append(out, all.Items[i])
+					break
+				}
 			}
 		}
+	default:
+		return nil, err
+	}
+
+	var byLabel mxlv1alpha1.MxlFlowMirrorList
+	if err := reader.List(ctx, &byLabel,
+		client.InNamespace(recv.Namespace),
+		client.MatchingLabels{mxlv1alpha1.LabelCreatedByReceiver: recv.Name},
+	); err != nil {
+		return nil, err
+	}
+	for i := range byLabel.Items {
+		if _, dup := seen[byLabel.Items[i].Name]; dup {
+			continue
+		}
+		if hasMxlReceiverOwner(&byLabel.Items[i]) {
+			continue
+		}
+		seen[byLabel.Items[i].Name] = struct{}{}
+		out = append(out, byLabel.Items[i])
 	}
 	return out, nil
+}
+
+// hasMxlReceiverOwner reports whether mirror carries an owner ref
+// to any MxlReceiver. Used to decide whether a label-only legacy
+// mirror still needs adoption.
+func hasMxlReceiverOwner(mirror *mxlv1alpha1.MxlFlowMirror) bool {
+	for _, or := range mirror.OwnerReferences {
+		if or.Kind == "MxlReceiver" && or.APIVersion == mxlv1alpha1.GroupVersion.String() {
+			return true
+		}
+	}
+	return false
 }
 
 // isFieldIndexUnsupported recognises the error a non-cached client
@@ -319,23 +407,45 @@ func isFieldIndexUnsupported(err error) bool {
 }
 
 // listOwnedCrossNsMirrors returns every MxlFlowMirror in a namespace
-// other than the receiver's own that carries the receiver's name in
-// LabelCreatedByReceiver. The label survives as the cross-namespace
-// owner-lookup mechanism because controller-runtime's field index
-// extractor cannot return entries reaching across the receiver's
-// namespace boundary: same-namespace owner-ref lookup is local and
-// uses the index, cross-namespace owner-ref lookup falls back to the
-// cluster-wide label match.
+// other than the receiver's own that this receiver owns.
+//
+// Cross-namespace mirrors carry LabelCreatedByReceiver=<recv.Name>
+// and LabelCreatedByReceiverNamespace=<recv.Namespace> (since PR #86).
+// Pre-PR-86 mirrors only carry LabelCreatedByReceiver; the namespace
+// label is absent. The lookup keeps the receiver-name label as the
+// cluster-wide selector (the only key that fits a single
+// MatchingLabels list call without 63-char overflow) and then in-Go
+// rejects any cross-namespace match whose namespace label disagrees
+// with this receiver's namespace, so two receivers sharing a name
+// across namespaces no longer collide. Mirrors with no namespace
+// label are accepted as legacy entries belonging to this receiver
+// for one upgrade cycle; on the next ensureMirror Create they will
+// be stamped with the namespace label.
+//
+// controller-runtime's field index extractor cannot return entries
+// reaching across the receiver's namespace boundary, so this stays
+// a label-scoped cluster-wide list rather than the ownerUIDIndex
+// the same-namespace path uses.
 func (r *Reconciler) listOwnedCrossNsMirrors(ctx context.Context, recv *mxlv1alpha1.MxlReceiver) ([]mxlv1alpha1.MxlFlowMirror, error) {
+	return r.listOwnedCrossNsMirrorsFrom(ctx, r.Client, recv)
+}
+
+// listOwnedCrossNsMirrorsFrom is the same lookup with an explicit
+// reader so the deletion path can pass the APIReader.
+func (r *Reconciler) listOwnedCrossNsMirrorsFrom(ctx context.Context, reader client.Reader, recv *mxlv1alpha1.MxlReceiver) ([]mxlv1alpha1.MxlFlowMirror, error) {
 	var mirrors mxlv1alpha1.MxlFlowMirrorList
-	if err := r.List(ctx, &mirrors, client.MatchingLabels{
+	if err := reader.List(ctx, &mirrors, client.MatchingLabels{
 		mxlv1alpha1.LabelCreatedByReceiver: recv.Name,
 	}); err != nil {
 		return nil, err
 	}
-	out := mirrors.Items[:0]
+	out := make([]mxlv1alpha1.MxlFlowMirror, 0, len(mirrors.Items))
 	for i := range mirrors.Items {
 		if mirrors.Items[i].Namespace == recv.Namespace {
+			continue
+		}
+		ns, hasNS := mirrors.Items[i].Labels[mxlv1alpha1.LabelCreatedByReceiverNamespace]
+		if hasNS && ns != recv.Namespace {
 			continue
 		}
 		out = append(out, mirrors.Items[i])
@@ -504,13 +614,17 @@ func (r *Reconciler) ensureMirror(ctx context.Context, recv *mxlv1alpha1.MxlRece
 		return nil, err
 	}
 
+	labels := map[string]string{
+		mxlv1alpha1.LabelCreatedByReceiver: recv.Name,
+	}
+	if !sameNs {
+		labels[mxlv1alpha1.LabelCreatedByReceiverNamespace] = recv.Namespace
+	}
 	desired := &mxlv1alpha1.MxlFlowMirror{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: target.namespace,
 			Name:      name,
-			Labels: map[string]string{
-				mxlv1alpha1.LabelCreatedByReceiver: recv.Name,
-			},
+			Labels:    labels,
 		},
 		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
 			FlowID:     recv.Spec.FlowID,
@@ -683,7 +797,9 @@ func (r *Reconciler) ensureOwnerRef(ctx context.Context, recv *mxlv1alpha1.MxlRe
 func (r *Reconciler) removeOwnerRef(ctx context.Context, recv *mxlv1alpha1.MxlReceiver, mirror *mxlv1alpha1.MxlFlowMirror) error {
 	key := types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}
 	var remaining int
+	var deleteRV string
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		deleteRV = ""
 		var live mxlv1alpha1.MxlFlowMirror
 		if err := r.Get(ctx, key, &live); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -711,14 +827,41 @@ func (r *Reconciler) removeOwnerRef(ctx context.Context, recv *mxlv1alpha1.MxlRe
 		}
 		remaining = len(kept)
 		if remaining == 0 {
-			if err := r.Delete(ctx, &live); err != nil && !apierrors.IsNotFound(err) {
-				return fmt.Errorf("delete orphaned mirror: %w", err)
-			}
+			deleteRV = live.ResourceVersion
 		}
 		return nil
 	})
 	if err != nil {
 		return err
+	}
+	if deleteRV != "" {
+		// Guard the Delete with a resourceVersion precondition so a
+		// concurrent ensureOwnerRef from a sibling receiver, racing
+		// between this loop's Update and the Delete here, cannot lose
+		// its newly added owner ref. If the precondition fails the
+		// mirror was mutated after the empty-owners observation, which
+		// means it correctly has owners again; bail and let the next
+		// reconcile re-evaluate. Bare-empty owner-ref deletion is
+		// required because apiserver GC only fires when an owner is
+		// deleted, not when ownerReferences becomes empty via Update.
+		mirrorRef := &mxlv1alpha1.MxlFlowMirror{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:       key.Namespace,
+				Name:            key.Name,
+				ResourceVersion: deleteRV,
+			},
+		}
+		err := r.Delete(ctx, mirrorRef, &client.DeleteOptions{
+			Preconditions: &metav1.Preconditions{ResourceVersion: &deleteRV},
+		})
+		switch {
+		case err == nil, apierrors.IsNotFound(err):
+		case apierrors.IsConflict(err):
+			log.FromContext(ctx).V(1).Info("skipping mirror delete after concurrent owner add",
+				"mirror", key.String())
+		default:
+			return fmt.Errorf("delete orphaned mirror: %w", err)
+		}
 	}
 	log.FromContext(ctx).V(1).Info("released mirror owner ref",
 		"mirror", key.String(), "owners", remaining)

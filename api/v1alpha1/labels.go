@@ -19,8 +19,18 @@ const (
 	// mirrors owned by a given receiver, because controller-runtime
 	// field indices on ownerReferences are scoped per cache and the
 	// cross-namespace lookup must reach mirrors in namespaces other
-	// than the receiver's.
+	// than the receiver's. Receiver namespace disambiguation lives
+	// on the separate LabelCreatedByReceiverNamespace key so the two
+	// values stay independently within the 63-char label-value limit.
 	LabelCreatedByReceiver = "mxl.qvest-digital.com/created-by-receiver"
+
+	// LabelCreatedByReceiverNamespace is set alongside
+	// LabelCreatedByReceiver on cross-namespace mirrors so a
+	// cluster-wide lookup can distinguish two receivers that share
+	// a name across different namespaces. Composing namespace and
+	// name into one label value would exceed the 63-char k8s label
+	// value limit when either segment is long.
+	LabelCreatedByReceiverNamespace = "mxl.qvest-digital.com/created-by-receiver-namespace"
 
 	// LabelCreatedByIntent is set on mirrors created by the agent
 	// in response to a local consumer's fanotify intent. Its value
