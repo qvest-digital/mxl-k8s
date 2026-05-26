@@ -69,9 +69,10 @@ func main() {
 		{"MxlFlow", (&flow.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
 		{"MxlFlowMirror", (&mirror.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
 		{"MxlReceiver", (&receiver.Reconciler{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
-			Lease:  &leasecheck.Checker{Client: mgr.GetClient()},
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+			Scheme:    mgr.GetScheme(),
+			Lease:     &leasecheck.Checker{Client: mgr.GetClient()},
 		}).SetupWithManager},
 		{"MxlNodeCapabilities", (&nodecaps.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
 	}

@@ -125,6 +125,16 @@ type MxlFlowMirrorStatus struct {
 
 // MxlFlowMirror represents the desired and observed state of one
 // (flow, target node) mirror.
+//
+// metadata.ownerReferences acts as a per-consumer refcount: each
+// MxlReceiver (or other consumer) that requests this flow on this
+// target node is appended as a non-controller, non-blocking owner,
+// and the operator deletes the mirror when the last owner ref is
+// removed. Tear-down is driven by the operator on that transition,
+// not by Kubernetes garbage collection. Consumers must not set
+// controller=true on their owner ref; multiple owners cannot all
+// be controllers, and the owner ref does not gate GC. The current
+// set of consumers is visible via kubectl describe.
 type MxlFlowMirror struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
