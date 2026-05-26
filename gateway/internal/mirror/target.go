@@ -45,6 +45,35 @@ const defaultDegradedAfter = 10 * time.Second
 // transition.
 const defaultTargetFlushInterval = 1 * time.Second
 
+// defaultStuckHandshakeAfter is the duration without any grain
+// commit since the fabric side was last opened that the flusher
+// treats as a silent libmxl-fabrics wedge: ReadGrain keeps reporting
+// ErrNotReady forever, so onFatal never fires, but no FI_CONNECTED
+// has landed and no grain has ever arrived. After this much time the
+// flusher escalates into recoverFromFatalError instead of waiting on
+// a fatal signal that will never come. 20 s sits between the typical
+// post-DaemonSet-rollout reconnect window (~15 s observed) and the
+// kind testcase-60 ceiling (STUCK_SECS=45 s).
+const defaultStuckHandshakeAfter = 20 * time.Second
+
+// maxStuckRebuilds bounds the number of consecutive recovery spawns
+// the watchdog will issue without seeing a grain commit land. On the
+// (maxStuckRebuilds+1)th observation of a stuck handshake the flusher
+// publishes Phase=Failed with reason StuckHandshakeCapReached, drops
+// the entry, closes the writer (invalidating consumer FlowReaders),
+// and exits; the next Reconcile rebuilds from scratch. The counter
+// resets on the first commit after each successful fabric open, so
+// the cap counts *consecutive* failed rebuilds, not lifetime ones.
+const maxStuckRebuilds uint32 = 3
+
+// ReasonStuckHandshakeCapReached marks a target-side mirror whose
+// libmxl-fabrics handshake never produced a grain commit across
+// maxStuckRebuilds consecutive watchdog-driven rebuilds. Distinct
+// from ReasonNoGrains: NoGrains is a recoverable Degraded state, this
+// reason accompanies a terminal Phase=Failed and signals that the
+// gateway has given up rebuilding the target in place.
+const ReasonStuckHandshakeCapReached = "StuckHandshakeCapReached"
+
 // TargetReconciler reconciles MxlFlowMirror resources from the
 // receiving side. See the package doc.
 type TargetReconciler struct {
@@ -75,10 +104,28 @@ type TargetReconciler struct {
 	// re-establish instead of short-circuiting. Defaults to 10s.
 	DegradedAfter time.Duration
 
+	// StuckHandshakeAfter is the duration without any grain commit
+	// since the fabric side was opened that the flusher treats as a
+	// silent libmxl-fabrics wedge (ErrNotReady forever, no fatal
+	// signal). On reaching it the flusher spawns recoverFromFatalError
+	// instead of waiting on a fatal that will not come. Defaults to
+	// defaultStuckHandshakeAfter.
+	StuckHandshakeAfter time.Duration
+
 	// openFabricSideFn is overridable so tests exercise the recovery
 	// path without a real libmxl-fabrics. Production leaves it nil
 	// and the reconciler falls back to (*TargetReconciler).openFabricSide.
 	openFabricSideFn func(writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Regions, *fabrics.Target, *fabrics.TargetInfo, string, error)
+
+	// recoverFn is the seam the stuck-handshake watchdog uses to
+	// spawn its recovery work. Production leaves it nil and the
+	// flusher invokes recoverFromFatalError directly; tests inject a
+	// stub so the watchdog's spawn/cap behavior can be observed
+	// without driving a real libmxl-fabrics rebuild. Kept distinct
+	// from openFabricSideFn because the watchdog's contract is
+	// "fire-and-forget" — it does not own the recovery result, only
+	// the gate that prevents double spawns.
+	recoverFn func(key types.NamespacedName)
 
 	mu      sync.Mutex
 	targets map[types.NamespacedName]*targetEntry
@@ -111,6 +158,30 @@ type targetEntry struct {
 	// status flusher.
 	commits      atomic.Uint64
 	lastCommitAt atomic.Pointer[time.Time]
+
+	// fabricOpenedAt is the wall-clock the current fabric side became
+	// live (initial openTarget or a recoverFromFatalError rebuild).
+	// commitsAtFabricOpen snapshots the commits counter at the same
+	// moment. Together they let the flusher discriminate "no commits
+	// yet because we just opened" from "no commits because the
+	// handshake is silently wedged" without needing a separate
+	// state-machine flag.
+	//
+	// Atomic because the recovery goroutine swaps them inside
+	// startProgressLoop while the flusher tick reads them. The
+	// existing entry.recovering atomic gates the flusher's read but
+	// only after the recovery has cleared it; the watchdog block
+	// reads these values from the flusher without ever taking r.mu.
+	// nil pointer (zero value) means "fabric side never opened".
+	fabricOpenedAt      atomic.Pointer[time.Time]
+	commitsAtFabricOpen atomic.Uint64
+
+	// recoveryAttempts counts consecutive watchdog-spawned recovery
+	// invocations that did not result in a fresh commit. recordCommit
+	// resets it to zero on the first commit after each fabric open,
+	// so the cap counts *consecutive* failed rebuilds rather than
+	// lifetime ones. The flusher caps spawns at maxStuckRebuilds.
+	recoveryAttempts atomic.Uint32
 
 	// recovering, set during recoverFromFatalError, tells the flusher
 	// to back off so its writes do not race the rebuild's own status
@@ -345,6 +416,15 @@ func (r *TargetReconciler) openFabricSideDispatch(writer *mxl.Writer, provider f
 // arms the recovery callback. Called after openTarget and again
 // after every successful in-place fabric rebuild.
 func (r *TargetReconciler) startProgressLoop(entry *targetEntry, key types.NamespacedName) {
+	// Re-arm the stuck-handshake watchdog reference: every fabric
+	// open (initial or rebuilt) gets its own elapsed window measured
+	// against its own commits baseline. Without resetting here the
+	// post-recovery flusher would trip the watchdog immediately on
+	// the carried-over (now-stale) fabricOpenedAt.
+	now := time.Now()
+	entry.fabricOpenedAt.Store(&now)
+	entry.commitsAtFabricOpen.Store(entry.commits.Load())
+
 	loopCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	entry.cancel = cancel
@@ -369,9 +449,17 @@ type commitTracker interface {
 }
 
 func (e *targetEntry) recordCommit(_ uint64, at time.Time) {
-	e.commits.Add(1)
+	n := e.commits.Add(1)
 	t := at
 	e.lastCommitAt.Store(&t)
+	// First commit after this fabric side opened disarms the
+	// stuck-handshake cap so a previously-rebuilt-successfully entry
+	// gets a fresh budget if it later wedges again. recoveryAttempts
+	// thus counts *consecutive* unsuccessful rebuilds, not lifetime
+	// ones.
+	if n == e.commitsAtFabricOpen.Load()+1 {
+		e.recoveryAttempts.Store(0)
+	}
 }
 
 // runTargetProgressLoop drives the libmxl-fabrics Target until ctx
@@ -473,6 +561,20 @@ func (r *TargetReconciler) closeEntry(key types.NamespacedName) {
 		return
 	}
 	closeTargetHandles(entry)
+}
+
+// dispatchRecovery routes the stuck-handshake watchdog's spawn
+// through the recoverFn seam when set, falling back to the cgo-
+// dependent recoverFromFatalError in production. The runTargetProgressLoop
+// onFatal callback continues to invoke recoverFromFatalError
+// directly: that path only fires on a fatal ReadGrain return, which
+// the tests cannot reach without real libmxl-fabrics anyway.
+func (r *TargetReconciler) dispatchRecovery(key types.NamespacedName) {
+	if r.recoverFn != nil {
+		r.recoverFn(key)
+		return
+	}
+	r.recoverFromFatalError(key)
 }
 
 // recoverFromFatalError rebuilds the libmxl-fabrics side of a mirror
@@ -664,6 +766,16 @@ func (r *TargetReconciler) degradedAfter() time.Duration {
 	return defaultDegradedAfter
 }
 
+// stuckHandshakeAfter returns the configured silent-wedge timeout the
+// flusher uses to escalate a non-progressing target into recovery,
+// falling back to defaultStuckHandshakeAfter when unset.
+func (r *TargetReconciler) stuckHandshakeAfter() time.Duration {
+	if r.StuckHandshakeAfter > 0 {
+		return r.StuckHandshakeAfter
+	}
+	return defaultStuckHandshakeAfter
+}
+
 // flushInterval returns the configured per-mirror flusher tick,
 // falling back to defaultTargetFlushInterval when unset.
 func (r *TargetReconciler) flushInterval() time.Duration {
@@ -737,6 +849,96 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// the fabric side. Skip the tick so the flusher's Degraded
 		// write does not race the recovery's Materializing publish.
 		if entry.recovering.Load() {
+			continue
+		}
+		// Stuck-handshake watchdog. A libmxl-fabrics target whose
+		// remote initiator never sent FI_CONNECTED keeps reporting
+		// ErrNotReady forever - the progress loop never raises
+		// onFatal, so recoverFromFatalError never fires, and the
+		// flusher would otherwise just oscillate between Ready and
+		// Degraded as time goes by. Spawn recovery explicitly when
+		// no commit has landed since the fabric side opened and the
+		// stuck-handshake window has elapsed.
+		//
+		// A nil fabricOpenedAt guards entries that the flusher runs
+		// against without a real openTarget/recovery handoff (existing
+		// flusher tests construct bare targetEntry values and drive
+		// the flusher directly): the watchdog must not fire on an
+		// entry whose fabric side was never actually opened.
+		openedAt := entry.fabricOpenedAt.Load()
+		if openedAt != nil &&
+			entry.commits.Load() == entry.commitsAtFabricOpen.Load() &&
+			time.Since(*openedAt) > r.stuckHandshakeAfter() {
+			if entry.recoveryAttempts.Load() >= maxStuckRebuilds {
+				// Cap reached: rebuilds keep failing to attract a
+				// commit. Publish a terminal Phase=Failed so operators
+				// see an explicit dead state, tear down the entry the
+				// way recoverFromFatalError's failure path does, and
+				// exit the flusher. The next Reconcile rebuilds the
+				// entry from scratch through openTarget.
+				//
+				// closeEntry must NOT be called from here:
+				// closeTargetHandles waits on flusherDone and the
+				// flusher is the goroutine that closes it on return,
+				// so a closeEntry from this point would deadlock the
+				// flusher on its own done channel. The teardown below
+				// matches recoverFromFatalError's drop-entry exit
+				// shape: cancel progress loop, wait for done, delete
+				// from r.targets, close writer, return.
+				log.FromContext(ctx).Error(nil,
+					"stuck handshake; recovery cap reached, dropping entry",
+					"mirror", key,
+					"attempts", entry.recoveryAttempts.Load())
+				if mirror, err := r.fetchMirror(ctx, key); err == nil {
+					_ = r.applyTargetStatus(ctx, mirror, mxlv1alpha1.MxlFlowMirrorFailed, &entry.infoStr, nil, &metav1.Condition{
+						Type:               mxlv1alpha1.ConditionTypeTargetProgress,
+						Status:             metav1.ConditionFalse,
+						Reason:             ReasonStuckHandshakeCapReached,
+						Message:            fmt.Sprintf("no commits in %s across %d rebuild attempts", r.stuckHandshakeAfter(), maxStuckRebuilds),
+						LastTransitionTime: metav1.Now(),
+					})
+				}
+				if entry.cancel != nil {
+					entry.cancel()
+				}
+				if entry.done != nil {
+					// Mirror recoverFromFatalError's ordering
+					// (target.go drop-entry exit): the progress loop
+					// must release its libmxl handles before Close
+					// runs underneath it.
+					<-entry.done
+				}
+				r.mu.Lock()
+				delete(r.targets, key)
+				r.mu.Unlock()
+				if entry.writer != nil {
+					// Invalidates consumer FlowReaders, matching
+					// recoverFromFatalError's failure exit. A
+					// concurrent closeEntry+closeTargetHandles would
+					// also Close this writer; double-close on
+					// *mxl.Writer is safe per the existing precedent
+					// in closeTargetHandles.
+					_ = entry.writer.Close()
+				}
+				return
+			}
+			if entry.recovering.CompareAndSwap(false, true) {
+				// CompareAndSwap, not Load+Store: two flusher ticks
+				// observing "not recovering" simultaneously would
+				// otherwise both spawn recoverFromFatalError on the
+				// same entry. CAS makes the spawn atomic. The
+				// goroutine clears recovering via the deferred
+				// Store(false) inside recoverFromFatalError.
+				attempt := entry.recoveryAttempts.Add(1)
+				log.FromContext(ctx).Info("stuck handshake; triggering recovery",
+					"mirror", key, "attempt", attempt)
+				go r.dispatchRecovery(key)
+			}
+			// Skip the Degraded write this tick: publishing it would
+			// flap Ready->Degraded->Materializing->Ready around the
+			// rebuild. The watchdog and the would-be Degraded write
+			// fire on the same discriminator, so the recovery must
+			// take precedence.
 			continue
 		}
 		state := observedTargetState(entry, r.degradedAfter(), last)
