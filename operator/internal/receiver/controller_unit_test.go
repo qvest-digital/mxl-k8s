@@ -2,6 +2,7 @@ package receiver
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"testing"
 
@@ -9,14 +10,17 @@ import (
 	"github.com/stretchr/testify/require"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -1048,4 +1052,112 @@ func TestRemoveOwnerRef_ToleratesNotFound(t *testing.T) {
 		"a mirror deleted out from under the controller is a normal race; "+
 			"the reconciler must treat it as a successful no-op rather than "+
 			"surface a NotFound error and requeue forever")
+}
+
+// mxlFlowMirrorGR names the resource group/resource pair the API
+// server's conflict error embeds. Built once so the synthetic
+// conflicts the tests inject look identical to a real apiserver
+// rejection.
+var mxlFlowMirrorGR = schema.GroupResource{
+	Group:    mxlv1alpha1.GroupVersion.Group,
+	Resource: "mxlflowmirrors",
+}
+
+func TestRemoveOwnerRef_RejectsDeleteOnConcurrentAdd(t *testing.T) {
+	ctx := context.Background()
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r", UID: "recv-uid"},
+	}
+	// Sole-owner mirror: removeOwnerRef will empty the slice, set
+	// deleteRV, and issue the resourceVersion-guarded Delete. The
+	// interceptor mimics the race window where a sibling ensureOwnerRef
+	// has appended its own owner ref between this loop's Update and the
+	// guarded Delete - the apiserver bumps the RV and the precondition
+	// fails with IsConflict.
+	mirror := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns",
+			Name:      "m",
+			OwnerReferences: []metav1.OwnerReference{
+				{APIVersion: mxlv1alpha1.GroupVersion.String(), Kind: "MxlReceiver", Name: "r", UID: "recv-uid"},
+			},
+		},
+	}
+	base := fake.NewClientBuilder().
+		WithScheme(unitScheme(t)).
+		WithObjects(mirror).
+		Build()
+
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Delete: func(ctx context.Context, _ client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			return apierrors.NewConflict(mxlFlowMirrorGR, obj.GetName(),
+				errors.New("simulated concurrent owner add"))
+		},
+	})
+	r := &Reconciler{Client: c}
+
+	require.NoError(t, r.removeOwnerRef(ctx, recv, mirror),
+		"a Delete precondition that fires on a concurrent ensureOwnerRef must "+
+			"be swallowed: the conflict means the mirror correctly has owners "+
+			"again, not that the receiver failed to release its claim. Surfacing "+
+			"the error would feed back into Reconcile and the next pass would "+
+			"redo the work it just bailed on.")
+
+	var live mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, base.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "m"}, &live),
+		"the precondition aborted the Delete, so the mirror must still exist; "+
+			"otherwise a sibling receiver's just-added owner ref would have lost "+
+			"its mirror out from under it")
+	assert.Empty(t, live.OwnerReferences,
+		"the receiver's own Update inside the retry loop emptied the owner ref "+
+			"list before the guarded Delete was attempted; the conflict on Delete "+
+			"is the only thing that kept the (now-ownerless) object alive, which is "+
+			"the contract a concurrent ensureOwnerRef relies on for its append to land")
+}
+
+func TestEnsureOwnerRef_RetryOnConflict(t *testing.T) {
+	ctx := context.Background()
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r", UID: "recv-uid"},
+	}
+	mirror := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "m"},
+	}
+	base := fake.NewClientBuilder().
+		WithScheme(unitScheme(t)).
+		WithObjects(mirror).
+		Build()
+
+	// One-shot conflict: the first Update returns IsConflict, every
+	// subsequent Update falls through to the real fake client so the
+	// retry's second attempt actually mutates the mirror.
+	var updates int
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Update: func(ctx context.Context, inner client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			updates++
+			if updates == 1 {
+				return apierrors.NewConflict(mxlFlowMirrorGR, obj.GetName(),
+					errors.New("simulated stale resourceVersion"))
+			}
+			return inner.Update(ctx, obj, opts...)
+		},
+	})
+	r := &Reconciler{Client: c}
+
+	require.NoError(t, r.ensureOwnerRef(ctx, recv, mirror),
+		"ensureOwnerRef must swallow a one-shot conflict and retry against the "+
+			"fresh apiserver state; surfacing the error would push the conflict "+
+			"into Reconcile and the next pass would re-Get, see the stale view "+
+			"the cache still holds, and loop indefinitely")
+	assert.GreaterOrEqual(t, updates, 2,
+		"the first Update returned IsConflict; the retry must issue a second "+
+			"Update or the receiver never actually adopts the mirror")
+
+	var live mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, base.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "m"}, &live))
+	require.Len(t, live.OwnerReferences, 1,
+		"the retry-after-conflict path must end with the owner ref actually "+
+			"stamped; without RetryOnConflict the receiver would walk away from "+
+			"a mirror it owns and apiserver-GC refcounting would silently miss it")
+	assert.Equal(t, types.UID("recv-uid"), live.OwnerReferences[0].UID)
 }
