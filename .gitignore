@@ -17,32 +17,8 @@ coverage.*
 *.coverprofile
 profile.cov
 
-# Dependency directories
-/vendor/
-/node_modules/
-
-# Local Graphify output and caches
-/graphify-out/
-/.graphify/
-/.graphify-cache/
-
-# Local tool caches and scratch dirs
-/.cache/
-/.go-build/
-/tmp/
-
-# Frontend build outputs, if generated locally
-/dist/
-/build/
-
-# Helm dependency and package outputs
-/charts/mxl-k8s/charts/
-/charts/mxl-k8s/*.tgz
-
-# Runtime and profiling artifacts
-*.prof
-*.pprof
-*.log
+# Dependency directories (remove the comment below to include it)
+# vendor/
 
 # env file
 .env
@@ -60,3 +36,8 @@ kind-diagnostics/
 
 # Per-session git worktrees managed by the Claude Code harness
 .claude/worktrees/
+
+# Graphify local-only outputs (the rest of graphify-out/ is committed)
+graphify-out/manifest.json
+graphify-out/cost.json
+graphify-out/.graphify_root
