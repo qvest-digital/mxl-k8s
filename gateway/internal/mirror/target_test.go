@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -655,4 +656,455 @@ func TestTarget_RecoverFromFatalErrorClearsRecoveringOnRebuildFailure(t *testing
 	assert.False(t, present,
 		"a failed rebuild must drop the entry so the next Reconcile rebuilds "+
 			"from scratch instead of operating on torn-down fabric handles")
+}
+
+func TestRecordCommit_FirstCommitResetsRecoveryAttempts(t *testing.T) {
+	// recordCommit must zero recoveryAttempts on the first commit
+	// after each fabric open so a previously-rebuilt-successfully
+	// entry that later wedges again gets a fresh budget. The cap
+	// counts *consecutive* failed rebuilds, not lifetime ones.
+	entry := &targetEntry{}
+	entry.commits.Store(5)
+	entry.commitsAtFabricOpen.Store(5)
+	entry.recoveryAttempts.Store(2)
+
+	entry.recordCommit(0, time.Now())
+
+	assert.Equal(t, uint32(0), entry.recoveryAttempts.Load(),
+		"the first commit after fabricOpenedAt was set must clear the "+
+			"recoveryAttempts counter; without the reset, the cap would "+
+			"fire across what are actually unrelated stuck windows")
+
+	// A subsequent commit must not re-reset (the condition fires only
+	// on the first-commit-after-open boundary).
+	entry.recoveryAttempts.Store(1)
+	entry.recordCommit(0, time.Now())
+	assert.Equal(t, uint32(1), entry.recoveryAttempts.Load(),
+		"only the very first commit after each fabric open resets the "+
+			"counter; later commits must leave it alone so the next "+
+			"wedge keeps any in-flight attempt count intact")
+}
+
+// targetWatchdogFixture sets up a TargetReconciler + entry pair
+// configured to exercise the stuck-handshake watchdog in isolation.
+// FlushInterval is small (1ms) so a test can drive several ticks
+// inside an Eventually budget; StuckHandshakeAfter is shorter still
+// (1ms) so the wedge condition is permanently met from the moment
+// fabricOpenedAt is stamped. DegradedAfter is wide so the would-be
+// Degraded write would still apply if the watchdog branch did not
+// pre-empt it.
+type targetWatchdogFixture struct {
+	r       *TargetReconciler
+	entry   *targetEntry
+	key     types.NamespacedName
+	cancel  context.CancelFunc
+	done    chan struct{}
+	mirror  *mxlv1alpha1.MxlFlowMirror
+	c       client.WithWatch
+	spawnCh chan struct{} // unbuffered; receiver blocks each spawn
+}
+
+func newTargetWatchdogFixture(t *testing.T, spawnBufLen int) *targetWatchdogFixture {
+	t.Helper()
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{
+		Phase:      mxlv1alpha1.MxlFlowMirrorReady,
+		TargetInfo: "info-1",
+	})
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	entry := &targetEntry{infoStr: "info-1"}
+	// fabricOpenedAt sits far in the past so time.Since() always
+	// exceeds StuckHandshakeAfter; commits/commitsAtFabricOpen are
+	// both zero so the no-progress branch matches.
+	past := time.Now().Add(-time.Hour)
+	entry.fabricOpenedAt.Store(&past)
+	entry.commitsAtFabricOpen.Store(0)
+	// cancel + done so the cap path's <-entry.done does not block:
+	// a closed channel reads instantly. Tests that want to assert
+	// ordering replace these with channels they control.
+	closedDone := make(chan struct{})
+	close(closedDone)
+	entry.cancel = func() {}
+	entry.done = closedDone
+
+	spawnCh := make(chan struct{}, spawnBufLen)
+	r := &TargetReconciler{
+		Client:              c,
+		Scheme:              scheme,
+		NodeName:            "node-a",
+		FlushInterval:       1 * time.Millisecond,
+		DegradedAfter:       time.Hour, // wide so Degraded does not pre-empt the watchdog
+		StuckHandshakeAfter: 1 * time.Millisecond,
+		targets:             map[types.NamespacedName]*targetEntry{key: entry},
+		recoverFn: func(types.NamespacedName) {
+			spawnCh <- struct{}{}
+			// Re-arm the watchdog for the next tick: clear recovering
+			// so CompareAndSwap can succeed again, and stamp
+			// fabricOpenedAt back into the past so the wedge condition
+			// stays true. A real recoverFromFatalError calls
+			// startProgressLoop, which would reset fabricOpenedAt to
+			// time.Now() and bury the wedge window; the test's
+			// re-wedge scenario instead simulates the case where each
+			// rebuild succeeds but the new fabric side wedges again
+			// before any commit lands.
+			past := time.Now().Add(-time.Hour)
+			entry.fabricOpenedAt.Store(&past)
+			entry.recovering.Store(false)
+		},
+	}
+
+	return &targetWatchdogFixture{
+		r:       r,
+		entry:   entry,
+		key:     key,
+		mirror:  mirror,
+		c:       c,
+		spawnCh: spawnCh,
+	}
+}
+
+func (f *targetWatchdogFixture) startFlusher(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	f.cancel = cancel
+	f.done = done
+	go f.r.runFlusher(ctx, done, f.key, f.entry)
+}
+
+func (f *targetWatchdogFixture) stopFlusher(t *testing.T) {
+	t.Helper()
+	if f.cancel == nil {
+		return
+	}
+	f.cancel()
+	select {
+	case <-f.done:
+	case <-time.After(time.Second):
+		t.Fatal("flusher did not exit after cancel")
+	}
+	f.cancel = nil
+}
+
+func TestRunFlusher_StuckHandshake_TriggersRecovery(t *testing.T) {
+	// Fabric opened in the distant past, zero commits: the flusher
+	// must escalate into the recovery seam exactly once and increment
+	// recoveryAttempts. Without the escalation a silently-wedged
+	// libmxl-fabrics target stays Ready forever (no fatal ReadGrain
+	// to trigger onFatal) and consumer FlowReaders see no grains.
+	f := newTargetWatchdogFixture(t, 4)
+	f.startFlusher(t)
+	defer f.stopFlusher(t)
+
+	select {
+	case <-f.spawnCh:
+	case <-time.After(time.Second):
+		t.Fatal("watchdog did not spawn recovery within 1s of a stuck handshake")
+	}
+
+	require.Eventually(t, func() bool {
+		return f.entry.recoveryAttempts.Load() >= 1
+	}, time.Second, 5*time.Millisecond,
+		"the watchdog spawn must increment recoveryAttempts so the cap "+
+			"branch can count consecutive failures")
+}
+
+func TestRunFlusher_CommitDisarmsWatchdog(t *testing.T) {
+	// One commit recorded after the fabric opened: the flusher must
+	// NOT spawn recovery. The discriminator is "no progress since
+	// open", not "fabric opened long ago".
+	f := newTargetWatchdogFixture(t, 4)
+	// Simulate a commit landing: bump commits past commitsAtFabricOpen.
+	f.entry.commits.Store(1)
+	commitAt := time.Now()
+	f.entry.lastCommitAt.Store(&commitAt)
+
+	f.startFlusher(t)
+	defer f.stopFlusher(t)
+
+	select {
+	case <-f.spawnCh:
+		t.Fatal("watchdog spawned recovery despite a commit landing after fabric open; " +
+			"the discriminator must be 'no progress since open', not 'time since open'")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	assert.Equal(t, uint32(0), f.entry.recoveryAttempts.Load(),
+		"a commit after fabric open must suppress the watchdog spawn; "+
+			"incrementing recoveryAttempts here would let an otherwise "+
+			"healthy mirror trip the cap on transient stalls")
+}
+
+func TestRunFlusher_CapsRecoveryAttempts(t *testing.T) {
+	// After maxStuckRebuilds spawns the next tick must publish
+	// Phase=Failed + Reason=StuckHandshakeCapReached, remove the
+	// entry from r.targets, and exit the flusher. The plan asserts
+	// exact spawn count + terminal status + entry removal + flusher
+	// exit in one test.
+	f := newTargetWatchdogFixture(t, int(maxStuckRebuilds)+2)
+	f.startFlusher(t)
+
+	for i := uint32(0); i < maxStuckRebuilds; i++ {
+		select {
+		case <-f.spawnCh:
+		case <-time.After(time.Second):
+			t.Fatalf("watchdog did not spawn recovery attempt %d within 1s", i+1)
+		}
+	}
+
+	// No further spawn should land; the cap fires on the next tick
+	// and tears the entry down. Drain the spawn channel briefly to
+	// confirm no fourth spawn slipped through.
+	select {
+	case <-f.spawnCh:
+		t.Fatalf("watchdog spawned more than maxStuckRebuilds=%d recoveries; "+
+			"the cap branch must take over before another spawn", maxStuckRebuilds)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Flusher must exit by itself once the cap branch returns.
+	select {
+	case <-f.done:
+	case <-time.After(time.Second):
+		t.Fatal("flusher did not exit after the cap branch fired; " +
+			"a stuck flusher leaks a goroutine and keeps producing status writes")
+	}
+	f.cancel = nil // already exited
+
+	f.r.mu.Lock()
+	_, present := f.r.targets[f.key]
+	f.r.mu.Unlock()
+	assert.False(t, present,
+		"the cap branch must delete the entry from r.targets so the next "+
+			"Reconcile rebuilds from scratch through openTarget")
+
+	assert.Equal(t, uint32(maxStuckRebuilds), f.entry.recoveryAttempts.Load(),
+		"recoveryAttempts must equal maxStuckRebuilds at cap time; a higher "+
+			"value means another spawn raced the cap branch")
+
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, f.c.Get(context.Background(), f.key, &got))
+	assert.Equal(t, mxlv1alpha1.MxlFlowMirrorFailed, got.Status.Phase,
+		"the cap branch must publish Phase=Failed so operators see an "+
+			"explicit terminal state instead of a silently-dropped entry")
+}
+
+func TestRunFlusher_CapPath_TerminalStatus(t *testing.T) {
+	// Codifies the operator-visible signal: cap must publish a
+	// TargetProgress condition with reason StuckHandshakeCapReached.
+	// A bare Phase=Failed without the reason would leave operators
+	// unable to distinguish this failure mode from other terminal
+	// states.
+	f := newTargetWatchdogFixture(t, int(maxStuckRebuilds)+2)
+	f.startFlusher(t)
+
+	for i := uint32(0); i < maxStuckRebuilds; i++ {
+		select {
+		case <-f.spawnCh:
+		case <-time.After(time.Second):
+			t.Fatalf("recovery spawn %d did not fire", i+1)
+		}
+	}
+
+	require.Eventually(t, func() bool {
+		var got mxlv1alpha1.MxlFlowMirror
+		if err := f.c.Get(context.Background(), f.key, &got); err != nil {
+			return false
+		}
+		if got.Status.Phase != mxlv1alpha1.MxlFlowMirrorFailed {
+			return false
+		}
+		for _, cond := range got.Status.Conditions {
+			if cond.Type == mxlv1alpha1.ConditionTypeTargetProgress &&
+				cond.Reason == ReasonStuckHandshakeCapReached {
+				return true
+			}
+		}
+		return false
+	}, time.Second, 5*time.Millisecond,
+		"the cap branch must publish TargetProgress with reason "+
+			"StuckHandshakeCapReached; a missing reason hides the failure "+
+			"mode from operators")
+
+	select {
+	case <-f.done:
+	case <-time.After(time.Second):
+		t.Fatal("flusher did not exit after cap branch")
+	}
+	f.cancel = nil
+}
+
+func TestRunFlusher_CapResetsAfterCommit(t *testing.T) {
+	// A commit between cap-imminent spawns must reset the counter so
+	// the next stuck window starts from zero. The cap counts
+	// *consecutive* failed rebuilds; without the reset, a long-lived
+	// mirror that survives a couple of transient wedges would
+	// eventually trip the cap even though every wedge healed.
+	f := newTargetWatchdogFixture(t, int(maxStuckRebuilds)*3)
+	// Override the recoverFn to drive the test deterministically:
+	// each spawn rearms the wedge without recording a commit. The
+	// test injects the commit in between bursts.
+	f.r.recoverFn = func(types.NamespacedName) {
+		f.spawnCh <- struct{}{}
+		past := time.Now().Add(-time.Hour)
+		f.entry.fabricOpenedAt.Store(&past)
+		f.entry.recovering.Store(false)
+	}
+
+	f.startFlusher(t)
+	defer func() {
+		if f.cancel != nil {
+			f.cancel()
+			<-f.done
+		}
+	}()
+
+	// First burst: maxStuckRebuilds-1 spawns, then record a commit
+	// before the cap can fire.
+	for i := uint32(0); i < maxStuckRebuilds-1; i++ {
+		select {
+		case <-f.spawnCh:
+		case <-time.After(time.Second):
+			t.Fatalf("first burst: spawn %d did not fire", i+1)
+		}
+	}
+
+	// Pause the flusher so the commit + counter reset happen as one
+	// atomic transition: stop the flusher, mutate the entry, restart.
+	// Without the pause an in-flight tick could spawn a fourth time
+	// against the un-reset counter before the test gets to record
+	// the commit, racing the cap branch.
+	f.stopFlusher(t)
+
+	// Record a commit: recoveryAttempts must clear.
+	prev := f.entry.commits.Load()
+	f.entry.commitsAtFabricOpen.Store(prev)
+	f.entry.recordCommit(0, time.Now())
+	require.Equal(t, uint32(0), f.entry.recoveryAttempts.Load(),
+		"the post-burst recordCommit must clear recoveryAttempts; without "+
+			"the reset, the cap would persist across what are actually "+
+			"unrelated stuck windows")
+
+	// Set up a fresh wedge: commitsAtFabricOpen tracks current commits.
+	f.entry.commitsAtFabricOpen.Store(f.entry.commits.Load())
+	past := time.Now().Add(-time.Hour)
+	f.entry.fabricOpenedAt.Store(&past)
+	f.startFlusher(t)
+
+	// Second burst must again reach maxStuckRebuilds spawns before
+	// the cap fires, proving the counter restarted at zero.
+	for i := uint32(0); i < maxStuckRebuilds; i++ {
+		select {
+		case <-f.spawnCh:
+		case <-time.After(time.Second):
+			t.Fatalf("second burst: spawn %d did not fire; the post-commit "+
+				"counter reset must give a full fresh budget", i+1)
+		}
+	}
+
+	select {
+	case <-f.done:
+	case <-time.After(time.Second):
+		t.Fatal("flusher did not exit after the second burst hit the cap")
+	}
+	f.cancel = nil
+}
+
+func TestRunFlusher_CapPath_NoDeadlock(t *testing.T) {
+	// The cap branch waits on entry.done before deleting the entry
+	// and closing the writer (mirroring recoverFromFatalError's
+	// ordering). If a concurrent closeEntry+closeTargetHandles were
+	// to also wait on flusherDone, the two would deadlock: the
+	// flusher waits on entry.done while closeTargetHandles waits on
+	// flusherDone, and the flusher cannot return until it has waited
+	// on entry.done. The cap branch must complete within a bounded
+	// timeout regardless. Test by holding entry.done open just long
+	// enough for the cap branch to be parked on it, then releasing.
+	f := newTargetWatchdogFixture(t, int(maxStuckRebuilds)+2)
+	// Replace the closed entry.done with an open one so the cap
+	// branch's <-entry.done parks instead of returning instantly.
+	openDone := make(chan struct{})
+	f.entry.done = openDone
+	cancelCalled := make(chan struct{})
+	f.entry.cancel = func() { close(cancelCalled) }
+
+	f.startFlusher(t)
+
+	for i := uint32(0); i < maxStuckRebuilds; i++ {
+		select {
+		case <-f.spawnCh:
+		case <-time.After(time.Second):
+			t.Fatalf("spawn %d did not fire", i+1)
+		}
+	}
+
+	// Wait until the cap branch has cancelled the progress loop.
+	select {
+	case <-cancelCalled:
+	case <-time.After(time.Second):
+		t.Fatal("cap branch did not cancel the progress loop; the cap path " +
+			"must signal the loop to exit before waiting on done")
+	}
+
+	// At this point the cap branch is blocked on <-entry.done. The
+	// flusher is still running. Release the progress loop so the
+	// cap branch can finish its teardown.
+	close(openDone)
+
+	select {
+	case <-f.done:
+	case <-time.After(time.Second):
+		t.Fatal("cap branch deadlocked after progress loop released; the " +
+			"teardown ordering must not wait on the flusher's own done")
+	}
+	f.cancel = nil
+}
+
+func TestRunFlusher_RecoveryGate_NoDoubleSpawnUnderRace(t *testing.T) {
+	// CompareAndSwap on entry.recovering is the spawn gate: two
+	// flusher ticks observing "not recovering" simultaneously would
+	// otherwise both spawn recoverFromFatalError on the same entry.
+	// Pin recovering = true after the first spawn and confirm a
+	// second tick (which only proceeds because the first spawn does
+	// not clear the flag) does not double-spawn.
+	f := newTargetWatchdogFixture(t, 4)
+	// Override recoverFn to NOT clear the recovering flag: this
+	// pins entry.recovering=true after the first spawn, so the
+	// flusher's recovering.Load() check at the top of the tick
+	// short-circuits every subsequent tick. The watchdog block
+	// never runs again, regardless of how many ticks elapse.
+	f.r.recoverFn = func(types.NamespacedName) {
+		f.spawnCh <- struct{}{}
+		// Intentionally do NOT clear recovering: simulates a slow
+		// recovery still in flight when the next flusher tick fires.
+	}
+
+	f.startFlusher(t)
+	defer f.stopFlusher(t)
+
+	// First spawn must land.
+	select {
+	case <-f.spawnCh:
+	case <-time.After(time.Second):
+		t.Fatal("first spawn did not fire")
+	}
+
+	// No second spawn within a generous window of further ticks.
+	select {
+	case <-f.spawnCh:
+		t.Fatal("second spawn fired while a previous recovery was still " +
+			"in flight; CompareAndSwap must serialize the spawn against " +
+			"concurrent observers")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	assert.Equal(t, uint32(1), f.entry.recoveryAttempts.Load(),
+		"recoveryAttempts must be exactly 1 after a single spawn; a higher "+
+			"value would mean two ticks raced past the CAS gate")
 }
