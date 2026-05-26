@@ -91,3 +91,20 @@ libmxl install (and, for the gateway, real fabric endpoints):
 ```
 
 The default unit/vet/build jobs don't run these.
+
+## Graphify
+
+This repo carries a [Graphify](https://github.com/safishamsi/graphify)
+knowledge graph under `graphify-out/`. The graph is committed so a
+fresh clone already has it; `.graphifyignore` controls what gets
+indexed.
+
+Graphify is optional. To rebuild the graph locally, query it, or
+have it auto-rebuild after each commit, install the `graphifyy`
+PyPI package (CLI: `graphify`) and run `graphify hook install`.
+Manage the hook with `graphify hook status` and
+`graphify hook uninstall`.
+
+See the upstream
+[common commands](https://github.com/safishamsi/graphify#common-commands)
+for usage.

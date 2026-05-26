@@ -36,3 +36,8 @@ kind-diagnostics/
 
 # Per-session git worktrees managed by the Claude Code harness
 .claude/worktrees/
+
+# Graphify local-only outputs (the rest of graphify-out/ is committed)
+graphify-out/manifest.json
+graphify-out/cost.json
+graphify-out/.graphify_root
