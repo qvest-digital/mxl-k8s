@@ -228,7 +228,6 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// re-registered the flow, typically after a pod restart).
 		// Tear down + reopen so the reader tails the fresh writer
 		// instead of holding a handle on a now-invalid ring.
-		// Target-side recoverFromFatalError republishes status.targetInfo via SSA on the Ready transition after rebuilding the fabric side. This infoStr comparison is the source initiator's only wake-up signal for that rotation - do not add a spec-only predicate to this watch.
 		if originRotated(existing.lastObservedOriginAt.Load(), originAt) {
 			l.Info("flow origin rotated, reopening reader")
 			r.closeEntry(req.NamespacedName)
@@ -238,7 +237,13 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			// TargetInfo rotated under us (typically: target gateway
 			// restarted and rebuilt the writer on a fresh ephemeral
 			// port). Tear down the stale initiator so we re-open
-			// against the new address.
+			// against the new address. The target side also lands
+			// here after recoverFromFatalError republishes
+			// status.targetInfo via SSA on its Ready transition --
+			// the infoStr comparison above is the source initiator's
+			// only wake-up signal for that rotation, so do not add a
+			// spec-only predicate to the MxlFlowMirror watch or
+			// recovery wakes will be silently dropped.
 			l.Info("target info rotated, rebuilding initiator")
 			r.closeEntry(req.NamespacedName)
 		}
