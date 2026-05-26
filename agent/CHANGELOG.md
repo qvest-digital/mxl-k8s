@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.0-rc.3](https://github.com/qvest-digital/mxl-k8s/compare/agent/v1.0.0-rc.2...agent/v1.0.0-rc.3) (2026-05-26)
+
+
+### Features
+
+* **operator,gateway,agent:** harden MxlFlowMirror lifecycle ([#79](https://github.com/qvest-digital/mxl-k8s/issues/79)) ([a8aa3e3](https://github.com/qvest-digital/mxl-k8s/commit/a8aa3e306ea77e8856008d0dad57a0052331db3b))
+
+
+### Miscellaneous
+
+* contributor-review pass on docs, comments, and typography ([#46](https://github.com/qvest-digital/mxl-k8s/issues/46)) ([cddc9ba](https://github.com/qvest-digital/mxl-k8s/commit/cddc9bad1535087a19d04570b77438e6df27a1eb))
+* **deps:** update module golang.org/x/sys to v0.45.0 ([#78](https://github.com/qvest-digital/mxl-k8s/issues/78)) ([19f3148](https://github.com/qvest-digital/mxl-k8s/commit/19f3148c8deea374a51b11d0fef14bbf7f590613))
+
 ## [1.0.0-rc.2](https://github.com/qvest-digital/mxl-k8s/compare/agent/v1.0.0-rc.1...agent/v1.0.0-rc.2) (2026-05-19)
 
 
