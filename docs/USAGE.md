@@ -277,37 +277,6 @@ selects the libmxl-fabrics provider for the cross-node transfer:
 Only `tcp` is part of routine CI today. The non-`tcp` providers
 work in code but have not been exercised continuously.
 
-## Known upstream issues
-
-Quirks rooted in libmxl or libmxl-fabrics that surface through the
-mxl-k8s control plane.
-
-### libmxl-fabrics idle-timer ms-counter wrap
-
-Symptom: gateway logs from libmxl-fabrics of the form
-
-    [RCInitiator.cpp:110] Endpoint has been idle for <billions>ms, activating
-
-with an idle interval many years long. The RC initiator's idle
-counter underflows on the first activation. The activation
-succeeds and the endpoint is usable; the message is cosmetic and
-has no mxl-k8s remediation.
-
-### libmxl FlowReader head index cached across writer restart
-
-Symptom: a consumer opened with a head-relative read policy after
-a producer restart sees a head index thousands of grains ahead of
-the producer's current commit index. The libmxl demuxer logs
-`no grain, too late` until the commit index catches up.
-
-Mitigation in mxl-k8s 1.0.x: the source-side gateway watches the
-per-flow `MxlFlow` CR and reopens its FlowReader whenever the
-local Origin `LastObserved` timestamp rotates -- the signal an
-agent emits when it (re)opens a FlowWriter. See `SourceReconciler`
-in `gateway/internal/mirror/source.go`. Gap: an in-place writer
-restart that does not rotate the Origin location in Kubernetes
-leaves the cached head in place until the next rotation.
-
 ## See also
 
 - [Root README](../README.md): project scope and the DMF coverage
