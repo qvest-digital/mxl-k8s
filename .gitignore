@@ -37,6 +37,12 @@ kind-diagnostics/
 # Per-session git worktrees managed by the Claude Code harness
 .claude/worktrees/
 
+# Local OMC scratch state; keep skills under .omc/skills/
+!.omc/
+.omc/*
+!.omc/skills/
+!.omc/skills/**
+
 # Graphify local-only outputs (the rest of graphify-out/ is committed)
 graphify-out/manifest.json
 graphify-out/cost.json
