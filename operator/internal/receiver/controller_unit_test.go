@@ -377,12 +377,18 @@ func Test_ensureMirror_UpdatesSourceNodeOnRescheduling(t *testing.T) {
 	}
 
 	// A pre-existing mirror with the old source node and an
-	// agent-stamped Requestor. The patch must update SourceNode and
-	// stamp the receiver label, but must not clobber Requestor.
+	// agent-stamped Requestor. The patch must update SourceNode but
+	// must not clobber Requestor and must not rewrite the receiver
+	// label -- label drift is no longer corrected on Patch (it would
+	// pingpong between co-resident receivers); label is only stamped
+	// on Create.
 	existing := &mxlv1alpha1.MxlFlowMirror{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: recvNS,
 			Name:      mirrorName(flowID, tgt),
+			Labels: map[string]string{
+				mxlv1alpha1.LabelCreatedByReceiver: "first-creator",
+			},
 		},
 		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
 			FlowID:     flowID,
@@ -418,8 +424,10 @@ func Test_ensureMirror_UpdatesSourceNodeOnRescheduling(t *testing.T) {
 	assert.Equal(t, mxlv1alpha1.ProviderTCP, live.Spec.Provider)
 	require.NotNil(t, live.Spec.Requestor, "merge-patch must preserve agent-owned Requestor")
 	assert.Equal(t, "consumer-pod", live.Spec.Requestor.Name)
-	assert.Equal(t, recvN, live.Labels[mxlv1alpha1.LabelCreatedByReceiver],
-		"the receiver label is what the GC pass uses to recognise its own mirrors")
+	assert.Equal(t, "first-creator", live.Labels[mxlv1alpha1.LabelCreatedByReceiver],
+		"label drift must not be corrected on Patch; the label is a "+
+			"first-creator diagnostic tag and rewriting it on every reconcile "+
+			"is the pingpong PR #79 removed")
 }
 
 func Test_ensureMirror_StampsLabelOnCreate(t *testing.T) {
@@ -729,4 +737,315 @@ func TestReceiver_LeaseInMxlSystemPredicate(t *testing.T) {
 			assert.Equal(t, tc.want, pred.Generic(event.GenericEvent{Object: obj}))
 		})
 	}
+}
+
+// TestSetupWithManager_RegistersOwnerUIDIndex asserts the fake
+// client honours a MatchingFields lookup on ownerUIDIndex after
+// the same extractor SetupWithManager uses gets registered via
+// WithIndex. A passing test means the extractor shape (returning
+// every owner UID as its own string) and the index name are
+// internally consistent: any later refactor that splits the name
+// from the extractor will surface as an empty result here rather
+// than a silent miss at runtime.
+func TestSetupWithManager_RegistersOwnerUIDIndex(t *testing.T) {
+	ctx := context.Background()
+
+	mirrorWithOwners := func(name string, uids ...string) *mxlv1alpha1.MxlFlowMirror {
+		m := &mxlv1alpha1.MxlFlowMirror{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name},
+			Spec:       mxlv1alpha1.MxlFlowMirrorSpec{FlowID: "f"},
+		}
+		for _, uid := range uids {
+			m.OwnerReferences = append(m.OwnerReferences, metav1.OwnerReference{
+				APIVersion: mxlv1alpha1.GroupVersion.String(),
+				Kind:       "MxlReceiver",
+				Name:       "r-" + uid,
+				UID:        types.UID(uid),
+			})
+		}
+		return m
+	}
+
+	extractor := func(o client.Object) []string {
+		mirror, ok := o.(*mxlv1alpha1.MxlFlowMirror)
+		if !ok {
+			return nil
+		}
+		ors := mirror.GetOwnerReferences()
+		if len(ors) == 0 {
+			return nil
+		}
+		out := make([]string, 0, len(ors))
+		for _, or := range ors {
+			out = append(out, string(or.UID))
+		}
+		return out
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(unitScheme(t)).
+		WithIndex(&mxlv1alpha1.MxlFlowMirror{}, ownerUIDIndex, extractor).
+		WithObjects(
+			mirrorWithOwners("solo", "uid-a"),
+			mirrorWithOwners("shared", "uid-a", "uid-b"),
+			mirrorWithOwners("other", "uid-c"),
+			mirrorWithOwners("orphan"),
+		).
+		Build()
+
+	var matchA mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, c.List(ctx, &matchA, client.MatchingFields{ownerUIDIndex: "uid-a"}))
+	gotA := map[string]struct{}{}
+	for _, m := range matchA.Items {
+		gotA[m.Name] = struct{}{}
+	}
+	assert.Equal(t, map[string]struct{}{"solo": {}, "shared": {}}, gotA,
+		"the extractor must register every owner UID on the object so a "+
+			"mirror with two co-owners is reachable via either UID; "+
+			"otherwise the second receiver's lookup would silently miss it")
+
+	var matchB mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, c.List(ctx, &matchB, client.MatchingFields{ownerUIDIndex: "uid-b"}))
+	require.Len(t, matchB.Items, 1)
+	assert.Equal(t, "shared", matchB.Items[0].Name)
+
+	var matchNone mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, c.List(ctx, &matchNone, client.MatchingFields{ownerUIDIndex: "uid-missing"}))
+	assert.Empty(t, matchNone.Items)
+}
+
+func TestMirrorNameForReceiver_SameNs_NoSuffix(t *testing.T) {
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r"},
+		Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: "11111111-2222-3333-4444-555555555555"},
+	}
+	got := mirrorNameForReceiver(recv, nodeTarget{node: "node-a", namespace: "ns"})
+	assert.Equal(t, mirrorName(recv.Spec.FlowID, "node-a"), got,
+		"same-namespace receivers share the base mirror name; the "+
+			"OwnerReferences refcount is what scopes the mirror to its "+
+			"co-resident receivers")
+}
+
+func TestMirrorNameForReceiver_PodSelectorIsAlwaysSameNs(t *testing.T) {
+	// A PodSelector receiver lists pods in its own namespace, so the
+	// resolved target is always same-ns regardless of where the
+	// selector matches; the mirror name must never gain a suffix.
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r"},
+		Spec: mxlv1alpha1.MxlReceiverSpec{
+			FlowID:      "f",
+			PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "x"}},
+		},
+	}
+	got := mirrorNameForReceiver(recv, nodeTarget{node: "n", namespace: "ns"})
+	assert.Equal(t, mirrorName("f", "n"), got)
+}
+
+func TestMirrorNameForReceiver_CrossNs_HasSuffix(t *testing.T) {
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "recv-ns", Name: "r"},
+		Spec: mxlv1alpha1.MxlReceiverSpec{
+			FlowID: "f",
+			PodRef: &mxlv1alpha1.PodRef{Namespace: "pod-ns", Name: "p"},
+		},
+	}
+	got := mirrorNameForReceiver(recv, nodeTarget{node: "n", namespace: "pod-ns"})
+	base := mirrorName("f", "n")
+	require.NotEqual(t, base, got,
+		"a cross-namespace PodRef must carry a per-receiver suffix; "+
+			"without it two cross-ns receivers would collide on the bare "+
+			"mirror name and the apiserver would reject the second Create")
+	assert.True(t, len(got) == len(base)+1+8,
+		"suffix is one dash plus 8 hex chars; the DNS-1123 budget for "+
+			"a UUID-based mirror name absorbs that comfortably")
+}
+
+func TestMirrorNameForReceiver_DistinctReceiversHashDifferently(t *testing.T) {
+	a := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ra-ns", Name: "ra"},
+		Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: "f"},
+	}
+	b := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "rb-ns", Name: "rb"},
+		Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: "f"},
+	}
+	tgt := nodeTarget{node: "n", namespace: "pod-ns"}
+	assert.NotEqual(t, mirrorNameForReceiver(a, tgt), mirrorNameForReceiver(b, tgt),
+		"two cross-ns receivers must produce two distinct mirror names so "+
+			"both can coexist in the same target namespace")
+}
+
+func TestShortHash_DNSSafe(t *testing.T) {
+	cases := []string{
+		"ns/r",
+		"a-very-long-name-with-many-dashes/receiver",
+		"unicode-ns/Receiver",
+	}
+	for _, s := range cases {
+		got := shortHash(s)
+		assert.Len(t, got, 8, "shortHash must be 8 chars; %q produced %q", s, got)
+		for _, c := range got {
+			ok := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+			assert.True(t, ok,
+				"shortHash must be lowercase hex so the result keeps the "+
+					"composed mirror name DNS-1123-safe; %q produced %q", s, got)
+		}
+	}
+
+	// Determinism is the contract OwnerReferences refcount depends on:
+	// two reconciles of the same receiver must address the same mirror.
+	assert.Equal(t, shortHash("ns/r"), shortHash("ns/r"))
+}
+
+func TestEnsureOwnerRef_AppendsAndIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r", UID: "recv-uid"},
+	}
+	mirror := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "m"},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(unitScheme(t)).
+		WithObjects(mirror).
+		Build()
+	r := &Reconciler{Client: c}
+
+	require.NoError(t, r.ensureOwnerRef(ctx, recv, mirror))
+
+	var live mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "m"}, &live))
+	require.Len(t, live.OwnerReferences, 1)
+	assert.Equal(t, types.UID("recv-uid"), live.OwnerReferences[0].UID)
+	require.NotNil(t, live.OwnerReferences[0].Controller)
+	assert.False(t, *live.OwnerReferences[0].Controller,
+		"Controller must be false; multiple co-owners is the whole point")
+	require.NotNil(t, live.OwnerReferences[0].BlockOwnerDeletion)
+	assert.False(t, *live.OwnerReferences[0].BlockOwnerDeletion,
+		"BlockOwnerDeletion must be false; receiver delete must not wait "+
+			"on the co-owned mirror finalising")
+
+	// Idempotent: a second call must not duplicate the entry.
+	require.NoError(t, r.ensureOwnerRef(ctx, recv, mirror))
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "m"}, &live))
+	assert.Len(t, live.OwnerReferences, 1,
+		"ensureOwnerRef must be a no-op when the receiver is already an owner; "+
+			"a second Update on every reconcile would feed the pingpong")
+}
+
+func TestEnsureOwnerRef_PreservesSiblingOwners(t *testing.T) {
+	ctx := context.Background()
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r", UID: "recv-uid"},
+	}
+	mirror := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns",
+			Name:      "m",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: mxlv1alpha1.GroupVersion.String(),
+					Kind:       "MxlReceiver",
+					Name:       "sibling",
+					UID:        "sibling-uid",
+				},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(unitScheme(t)).
+		WithObjects(mirror).
+		Build()
+	r := &Reconciler{Client: c}
+
+	require.NoError(t, r.ensureOwnerRef(ctx, recv, mirror))
+
+	var live mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "m"}, &live))
+	require.Len(t, live.OwnerReferences, 2,
+		"the sibling owner ref must survive; a JSON merge-patch would replace "+
+			"the entire ownerReferences array per RFC 7396 and silently strip it")
+	uids := map[types.UID]struct{}{}
+	for _, or := range live.OwnerReferences {
+		uids[or.UID] = struct{}{}
+	}
+	assert.Contains(t, uids, types.UID("sibling-uid"))
+	assert.Contains(t, uids, types.UID("recv-uid"))
+}
+
+func TestRemoveOwnerRef_RemovesOnlyMatchingUID(t *testing.T) {
+	ctx := context.Background()
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r", UID: "recv-uid"},
+	}
+	mirror := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns",
+			Name:      "m",
+			OwnerReferences: []metav1.OwnerReference{
+				{APIVersion: mxlv1alpha1.GroupVersion.String(), Kind: "MxlReceiver", Name: "r", UID: "recv-uid"},
+				{APIVersion: mxlv1alpha1.GroupVersion.String(), Kind: "MxlReceiver", Name: "sibling", UID: "sibling-uid"},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(unitScheme(t)).
+		WithObjects(mirror).
+		Build()
+	r := &Reconciler{Client: c}
+
+	require.NoError(t, r.removeOwnerRef(ctx, recv, mirror))
+
+	var live mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "m"}, &live))
+	require.Len(t, live.OwnerReferences, 1,
+		"only the matching UID must be removed; without that the sibling "+
+			"loses its claim and the mirror is GC'd out from under it")
+	assert.Equal(t, types.UID("sibling-uid"), live.OwnerReferences[0].UID)
+}
+
+func TestRemoveOwnerRef_NoopWhenAbsent(t *testing.T) {
+	ctx := context.Background()
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r", UID: "recv-uid"},
+	}
+	mirror := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns",
+			Name:      "m",
+			OwnerReferences: []metav1.OwnerReference{
+				{APIVersion: mxlv1alpha1.GroupVersion.String(), Kind: "MxlReceiver", Name: "sibling", UID: "sibling-uid"},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(unitScheme(t)).
+		WithObjects(mirror).
+		Build()
+	r := &Reconciler{Client: c}
+
+	require.NoError(t, r.removeOwnerRef(ctx, recv, mirror))
+
+	var live mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "m"}, &live))
+	assert.Len(t, live.OwnerReferences, 1,
+		"removeOwnerRef must be a no-op when the receiver is not an owner; "+
+			"writing anyway would burn API budget on every gcOrphan pass")
+}
+
+func TestRemoveOwnerRef_ToleratesNotFound(t *testing.T) {
+	ctx := context.Background()
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r", UID: "recv-uid"},
+	}
+	mirror := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "m"},
+	}
+	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).Build()
+	r := &Reconciler{Client: c}
+
+	require.NoError(t, r.removeOwnerRef(ctx, recv, mirror),
+		"a mirror deleted out from under the controller is a normal race; "+
+			"the reconciler must treat it as a successful no-op rather than "+
+			"surface a NotFound error and requeue forever")
 }
