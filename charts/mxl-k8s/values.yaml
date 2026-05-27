@@ -43,9 +43,21 @@ rbac:
 # and CRD teardown.
 cleanup:
   preDeleteDomainWipe:
-    # -- Wipe stale .mxl-flow directories under
-    # gateway.flags.domainPath during helm uninstall. Disable only
-    # when host state is deliberately reused across reinstalls.
+    # -- Wipe stale .mxl-flow directories under gateway.flags.domainPath
+    # during helm uninstall, closing the cold-reinstall lifecycle bug
+    # where surviving hostPath state from a prior install causes the
+    # agent classifier to default the dirs to Origin on the next
+    # install (ghost source-side initiator).
+    #
+    # Set to false if either applies:
+    #   - producers (libmxl writers) are still mmap-attached to files
+    #     under domainPath at uninstall time. rm -rf does not crash
+    #     producers (mmap regions survive unlink), but their writes
+    #     are orphaned from any new consumer. Drain producers first,
+    #     then uninstall.
+    #   - host state under domainPath is intentionally reused across
+    #     chart reinstalls (advanced; expect to clean up manually to
+    #     avoid the ghost-initiator bug).
     enabled: true
     # @schema
     # minimum: 1
