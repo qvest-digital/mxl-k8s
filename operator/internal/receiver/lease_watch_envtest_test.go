@@ -250,6 +250,15 @@ func TestReceiver_LeaseWatchIgnoresOtherNamespaces(t *testing.T) {
 	baseline := rec.waitForAtLeast(key, 1, 5*time.Second)
 	require.GreaterOrEqual(t, baseline, 1)
 
+	// Quiesce so the post-action assertion observes only the
+	// cross-namespace Lease event. markPending on the initial
+	// reconcile writes status, which echoes through the For()
+	// watch as a fresh reconcile; without this wait the baseline
+	// can be sampled before those echoes land and inflate the
+	// post-action count.
+	time.Sleep(750 * time.Millisecond)
+	baseline = rec.countFor(key)
+
 	// Lease in default namespace with a name that would otherwise
 	// match this receiver's flow ID. The predicate must reject it
 	// before the mapper runs.
