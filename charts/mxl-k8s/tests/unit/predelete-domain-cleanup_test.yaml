@@ -1,0 +1,225 @@
+suite: pre-delete domain-cleanup hook
+templates:
+  - templates/job-predelete-domain-cleanup.yaml
+  - templates/serviceaccount-predelete-domain-cleanup.yaml
+  - templates/rbac-predelete-domain-cleanup.yaml
+tests:
+  - it: renders a pre-delete Job by default
+    template: templates/job-predelete-domain-cleanup.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: Job
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-delete
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-10"
+      - equal:
+          path: metadata.annotations["helm.sh/hook-delete-policy"]
+          value: hook-succeeded,hook-failed,before-hook-creation
+      - equal:
+          path: spec.completionMode
+          value: Indexed
+      - equal:
+          path: spec.completions
+          value: 1
+      - equal:
+          path: spec.parallelism
+          value: 1
+      - equal:
+          path: spec.backoffLimit
+          value: 0
+      - equal:
+          path: spec.activeDeadlineSeconds
+          value: 120
+
+  - it: scales completions and parallelism with nodeCount
+    template: templates/job-predelete-domain-cleanup.yaml
+    set:
+      cleanup.preDeleteDomainWipe.nodeCount: 3
+    asserts:
+      - equal:
+          path: spec.completions
+          value: 3
+      - equal:
+          path: spec.parallelism
+          value: 3
+
+  - it: spreads pods across nodes via podAntiAffinity on hostname
+    template: templates/job-predelete-domain-cleanup.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey
+          value: kubernetes.io/hostname
+      - equal:
+          path: spec.template.spec.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].labelSelector.matchLabels["app.kubernetes.io/component"]
+          value: predelete-domain-cleanup
+
+  - it: removes only .mxl-flow children under domainPath
+    template: templates/job-predelete-domain-cleanup.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: '-mindepth 1 -maxdepth 1 -type d -name "\.mxl-flow"'
+      - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'xargs -0 -r rm -rf'
+      - equal:
+          path: spec.template.spec.containers[0].env[0].name
+          value: DOMAIN_PATH
+      - equal:
+          path: spec.template.spec.containers[0].env[0].value
+          value: /run/mxl/domain
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPath
+          value: /run/mxl/domain
+      - equal:
+          path: spec.template.spec.volumes[0].hostPath.path
+          value: /run/mxl/domain
+      - equal:
+          path: spec.template.spec.volumes[0].hostPath.type
+          value: DirectoryOrCreate
+
+  - it: tracks a custom gateway.flags.domainPath everywhere it appears
+    template: templates/job-predelete-domain-cleanup.yaml
+    set:
+      gateway.flags.domainPath: /var/run/mxl/domain
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[0].value
+          value: /var/run/mxl/domain
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPath
+          value: /var/run/mxl/domain
+      - equal:
+          path: spec.template.spec.volumes[0].hostPath.path
+          value: /var/run/mxl/domain
+
+  - it: runs the nodecount-guard before the cleanup container
+    template: templates/job-predelete-domain-cleanup.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: nodecount-guard
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: bitnami/kubectl:1.31
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'kubectl get nodes'
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'FATAL: cleanup\.preDeleteDomainWipe\.nodeCount=1'
+      - equal:
+          path: spec.template.spec.initContainers[0].env[0].name
+          value: NODE_SELECTOR
+      - equal:
+          path: spec.template.spec.initContainers[0].env[1].name
+          value: CONFIGURED
+      - equal:
+          path: spec.template.spec.initContainers[0].env[1].value
+          value: "1"
+
+  - it: serialises agent.nodeSelector into the guard NODE_SELECTOR env
+    template: templates/job-predelete-domain-cleanup.yaml
+    set:
+      agent.nodeSelector:
+        mxl.qvest-digital.com/agent: "true"
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].env[0].value
+          value: mxl.qvest-digital.com/agent=true
+      - equal:
+          path: spec.template.spec.nodeSelector["mxl.qvest-digital.com/agent"]
+          value: "true"
+
+  - it: propagates agent.tolerations to the cleanup pod
+    template: templates/job-predelete-domain-cleanup.yaml
+    set:
+      agent.tolerations:
+        - key: dedicated
+          operator: Equal
+          value: media
+          effect: NoSchedule
+    asserts:
+      - equal:
+          path: spec.template.spec.tolerations[0].key
+          value: dedicated
+      - equal:
+          path: spec.template.spec.tolerations[0].value
+          value: media
+
+  - it: binds the cleanup pod to its own ServiceAccount
+    template: templates/job-predelete-domain-cleanup.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: mxl-k8s-predelete-domain-cleanup
+      - equal:
+          path: spec.template.spec.restartPolicy
+          value: Never
+
+  - it: cleanup.preDeleteDomainWipe.enabled=false suppresses every resource
+    set:
+      cleanup.preDeleteDomainWipe.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: gateway.enabled=false suppresses the cleanup hook entirely
+    set:
+      gateway.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders the cleanup ServiceAccount as a pre-delete hook
+    template: templates/serviceaccount-predelete-domain-cleanup.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: ServiceAccount
+      - equal:
+          path: metadata.name
+          value: mxl-k8s-predelete-domain-cleanup
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-delete
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-30"
+
+  - it: renders ClusterRole + ClusterRoleBinding granting node read
+    template: templates/rbac-predelete-domain-cleanup.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: ClusterRole
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: [nodes]
+            verbs: [get, list]
+        documentIndex: 0
+      - isKind:
+          of: ClusterRoleBinding
+        documentIndex: 1
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-delete
+        documentIndex: 1
+
+  - it: rbac.create=false suppresses the cleanup ClusterRole and Binding
+    template: templates/rbac-predelete-domain-cleanup.yaml
+    set:
+      rbac.create: false
+    asserts:
+      - hasDocuments:
+          count: 0

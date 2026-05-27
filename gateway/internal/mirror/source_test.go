@@ -568,6 +568,62 @@ func TestReconcile_FlowOriginRotationReopensReader(t *testing.T) {
 			"gateway tails the rebound writer instead of the stale handle")
 }
 
+func TestReconcile_SourceNodeMutatedAwayClosesEntry(t *testing.T) {
+	// The operator mutates spec.sourceNode away from this node (e.g.
+	// the source agent moves to a different host). The MxlFlowMirror
+	// watch is unfiltered, so the spec change wakes Reconcile here.
+	// Without the closeEntry call ahead of the early return, the
+	// in-memory sourceEntry stays installed with an RCInitiator open
+	// against a producer-less .mxl-flow until the pod is bounced.
+	scheme := newSourceTestScheme(t)
+	const selfNode = "node-a"
+	const otherNode = "node-b"
+	mirror := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "m1",
+			Namespace:  "ns1",
+			Finalizers: []string{SourceFinalizerName},
+		},
+		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
+			FlowID:     "flow-1",
+			SourceNode: otherNode,
+			TargetNode: "node-c",
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	r := &SourceReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		NodeName: selfNode,
+		sources:  map[types.NamespacedName]*sourceEntry{},
+		attempts: map[types.NamespacedName]uint32{},
+	}
+
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+
+	// Pre-seed: a previous reconcile (when spec.sourceNode == selfNode)
+	// installed an entry on this node. closeSourceHandles is nil-safe
+	// for every field, so a zero-value entry is enough to detect the
+	// removal without spinning up real fabrics handles.
+	r.sources[key] = &sourceEntry{}
+
+	_, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	require.NoError(t, err)
+
+	r.mu.Lock()
+	_, present := r.sources[key]
+	r.mu.Unlock()
+	require.False(t, present,
+		"entry must be removed when spec.sourceNode is mutated away; "+
+			"otherwise the RCInitiator keeps ticking against a producer-less "+
+			"flow until the pod restarts")
+}
+
 func TestSource_SeedAttemptsFromStatus(t *testing.T) {
 	// A gateway pod restart drops every in-memory counter. Without a
 	// seed from status, a mirror whose target has been unreachable

@@ -86,8 +86,8 @@ github.com/prometheus/common v0.67.5 h1:pIgK94WWlQt1WLwAC5j2ynLaBRDiinoAb86HZHTU
 github.com/prometheus/common v0.67.5/go.mod h1:SjE/0MzDEEAyrdr5Gqc6G+sXI67maCxzaT3A2+HqjUw=
 github.com/prometheus/procfs v0.19.2 h1:zUMhqEW66Ex7OXIiDkll3tl9a1ZdilUOd/F6ZXw4Vws=
 github.com/prometheus/procfs v0.19.2/go.mod h1:M0aotyiemPhBCM0z5w87kL22CxfcH05ZpYlu+b4J7mw=
-github.com/qvest-digital/go-mxl v1.0.0-rc.5 h1:DVMJDzlPDjol3JtgQa2IGoeWDaE6oj7WP8+Ok7I+NyM=
-github.com/qvest-digital/go-mxl v1.0.0-rc.5/go.mod h1:cYzyT+S/AONytsKr/DozzFQP2OrNrg/JsQOSjvwn+Rk=
+github.com/qvest-digital/go-mxl v1.0.0-rc.8 h1:Tvha6oYI8uYPup0HeHjVfIuHPLMBeGIKo3vuLEa1Qmk=
+github.com/qvest-digital/go-mxl v1.0.0-rc.8/go.mod h1:cYzyT+S/AONytsKr/DozzFQP2OrNrg/JsQOSjvwn+Rk=
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
 github.com/spf13/pflag v1.0.9 h1:9exaQaMOCwffKiiiYk6/BndUBv+iRViNW+4lEMi0PvY=
