@@ -1,0 +1,29 @@
+suite: app.kubernetes.io/version label sanitisation
+templates:
+  - templates/daemonset-agent.yaml
+tests:
+  - it: sanitises '+' in app.kubernetes.io/version label
+    chart:
+      appVersion: 0.1.0+sha.deadbeef
+    asserts:
+      - matchRegex:
+          path: metadata.labels["app.kubernetes.io/version"]
+          pattern: ^0\.1\.0_sha\.deadbeef$
+      - notMatchRegex:
+          path: metadata.labels["app.kubernetes.io/version"]
+          pattern: \+
+      - matchRegex:
+          path: spec.template.metadata.labels["app.kubernetes.io/version"]
+          pattern: ^0\.1\.0_sha\.deadbeef$
+      - notMatchRegex:
+          path: spec.template.metadata.labels["app.kubernetes.io/version"]
+          pattern: \+
+
+  - it: omits app.kubernetes.io/version when appVersion is empty
+    chart:
+      appVersion: ""
+    asserts:
+      - notExists:
+          path: metadata.labels["app.kubernetes.io/version"]
+      - notExists:
+          path: spec.template.metadata.labels["app.kubernetes.io/version"]

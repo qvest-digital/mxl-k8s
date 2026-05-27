@@ -7,6 +7,16 @@ Chart name + version label.
 {{- end -}}
 
 {{/*
+Sanitised app.kubernetes.io/version. K8s label values forbid '+',
+which is legal in semver build-metadata; collapse to '_' to match
+mxlk8s.chart's existing convention.
+Call as: include "mxlk8s.appVersion" .Chart
+*/}}
+{{- define "mxlk8s.appVersion" -}}
+{{- .AppVersion | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
 Common labels applied to every object.
 */}}
 {{- define "mxlk8s.labels" -}}
@@ -15,7 +25,7 @@ app.kubernetes.io/name: {{ .Chart.Name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- if .Chart.AppVersion }}
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/version: {{ include "mxlk8s.appVersion" .Chart | quote }}
 {{- end }}
 {{- with .Values.global.commonLabels }}
 {{ toYaml . }}
@@ -42,7 +52,7 @@ makes the apiserver reject the workload at install time.
 helm.sh/chart: {{ include "mxlk8s.chart" .Context }}
 app.kubernetes.io/managed-by: {{ .Context.Release.Service }}
 {{- if .Context.Chart.AppVersion }}
-app.kubernetes.io/version: {{ .Context.Chart.AppVersion | quote }}
+app.kubernetes.io/version: {{ include "mxlk8s.appVersion" .Context.Chart | quote }}
 {{- end }}
 {{ include "mxlk8s.selectorLabels" . }}
 {{- with .Context.Values.global.commonLabels }}
