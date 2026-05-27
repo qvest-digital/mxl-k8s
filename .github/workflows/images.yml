@@ -3,15 +3,6 @@ name: images
 on:
   push:
     branches: [main]
-    # Manual escape hatch: a developer pushing a tag from a shell.
-    # release-please-driven publishes go through workflow_call from
-    # release-please.yml for explicit per-component gating; with
-    # release-please-action now authenticated through
-    # RELEASE_PLEASE_TOKEN its tag push also matches this filter,
-    # so each release tag currently publishes twice (once via
-    # workflow_call, once via this tag-push listener) until the
-    # overlap is collapsed.
-    tags: ['*/v*.*.*']
   pull_request:
   # Invoked from release-please.yml once a per-component release
   # tag has just been cut (operator/agent/gateway/shim). The tag
@@ -47,8 +38,8 @@ permissions:
 concurrency:
   # Include release_tag so distinct workflow_call / workflow_dispatch
   # backfills (one per component tag) get their own queue slot and
-  # don't cancel each other. PR / push / tag-event invocations key
-  # on the ref as before.
+  # don't cancel each other. PR / push invocations key on the ref
+  # as before.
   group: images-${{ github.workflow }}-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -58,14 +49,12 @@ jobs:
   # depends on. See CLAUDE.md for the contract: when a Dockerfile
   # starts COPYing a new sibling module, that module must be added
   # here so the image rebuilds on the dependency's changes.
-  # Tag-event builds bypass this filter entirely; a release tag is
-  # an explicit "publish this image now" signal regardless of diff.
   changes:
-    # Diff-based filtering only makes sense for PR / push-to-branch
-    # events. Tag pushes, workflow_call and workflow_dispatch carry
-    # an explicit release_tag (or the dev-build sentinel) and
-    # bypass the per-image filter in meta.
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')
+    # Diff-based filtering only makes sense for PR / push events.
+    # workflow_call and workflow_dispatch carry an explicit
+    # release_tag (or the dev-build sentinel) and bypass the per-
+    # image filter in meta.
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     outputs:
@@ -104,15 +93,15 @@ jobs:
   # so build and merge agree on what to publish.
   #
   # The images list is a JSON array consumed by the build matrix
-  # below. On a per-component tag push or a workflow_call/dispatch
-  # carrying release_tag, only the matching image is included. On
-  # main / PR events the list is filtered by the changes job; an
-  # unrelated diff publishes nothing.
+  # below. On a workflow_call/dispatch carrying release_tag, only
+  # the matching image is included. On main / PR events the list
+  # is filtered by the changes job; an unrelated diff publishes
+  # nothing.
   meta:
     needs: changes
-    # changes is skipped for tag pushes, workflow_call and
-    # workflow_dispatch (none of those rely on diff-based filtering),
-    # so meta must run even when its dependency was skipped.
+    # changes is skipped for workflow_call and workflow_dispatch
+    # (neither relies on diff-based filtering), so meta must run
+    # even when its dependency was skipped.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     outputs:
@@ -129,8 +118,8 @@ jobs:
       # - push to main (branch): changes.kind == true and push == true
       #   (release-please merges already toggled push=false above).
       # - workflow_dispatch with empty release_tag: always true.
-      # - tag push / workflow_call with release_tag: false. Release
-      #   publishes are not gated on a smoke test.
+      # - workflow_call with release_tag: false. Release publishes
+      #   are not gated on a smoke test.
       CHANGED_KIND:   ${{ needs.changes.outputs.kind   || 'false' }}
       PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
       # head_commit is present on push events; empty otherwise. Used
@@ -141,7 +130,7 @@ jobs:
       # When `changes` is skipped, needs.changes.outputs.<x> is the
       # empty string. Defaulting to 'true' falls back to "build it"
       # for the no-filter case (manual workflow_dispatch dev build);
-      # tag / release_tag paths bypass the wanted check entirely via
+      # the release_tag path bypasses the wanted check entirely via
       # `selected`.
       CHANGED_OPERATOR:   ${{ needs.changes.outputs.operator   || 'true' }}
       CHANGED_AGENT:      ${{ needs.changes.outputs.agent      || 'true' }}
@@ -186,8 +175,7 @@ jobs:
 
           # tag_release applies the version-tag publish convention
           # (:v<X>, plus :latest or :pre) from a "<component>/v<X>"
-          # ref. Shared by direct tag pushes and the release_tag
-          # input path so both produce identical tag lists.
+          # ref passed via the release_tag input.
           tag_release() {
             local ref="$1" version
             selected="${ref%%/*}"
@@ -217,32 +205,27 @@ jobs:
             # construction, so :dev tracking HEAD stays consistent.
             extra_tags+=("dev" "sha-${short_sha}")
           elif [ "$GITHUB_EVENT_NAME" = "push" ]; then
-            if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-              push=true
-              tag_release "$GITHUB_REF_NAME"
-            else
-              # Push to main: :dev tracks HEAD; :sha-<short> is the
-              # content-addressed handle. Defer release-please's own
-              # merge commits to the workflow_call invocation from
-              # release-please.yml so the same content isn't built
-              # twice (push-to-main run alongside workflow_call run).
-              # release-please's PR titles always start with
-              # "chore(main): release "; the squash-merge subject
-              # carries that prefix verbatim.
-              case "${HEAD_COMMIT_MSG%%$'\n'*}" in
-                "chore(main): release "*)
-                  echo "Release-please merge commit; image publish deferred to workflow_call from release-please.yml."
-                  push=false
-                  # Empty the wanted set so the loop below produces
-                  # an empty images list and build/merge skip.
-                  for k in "${!wanted[@]}"; do wanted[$k]=false; done
-                  ;;
-                *)
-                  push=true
-                  extra_tags+=("dev" "sha-${short_sha}")
-                  ;;
-              esac
-            fi
+            # Push to main: :dev tracks HEAD; :sha-<short> is the
+            # content-addressed handle. Defer release-please's own
+            # merge commits to the workflow_call invocation from
+            # release-please.yml so the same content isn't built
+            # twice (push-to-main run alongside workflow_call run).
+            # release-please's PR titles always start with
+            # "chore(main): release "; the squash-merge subject
+            # carries that prefix verbatim.
+            case "${HEAD_COMMIT_MSG%%$'\n'*}" in
+              "chore(main): release "*)
+                echo "Release-please merge commit; image publish deferred to workflow_call from release-please.yml."
+                push=false
+                # Empty the wanted set so the loop below produces
+                # an empty images list and build/merge skip.
+                for k in "${!wanted[@]}"; do wanted[$k]=false; done
+                ;;
+              *)
+                push=true
+                extra_tags+=("dev" "sha-${short_sha}")
+                ;;
+            esac
           elif [ "$GITHUB_EVENT_NAME" = "pull_request" ] \
               && [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}" ]; then
             push=true
@@ -292,10 +275,10 @@ jobs:
           fi
 
           # kind-integration eligibility. The kind path is a pre-
-          # release smoke test, not a release gate, so tag pushes and
-          # workflow_call-with-release_tag invocations always skip.
-          # has_images=false short-circuits to false too: with no
-          # images to build, there is nothing for kind to load.
+          # release smoke test, not a release gate, so workflow_call-
+          # with-release_tag invocations always skip. has_images=false
+          # short-circuits to false too: with no images to build,
+          # there is nothing for kind to load.
           kind_wanted=false
           case "$GITHUB_EVENT_NAME" in
             pull_request)
@@ -310,8 +293,7 @@ jobs:
               fi
               ;;
             push)
-              if [ "$GITHUB_REF_TYPE" = "branch" ] \
-                  && [ "$GITHUB_REF" = "refs/heads/main" ] \
+              if [ "$GITHUB_REF" = "refs/heads/main" ] \
                   && [ "$CHANGED_KIND" = "true" ] \
                   && [ "$push" = "true" ]; then
                 kind_wanted=true
@@ -343,7 +325,7 @@ jobs:
     needs: meta
     # `!cancelled()` defeats the implicit success() check on needs.
     # Without it, build would be skipped whenever a transitive need
-    # (the changes job, which is skipped for tag / workflow_call /
+    # (the changes job, which is skipped for workflow_call /
     # workflow_dispatch events) was non-success, even though the
     # explicit condition below would otherwise have run it.
     if: ${{ !cancelled() && needs.meta.outputs.has_images == 'true' }}
@@ -520,10 +502,9 @@ jobs:
   # Bring up a 3-node KIND cluster on the runner, point `make kind-up`
   # at the per-PR multi-arch manifest the `merge` job just published,
   # and exercise the integration suite under test/integration/kind.
-  # Gated by meta.kind_wanted so unrelated diffs skip cleanly. Tag
-  # publishes and workflow_call-with-release_tag invocations skip by
-  # design -- the kind path is a pre-release smoke test, not a
-  # release gate.
+  # Gated by meta.kind_wanted so unrelated diffs skip cleanly.
+  # workflow_call-with-release_tag invocations skip by design --
+  # the kind path is a pre-release smoke test, not a release gate.
   kind-integration:
     needs: [meta, build, merge, retag]
     if: ${{ !cancelled() && needs.meta.outputs.kind_wanted == 'true' && needs.merge.result == 'success' && needs.retag.result == 'success' }}
