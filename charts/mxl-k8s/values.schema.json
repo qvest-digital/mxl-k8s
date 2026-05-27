@@ -794,6 +794,13 @@
               "required": [],
               "title": "metricsBindAddress"
             },
+            "pprofBindAddress": {
+              "default": "",
+              "description": "Bind address for the net/http/pprof endpoint. Empty disables; otherwise must be a loopback bind (127.0.0.1: or localhost:). Use kubectl port-forward to reach the endpoint; see docs/diagnostics/perf-shortfall.md for the capture recipe.",
+              "pattern": "^$|^(127\\.0\\.0\\.1|localhost):[0-9]+$",
+              "required": [],
+              "title": "pprofBindAddress"
+            },
             "providers": {
               "description": " items:   enum: [\"tcp\", \"verbs\", \"efa\", \"shm\", \"auto\"] @schema",
               "items": {

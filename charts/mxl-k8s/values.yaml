@@ -390,6 +390,15 @@ gateway:
     # @schema
     healthProbeBindAddress: ":8081"
     # @schema
+    # pattern: ^$|^(127\.0\.0\.1|localhost):[0-9]+$
+    # @schema
+    # -- Bind address for the net/http/pprof endpoint. Empty
+    # disables; otherwise must be a loopback bind (127.0.0.1: or
+    # localhost:). Use kubectl port-forward to reach the endpoint;
+    # see docs/diagnostics/perf-shortfall.md for the capture
+    # recipe.
+    pprofBindAddress: ""
+    # @schema
     # enum: ["debug", "info", "warn", "error"]
     # @schema
     zapLogLevel: info

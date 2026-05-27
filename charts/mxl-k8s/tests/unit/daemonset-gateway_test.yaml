@@ -36,6 +36,23 @@ tests:
           path: spec.template.spec.containers[0].args
           content: --bind-address=
 
+  - it: default pprofBindAddress renders a bare --pprof-bind-address= arg
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --pprof-bind-address=
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --pprof-bind-address=127.0.0.1:6060
+
+  - it: explicit pprofBindAddress renders the loopback bind
+    set:
+      gateway.flags.pprofBindAddress: 127.0.0.1:6060
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --pprof-bind-address=127.0.0.1:6060
+
   - it: rdma.enabled adds IPC_LOCK + SYS_RESOURCE and the /dev/infiniband mount
     set:
       gateway.rdma.enabled: true
