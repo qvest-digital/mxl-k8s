@@ -67,7 +67,7 @@ cleanup:
     # fails the chart with a clear error in that case.
     nodeCount: 1
     # -- Image used by the cleanup Job. Pinned tag (no :latest).
-    image: busybox:1.36
+    image: busybox:1.38
     # -- Image used by the nodecount-guard init-container. Must
     # carry a kubectl binary on PATH.
     guardImage: bitnami/kubectl:1.31
