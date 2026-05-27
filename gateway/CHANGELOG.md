@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.0.0-rc.4](https://github.com/qvest-digital/mxl-k8s/compare/gateway/v1.0.0-rc.3...gateway/v1.0.0-rc.4) (2026-05-27)
+
+
+### Features
+
+* **chart:** expose gateway pprof bind address ([f32db01](https://github.com/qvest-digital/mxl-k8s/commit/f32db0158adf99863d25c76ac9a78ed9f8709e31))
+* **gateway:** pprof bind address flag ([#101](https://github.com/qvest-digital/mxl-k8s/issues/101)) ([f32db01](https://github.com/qvest-digital/mxl-k8s/commit/f32db0158adf99863d25c76ac9a78ed9f8709e31))
+* **operator,gateway,agent:** harden MxlFlowMirror lifecycle ([#79](https://github.com/qvest-digital/mxl-k8s/issues/79)) ([a8aa3e3](https://github.com/qvest-digital/mxl-k8s/commit/a8aa3e306ea77e8856008d0dad57a0052331db3b))
+
+
+### Bug Fixes
+
+* **gateway:** close entry on sourceNode mismatch ([#97](https://github.com/qvest-digital/mxl-k8s/issues/97)) ([3434e83](https://github.com/qvest-digital/mxl-k8s/commit/3434e83adae7eeaf464dff1330a84ed33977522e))
+* **gateway:** recover targets wedged after first grain ([#87](https://github.com/qvest-digital/mxl-k8s/issues/87)) ([fe49ca3](https://github.com/qvest-digital/mxl-k8s/commit/fe49ca302296afd517118b08f3309d33b2b7a526))
+* **gateway:** recover targets wedged in silent ErrNotReady ([#85](https://github.com/qvest-digital/mxl-k8s/issues/85)) ([943c266](https://github.com/qvest-digital/mxl-k8s/commit/943c266d997646febb74f10183389826f88c71e6))
+
+
+### Build System
+
+* **gateway:** bump go-mxl to 1.0.0-rc.6 ([#98](https://github.com/qvest-digital/mxl-k8s/issues/98)) ([4a3a3eb](https://github.com/qvest-digital/mxl-k8s/commit/4a3a3eb010f22aa5286ae401f4dcded6abe09496))
+* **gateway:** bump go-mxl to 1.0.0-rc.7 ([#102](https://github.com/qvest-digital/mxl-k8s/issues/102)) ([aadb15d](https://github.com/qvest-digital/mxl-k8s/commit/aadb15dd02878058d102cc232ea84d6a1573f21a))
+* **gateway:** bump go-mxl to 1.0.0-rc.8 ([#103](https://github.com/qvest-digital/mxl-k8s/issues/103)) ([97023a6](https://github.com/qvest-digital/mxl-k8s/commit/97023a69a284fff4a2f9d8364c642206487663db))
+
 ## [1.0.0-rc.3](https://github.com/qvest-digital/mxl-k8s/compare/gateway/v1.0.0-rc.2...gateway/v1.0.0-rc.3) (2026-05-19)
 
 
