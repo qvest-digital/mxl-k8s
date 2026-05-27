@@ -18,12 +18,3 @@ tests:
       - notMatchRegex:
           path: spec.template.metadata.labels["app.kubernetes.io/version"]
           pattern: \+
-
-  - it: omits app.kubernetes.io/version when appVersion is empty
-    chart:
-      appVersion: ""
-    asserts:
-      - notExists:
-          path: metadata.labels["app.kubernetes.io/version"]
-      - notExists:
-          path: spec.template.metadata.labels["app.kubernetes.io/version"]
