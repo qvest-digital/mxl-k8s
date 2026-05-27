@@ -37,6 +37,46 @@ crds:
 rbac:
   create: true
 
+# -- Pre-delete lifecycle hooks. The domain wipe removes stale
+# .mxl-flow directories under gateway.flags.domainPath at chart
+# uninstall, because they live on a hostPath and survive namespace
+# and CRD teardown.
+cleanup:
+  preDeleteDomainWipe:
+    # -- Wipe stale .mxl-flow directories under gateway.flags.domainPath
+    # during helm uninstall, closing the cold-reinstall lifecycle bug
+    # where surviving hostPath state from a prior install causes the
+    # agent classifier to default the dirs to Origin on the next
+    # install (ghost source-side initiator).
+    #
+    # Set to false if either applies:
+    #   - producers (libmxl writers) are still mmap-attached to files
+    #     under domainPath at uninstall time. rm -rf does not crash
+    #     producers (mmap regions survive unlink), but their writes
+    #     are orphaned from any new consumer. Drain producers first,
+    #     then uninstall.
+    #   - host state under domainPath is intentionally reused across
+    #     chart reinstalls (advanced; expect to clean up manually to
+    #     avoid the ghost-initiator bug).
+    enabled: true
+    # @schema
+    # minimum: 1
+    # @schema
+    # -- Effective node count for the agent DaemonSet. An under-set
+    # value yields a partial wipe; the nodecount-guard init-container
+    # fails the chart with a clear error in that case.
+    nodeCount: 1
+    # -- Image used by the cleanup Job. Pinned tag (no :latest).
+    image: busybox:1.36
+    # -- Image used by the nodecount-guard init-container. Must
+    # carry a kubectl binary on PATH.
+    guardImage: bitnami/kubectl:1.31
+    # @schema
+    # minimum: 1
+    # @schema
+    # -- Per-pod completion timeout.
+    timeoutSeconds: 120
+
 # -- Operator: cluster-wide reconciler for MxlReceiver, MxlFlowMirror,
 # and related CRDs. Single Deployment.
 operator:
