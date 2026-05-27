@@ -5,8 +5,12 @@ on:
     branches: [main]
     # Manual escape hatch: a developer pushing a tag from a shell.
     # release-please-driven publishes go through workflow_call from
-    # release-please.yml because tags created by GITHUB_TOKEN do not
-    # start downstream workflow runs.
+    # release-please.yml for explicit per-component gating; with
+    # release-please-action now authenticated through
+    # RELEASE_PLEASE_TOKEN its tag push also matches this filter,
+    # so each release tag currently publishes twice (once via
+    # workflow_call, once via this tag-push listener) until the
+    # overlap is collapsed.
     tags: ['*/v*.*.*']
   pull_request:
   # Invoked from release-please.yml once a per-component release
