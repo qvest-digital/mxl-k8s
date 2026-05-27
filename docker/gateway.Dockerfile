@@ -4,7 +4,8 @@
 # libmxl-fabrics, and libfabric are already in place.
 # Build context: repo root.
 
-ARG GO_MXL_TAG=1.0.0-rc.6
+# renovate: datasource=docker depName=ghcr.io/qvest-digital/go-mxl-builder
+ARG GO_MXL_TAG=1.0.0-rc.8
 
 FROM ghcr.io/qvest-digital/go-mxl-builder:${GO_MXL_TAG} AS builder
 WORKDIR /workspace
