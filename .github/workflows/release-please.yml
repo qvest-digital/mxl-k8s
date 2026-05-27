@@ -48,10 +48,13 @@ jobs:
 
   # Once a charts/mxl-k8s tag is cut (prerelease or stable),
   # package and push the chart with per-component image tags
-  # pinned. This is a reusable workflow call because GITHUB_TOKEN-
-  # created release events do not start downstream workflow runs,
-  # so chart.yml cannot listen on release:published.
-  # workflow_call is explicitly excepted from that restriction.
+  # pinned. Driven via workflow_call so the per-component
+  # release_created output gates the call explicitly. Pre-PAT
+  # this was also forced (release events created by GITHUB_TOKEN
+  # do not start downstream runs); release-please-action is now
+  # authenticated through RELEASE_PLEASE_TOKEN so that
+  # restriction no longer applies, but explicit gating is
+  # preferable to a tag-prefix filter on release:published.
   package-chart:
     needs: [release-please]
     if: needs.release-please.outputs.chart_released == 'true'
@@ -62,11 +65,10 @@ jobs:
     with:
       release_tag: ${{ needs.release-please.outputs.chart_tag }}
 
-  # Per-component image publishes. Same workflow_call-instead-of-
-  # tag-event reason as the chart above: tags pushed by GITHUB_TOKEN
-  # do not start downstream runs, so images.yml has to be invoked
-  # directly. Each job is gated on its component's release_created
-  # so an unrelated release cycle costs nothing.
+  # Per-component image publishes. Same workflow_call-driven
+  # path as the chart above, for the same explicit-gating
+  # reason. Each job is gated on its component's release_created
+  # output so an unrelated release cycle costs nothing.
   publish-operator-image:
     needs: [release-please]
     if: needs.release-please.outputs.operator_released == 'true'
