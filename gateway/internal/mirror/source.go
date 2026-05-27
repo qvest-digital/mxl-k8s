@@ -171,6 +171,11 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	if mirror.Spec.SourceNode != r.NodeName {
+		// spec.sourceNode used to name this node and was mutated to
+		// another; the in-memory sources map keeps an RCInitiator open
+		// against a producer-less .mxl-flow until the pod is bounced.
+		// closeEntry is a no-op when key absent (def at line 592).
+		r.closeEntry(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
