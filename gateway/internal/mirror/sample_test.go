@@ -56,7 +56,7 @@ func TestRunSampleTransferLoop_TransfersDeltaSinceLastTick(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, makeProgress, 480, time.Millisecond, tracker)
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, makeProgress, 480, 480, time.Millisecond, tracker)
 
 	require.Eventually(t, func() bool { return len(xfersSnap()) == 1 },
 		time.Second, time.Millisecond, "expected exactly one sample-run transfer")
@@ -72,6 +72,55 @@ func TestRunSampleTransferLoop_TransfersDeltaSinceLastTick(t *testing.T) {
 	assert.Zero(t, agedOuts, "a within-window catch-up is not an aged-out skip")
 	assert.GreaterOrEqual(t, progressCalls.Load(), int32(1),
 		"makeProgress must drive the fabric event queues every tick")
+}
+
+func TestRunSampleTransferLoop_ChunksLargeDeltaByXferBatch(t *testing.T) {
+	// A within-window delta larger than xferBatch must be transferred
+	// as several runs of at most xferBatch each, not one oversized
+	// TransferSamples (the fabric rejects an over-large count). The
+	// delta is below maxBatch, so this is a normal catch-up with no
+	// aged-out skip.
+	const xferBatch = 480
+	var probeCalls atomic.Int32
+	probe := func() (uint64, error) {
+		if probeCalls.Add(1) == 1 {
+			return 0, nil
+		}
+		return 1200, nil
+	}
+
+	var mu sync.Mutex
+	var xfers []sampleXfer
+	transfer := func(head uint64, count int) error {
+		mu.Lock()
+		xfers = append(xfers, sampleXfer{head, count})
+		mu.Unlock()
+		return nil
+	}
+	xfersSnap := func() []sampleXfer {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]sampleXfer, len(xfers))
+		copy(out, xfers)
+		return out
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	tracker := &recordingTracker{}
+	// maxBatch large so no aged-out clamp fires; xferBatch caps each run.
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, 100000, xferBatch, time.Millisecond, tracker)
+
+	require.Eventually(t, func() bool { return len(xfersSnap()) == 3 },
+		time.Second, time.Millisecond, "expected the 1200-sample delta to split into 480+480+240")
+
+	cancel()
+	<-done
+
+	assert.Equal(t, []sampleXfer{{480, 480}, {960, 480}, {1200, 240}}, xfersSnap(),
+		"the loop must chunk the delta into runs of at most xferBatch, each ending at the chunk's last index")
+	_, agedOuts := tracker.snapshot()
+	assert.Zero(t, agedOuts, "a within-maxBatch delta is a normal catch-up, not an aged-out skip")
 }
 
 func TestRunSampleTransferLoop_FellBehindSkipsToWindowAndSignals(t *testing.T) {
@@ -109,7 +158,7 @@ func TestRunSampleTransferLoop_FellBehindSkipsToWindowAndSignals(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, maxBatch, time.Millisecond, tracker)
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, maxBatch, maxBatch, time.Millisecond, tracker)
 
 	require.Eventually(t, func() bool { return len(xfersSnap()) == 1 },
 		time.Second, time.Millisecond, "expected the clamped final run to transfer")
@@ -159,7 +208,7 @@ func TestRunSampleTransferLoop_TransferErrorBreaksTickAndRetries(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, 480, time.Millisecond, &recordingTracker{})
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, 480, 480, time.Millisecond, &recordingTracker{})
 
 	require.Eventually(t, func() bool { return xfersLen() >= 1 },
 		time.Second, time.Millisecond, "a transfer error must not wedge the loop; the next tick must retry")
@@ -183,7 +232,7 @@ func TestRunSampleTransferLoop_CtxCancelExitsDuringIdle(t *testing.T) {
 	done := make(chan struct{})
 	go runSampleTransferLoop(ctx, done, "flow-audio", probe,
 		func(uint64, int) error { t.Error("no transfer expected on an idle flow"); return nil },
-		func() error { return nil }, 480, time.Millisecond, &recordingTracker{})
+		func() error { return nil }, 480, 480, time.Millisecond, &recordingTracker{})
 
 	cancel()
 	select {

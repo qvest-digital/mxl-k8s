@@ -430,9 +430,10 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 	}
 
 	// A continuous (audio) flow moves samples, not grains; pick the
-	// transfer path from the flow's data format. maxBatch bounds both a
-	// single TransferSamples call and the catch-up window: the reader's
-	// max readable sample run.
+	// transfer path from the flow's data format. maxBatch is the
+	// reader's max readable sample run, used as the catch-up window;
+	// xferBatch caps a single TransferSamples call, which the fabric
+	// rejects when the count is over-large.
 	cfg, err := reader.Config()
 	if err != nil {
 		_ = info.Close()
@@ -441,7 +442,7 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 		return nil, fmt.Errorf("Reader.Config: %w", err)
 	}
 	audio := cfg.Common.Format == mxl.FormatAudio
-	var maxBatch uint64
+	var maxBatch, xferBatch uint64
 	if audio {
 		maxBatch, err = reader.GetMaxReadLengthSamples()
 		if err != nil {
@@ -449,6 +450,19 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 			_ = initiator.Close()
 			_ = reader.Close()
 			return nil, fmt.Errorf("GetMaxReadLengthSamples: %w", err)
+		}
+		// Cap each transfer at ~10 ms of audio: that is the producer's
+		// natural commit batch and stays well under the fabric's
+		// per-call limit. Transferring the whole readable window in one
+		// TransferSamples is rejected as invalid argument.
+		xferBatch = 1
+		if rate := cfg.Common.GrainRate; rate.Den > 0 && rate.Num > 0 {
+			if b := uint64(rate.Num / (100 * rate.Den)); b > 0 {
+				xferBatch = b
+			}
+		}
+		if maxBatch > 0 && xferBatch > maxBatch {
+			xferBatch = maxBatch
 		}
 	}
 
@@ -480,7 +494,7 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 		transferSamplesFn := func(headIndex uint64, count int) error {
 			return initiator.TransferSamples(headIndex, count)
 		}
-		go runSampleTransferLoop(loopCtx, done, flowID, runtimeFn, transferSamplesFn, progressFn, maxBatch, progressInterval, entry)
+		go runSampleTransferLoop(loopCtx, done, flowID, runtimeFn, transferSamplesFn, progressFn, maxBatch, xferBatch, progressInterval, entry)
 	} else {
 		transferFn := func(idx uint64) (bool, error) {
 			grain, err := reader.GetGrainNonBlocking(idx)
@@ -612,12 +626,12 @@ func runTransferLoop(
 // canceled. Closes done on exit. It mirrors runTransferLoop but moves
 // ranges of samples per tick rather than one grain per index: a
 // continuous flow's head advances by many samples between ticks, so
-// the loop transfers the (lastSent, head] delta in chunks bounded by
-// maxBatch (the reader's max readable sample run). If the source falls
-// more than maxBatch behind the writer the oldest samples have left
-// the readable window; the loop skips ahead to head-maxBatch and
-// signals the tracker so the reconciler can publish
-// SourceProgress=ReaderAgedOut.
+// the loop transfers the (lastSent, head] delta in chunks of at most
+// xferBatch samples (the fabric rejects an over-large single transfer).
+// If the source falls more than maxBatch (the reader's max readable
+// sample run) behind the writer the oldest samples have left the
+// readable window; the loop skips ahead to head-maxBatch and signals
+// the tracker so the reconciler can publish SourceProgress=ReaderAgedOut.
 //
 // The cgo-dependent calls are injected as functions so the state
 // machine stays testable without libmxl-fabrics. Production binds
@@ -632,6 +646,7 @@ func runSampleTransferLoop(
 	transferSamples SampleTransferFunc,
 	makeProgress ProgressFunc,
 	maxBatch uint64,
+	xferBatch uint64,
 	interval time.Duration,
 	tracker progressTracker,
 ) {
@@ -678,12 +693,12 @@ func runSampleTransferLoop(
 				lastSent = head - maxBatch
 			}
 			// Transfer the remaining (lastSent, head] delta in chunks
-			// of at most maxBatch samples, each ending at the chunk's
+			// of at most xferBatch samples, each ending at the chunk's
 			// last index.
 			for lastSent < head {
 				count := head - lastSent
-				if maxBatch > 0 && count > maxBatch {
-					count = maxBatch
+				if xferBatch > 0 && count > xferBatch {
+					count = xferBatch
 				}
 				end := lastSent + count
 				if err := transferSamples(end, int(count)); err != nil {
