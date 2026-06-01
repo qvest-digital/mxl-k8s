@@ -38,8 +38,8 @@ type RuntimeProbe func() (head uint64, err error)
 
 // TransferFunc transfers one grain from the source flow to the
 // target. The bool return signals "grain was skipped" - production
-// returns it true when grain.TotalSlices == 0 (continuous flows have
-// no slice subdivision and v0 does not transfer them).
+// returns it true when grain.TotalSlices == 0. Continuous (audio)
+// flows take the sample-transfer path and never reach this loop.
 //
 // A non-nil error breaks the per-tick loop; the next tick re-reads
 // head and re-tries from lastSent+1.
@@ -60,3 +60,22 @@ type ReadGrainFunc func() (idx uint64, err error)
 // (OpenGrain + Commit) so consumer FlowReaders see it. Production
 // passes a closure over the per-mirror *mxl.Writer.
 type CommitFunc func(idx uint64) error
+
+// SampleTransferFunc transfers a contiguous run of `count` samples
+// ending at headIndex from a continuous source flow to the target.
+// Production calls Initiator.TransferSamples; tests record the
+// (headIndex, count) pairs. A non-nil error breaks the per-tick loop;
+// the next tick re-reads head and re-tries from lastSent+1.
+type SampleTransferFunc func(headIndex uint64, count int) error
+
+// ReadSamplesFunc polls the target side for an arrived run of samples,
+// returning the ending head index and the sample count. Returns
+// fabrics.ErrNotReady when nothing landed since the previous call so
+// the loop can sleep. Any other error is fatal: it tells the loop to
+// exit and the recovery callback to fire.
+type ReadSamplesFunc func() (headIndex uint64, count int, err error)
+
+// CommitSamplesFunc finishes one arrived run of samples on the local
+// writer (OpenSamples + Commit) so consumer FlowReaders see it.
+// Production passes a closure over the per-mirror *mxl.Writer.
+type CommitSamplesFunc func(headIndex uint64, count int) error
