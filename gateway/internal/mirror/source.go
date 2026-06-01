@@ -429,6 +429,29 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 		return nil, fmt.Errorf("%w: %w", errAddTargetFailed, err)
 	}
 
+	// A continuous (audio) flow moves samples, not grains; pick the
+	// transfer path from the flow's data format. maxBatch bounds both a
+	// single TransferSamples call and the catch-up window: the reader's
+	// max readable sample run.
+	cfg, err := reader.Config()
+	if err != nil {
+		_ = info.Close()
+		_ = initiator.Close()
+		_ = reader.Close()
+		return nil, fmt.Errorf("Reader.Config: %w", err)
+	}
+	audio := cfg.Common.Format == mxl.FormatAudio
+	var maxBatch uint64
+	if audio {
+		maxBatch, err = reader.GetMaxReadLengthSamples()
+		if err != nil {
+			_ = info.Close()
+			_ = initiator.Close()
+			_ = reader.Close()
+			return nil, fmt.Errorf("GetMaxReadLengthSamples: %w", err)
+		}
+	}
+
 	loopCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	entry := &sourceEntry{
@@ -451,23 +474,31 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 		}
 		return rt.HeadIndex, nil
 	}
-	transferFn := func(idx uint64) (bool, error) {
-		grain, err := reader.GetGrainNonBlocking(idx)
-		if err != nil {
-			// Not yet committed or already aged out; signal the loop
-			// to break and re-try on the next tick.
-			return false, err
-		}
-		if grain.TotalSlices == 0 {
-			// Continuous flows or grains with no slice subdivision
-			// report TotalSlices==0; v0 sends only fully-discrete
-			// grains and skips these.
-			return true, nil
-		}
-		return false, initiator.TransferGrain(idx, 0, grain.TotalSlices)
-	}
 	progressFn := initiator.MakeProgressNonBlocking
-	go runTransferLoop(loopCtx, done, flowID, runtimeFn, transferFn, progressFn, progressInterval, entry)
+
+	if audio {
+		transferSamplesFn := func(headIndex uint64, count int) error {
+			return initiator.TransferSamples(headIndex, count)
+		}
+		go runSampleTransferLoop(loopCtx, done, flowID, runtimeFn, transferSamplesFn, progressFn, maxBatch, progressInterval, entry)
+	} else {
+		transferFn := func(idx uint64) (bool, error) {
+			grain, err := reader.GetGrainNonBlocking(idx)
+			if err != nil {
+				// Not yet committed or already aged out; signal the loop
+				// to break and re-try on the next tick.
+				return false, err
+			}
+			if grain.TotalSlices == 0 {
+				// A discrete grain with no slice subdivision; continuous
+				// (audio) flows take the sample path above and never
+				// reach here.
+				return true, nil
+			}
+			return false, initiator.TransferGrain(idx, 0, grain.TotalSlices)
+		}
+		go runTransferLoop(loopCtx, done, flowID, runtimeFn, transferFn, progressFn, progressInterval, entry)
+	}
 
 	return entry, nil
 }
@@ -568,6 +599,102 @@ func runTransferLoop(
 				tracker.recordTransfer(uint64(idx), time.Now())
 			}
 			lastSent = idx
+		}
+
+		if err := makeProgress(); err != nil && !errors.Is(err, fabrics.ErrNotReady) {
+			l.Error(err, "MakeProgress")
+		}
+	}
+}
+
+// runSampleTransferLoop pumps newly committed samples that appear on a
+// continuous (audio) source flow into the initiator until ctx is
+// canceled. Closes done on exit. It mirrors runTransferLoop but moves
+// ranges of samples per tick rather than one grain per index: a
+// continuous flow's head advances by many samples between ticks, so
+// the loop transfers the (lastSent, head] delta in chunks bounded by
+// maxBatch (the reader's max readable sample run). If the source falls
+// more than maxBatch behind the writer the oldest samples have left
+// the readable window; the loop skips ahead to head-maxBatch and
+// signals the tracker so the reconciler can publish
+// SourceProgress=ReaderAgedOut.
+//
+// The cgo-dependent calls are injected as functions so the state
+// machine stays testable without libmxl-fabrics. Production binds
+// probeRuntime to mxl.Reader.Runtime().HeadIndex, transferSamples to
+// Initiator.TransferSamples, and makeProgress to
+// Initiator.MakeProgressNonBlocking.
+func runSampleTransferLoop(
+	ctx context.Context,
+	done chan struct{},
+	flowID string,
+	probeRuntime RuntimeProbe,
+	transferSamples SampleTransferFunc,
+	makeProgress ProgressFunc,
+	maxBatch uint64,
+	interval time.Duration,
+	tracker progressTracker,
+) {
+	defer close(done)
+
+	l := ctrl.Log.WithName("sample-transfer").WithValues("flowID", flowID)
+
+	// Discover the current head and tail the live flow from there,
+	// rather than replaying samples the producer may already have aged
+	// out of the ring.
+	head0, err := probeRuntime()
+	if err != nil {
+		l.Error(err, "initial Runtime")
+		return
+	}
+	lastSent := head0
+
+	t := time.NewTicker(interval)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+
+		head, err := probeRuntime()
+		if err != nil {
+			l.Error(err, "Runtime")
+			continue
+		}
+		if head > lastSent {
+			// Fell behind: the samples between lastSent+1 and
+			// head-maxBatch have left the readable window. Skip them
+			// and signal the tracker so the reconciler can publish the
+			// SourceProgress=ReaderAgedOut condition.
+			if maxBatch > 0 && head-lastSent > maxBatch {
+				l.Info("reader fell behind writer, skipping samples",
+					"fromIndex", lastSent+1, "toIndex", head)
+				if tracker != nil {
+					tracker.recordAgedOut(time.Now())
+				}
+				lastSent = head - maxBatch
+			}
+			// Transfer the remaining (lastSent, head] delta in chunks
+			// of at most maxBatch samples, each ending at the chunk's
+			// last index.
+			for lastSent < head {
+				count := head - lastSent
+				if maxBatch > 0 && count > maxBatch {
+					count = maxBatch
+				}
+				end := lastSent + count
+				if err := transferSamples(end, int(count)); err != nil {
+					l.Error(err, "TransferSamples", "headIndex", end, "count", count)
+					break
+				}
+				if tracker != nil {
+					tracker.recordTransfer(end, time.Now())
+				}
+				lastSent = end
+			}
 		}
 
 		if err := makeProgress(); err != nil && !errors.Is(err, fabrics.ErrNotReady) {

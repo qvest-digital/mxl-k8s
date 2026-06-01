@@ -422,14 +422,26 @@ func (r *TargetReconciler) startProgressLoop(entry *targetEntry, key types.Names
 	entry.done = done
 	target := entry.target
 	writer := entry.writer
-	readFn := target.ReadGrainNonBlocking
-	commitFn := func(idx uint64) error { return commitArrivedGrain(writer, idx) }
-	go runTargetProgressLoop(loopCtx, done, readFn, commitFn, func() {
-		// Detach the recovery work from the goroutine that's
-		// exiting so the recovery's wait-for-done doesn't deadlock
-		// on its own done channel.
+	onFatal := func() {
+		// Detach the recovery work from the goroutine that's exiting
+		// so the recovery's wait-for-done doesn't deadlock on its own
+		// done channel.
 		go r.recoverFromFatalError(key)
-	}, entry)
+	}
+	// A continuous (audio) flow receives sample runs, not grains; pick
+	// the progress path from the flow's data format. The writer's
+	// cached config is the source of truth for which API is valid.
+	if writer.Config().Common.Format == mxl.FormatAudio {
+		readFn := target.ReadSamplesNonBlocking
+		commitFn := func(head uint64, count int) error {
+			return commitArrivedSamples(writer, head, count)
+		}
+		go runTargetSampleProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)
+	} else {
+		readFn := target.ReadGrainNonBlocking
+		commitFn := func(idx uint64) error { return commitArrivedGrain(writer, idx) }
+		go runTargetProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)
+	}
 }
 
 // commitTracker is the subset of targetEntry the progress loop
@@ -539,6 +551,75 @@ func commitArrivedGrain(writer *mxl.Writer, idx uint64) error {
 	}
 	if err := ga.Commit(ga.TotalSlices, 0); err != nil {
 		return fmt.Errorf("Commit(%d): %w", idx, err)
+	}
+	return nil
+}
+
+// runTargetSampleProgressLoop drives a libmxl-fabrics Target for a
+// continuous (audio) flow until ctx is canceled or ReadSamples reports
+// a non-recoverable error. It mirrors runTargetProgressLoop: the
+// non-blocking ReadSamples advances the libfabric event + completion
+// queues on every call, and the same Go-side idle sleep avoids the
+// blocking-variant SIGURG interaction documented there. For every run
+// of samples ReadSamples reports as arrived, commit does the
+// OpenSamples + Commit dance on the local FlowWriter so consumer
+// FlowReaders see them. Any non-ErrNotReady error is fatal and fires
+// onFatal so the reconciler rebuilds the fabric side.
+func runTargetSampleProgressLoop(
+	ctx context.Context,
+	done chan struct{},
+	readSamples ReadSamplesFunc,
+	commit CommitSamplesFunc,
+	onFatal func(),
+	tracker commitTracker,
+) {
+	defer close(done)
+	l := ctrl.Log.WithName("target-sample-progress")
+	const idleSleep = 1 * time.Millisecond
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		head, count, err := readSamples()
+		switch {
+		case err == nil:
+			if err := commit(head, count); err != nil {
+				l.Error(err, "commit received samples", "headIndex", head, "count", count)
+				break
+			}
+			if tracker != nil {
+				tracker.recordCommit(head, time.Now())
+			}
+		case errors.Is(err, fabrics.ErrNotReady):
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(idleSleep):
+			}
+		default:
+			l.Error(err, "ReadSamples - target is no longer safe to poll, exiting loop")
+			if onFatal != nil {
+				onFatal()
+			}
+			return
+		}
+	}
+}
+
+// commitArrivedSamples advances the local flow's head for a run of
+// samples whose payload was already filled in by the remote
+// initiator's RDMA write. OpenSamples returns a writable view aliasing
+// the ring; we leave the bytes untouched and Commit so the flow
+// metadata catches up, mirroring commitArrivedGrain.
+func commitArrivedSamples(writer *mxl.Writer, head uint64, count int) error {
+	sa, err := writer.OpenSamples(head, count)
+	if err != nil {
+		return fmt.Errorf("OpenSamples(%d,%d): %w", head, count, err)
+	}
+	if err := sa.Commit(); err != nil {
+		return fmt.Errorf("CommitSamples(%d,%d): %w", head, count, err)
 	}
 	return nil
 }
