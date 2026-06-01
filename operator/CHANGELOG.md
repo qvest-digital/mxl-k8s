@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.3](https://github.com/qvest-digital/mxl-k8s/compare/operator/v1.0.0-rc.2...operator/v1.0.0-rc.3) (2026-06-01)
+
+
+### Miscellaneous
+
+* **deps:** update module github.com/qvest-digital/mxl-k8s/api to v1.0.0-rc.2 ([#105](https://github.com/qvest-digital/mxl-k8s/issues/105)) ([6652a9f](https://github.com/qvest-digital/mxl-k8s/commit/6652a9f297fb8eb84d0a2f149f0788b8362a79ef))
+
 ## [1.0.0-rc.2](https://github.com/qvest-digital/mxl-k8s/compare/operator/v1.0.0-rc.1...operator/v1.0.0-rc.2) (2026-05-27)
 
 
