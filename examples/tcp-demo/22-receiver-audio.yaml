@@ -1,0 +1,17 @@
+# MxlReceiver for the audio reader: it wants the continuous (audio)
+# flow materialized locally. The operator translates this into an
+# MxlFlowMirror; the gateway pair then sets up the TCP sample transfer.
+#
+# flowID matches the id embedded in flow-audio-f32.json.
+
+apiVersion: mxl.qvest-digital.com/v1alpha1
+kind: MxlReceiver
+metadata:
+  name: tcp-demo-audio
+  namespace: mxl-system
+spec:
+  flowID: "b3bb5be7-9fe9-4324-a5bb-4c70e1084449"
+  provider: tcp
+  podRef:
+    name: mxl-tcp-demo-audio-reader
+    namespace: mxl-system

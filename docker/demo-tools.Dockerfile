@@ -1,5 +1,6 @@
-# demo-tools: minimal image carrying go-mxl's write-grain and
-# read-grain example binaries, on top of go-mxl-runtime.
+# demo-tools: minimal image carrying go-mxl's write-grain, read-grain,
+# write-samples, and read-samples example binaries, on top of
+# go-mxl-runtime.
 #
 # These pure-Go (cgo-to-libmxl) tools sidestep the GStreamer-plugin
 # rabbit hole `mxl-gst-testsrc` runs into on Debian trixie (where
@@ -18,8 +19,12 @@ ARG GO_MXL_TAG
 ENV GOBIN=/out
 RUN go install \
         github.com/qvest-digital/go-mxl/examples/write-grain@v${GO_MXL_TAG} \
-        github.com/qvest-digital/go-mxl/examples/read-grain@v${GO_MXL_TAG}
+        github.com/qvest-digital/go-mxl/examples/read-grain@v${GO_MXL_TAG} \
+        github.com/qvest-digital/go-mxl/examples/write-samples@v${GO_MXL_TAG} \
+        github.com/qvest-digital/go-mxl/examples/read-samples@v${GO_MXL_TAG}
 
 FROM ghcr.io/qvest-digital/go-mxl-runtime:${GO_MXL_TAG}
-COPY --from=builder /out/write-grain /usr/local/bin/write-grain
-COPY --from=builder /out/read-grain  /usr/local/bin/read-grain
+COPY --from=builder /out/write-grain   /usr/local/bin/write-grain
+COPY --from=builder /out/read-grain    /usr/local/bin/read-grain
+COPY --from=builder /out/write-samples /usr/local/bin/write-samples
+COPY --from=builder /out/read-samples  /usr/local/bin/read-samples

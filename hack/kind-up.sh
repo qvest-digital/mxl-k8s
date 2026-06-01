@@ -232,7 +232,10 @@ if [[ "$CLUSTER_REUSED" == "true" ]]; then
   # Wait for the deletes to complete -- re-applying while a pod is
   # still Terminating leaves the new pod in limbo (apply observes
   # the live object and treats it as a no-op).
-  "${KUBECTL[@]}" -n mxl-system delete pod mxl-tcp-demo-writer mxl-tcp-demo-reader --ignore-not-found --force --grace-period=0
+  "${KUBECTL[@]}" -n mxl-system delete pod \
+    mxl-tcp-demo-writer mxl-tcp-demo-reader \
+    mxl-tcp-demo-audio-writer mxl-tcp-demo-audio-reader \
+    --ignore-not-found --force --grace-period=0
   apply_demo
 fi
 

@@ -1,0 +1,45 @@
+# Audio producer pod for the demo. Writes a deterministic sample ramp
+# into a continuous (audio) flow on the local MXL domain using the
+# `write-samples` example binary from go-mxl. Mirrors 10-writer.yaml
+# but for the sample (audio) data path. Its own producer role label
+# lets the audio reader target a different node via anti-affinity,
+# independent of the video pair.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mxl-tcp-demo-audio-writer
+  namespace: mxl-system
+  labels:
+    app.kubernetes.io/name: mxl-tcp-demo-audio-writer
+    mxl-k8s-demo.qvest-digital.com/role: audio-producer
+spec:
+  containers:
+    - name: writer
+      image: ghcr.io/qvest-digital/mxl-k8s/demo-tools:dev
+      command: ["/usr/local/bin/write-samples"]
+      args:
+        - "-domain"
+        - "/run/mxl/domain"
+        - "-flow-def"
+        - "/etc/mxl-demo/flow-audio-f32.json"
+      # IPC_LOCK + SYS_RESOURCE: libmxl pins flow pages into RAM via
+      # mlock; tmpfs-backed shared memory needs the same to be
+      # RDMA-pinnable from the gateway sharing this domain.
+      securityContext:
+        capabilities:
+          add: ["IPC_LOCK", "SYS_RESOURCE"]
+      volumeMounts:
+        - name: mxl-domain
+          mountPath: /run/mxl/domain
+        - name: flow-config
+          mountPath: /etc/mxl-demo
+          readOnly: true
+  volumes:
+    - name: mxl-domain
+      hostPath:
+        path: /run/mxl/domain
+        type: DirectoryOrCreate
+    - name: flow-config
+      configMap:
+        name: mxl-demo-flow-config
