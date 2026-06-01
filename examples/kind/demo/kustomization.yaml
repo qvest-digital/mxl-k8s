@@ -13,10 +13,14 @@ resources:
   - ../../tcp-demo/10-writer.yaml
   - ../../tcp-demo/20-receiver.yaml
   - ../../tcp-demo/21-reader.yaml
+  - ../../tcp-demo/11-writer-audio.yaml
+  - ../../tcp-demo/22-receiver-audio.yaml
+  - ../../tcp-demo/23-reader-audio.yaml
 
 configMapGenerator:
   - name: mxl-demo-flow-config
     files:
       - ../../tcp-demo/flow-video-v210.json
+      - ../../tcp-demo/flow-audio-f32.json
 generatorOptions:
   disableNameSuffixHash: true

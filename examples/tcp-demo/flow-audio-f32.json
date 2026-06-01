@@ -1,0 +1,19 @@
+{
+  "description": "MXL Test Flow, 48kHz stereo float32",
+  "id": "b3bb5be7-9fe9-4324-a5bb-4c70e1084449",
+  "tags": {
+    "urn:x-nmos:tag:grouphint/v1.0": [
+      "Media Function XYZ:Audio"
+    ]
+  },
+  "format": "urn:x-nmos:format:audio",
+  "label": "MXL Test Flow, 48kHz stereo",
+  "parents": [],
+  "media_type": "audio/float32",
+  "sample_rate": {
+    "numerator": 48000,
+    "denominator": 1
+  },
+  "channel_count": 2,
+  "bit_depth": 32
+}

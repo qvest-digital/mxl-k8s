@@ -1,0 +1,71 @@
+# Audio consumer pod for the demo. Opens the continuous (audio) flow
+# on its local MXL domain with the `read-samples` example binary from
+# go-mxl, which prints a one-line summary of each sample batch it
+# observes. The libmxl-intent.so LD_PRELOAD shim turns libmxl's first
+# ENOENT probe into a synchronous wait on the agent's UDS, so the
+# reader's first mxlCreateFlowReader already sees the mirrored flow.
+#
+# Unlike read-grain, read-samples anchors to the flow's current head
+# and exits if the flow has no committed samples yet (no head). While
+# the mirrored flow warms up that is expected, so read-samples runs in
+# an `until` retry loop: the container stays up (no CrashLoopBackOff)
+# and starts printing once the gateway has committed the first batch.
+#
+# Anti-affinity forces the pod onto a different node than the audio
+# writer so the mirror plumbing is exercised across the fabric.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mxl-tcp-demo-audio-reader
+  namespace: mxl-system
+  labels:
+    app.kubernetes.io/name: mxl-tcp-demo-audio-reader
+    mxl-k8s-demo.qvest-digital.com/role: audio-consumer
+spec:
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              mxl-k8s-demo.qvest-digital.com/role: audio-producer
+          topologyKey: kubernetes.io/hostname
+  initContainers:
+    - name: install-intent-shim
+      image: ghcr.io/qvest-digital/mxl-k8s/shim:dev
+      imagePullPolicy: IfNotPresent
+      volumeMounts:
+        - name: intent-shim
+          mountPath: /shared
+  containers:
+    - name: reader
+      image: ghcr.io/qvest-digital/mxl-k8s/demo-tools:dev
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          until /usr/local/bin/read-samples -domain /run/mxl/domain -flow b3bb5be7-9fe9-4324-a5bb-4c70e1084449; do
+            echo "read-samples exited (flow not ready yet); retrying in 1s"
+            sleep 1
+          done
+      env:
+        - name: LD_PRELOAD
+          value: /opt/mxl-intent/libmxl-intent.so
+      securityContext:
+        capabilities:
+          add: ["IPC_LOCK", "SYS_RESOURCE"]
+      volumeMounts:
+        # Mount /run/mxl as a whole so both the domain subdir and the
+        # agent's intent socket land inside the pod even if the
+        # socket hasn't been created yet at scheduling time.
+        - name: mxl-run
+          mountPath: /run/mxl
+        - name: intent-shim
+          mountPath: /opt/mxl-intent
+          readOnly: true
+  volumes:
+    - name: mxl-run
+      hostPath:
+        path: /run/mxl
+        type: DirectoryOrCreate
+    - name: intent-shim
+      emptyDir: {}
