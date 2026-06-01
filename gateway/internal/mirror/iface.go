@@ -19,7 +19,7 @@ import "github.com/qvest-digital/go-mxl/fabrics"
 // initiatorOpener is the source reconciler's seam onto the
 // cgo-dependent libmxl-fabrics Initiator setup path. Production
 // binds it to libmxlOpener, which is a thin struct wrapping the
-// existing FlowReader + Regions + Initiator + AddTarget sequence.
+// existing FlowReader + Initiator + AddTarget sequence.
 // Tests bind it to an inline fake whose open method returns canned
 // sourceEntry values without touching libmxl or libmxl-fabrics.
 //

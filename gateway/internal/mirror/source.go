@@ -107,7 +107,6 @@ type SourceReconciler struct {
 // transfer-loop control plumbing for one source-side mirror.
 type sourceEntry struct {
 	reader    *mxl.Reader
-	regions   *fabrics.Regions
 	initiator *fabrics.Initiator
 	info      *fabrics.TargetInfo
 	// infoStr is the serialized TargetInfo the initiator was set up
@@ -376,9 +375,9 @@ func originRotated(baseline, observed *time.Time) bool {
 }
 
 // libmxlOpener is the production initiatorOpener implementation. It
-// opens a FlowReader on the local flow, registers its regions with
-// libmxl-fabrics, creates and sets up an Initiator, AddTarget()s the
-// remote info, and starts the per-flow transfer goroutine. The
+// opens a FlowReader on the local flow, creates and sets up an
+// Initiator that pins the reader, AddTarget()s the remote info, and
+// starts the per-flow transfer goroutine. The
 // fields are the subset of SourceReconciler state the open path
 // reads; the reconciler hands a fully populated value at
 // SetupWithManager time.
@@ -403,38 +402,29 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 	if err != nil {
 		return nil, fmt.Errorf("NewReader: %w", err)
 	}
-	regions, err := fabrics.RegionsForFlowReader(reader)
-	if err != nil {
-		_ = reader.Close()
-		return nil, fmt.Errorf("RegionsForFlowReader: %w", err)
-	}
 	initiator, err := fabInst.NewInitiator()
 	if err != nil {
-		_ = regions.Close()
 		_ = reader.Close()
 		return nil, fmt.Errorf("NewInitiator: %w", err)
 	}
 	if err := initiator.Setup(fabrics.InitiatorConfig{
 		Endpoint: fabrics.EndpointAddress{Node: o.BindAddress},
 		Provider: provider,
-		Regions:  regions,
+		Reader:   reader,
 	}); err != nil {
 		_ = initiator.Close()
-		_ = regions.Close()
 		_ = reader.Close()
 		return nil, fmt.Errorf("Initiator.Setup: %w", err)
 	}
 	info, err := fabrics.ParseTargetInfo(targetInfoStr)
 	if err != nil {
 		_ = initiator.Close()
-		_ = regions.Close()
 		_ = reader.Close()
 		return nil, fmt.Errorf("ParseTargetInfo: %w", err)
 	}
 	if err := initiator.AddTarget(info); err != nil {
 		_ = info.Close()
 		_ = initiator.Close()
-		_ = regions.Close()
 		_ = reader.Close()
 		return nil, fmt.Errorf("%w: %w", errAddTargetFailed, err)
 	}
@@ -443,7 +433,6 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 	done := make(chan struct{})
 	entry := &sourceEntry{
 		reader:    reader,
-		regions:   regions,
 		initiator: initiator,
 		info:      info,
 		infoStr:   targetInfoStr,
@@ -623,9 +612,6 @@ func closeSourceHandles(e *sourceEntry) {
 	}
 	if e.initiator != nil {
 		_ = e.initiator.Close()
-	}
-	if e.regions != nil {
-		_ = e.regions.Close()
 	}
 	if e.reader != nil {
 		_ = e.reader.Close()
