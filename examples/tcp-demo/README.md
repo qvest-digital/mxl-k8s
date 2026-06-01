@@ -38,6 +38,20 @@ then skip the shim and just open the flow directly. The shim turns
 that into "the application doesn't need to declare anything; the
 first open is the declaration".
 
+## Audio (sample) variant
+
+Alongside the video/grain pair, the demo includes an audio pair that
+exercises the continuous (sample) data path. `11-writer-audio.yaml`
+runs `write-samples` into the 48 kHz stereo flow defined by
+`flow-audio-f32.json`; `22-receiver-audio.yaml` and
+`23-reader-audio.yaml` mirror it onto a second node where
+`read-samples` prints one line per arrived sample batch. The gateway
+selects the sample-transfer path from the flow's data format, so the
+audio and video pairs run side by side over the same control plane.
+`23-reader-audio.yaml` runs `read-samples` in an `until` loop because
+that tool exits until the mirrored flow has a committed head; the loop
+keeps the pod up while the flow warms up.
+
 ## Prerequisites
 
 - A two-node Linux cluster, kernel >= 5.17 on the worker nodes

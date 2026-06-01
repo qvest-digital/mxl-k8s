@@ -119,7 +119,8 @@ collect_diagnostics() {
         --all-containers --prefix --tail=400 \
         > "$KIND_DIAG_DIR/${app}.log"       2>&1 || true
   done
-  for pod in mxl-tcp-demo-writer mxl-tcp-demo-reader; do
+  for pod in mxl-tcp-demo-writer mxl-tcp-demo-reader \
+             mxl-tcp-demo-audio-writer mxl-tcp-demo-audio-reader; do
     "${KUBECTL[@]}" -n "$NAMESPACE" logs "pod/${pod}" \
         --all-containers --prefix --tail=400 \
         > "$KIND_DIAG_DIR/${pod}.log"       2>&1 || true

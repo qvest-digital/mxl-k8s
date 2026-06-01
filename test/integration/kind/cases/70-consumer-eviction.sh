@@ -15,12 +15,25 @@ READER_POD="${READER_POD:-mxl-tcp-demo-reader}"
 READER_MANIFEST="${READER_MANIFEST:-${PWD}/examples/tcp-demo/21-reader.yaml}"
 GC_TIMEOUT_SECS="${GC_TIMEOUT_SECS:-30}"
 
-# Establish baseline: at least one mirror exists so the assertion
-# is not trivially satisfied.
-pre=$("${KUBECTL[@]}" -n "$NAMESPACE" get mxlfm \
-      -o jsonpath='{range .items[*]}{.metadata.name} {end}')
-[ -n "$pre" ] || fail "no MxlFlowMirror in namespace ${NAMESPACE} before deletion"
+# The deleted reader consumes the video flow, so only that flow's
+# mirror must be GC'd. The audio reader is untouched, so the audio
+# flow's mirror must persist -- GC is per-consumer, not global.
+VIDEO_FLOW_ID="${VIDEO_FLOW_ID:-5fbec3b1-1b0f-417d-9059-8b94a47197ed}"
+AUDIO_FLOW_ID="${AUDIO_FLOW_ID:-b3bb5be7-9fe9-4324-a5bb-4c70e1084449}"
+
+mirror_names() {
+  "${KUBECTL[@]}" -n "$NAMESPACE" get mxlfm \
+      -o jsonpath='{range .items[*]}{.metadata.name} {end}' 2>/dev/null || true
+}
+
+# Establish baseline: the video consumer's mirror exists so the
+# assertion is not trivially satisfied.
+pre=$(mirror_names)
 echo "  pre-deletion mirrors: ${pre}"
+case "$pre" in
+  *"${VIDEO_FLOW_ID}--"*) : ;;
+  *) fail "no video MxlFlowMirror (${VIDEO_FLOW_ID}) in ${NAMESPACE} before deletion" ;;
+esac
 
 "${KUBECTL[@]}" -n "$NAMESPACE" delete "pod/${READER_POD}" \
     --grace-period=0 --force --ignore-not-found \
@@ -32,19 +45,25 @@ echo "  pre-deletion mirrors: ${pre}"
     "pod/${READER_POD}" --timeout=30s >/dev/null 2>&1 || true
 
 deadline=$(( $(date +%s) + GC_TIMEOUT_SECS ))
-remaining=""
+video_gone=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  remaining=$("${KUBECTL[@]}" -n "$NAMESPACE" get mxlfm \
-              -o jsonpath='{range .items[*]}{.metadata.name} {end}' 2>/dev/null || true)
-  # Trim trailing whitespace so an empty list compares equal to "".
-  remaining="$(echo "$remaining" | sed 's/[[:space:]]*$//')"
-  [ -z "$remaining" ] && break
+  case "$(mirror_names)" in
+    *"${VIDEO_FLOW_ID}--"*) ;;        # video mirror still present
+    *) video_gone=1; break ;;
+  esac
   sleep 2
 done
-if [ -n "$remaining" ]; then
-  fail "MxlFlowMirror(s) not GC'd within ${GC_TIMEOUT_SECS}s after reader deletion: ${remaining}"
-fi
-echo "  mirrors GC'd within budget"
+[ "$video_gone" -eq 1 ] \
+  || fail "video MxlFlowMirror (${VIDEO_FLOW_ID}) not GC'd within ${GC_TIMEOUT_SECS}s after reader deletion"
+echo "  video mirror GC'd within budget"
+
+# The audio consumer was not touched, so its mirror must survive the
+# video reader's deletion: GC keys on the evicted consumer, not on the
+# presence of any consumer.
+case "$(mirror_names)" in
+  *"${AUDIO_FLOW_ID}--"*) echo "  audio mirror retained (per-consumer GC)" ;;
+  *) fail "audio MxlFlowMirror (${AUDIO_FLOW_ID}) GC'd by deleting the video reader; GC must be per-consumer" ;;
+esac
 
 # Restore the reader so subsequent cases see a converged demo. A
 # per-pod apply (not the all-in-one tcp-demo kustomization) leaves
