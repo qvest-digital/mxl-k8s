@@ -68,7 +68,7 @@ This repo is a Go workspace with four modules:
 | --- | --- | --- |
 | `api/` | `github.com/qvest-digital/mxl-k8s/api` | no |
 | `operator/` | `github.com/qvest-digital/mxl-k8s/operator` | no |
-| `agent/` | `github.com/qvest-digital/mxl-k8s/agent` | libmxl (via `go-mxl`) |
+| `agent/` | `github.com/qvest-digital/mxl-k8s/agent` | no |
 | `gateway/` | `github.com/qvest-digital/mxl-k8s/gateway` | libmxl + libmxl-fabrics (via `go-mxl/fabrics`) |
 
 `go.work` at the repo root enumerates all four `use` paths. Don't add

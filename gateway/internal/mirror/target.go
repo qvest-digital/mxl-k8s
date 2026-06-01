@@ -115,7 +115,7 @@ type TargetReconciler struct {
 	// openFabricSideFn is overridable so tests exercise the recovery
 	// path without a real libmxl-fabrics. Production leaves it nil
 	// and the reconciler falls back to (*TargetReconciler).openFabricSide.
-	openFabricSideFn func(writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Regions, *fabrics.Target, *fabrics.TargetInfo, string, error)
+	openFabricSideFn func(writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error)
 
 	// recoverFn is the seam the stuck-handshake watchdog uses to
 	// spawn its recovery work. Production leaves it nil and the
@@ -143,7 +143,6 @@ type targetEntry struct {
 
 	// fabric-side handles, rebuilt by recoverFromFatalError when
 	// ReadGrain reports a non-recoverable error.
-	regions *fabrics.Regions
 	target  *fabrics.Target
 	info    *fabrics.TargetInfo
 	infoStr string
@@ -326,9 +325,9 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	return ctrl.Result{}, nil
 }
 
-// openTarget walks the libmxl handshake: open FlowWriter, register
-// memory regions, create + setup fabrics.Target, marshal TargetInfo,
-// and start the progress goroutine.
+// openTarget walks the libmxl handshake: open FlowWriter, create +
+// setup fabrics.Target against it, marshal TargetInfo, and start the
+// progress goroutine.
 //
 // key identifies the MxlFlowMirror whose target we're opening; the
 // progress goroutine uses it to invoke recovery if the libmxl-fabrics
@@ -344,7 +343,7 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, flowDef string, 
 	if err != nil {
 		return nil, fmt.Errorf("NewWriter: %w", err)
 	}
-	regions, target, info, s, err := r.openFabricSideDispatch(writer, provider)
+	target, info, s, err := r.openFabricSideDispatch(writer, provider)
 	if err != nil {
 		_ = writer.Close()
 		return nil, err
@@ -352,7 +351,6 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, flowDef string, 
 
 	entry := &targetEntry{
 		writer:   writer,
-		regions:  regions,
 		target:   target,
 		info:     info,
 		infoStr:  s,
@@ -362,42 +360,35 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, flowDef string, 
 	return entry, nil
 }
 
-// openFabricSide creates the regions + fabrics.Target + TargetInfo
-// on an already-open mxl.Writer. Used both by initial openTarget and
-// by recoverFromFatalError when the fabric side died but the writer
-// is still good.
-func (r *TargetReconciler) openFabricSide(writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Regions, *fabrics.Target, *fabrics.TargetInfo, string, error) {
+// openFabricSide creates the fabrics.Target + TargetInfo on an
+// already-open mxl.Writer. Used both by initial openTarget and by
+// recoverFromFatalError when the fabric side died but the writer is
+// still good.
+func (r *TargetReconciler) openFabricSide(writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
 	fabInst := r.Handles.Fabrics()
 	if fabInst == nil {
-		return nil, nil, nil, "", fmt.Errorf("fabrics instance closed")
-	}
-	regions, err := fabrics.RegionsForFlowWriter(writer)
-	if err != nil {
-		return nil, nil, nil, "", fmt.Errorf("RegionsForFlowWriter: %w", err)
+		return nil, nil, "", fmt.Errorf("fabrics instance closed")
 	}
 	target, err := fabInst.NewTarget()
 	if err != nil {
-		_ = regions.Close()
-		return nil, nil, nil, "", fmt.Errorf("NewTarget: %w", err)
+		return nil, nil, "", fmt.Errorf("NewTarget: %w", err)
 	}
 	info, err := target.Setup(fabrics.TargetConfig{
 		Endpoint: fabrics.EndpointAddress{Node: r.BindAddress},
 		Provider: provider,
-		Regions:  regions,
+		Writer:   writer,
 	})
 	if err != nil {
 		_ = target.Close()
-		_ = regions.Close()
-		return nil, nil, nil, "", fmt.Errorf("Target.Setup: %w", err)
+		return nil, nil, "", fmt.Errorf("Target.Setup: %w", err)
 	}
 	s, err := info.MarshalString()
 	if err != nil {
 		_ = info.Close()
 		_ = target.Close()
-		_ = regions.Close()
-		return nil, nil, nil, "", fmt.Errorf("TargetInfo.MarshalString: %w", err)
+		return nil, nil, "", fmt.Errorf("TargetInfo.MarshalString: %w", err)
 	}
-	return regions, target, info, s, nil
+	return target, info, s, nil
 }
 
 // openFabricSideDispatch routes the fabric-side open through the
@@ -405,7 +396,7 @@ func (r *TargetReconciler) openFabricSide(writer *mxl.Writer, provider fabrics.P
 // production. The source reconciler routes the equivalent libmxl-
 // fabrics Initiator setup through the initiatorOpener interface
 // instead, but the seam serves the same purpose.
-func (r *TargetReconciler) openFabricSideDispatch(writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Regions, *fabrics.Target, *fabrics.TargetInfo, string, error) {
+func (r *TargetReconciler) openFabricSideDispatch(writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
 	if r.openFabricSideFn != nil {
 		return r.openFabricSideFn(writer, provider)
 	}
@@ -615,7 +606,7 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 	}
 
 	// Wait for the previous progress loop to finish before swapping
-	// its target/regions/info pointers.
+	// its target/info pointers.
 	if entry.done != nil {
 		<-entry.done
 	}
@@ -628,10 +619,7 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 	if entry.target != nil {
 		_ = entry.target.Close()
 	}
-	if entry.regions != nil {
-		_ = entry.regions.Close()
-	}
-	entry.info, entry.target, entry.regions, entry.infoStr = nil, nil, nil, ""
+	entry.info, entry.target, entry.infoStr = nil, nil, ""
 
 	// Publish Materializing so observers see the in-flight rebuild.
 	// The flusher flips Phase back to Ready on the first commit the
@@ -648,7 +636,7 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 		}
 	}
 
-	regions, target, info, s, err := r.openFabricSideDispatch(entry.writer, entry.provider)
+	target, info, s, err := r.openFabricSideDispatch(entry.writer, entry.provider)
 	if err != nil {
 		l.Error(err, "rebuild fabric side")
 		// Drop the entry so the next Reconcile rebuilds from scratch
@@ -661,7 +649,6 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 		}
 		return
 	}
-	entry.regions = regions
 	entry.target = target
 	entry.info = info
 	entry.infoStr = s
@@ -711,9 +698,6 @@ func closeTargetHandles(e *targetEntry) {
 	}
 	if e.target != nil {
 		_ = e.target.Close()
-	}
-	if e.regions != nil {
-		_ = e.regions.Close()
 	}
 	if e.writer != nil {
 		_ = e.writer.Close()

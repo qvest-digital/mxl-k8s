@@ -638,8 +638,8 @@ func TestTarget_RecoverFromFatalErrorClearsRecoveringOnRebuildFailure(t *testing
 		Scheme:   scheme,
 		NodeName: "node-a",
 		targets:  map[types.NamespacedName]*targetEntry{key: entry},
-		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Regions, *fabrics.Target, *fabrics.TargetInfo, string, error) {
-			return nil, nil, nil, "", rebuildErr
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+			return nil, nil, "", rebuildErr
 		},
 	}
 
@@ -695,8 +695,8 @@ func TestTarget_RecoverFromFatalErrorCancelsRunningProgressLoop(t *testing.T) {
 		Scheme:   scheme,
 		NodeName: "node-a",
 		targets:  map[types.NamespacedName]*targetEntry{key: entry},
-		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Regions, *fabrics.Target, *fabrics.TargetInfo, string, error) {
-			return nil, nil, nil, "", rebuildErr
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+			return nil, nil, "", rebuildErr
 		},
 	}
 
