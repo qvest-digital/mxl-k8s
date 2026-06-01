@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.0.0-rc.5](https://github.com/qvest-digital/mxl-k8s/compare/gateway/v1.0.0-rc.4...gateway/v1.0.0-rc.5) (2026-06-01)
+
+
+### Features
+
+* **gateway:** mirror continuous audio flows via sample transfer ([#111](https://github.com/qvest-digital/mxl-k8s/issues/111)) ([0807b88](https://github.com/qvest-digital/mxl-k8s/commit/0807b88d3e18e2efb660c7a2330b99ca7f71c529))
+
+
+### Build System
+
+* **gateway:** migrate to go-mxl v1.0.0-rc.9 ([#106](https://github.com/qvest-digital/mxl-k8s/issues/106)) ([d3a52b0](https://github.com/qvest-digital/mxl-k8s/commit/d3a52b01fdf035d8e408d6ed575345b60300161d))
+
+
+### Miscellaneous
+
+* **deps:** update module github.com/qvest-digital/mxl-k8s/api to v1.0.0-rc.2 ([#105](https://github.com/qvest-digital/mxl-k8s/issues/105)) ([6652a9f](https://github.com/qvest-digital/mxl-k8s/commit/6652a9f297fb8eb84d0a2f149f0788b8362a79ef))
+
 ## [1.0.0-rc.4](https://github.com/qvest-digital/mxl-k8s/compare/gateway/v1.0.0-rc.3...gateway/v1.0.0-rc.4) (2026-05-27)
 
 
