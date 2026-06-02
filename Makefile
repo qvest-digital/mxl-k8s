@@ -1,12 +1,12 @@
 # renovate: datasource=go depName=sigs.k8s.io/controller-tools versioning=semver
-CONTROLLER_TOOLS_VERSION ?= v0.18.0
+CONTROLLER_TOOLS_VERSION ?= v0.21.0
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
 
 # renovate: datasource=go depName=gotest.tools/gotestsum versioning=semver
 GOTESTSUM_VERSION ?= v1.13.0
 GOTESTSUM ?= go run gotest.tools/gotestsum@$(GOTESTSUM_VERSION)
 # renovate: datasource=go depName=github.com/vektra/mockery/v3 versioning=semver
-MOCKERY_VERSION ?= v3.5.4
+MOCKERY_VERSION ?= v3.7.0
 MOCKERY ?= go run github.com/vektra/mockery/v3@$(MOCKERY_VERSION)
 # SETUP_ENVTEST_VERSION (a controller-runtime release branch) and
 # ENVTEST_K8S_VERSION (an envtest asset version that trails upstream
