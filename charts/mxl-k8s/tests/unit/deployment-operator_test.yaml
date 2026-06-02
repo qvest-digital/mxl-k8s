@@ -63,11 +63,12 @@ tests:
           path: spec.template.spec.containers[0].image
           value: "ghcr.io/qvest-digital/mxl-k8s/operator@sha256:0000000000000000000000000000000000000000000000000000000000000001"
 
-  - it: falls back to v-prefixed Chart.AppVersion when tag and digest are empty
+  - it: fails to render when both tag and digest are empty
+    set:
+      operator.image.tag: ""
     asserts:
-      - equal:
-          path: spec.template.spec.containers[0].image
-          value: "ghcr.io/qvest-digital/mxl-k8s/operator:v0.0.0"
+      - failedTemplate:
+          errorMessage: "set <component>.image.tag or .image.digest"
 
   - it: respects a custom registry override
     set:

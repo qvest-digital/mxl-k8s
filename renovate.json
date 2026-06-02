@@ -16,6 +16,14 @@
       ],
       "datasourceTemplate": "github-releases",
       "versioningTemplate": "loose"
+    },
+    {
+      "customType": "regex",
+      "description": "Pin the chart-bundled module images (operator, agent, gateway) to their ghcr releases via inline markers in values.yaml",
+      "fileMatch": ["^charts/mxl-k8s/values\\.yaml$"],
+      "matchStrings": [
+        "tag: \"(?<currentValue>[^\"]+)\"\\s+#\\s*renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?"
+      ]
     }
   ],
   "packageRules": [
@@ -43,6 +51,31 @@
       "semanticCommitType": "build",
       "semanticCommitScope": "libmxl",
       "labels": ["dependencies", "libmxl"]
+    },
+    {
+      "description": "Chart-bundled module images are intra-repo and not stability-gated, so a new module (pre)release re-pins the chart immediately via a deps(chart) PR that release-please turns into a chart release",
+      "matchManagers": ["custom.regex"],
+      "matchDatasources": ["docker"],
+      "matchPackageNames": [
+        "ghcr.io/qvest-digital/mxl-k8s/operator",
+        "ghcr.io/qvest-digital/mxl-k8s/agent",
+        "ghcr.io/qvest-digital/mxl-k8s/gateway"
+      ],
+      "groupName": "mxl-k8s module images",
+      "minimumReleaseAge": "0 days",
+      "schedule": ["at any time"],
+      "semanticCommitType": "deps",
+      "semanticCommitScope": "chart"
+    },
+    {
+      "description": "The intra-repo api module require is not stability-gated; its bumps flow immediately in their own PR",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["github.com/qvest-digital/mxl-k8s/api"],
+      "groupName": "mxl-k8s api module",
+      "minimumReleaseAge": "0 days",
+      "schedule": ["at any time"],
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
     }
   ]
 }

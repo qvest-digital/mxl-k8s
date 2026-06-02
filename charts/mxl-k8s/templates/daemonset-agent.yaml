@@ -63,7 +63,7 @@ spec:
       {{- end }}
       containers:
         - name: agent
-          image: {{ include "mxlk8s.image" (dict "global" .Values.global "image" .Values.agent.image "Chart" .Chart) }}
+          image: {{ include "mxlk8s.image" (dict "global" .Values.global "image" .Values.agent.image) }}
           imagePullPolicy: {{ include "mxlk8s.imagePullPolicy" (dict "global" .Values.global "image" .Values.agent.image) }}
           args:
             {{- include "mxlk8s.flags.render" (dict "flags" .Values.agent.flags) | nindent 12 }}
