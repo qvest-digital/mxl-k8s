@@ -24,22 +24,47 @@
       "matchStrings": [
         "tag: \"(?<currentValue>[^\"]+)\"\\s+#\\s*renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?"
       ]
+    },
+    {
+      "customType": "regex",
+      "description": "Track CI/build tool versions pinned in workflow env blocks and the Makefile via inline `# renovate:` markers (helm, helm-unittest, helm-schema, helm-docs, kubeconform, yq, gotestsum, controller-tools, mockery). The marker sits on the line directly above the value; the value line may be a workflow `KEY: value` or a Makefile `KEY ?= value`.",
+      "fileMatch": [
+        "^\\.github/workflows/chart\\.yml$",
+        "^\\.github/workflows/ci\\.yml$",
+        "^\\.github/workflows/images\\.yml$",
+        "^\\.github/workflows/chart-autofix\\.yml$",
+        "^Makefile$"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?(?: extractVersion=(?<extractVersion>\\S+))?[ \\t]*\\n[ \\t]*[\\w.-]+[ \\t]*(?::|\\?=|=)[ \\t]*[\"']?(?<currentValue>[^\"'\\s#]+)"
+      ]
     }
   ],
   "packageRules": [
     {
-      "description": "Group Go module bumps into one PR per module",
+      "description": "Group third-party Go module bumps into one PR; deps(gomod) so release-please folds a dependency move into each affected module's next release",
       "matchManagers": ["gomod"],
       "groupName": "Go modules",
-      "semanticCommitType": "chore",
-      "semanticCommitScope": "deps"
+      "semanticCommitType": "deps",
+      "semanticCommitScope": "gomod"
     },
     {
       "description": "Group GitHub Actions bumps into one PR",
       "matchManagers": ["github-actions"],
       "groupName": "GitHub Actions",
-      "semanticCommitType": "ci",
-      "semanticCommitScope": "deps"
+      "semanticCommitType": "deps",
+      "semanticCommitScope": "actions"
+    },
+    {
+      "description": "CI/build tool versions tracked via inline markers in workflows and the Makefile. Third-party, so the default stability delay applies; these files are not under a release-please package path, so the bump does not cut a release.",
+      "matchManagers": ["custom.regex"],
+      "matchFileNames": [
+        ".github/workflows/*.yml",
+        "Makefile"
+      ],
+      "groupName": "CI tool versions",
+      "semanticCommitType": "deps",
+      "semanticCommitScope": "tools"
     },
     {
       "description": "libmxl is intentionally not delayed so upstream-breaking releases surface immediately via a CI-red PR",
@@ -48,7 +73,7 @@
       "minimumReleaseAge": "0 days",
       "schedule": ["at any time"],
       "commitMessageTopic": "libmxl",
-      "semanticCommitType": "build",
+      "semanticCommitType": "deps",
       "semanticCommitScope": "libmxl",
       "labels": ["dependencies", "libmxl"]
     },
@@ -74,8 +99,8 @@
       "groupName": "mxl-k8s api module",
       "minimumReleaseAge": "0 days",
       "schedule": ["at any time"],
-      "semanticCommitType": "chore",
-      "semanticCommitScope": "deps"
+      "semanticCommitType": "deps",
+      "semanticCommitScope": "api"
     }
   ]
 }

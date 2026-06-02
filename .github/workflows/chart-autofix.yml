@@ -38,7 +38,10 @@ concurrency:
 env:
   # Keep in lock-step with the generator pins in chart.yml so the
   # regenerated output matches what the lint drift check expects.
+  # Same depNames as chart.yml, so Renovate bumps both copies together.
+  # renovate: datasource=github-releases depName=dadav/helm-schema versioning=semver
   HELM_SCHEMA_VERSION: "0.23.2"
+  # renovate: datasource=go depName=github.com/norwoodj/helm-docs versioning=semver
   HELM_DOCS_VERSION: v1.14.2
 
 jobs:
