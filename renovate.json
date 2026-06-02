@@ -53,7 +53,7 @@
       "labels": ["dependencies", "libmxl"]
     },
     {
-      "description": "Chart-bundled module images are intra-repo and not stability-gated, so a new module (pre)release re-pins the chart immediately via a fix(chart) PR",
+      "description": "Chart-bundled module images are intra-repo and not stability-gated, so a new module (pre)release re-pins the chart immediately via a deps(chart) PR that release-please turns into a chart release",
       "matchManagers": ["custom.regex"],
       "matchDatasources": ["docker"],
       "matchPackageNames": [
@@ -64,7 +64,7 @@
       "groupName": "mxl-k8s module images",
       "minimumReleaseAge": "0 days",
       "schedule": ["at any time"],
-      "semanticCommitType": "fix",
+      "semanticCommitType": "deps",
       "semanticCommitScope": "chart"
     },
     {
