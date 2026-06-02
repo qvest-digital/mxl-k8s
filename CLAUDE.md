@@ -69,7 +69,7 @@ This repo is a Go workspace with four modules:
 | `api/` | `github.com/qvest-digital/mxl-k8s/api` | no |
 | `operator/` | `github.com/qvest-digital/mxl-k8s/operator` | no |
 | `agent/` | `github.com/qvest-digital/mxl-k8s/agent` | no |
-| `gateway/` | `github.com/qvest-digital/mxl-k8s/gateway` | libmxl + libmxl-fabrics (via `go-mxl/fabrics`) |
+| `gateway/` | `github.com/qvest-digital/mxl-k8s/gateway` | libmxl + libmxl-fabrics (via `go-mxl`) |
 
 `go.work` at the repo root enumerates all four `use` paths. Don't add
 a `replace` directive to it. `api` and `operator` must not gain any
@@ -218,13 +218,13 @@ the work that produced it. The same rules apply to PR descriptions.
 
 ## Build
 
-- `api` and `operator` are pure Go.
-- `agent` and `gateway` are cgo. `libmxl` (and for the gateway,
-  `libmxl-fabrics`) must be installed with headers and a pkg-config file
-  before `go build` works in those modules. See `docs/BUILD.md`.
-- Integration tests that require a running libmxl writer go under the
-  build tag `mxl_integration`. The CI lint/vet/build jobs don't run
-  them.
+- `api`, `operator`, and `agent` are pure Go.
+- `gateway` is the only cgo module. It links `libmxl` + `libmxl-fabrics`
+  through the `go-mxl` binding, so both must be installed with headers
+  and pkg-config files before `go build` works there. See `docs/BUILD.md`.
+- Integration testing runs against a local KIND cluster (`make kind-up`,
+  `make kind-test`); see `docs/KIND.md`. Plain `go test ./...` jobs need
+  no cluster.
 
 ## Shell scripts
 

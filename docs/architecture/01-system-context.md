@@ -37,8 +37,8 @@ node, and then get out of the way of the data path.
     code paths are accepted by the API but not exercised in routine
     CI).
 - **External, linked in**
-  - `libmxl.so` is linked into the gateway, the agent, the writer
-    pod, and the consumer pod.
+  - `libmxl.so` is linked into the gateway, the writer pod, and the
+    consumer pod.
   - `libmxl-fabrics.so` is linked into the gateway only.
 
 ## Actors

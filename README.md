@@ -172,14 +172,14 @@ The repo is a Go workspace with four modules:
 | --- | --- | --- |
 | `api` | `github.com/qvest-digital/mxl-k8s/api` | CRD types. |
 | `operator` | `github.com/qvest-digital/mxl-k8s/operator` | Cluster operator that reconciles the CRDs. |
-| `agent` | `github.com/qvest-digital/mxl-k8s/agent` | Per-node DaemonSet. Links libmxl via [`go-mxl`][go-mxl]. |
-| `gateway` | `github.com/qvest-digital/mxl-k8s/gateway` | Per-node DaemonSet. Links libmxl-fabrics via [`go-mxl/fabrics`][go-mxl]. |
+| `agent` | `github.com/qvest-digital/mxl-k8s/agent` | Per-node DaemonSet. Pure Go; watches the domain via `fanotify`, does not link libmxl. |
+| `gateway` | `github.com/qvest-digital/mxl-k8s/gateway` | Per-node DaemonSet. Links libmxl + libmxl-fabrics via [`go-mxl`][go-mxl]. |
 
 [`docs/USAGE.md`](docs/USAGE.md) covers the prerequisites for a
 media function (container, libmxl link, capabilities) and how to
 integrate it as a producer or consumer.
 [`docs/BUILD.md`](docs/BUILD.md) covers local-build prerequisites
-and the cgo lane for `agent` and `gateway`.
+and the cgo lane for `gateway`.
 [`CLAUDE.md`](CLAUDE.md) carries the contributor rules.
 
 [mxl]: https://github.com/dmf-mxl/mxl

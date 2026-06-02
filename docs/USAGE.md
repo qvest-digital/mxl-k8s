@@ -292,7 +292,7 @@ work in code but have not been exercised continuously.
 - [`docs/architecture/`](./architecture/): runtime walkthrough of
   the operator, agent, gateway, and shim.
 - [`docs/BUILD.md`](./BUILD.md): local-build prerequisites and the
-  cgo lane for `agent` and `gateway`.
+  cgo lane for `gateway`.
 - [`docs/RDMA.md`](./RDMA.md): host setup for the `verbs` and
   `efa` providers.
 - [`docs/KIND.md`](./KIND.md): KIND demo walkthrough.
