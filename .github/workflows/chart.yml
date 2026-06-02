@@ -51,7 +51,7 @@ env:
   # helm-unittest tags are v-prefixed, so extractVersion strips the v
   # to keep the bare value `helm plugin install --version` expects.
   # renovate: datasource=github-releases depName=helm/helm versioning=semver
-  HELM_VERSION: v3.18.4
+  HELM_VERSION: v4.2.0
   # renovate: datasource=github-releases depName=helm-unittest/helm-unittest versioning=semver extractVersion=^v(?<version>.+)$
   HELM_UNITTEST_VERSION: "1.1.0"
   # renovate: datasource=github-releases depName=dadav/helm-schema versioning=semver
@@ -124,7 +124,10 @@ jobs:
           version: ${{ env.HELM_VERSION }}
 
       - name: Install helm-unittest
-        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version "${HELM_UNITTEST_VERSION}"
+        # helm 4 verifies plugin provenance by default and aborts when
+        # the source ships none; the unittest release has no signature,
+        # so opt out of verification explicitly.
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version "${HELM_UNITTEST_VERSION}" --verify=false
 
       - uses: actions/setup-go@v6
         with:
