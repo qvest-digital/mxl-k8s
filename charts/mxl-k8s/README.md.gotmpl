@@ -71,24 +71,24 @@ on every merge to `main`; Helm encodes the `+` as `_` in the OCI tag.
 ## Per-component image versions
 
 Operator, agent, and gateway release independently from the chart;
-their versions can diverge. The published chart pins
-`<component>.image.tag` per component at package time so a chart
-release at `1.0.0-rc.5` can ship operator at `v1.0.0-rc.4`, agent at
-`v1.0.0-rc.5`, and gateway at `v1.0.0-rc.2` without the user
-touching values.
+their versions can diverge. `<component>.image.tag` is pinned per
+component in `values.yaml` and committed, so a chart release at
+`1.0.0-rc.5` can ship operator at `v1.0.0-rc.4`, agent at
+`v1.0.0-rc.5`, and gateway at `v1.0.0-rc.2` without the user touching
+values. Renovate keeps each committed pin current; a bump opens a
+`deps(chart)` PR that release-please turns into a chart release.
 
-The pinned table for each released chart appears in the chart's
-GitHub release notes
+The bundled-versions table for each released chart appears in the
+chart's GitHub release notes
 (`https://github.com/qvest-digital/mxl-k8s/releases/tag/charts/mxl-k8s/v<X>`).
-The `:dev` chart pins every tag to `dev` so it tracks main HEAD
-images.
+The `:dev` chart published on every merge to `main` rewrites every tag
+to `dev` so it tracks main HEAD images.
 
-A `helm install ./charts/mxl-k8s` from a clone of the repo (source
-values.yaml, no pin) falls back to `v<Chart.AppVersion>` for every
-component, which is fine for the rare case where the contributor
-wants the same version across all components from one checkout.
-
-`--set <comp>.image.tag=<tag>` overrides the pin as usual.
+A `helm install ./charts/mxl-k8s` from a clone uses the committed pins
+as-is. Each component must resolve to an image: set `image.tag` or
+`image.digest` (both ship pinned in `values.yaml`); leaving both empty
+makes rendering fail. `--set <comp>.image.tag=<tag>` overrides the pin
+as usual.
 
 ## Common overrides
 

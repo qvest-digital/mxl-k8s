@@ -87,9 +87,9 @@ operator:
   replicaCount: 1
   image:
     repository: operator
-    # -- Image tag, pinned to the operator release this chart version
-    # bundles. An empty value falls back to `v<Chart.AppVersion>` for a
-    # local `helm install ./charts/mxl-k8s` from a checkout.
+    # -- Image tag for the operator, pinned to the release this chart
+    # version bundles and kept current by Renovate. Set this or
+    # image.digest; with both empty, rendering fails.
     tag: "v1.0.0-rc.3" # renovate: datasource=docker depName=ghcr.io/qvest-digital/mxl-k8s/operator versioning=semver
     # -- Image digest. Wins over tag when set.
     # @schema
@@ -203,9 +203,9 @@ agent:
       maxUnavailable: 1
   image:
     repository: agent
-    # -- Image tag, pinned to the agent release this chart version
-    # bundles. An empty value falls back to `v<Chart.AppVersion>` for a
-    # local `helm install ./charts/mxl-k8s` from a checkout.
+    # -- Image tag for the agent, pinned to the release this chart
+    # version bundles and kept current by Renovate. Set this or
+    # image.digest; with both empty, rendering fails.
     tag: "v1.0.0-rc.4" # renovate: datasource=docker depName=ghcr.io/qvest-digital/mxl-k8s/agent versioning=semver
     # @schema
     # pattern: ^$|^sha256:[0-9a-f]{64}$
@@ -333,9 +333,9 @@ gateway:
       maxUnavailable: 1
   image:
     repository: gateway
-    # -- Image tag, pinned to the gateway release this chart version
-    # bundles. An empty value falls back to `v<Chart.AppVersion>` for a
-    # local `helm install ./charts/mxl-k8s` from a checkout.
+    # -- Image tag for the gateway, pinned to the release this chart
+    # version bundles and kept current by Renovate. Set this or
+    # image.digest; with both empty, rendering fails.
     tag: "v1.0.0-rc.5" # renovate: datasource=docker depName=ghcr.io/qvest-digital/mxl-k8s/gateway versioning=semver
     # @schema
     # pattern: ^$|^sha256:[0-9a-f]{64}$

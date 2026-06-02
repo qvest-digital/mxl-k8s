@@ -228,7 +228,7 @@
             },
             "tag": {
               "default": "v1.0.0-rc.4",
-              "description": "Image tag, pinned to the agent release this chart version bundles. An empty value falls back to `v\u003cChart.AppVersion\u003e` for a local `helm install ./charts/mxl-k8s` from a checkout.",
+              "description": "Image tag for the agent, pinned to the release this chart version bundles and kept current by Renovate. Set this or image.digest; with both empty, rendering fails.",
               "required": [],
               "title": "tag"
             }
@@ -898,7 +898,7 @@
             },
             "tag": {
               "default": "v1.0.0-rc.5",
-              "description": "Image tag, pinned to the gateway release this chart version bundles. An empty value falls back to `v\u003cChart.AppVersion\u003e` for a local `helm install ./charts/mxl-k8s` from a checkout.",
+              "description": "Image tag for the gateway, pinned to the release this chart version bundles and kept current by Renovate. Set this or image.digest; with both empty, rendering fails.",
               "required": [],
               "title": "tag"
             }
@@ -1530,7 +1530,7 @@
             },
             "tag": {
               "default": "v1.0.0-rc.3",
-              "description": "Image tag, pinned to the operator release this chart version bundles. An empty value falls back to `v\u003cChart.AppVersion\u003e` for a local `helm install ./charts/mxl-k8s` from a checkout.",
+              "description": "Image tag for the operator, pinned to the release this chart version bundles and kept current by Renovate. Set this or image.digest; with both empty, rendering fails.",
               "required": [],
               "title": "tag"
             }

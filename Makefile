@@ -93,14 +93,14 @@ chart-check: chart-crd-sync chart-schema chart-docs
 		exit 1; \
 	fi
 
-# Pin per-component image tags in charts/mxl-k8s/values.yaml so a
+# Set per-component image tags in charts/mxl-k8s/values.yaml for a
 # local `helm install ./charts/mxl-k8s` or `helm template
-# ./charts/mxl-k8s` resolves to the same image tags the CI-published
-# chart would carry. `MODE` is one of `dev`, `rc`, `stable` (default
-# `rc`). The chart workflow runs the same script with the chart's
-# version at package time; local users can match either flow.
+# ./charts/mxl-k8s`. `MODE=dev` rewrites every tag to "dev" to match
+# the floating dev chart; `MODE=release` (default) keeps the committed
+# per-component pins, which is what a release chart ships. The chart
+# workflow runs the same script at package time.
 # `make chart-resolve-reset` reverts values.yaml.
-MODE ?= rc
+MODE ?= release
 
 .PHONY: chart-resolve
 chart-resolve:

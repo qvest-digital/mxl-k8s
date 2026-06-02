@@ -236,14 +236,14 @@ jobs:
           chmod +x /usr/local/bin/yq
           yq --version
 
-      # hack/chart-resolve-tags.sh patches charts/mxl-k8s/values.yaml
-      # in place with the right image tag per component: dev for
-      # 0.0.0-dev* chart builds (track main HEAD), otherwise the
-      # per-component version from .github/release-please-manifest.json.
-      # The script also writes a Markdown table of the resolved tags
-      # to stdout; we save it for the publish-bundled-component-table
-      # step below.
-      - name: Resolve per-component image tags into values.yaml
+      # hack/chart-resolve-tags.sh emits the bundled-component table and,
+      # for the floating dev build (0.0.0-dev*), rewrites each
+      # <component>.image.tag to "dev" so the dev chart tracks main HEAD
+      # images. Release builds keep the per-component pins committed in
+      # values.yaml (Renovate keeps those current), so the diff below is
+      # empty for a release and confirms it ships exactly those pins. The
+      # table is saved for the publish-bundled-component-table step.
+      - name: Emit bundled-component table (dev build pins :dev)
         env:
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
