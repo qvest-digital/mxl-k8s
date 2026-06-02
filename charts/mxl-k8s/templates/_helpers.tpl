@@ -61,13 +61,12 @@ app.kubernetes.io/version: {{ include "mxlk8s.appVersion" .Context.Chart | quote
 {{- end -}}
 
 {{/*
-Resolve the image reference for one component. Digest beats tag. Tag
-falls back to "v" prepended to chart appVersion, matching the
-"v<VERSION>" tags that images.yml publishes to ghcr.io. An explicit
-image.tag is used verbatim so digests, "pre", "latest", or
-externally-mirrored tags pass through unchanged.
+Resolve the image reference for one component. Digest beats tag. An
+explicit image.tag is used verbatim so digests, "pre", "latest", or
+externally-mirrored tags pass through unchanged. With neither tag nor
+digest set, rendering fails: every component pins one or the other.
 
-Call as: include "mxlk8s.image" (dict "global" .Values.global "image" .Values.operator.image "Chart" .Chart)
+Call as: include "mxlk8s.image" (dict "global" .Values.global "image" .Values.operator.image)
 */}}
 {{- define "mxlk8s.image" -}}
 {{- $registry := .global.image.registry -}}
@@ -75,7 +74,7 @@ Call as: include "mxlk8s.image" (dict "global" .Values.global "image" .Values.op
 {{- if .image.digest -}}
 {{- printf "%s/%s@%s" $registry $repo .image.digest -}}
 {{- else -}}
-{{- $tag := default (printf "v%s" .Chart.AppVersion) .image.tag -}}
+{{- $tag := required "set <component>.image.tag or .image.digest" .image.tag -}}
 {{- printf "%s/%s:%s" $registry $repo $tag -}}
 {{- end -}}
 {{- end -}}

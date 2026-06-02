@@ -87,14 +87,10 @@ operator:
   replicaCount: 1
   image:
     repository: operator
-    # -- Image tag. Empty falls back to `v<Chart.AppVersion>` so a
-    # local `helm install ./charts/mxl-k8s` from the repo still
-    # resolves to a single bundle version. The published OCI
-    # artifact has this field pre-populated at package time to
-    # the tag the operator's last release produced; see the
-    # chart's GitHub release page for the per-component bundle
-    # table.
-    tag: ""
+    # -- Image tag, pinned to the operator release this chart version
+    # bundles. An empty value falls back to `v<Chart.AppVersion>` for a
+    # local `helm install ./charts/mxl-k8s` from a checkout.
+    tag: "v1.0.0-rc.2" # renovate: datasource=docker depName=ghcr.io/qvest-digital/mxl-k8s/operator versioning=semver
     # -- Image digest. Wins over tag when set.
     # @schema
     # pattern: ^$|^sha256:[0-9a-f]{64}$
@@ -207,13 +203,10 @@ agent:
       maxUnavailable: 1
   image:
     repository: agent
-    # -- Image tag. Empty falls back to `v<Chart.AppVersion>` so a
-    # local `helm install ./charts/mxl-k8s` from the repo still
-    # resolves to a single bundle version. The published OCI
-    # artifact has this field pre-populated at package time to
-    # the tag the agent's last release produced; see the chart's
-    # GitHub release page for the per-component bundle table.
-    tag: ""
+    # -- Image tag, pinned to the agent release this chart version
+    # bundles. An empty value falls back to `v<Chart.AppVersion>` for a
+    # local `helm install ./charts/mxl-k8s` from a checkout.
+    tag: "v1.0.0-rc.4" # renovate: datasource=docker depName=ghcr.io/qvest-digital/mxl-k8s/agent versioning=semver
     # @schema
     # pattern: ^$|^sha256:[0-9a-f]{64}$
     # @schema
@@ -340,14 +333,10 @@ gateway:
       maxUnavailable: 1
   image:
     repository: gateway
-    # -- Image tag. Empty falls back to `v<Chart.AppVersion>` so a
-    # local `helm install ./charts/mxl-k8s` from the repo still
-    # resolves to a single bundle version. The published OCI
-    # artifact has this field pre-populated at package time to
-    # the tag the gateway's last release produced; see the
-    # chart's GitHub release page for the per-component bundle
-    # table.
-    tag: ""
+    # -- Image tag, pinned to the gateway release this chart version
+    # bundles. An empty value falls back to `v<Chart.AppVersion>` for a
+    # local `helm install ./charts/mxl-k8s` from a checkout.
+    tag: "v1.0.0-rc.5" # renovate: datasource=docker depName=ghcr.io/qvest-digital/mxl-k8s/gateway versioning=semver
     # @schema
     # pattern: ^$|^sha256:[0-9a-f]{64}$
     # @schema
