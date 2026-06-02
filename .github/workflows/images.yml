@@ -523,9 +523,11 @@ jobs:
 
       # hack/kind-up.sh installs the chart via `helm upgrade --install`.
       # Pin the helm version to the value chart.yml uses so the chart
-      # path is exercised against a single tested release.
+      # path is exercised against a single tested release. Same depName
+      # as chart.yml's HELM_VERSION, so Renovate bumps both together.
       - uses: azure/setup-helm@v5
         with:
+          # renovate: datasource=github-releases depName=helm/helm versioning=semver
           version: v3.18.4
 
       # `make kind-up BUILD=<tag>` pulls images from GHCR. GHCR
