@@ -79,6 +79,16 @@ jobs:
         run: make chart-crd-sync chart-schema chart-docs
 
       - name: Commit and push if changed
+        env:
+          # Derive the commit identity from the run context rather than
+          # hardcoding it: actor is the account that triggered the run
+          # (the Renovate bot for these PRs) and actor_id is its user id,
+          # which together form GitHub's {id}+{login}@users.noreply
+          # address so the commit links back to that account. Passed via
+          # env (not inlined into the script) to avoid expression-in-shell
+          # injection.
+          ACTOR: ${{ github.actor }}
+          ACTOR_ID: ${{ github.actor_id }}
         run: |
           set -eu
           if git diff --quiet -- \
@@ -92,10 +102,7 @@ jobs:
             charts/mxl-k8s/crds \
             charts/mxl-k8s/values.schema.json \
             charts/mxl-k8s/README.md
-          # Author as the github-actions bot (41898282 is that account's
-          # user id, so the commit links to it). -c scopes the identity to
-          # this one commit rather than mutating the checkout's git config.
-          git -c user.name='github-actions[bot]' \
-              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+          git -c user.name="${ACTOR}" \
+              -c user.email="${ACTOR_ID}+${ACTOR}@users.noreply.github.com" \
               commit -m "chore(chart): regenerate schema, docs, CRDs"
           git push origin "HEAD:${GITHUB_HEAD_REF}"
