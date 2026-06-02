@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.6](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.5...charts/mxl-k8s/v1.0.0-rc.6) (2026-06-02)
+
+
+### Miscellaneous
+
+* **deps:** update busybox docker tag to v1.38 ([#100](https://github.com/qvest-digital/mxl-k8s/issues/100)) ([9790e64](https://github.com/qvest-digital/mxl-k8s/commit/9790e642c6932d9988a947e8e6e5d63996f2f770))
+
 ## [1.0.0-rc.5](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.4...charts/mxl-k8s/v1.0.0-rc.5) (2026-05-27)
 
 

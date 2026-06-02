@@ -67,7 +67,7 @@ cleanup:
     # fails the chart with a clear error in that case.
     nodeCount: 1
     # -- Image used by the cleanup Job. Pinned tag (no :latest).
-    image: busybox:1.36
+    image: busybox:1.38
     # -- Image used by the nodecount-guard init-container. Must
     # carry a kubectl binary on PATH.
     guardImage: bitnami/kubectl:1.31
@@ -90,7 +90,7 @@ operator:
     # -- Image tag, pinned to the operator release this chart version
     # bundles. An empty value falls back to `v<Chart.AppVersion>` for a
     # local `helm install ./charts/mxl-k8s` from a checkout.
-    tag: "v1.0.0-rc.2" # renovate: datasource=docker depName=ghcr.io/qvest-digital/mxl-k8s/operator versioning=semver
+    tag: "v1.0.0-rc.3" # renovate: datasource=docker depName=ghcr.io/qvest-digital/mxl-k8s/operator versioning=semver
     # -- Image digest. Wins over tag when set.
     # @schema
     # pattern: ^$|^sha256:[0-9a-f]{64}$
