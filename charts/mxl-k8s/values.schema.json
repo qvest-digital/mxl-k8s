@@ -599,7 +599,7 @@
               "title": "guardImage"
             },
             "image": {
-              "default": "busybox:1.36",
+              "default": "busybox:1.38",
               "description": "Image used by the cleanup Job. Pinned tag (no :latest).",
               "required": [],
               "title": "image"
