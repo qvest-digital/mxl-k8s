@@ -78,6 +78,12 @@
       "labels": ["dependencies", "libmxl"]
     },
     {
+      "description": "operator/agent/gateway are tracked by the custom regex manager below with their full ghcr path. Renovate's built-in helm-values manager also detects them from values.yaml, but only as the bare repository (operator/agent/gateway) because the registry lives under global.image.registry; that docker lookup returns no-result and warns on the dependency dashboard. Disable the helm-values copies; busybox and bitnami/kubectl keep their working helm-values detection.",
+      "matchManagers": ["helm-values"],
+      "matchPackageNames": ["operator", "agent", "gateway"],
+      "enabled": false
+    },
+    {
       "description": "Chart-bundled module images are intra-repo and not stability-gated, so a new module (pre)release re-pins the chart immediately via a deps(chart) PR that release-please turns into a chart release",
       "matchManagers": ["custom.regex"],
       "matchDatasources": ["docker"],
