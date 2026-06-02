@@ -1,0 +1,98 @@
+name: chart-autofix
+
+# Mend-hosted Renovate cannot run postUpgradeTasks, so a Renovate PR
+# that bumps a value in charts/mxl-k8s/values.yaml (or a CRD under
+# config/crd) leaves the generated chart artefacts stale:
+# values.schema.json and README.md embed values as generated defaults,
+# and crds/ is a copy of config/crd. The chart lint job's drift check
+# then fails and the PR is stuck (see the busybox/kubectl Renovate PRs).
+# This job regenerates those artefacts on Renovate branches and pushes
+# the result back so the drift check passes.
+#
+# Scope is deliberately narrow: same-repo Renovate branches only. Human
+# PRs keep the red drift check that tells the author to run
+# `make chart-crd-sync chart-schema chart-docs`, and fork PRs never
+# reach a step that holds the push token.
+
+on:
+  pull_request:
+    # Inputs only. The push below touches generated files
+    # (values.schema.json, README.md, crds/), none of which appear here,
+    # so it does not re-trigger this workflow; it does re-trigger
+    # chart.yml (which watches all of charts/mxl-k8s/**) so the lint
+    # drift check re-runs against the corrected tree.
+    paths:
+      - 'charts/mxl-k8s/values.yaml'
+      - 'charts/mxl-k8s/Chart.yaml'
+      - 'charts/mxl-k8s/README.md.gotmpl'
+      - 'config/crd/**'
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chart-autofix-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep in lock-step with the generator pins in chart.yml so the
+  # regenerated output matches what the lint drift check expects.
+  HELM_SCHEMA_VERSION: "0.23.2"
+  HELM_DOCS_VERSION: v1.14.2
+
+jobs:
+  regenerate:
+    # Same-repo Renovate branches only. Forks cannot receive a push and
+    # must not see the token; human branches keep the lint drift check
+    # as an explicit "run make" signal.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.head_ref, 'renovate/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Check out the PR head branch (not the merge ref) so the
+          # regenerated commit lands on the Renovate branch. A PAT is
+          # required because a push made with the default GITHUB_TOKEN
+          # does not start downstream workflow runs, which would leave
+          # chart.yml's drift check stuck on the pre-fix commit. Reuses
+          # RELEASE_PLEASE_TOKEN; a dedicated least-privilege token can
+          # be swapped in without touching the rest of this workflow.
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Install helm-schema and helm-docs
+        run: |
+          go install github.com/dadav/helm-schema/cmd/helm-schema@${HELM_SCHEMA_VERSION}
+          go install github.com/norwoodj/helm-docs/cmd/helm-docs@${HELM_DOCS_VERSION}
+
+      - name: Regenerate chart artefacts
+        run: make chart-crd-sync chart-schema chart-docs
+
+      - name: Commit and push if changed
+        run: |
+          set -eu
+          if git diff --quiet -- \
+            charts/mxl-k8s/crds \
+            charts/mxl-k8s/values.schema.json \
+            charts/mxl-k8s/README.md; then
+            echo "No drift; generated artefacts already in sync."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            charts/mxl-k8s/crds \
+            charts/mxl-k8s/values.schema.json \
+            charts/mxl-k8s/README.md
+          git commit -m "chore(chart): regenerate schema, docs, CRDs"
+          git push origin "HEAD:${GITHUB_HEAD_REF}"
