@@ -9,16 +9,6 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Track tagged releases of dmf-mxl/mxl (or any fork) pinned in .github/libmxl.version",
-      "fileMatch": ["^\\.github/libmxl\\.version$"],
-      "matchStrings": [
-        "^https://github\\.com/(?<depName>[^/]+/[^/]+)/tree/(?<currentValue>[^\\s/]+)\\s*$"
-      ],
-      "datasourceTemplate": "github-releases",
-      "versioningTemplate": "loose"
-    },
-    {
-      "customType": "regex",
       "description": "Pin the chart-bundled module images (operator, agent, gateway) to their ghcr releases via inline markers in values.yaml",
       "fileMatch": ["^charts/mxl-k8s/values\\.yaml$"],
       "matchStrings": [
@@ -65,17 +55,6 @@
       "groupName": "CI tool versions",
       "semanticCommitType": "deps",
       "semanticCommitScope": "tools"
-    },
-    {
-      "description": "libmxl is intentionally not delayed so upstream-breaking releases surface immediately via a CI-red PR",
-      "matchManagers": ["custom.regex"],
-      "matchFileNames": [".github/libmxl.version"],
-      "minimumReleaseAge": "0 days",
-      "schedule": ["at any time"],
-      "commitMessageTopic": "libmxl",
-      "semanticCommitType": "deps",
-      "semanticCommitScope": "libmxl",
-      "labels": ["dependencies", "libmxl"]
     },
     {
       "description": "operator/agent/gateway are tracked by the custom regex manager below with their full ghcr path. Renovate's built-in helm-values manager also detects them from values.yaml, but only as the bare repository (operator/agent/gateway) because the registry lives under global.image.registry; that docker lookup returns no-result and warns on the dependency dashboard. Disable the helm-values copies; busybox and bitnami/kubectl keep their working helm-values detection.",

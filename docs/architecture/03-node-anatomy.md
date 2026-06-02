@@ -94,7 +94,7 @@ table:
 | --- | --- | --- | --- |
 | writer pod | rw | -- | libmxl |
 | consumer pod | rw | rw (bind-mount of the socket file) | libmxl + libmxl-intent.so via `LD_PRELOAD` |
-| agent DaemonSet | rw | rw (binds, listens) | libmxl |
+| agent DaemonSet | rw | rw (binds, listens) | none (pure Go) |
 | gateway DaemonSet | rw | -- | libmxl + libmxl-fabrics + libfabric provider |
 
 The LD_PRELOAD shim is delivered through a small two-container
