@@ -71,24 +71,24 @@ on every merge to `main`; Helm encodes the `+` as `_` in the OCI tag.
 ## Per-component image versions
 
 Operator, agent, and gateway release independently from the chart;
-their versions can diverge. The published chart pins
-`<component>.image.tag` per component at package time so a chart
-release at `1.0.0-rc.5` can ship operator at `v1.0.0-rc.4`, agent at
-`v1.0.0-rc.5`, and gateway at `v1.0.0-rc.2` without the user
-touching values.
+their versions can diverge. `<component>.image.tag` is pinned per
+component in `values.yaml` and committed, so a chart release at
+`1.0.0-rc.5` can ship operator at `v1.0.0-rc.4`, agent at
+`v1.0.0-rc.5`, and gateway at `v1.0.0-rc.2` without the user touching
+values. Renovate keeps each committed pin current; a bump opens a
+`deps(chart)` PR that release-please turns into a chart release.
 
-The pinned table for each released chart appears in the chart's
-GitHub release notes
+The bundled-versions table for each released chart appears in the
+chart's GitHub release notes
 (`https://github.com/qvest-digital/mxl-k8s/releases/tag/charts/mxl-k8s/v<X>`).
-The `:dev` chart pins every tag to `dev` so it tracks main HEAD
-images.
+The `:dev` chart published on every merge to `main` rewrites every tag
+to `dev` so it tracks main HEAD images.
 
-A `helm install ./charts/mxl-k8s` from a clone of the repo (source
-values.yaml, no pin) falls back to `v<Chart.AppVersion>` for every
-component, which is fine for the rare case where the contributor
-wants the same version across all components from one checkout.
-
-`--set <comp>.image.tag=<tag>` overrides the pin as usual.
+A `helm install ./charts/mxl-k8s` from a clone uses the committed pins
+as-is. Each component must resolve to an image: set `image.tag` or
+`image.digest` (both ship pinned in `values.yaml`); leaving both empty
+makes rendering fail. `--set <comp>.image.tag=<tag>` overrides the pin
+as usual.
 
 ## Common overrides
 
@@ -167,7 +167,7 @@ Kubernetes: `>=1.28-0`
 | agent.containerSecurityContext.runAsNonRoot | bool | `false` | fanotify on /run/mxl/domain reads host inodes, so the agent currently runs as root. PSA-restricted environments cannot host the agent without a policy exception. |
 | agent.hostPID | bool | `true` | Run the agent in the host PID namespace. Required for the intent socket's SO_PEERCRED-based pod identification: without it the connecting consumer pod's PID is not visible to the agent and the on-demand mirror materialization path silently fails. |
 | agent.hostPath | object | `{"run":"/run/mxl","type":"DirectoryOrCreate"}` | hostPath layout. The agent mounts the whole /run/mxl so the intent socket lands on the host where consumer pods can see it. |
-| agent.image.tag | string | `"v1.0.0-rc.4"` | Image tag, pinned to the agent release this chart version bundles. An empty value falls back to `v<Chart.AppVersion>` for a local `helm install ./charts/mxl-k8s` from a checkout. |
+| agent.image.tag | string | `"v1.0.0-rc.4"` | Image tag for the agent, pinned to the release this chart version bundles and kept current by Renovate. Set this or image.digest; with both empty, rendering fails. |
 | cleanup | object | `{"preDeleteDomainWipe":{"enabled":true,"guardImage":"bitnami/kubectl:1.31","image":"busybox:1.38","nodeCount":1,"timeoutSeconds":120}}` | Pre-delete lifecycle hooks. The domain wipe removes stale .mxl-flow directories under gateway.flags.domainPath at chart uninstall, because they live on a hostPath and survive namespace and CRD teardown. |
 | cleanup.preDeleteDomainWipe.enabled | bool | `true` | Wipe stale .mxl-flow directories under gateway.flags.domainPath during helm uninstall, closing the cold-reinstall lifecycle bug where surviving hostPath state from a prior install causes the agent classifier to default the dirs to Origin on the next install (ghost source-side initiator).  Set to false if either applies:   - producers (libmxl writers) are still mmap-attached to files     under domainPath at uninstall time. rm -rf does not crash     producers (mmap regions survive unlink), but their writes     are orphaned from any new consumer. Drain producers first,     then uninstall.   - host state under domainPath is intentionally reused across     chart reinstalls (advanced; expect to clean up manually to     avoid the ghost-initiator bug). |
 | cleanup.preDeleteDomainWipe.guardImage | string | `"bitnami/kubectl:1.31"` | Image used by the nodecount-guard init-container. Must carry a kubectl binary on PATH. |
@@ -181,7 +181,7 @@ Kubernetes: `>=1.28-0`
 | gateway.flags.degradedAfter | string | `"10s"` | Grain-commit inactivity after which the target gateway demotes a mirror to Degraded. Same threshold gates the Reconcile fast-path so a stale Ready status falls through to re-establish. |
 | gateway.flags.pprofBindAddress | string | `""` | Bind address for the net/http/pprof endpoint. Empty disables; otherwise must be a loopback bind (127.0.0.1: or localhost:). Use kubectl port-forward to reach the endpoint; see docs/diagnostics/perf-shortfall.md for the capture recipe. |
 | gateway.hostNetwork | bool | `true` | hostNetwork is required because the libmxl-fabrics TargetInfo embeds the host:port a peer dials; a CNI overlay IP would not be reachable cross-node. |
-| gateway.image.tag | string | `"v1.0.0-rc.5"` | Image tag, pinned to the gateway release this chart version bundles. An empty value falls back to `v<Chart.AppVersion>` for a local `helm install ./charts/mxl-k8s` from a checkout. |
+| gateway.image.tag | string | `"v1.0.0-rc.5"` | Image tag for the gateway, pinned to the release this chart version bundles and kept current by Renovate. Set this or image.digest; with both empty, rendering fails. |
 | gateway.rdma.enabled | bool | `false` | Add the capabilities and mounts the verbs/efa providers need. |
 | gateway.rdma.resourceName | string | `""` | Extended-resource name advertised by a Kubernetes device plugin (for example `rdma/hca_shared_devices` from k8s-rdma-shared-dev-plugin). When non-empty, the gateway container gets `<resourceName>: 1` on both requests and limits. Empty disables the request. |
 | global | object | `{"commonAnnotations":{},"commonLabels":{},"image":{"pullPolicy":"IfNotPresent","pullSecrets":[],"registry":"ghcr.io/qvest-digital/mxl-k8s"}}` | Global settings inherited by every component unless overridden. |
@@ -197,7 +197,7 @@ Kubernetes: `>=1.28-0`
 | operator.flags.leaderElect | bool | `false` | Enable leader election. Required for replicaCount > 1. |
 | operator.image.digest | string | `""` | Image digest. Wins over tag when set. @schema pattern: ^$|^sha256:[0-9a-f]{64}$ @schema |
 | operator.image.pullPolicy | string | `""` | imagePullPolicy override. Empty falls back to global. @schema enum: ["", "Always", "IfNotPresent", "Never"] @schema |
-| operator.image.tag | string | `"v1.0.0-rc.3"` | Image tag, pinned to the operator release this chart version bundles. An empty value falls back to `v<Chart.AppVersion>` for a local `helm install ./charts/mxl-k8s` from a checkout. |
+| operator.image.tag | string | `"v1.0.0-rc.3"` | Image tag for the operator, pinned to the release this chart version bundles and kept current by Renovate. Set this or image.digest; with both empty, rendering fails. |
 | operator.metrics.serviceMonitor.enabled | bool | `false` | Render a Prometheus Operator ServiceMonitor. Requires the monitoring.coreos.com CRDs to be installed cluster-wide. |
 | operator.serviceAccount.name | string | `""` | ServiceAccount name. Empty falls back to a generated name. |
 | rbac | object | `{"create":true}` | ClusterRoles and ClusterRoleBindings for every enabled component. Set to false when RBAC is centrally managed. |
