@@ -88,11 +88,14 @@ jobs:
             echo "No drift; generated artefacts already in sync."
             exit 0
           fi
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add \
             charts/mxl-k8s/crds \
             charts/mxl-k8s/values.schema.json \
             charts/mxl-k8s/README.md
-          git commit -m "chore(chart): regenerate schema, docs, CRDs"
+          # Author as the github-actions bot (41898282 is that account's
+          # user id, so the commit links to it). -c scopes the identity to
+          # this one commit rather than mutating the checkout's git config.
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m "chore(chart): regenerate schema, docs, CRDs"
           git push origin "HEAD:${GITHUB_HEAD_REF}"
