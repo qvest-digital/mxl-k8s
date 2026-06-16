@@ -214,8 +214,7 @@ mocks-check: mocks
 # Override the cluster name with KIND_CLUSTER=<name>.
 # Use Podman instead of Docker: CONTAINER_RUNTIME=podman
 #   e.g. `make kind-up CONTAINER_RUNTIME=podman`
-<<<<<<< improvement-mxl-stability
-=======
+
 #
 # Image source selector (BUILD):
 #   unset / BUILD=local  build the five component images locally as
@@ -227,17 +226,11 @@ mocks-check: mocks
 #                        the chart with --set <comp>.image.tag=<tag>.
 #   e.g. `make kind-up BUILD=sha-abc1234`
 #        `make kind-up BUILD=v1.0.0-rc.3`
->>>>>>> main
+
 
 KIND_CLUSTER ?= mxl-k8s-demo
 # Container runtime: "docker" (default) or "podman".
 CONTAINER_RUNTIME ?= docker
-<<<<<<< improvement-mxl-stability
-
-.PHONY: kind-up
-kind-up:
-	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) bash hack/kind-up.sh
-=======
 # Image source: "local" (default) or a CI-produced image tag.
 BUILD ?= local
 # Where the integration suite writes failure diagnostics.
@@ -246,7 +239,6 @@ KIND_DIAG_DIR ?= $(CURDIR)/kind-diagnostics
 .PHONY: kind-up
 kind-up:
 	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) BUILD=$(BUILD) bash hack/kind-up.sh
->>>>>>> main
 
 .PHONY: kind-down
 kind-down:
@@ -255,10 +247,7 @@ kind-down:
 .PHONY: kind-status
 kind-status:
 	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) bash hack/kind-status.sh
-<<<<<<< improvement-mxl-stability
-=======
 
 .PHONY: kind-test
 kind-test:
 	KIND_CLUSTER=$(KIND_CLUSTER) KIND_DIAG_DIR=$(KIND_DIAG_DIR) bash test/integration/kind/run.sh
->>>>>>> main
