@@ -227,8 +227,8 @@
               "type": "string"
             },
             "tag": {
-              "default": "",
-              "description": "Image tag. Empty falls back to `v\u003cChart.AppVersion\u003e` so a local `helm install ./charts/mxl-k8s` from the repo still resolves to a single bundle version. The published OCI artifact has this field pre-populated at package time to the tag the agent's last release produced; see the chart's GitHub release page for the per-component bundle table.",
+              "default": "v1.0.0-rc.4",
+              "description": "Image tag for the agent, pinned to the release this chart version bundles and kept current by Renovate. Set this or image.digest; with both empty, rendering fails.",
               "required": [],
               "title": "tag"
             }
@@ -581,6 +581,54 @@
       ],
       "title": "agent"
     },
+    "cleanup": {
+      "description": "Pre-delete lifecycle hooks. The domain wipe removes stale .mxl-flow directories under gateway.flags.domainPath at chart uninstall, because they live on a hostPath and survive namespace and CRD teardown.",
+      "properties": {
+        "preDeleteDomainWipe": {
+          "properties": {
+            "enabled": {
+              "default": "true",
+              "description": "Wipe stale .mxl-flow directories under gateway.flags.domainPath during helm uninstall, closing the cold-reinstall lifecycle bug where surviving hostPath state from a prior install causes the agent classifier to default the dirs to Origin on the next install (ghost source-side initiator).  Set to false if either applies:   - producers (libmxl writers) are still mmap-attached to files     under domainPath at uninstall time. rm -rf does not crash     producers (mmap regions survive unlink), but their writes     are orphaned from any new consumer. Drain producers first,     then uninstall.   - host state under domainPath is intentionally reused across     chart reinstalls (advanced; expect to clean up manually to     avoid the ghost-initiator bug).",
+              "required": [],
+              "title": "enabled"
+            },
+            "guardImage": {
+              "default": "bitnami/kubectl:1.31",
+              "description": "Image used by the nodecount-guard init-container. Must carry a kubectl binary on PATH.",
+              "required": [],
+              "title": "guardImage"
+            },
+            "image": {
+              "default": "busybox:1.38",
+              "description": "Image used by the cleanup Job. Pinned tag (no :latest).",
+              "required": [],
+              "title": "image"
+            },
+            "nodeCount": {
+              "default": "1",
+              "description": "Effective node count for the agent DaemonSet. An under-set value yields a partial wipe; the nodecount-guard init-container fails the chart with a clear error in that case.",
+              "minimum": 1,
+              "required": [],
+              "title": "nodeCount"
+            },
+            "timeoutSeconds": {
+              "default": "120",
+              "description": "Per-pod completion timeout.",
+              "minimum": 1,
+              "required": [],
+              "title": "timeoutSeconds"
+            }
+          },
+          "required": [],
+          "title": "preDeleteDomainWipe",
+          "type": "object"
+        }
+      },
+      "required": [
+        "preDeleteDomainWipe"
+      ],
+      "title": "cleanup"
+    },
     "crds": {
       "description": "CRD handling. The chart installs CRDs from its crds/ directory by default. Helm only installs them on first install and never deletes or upgrades them; Flux's HelmRelease.spec.{install,upgrade}.crds governs replace semantics. Set skipInstall=true when CRDs are managed by a separate Kustomization or operator framework.",
       "properties": {
@@ -715,9 +763,15 @@
           "properties": {
             "bindAddress": {
               "default": "$(POD_IP)",
-              "description": "Bind address for libmxl-fabrics endpoints. Default uses the downward-API POD_IP so each gateway binds its node IP.",
+              "description": "Bind address for libmxl-fabrics endpoints. Default uses the downward-API POD_IP so each gateway binds its node IP. An explicit empty string (\"\") emits `--bind-address=` (bare equals), which suppresses the POD_IP fallback so libfabric picks the interface; useful when the gateway runs on a Multus-attached NAD and the RDMA fabric is a secondary netdev.",
               "required": [],
               "title": "bindAddress"
+            },
+            "degradedAfter": {
+              "default": "10s",
+              "description": "Grain-commit inactivity after which the target gateway demotes a mirror to Degraded. Same threshold gates the Reconcile fast-path so a stale Ready status falls through to re-establish.",
+              "required": [],
+              "title": "degradedAfter"
             },
             "domainPath": {
               "default": "/run/mxl/domain",
@@ -739,6 +793,13 @@
               "pattern": "^:[0-9]+$|^[0-9.]+:[0-9]+$",
               "required": [],
               "title": "metricsBindAddress"
+            },
+            "pprofBindAddress": {
+              "default": "",
+              "description": "Bind address for the net/http/pprof endpoint. Empty disables; otherwise must be a loopback bind (127.0.0.1: or localhost:). Use kubectl port-forward to reach the endpoint; see docs/diagnostics/perf-shortfall.md for the capture recipe.",
+              "pattern": "^$|^(127\\.0\\.0\\.1|localhost):[0-9]+$",
+              "required": [],
+              "title": "pprofBindAddress"
             },
             "providers": {
               "description": " items:   enum: [\"tcp\", \"verbs\", \"efa\", \"shm\", \"auto\"] @schema",
@@ -836,8 +897,8 @@
               "type": "string"
             },
             "tag": {
-              "default": "",
-              "description": "Image tag. Empty falls back to `v\u003cChart.AppVersion\u003e` so a local `helm install ./charts/mxl-k8s` from the repo still resolves to a single bundle version. The published OCI artifact has this field pre-populated at package time to the tag the gateway's last release produced; see the chart's GitHub release page for the per-component bundle table.",
+              "default": "v1.0.0-rc.5",
+              "description": "Image tag for the gateway, pinned to the release this chart version bundles and kept current by Renovate. Set this or image.digest; with both empty, rendering fails.",
               "required": [],
               "title": "tag"
             }
@@ -1027,6 +1088,12 @@
               "pattern": "^/.+",
               "required": [],
               "title": "infinibandHostPath"
+            },
+            "resourceName": {
+              "default": "",
+              "description": "Extended-resource name advertised by a Kubernetes device plugin (for example `rdma/hca_shared_devices` from k8s-rdma-shared-dev-plugin). When non-empty, the gateway container gets `\u003cresourceName\u003e: 1` on both requests and limits. Empty disables the request.",
+              "required": [],
+              "title": "resourceName"
             }
           },
           "required": [
@@ -1462,8 +1529,8 @@
               "type": "string"
             },
             "tag": {
-              "default": "",
-              "description": "Image tag. Empty falls back to `v\u003cChart.AppVersion\u003e` so a local `helm install ./charts/mxl-k8s` from the repo still resolves to a single bundle version. The published OCI artifact has this field pre-populated at package time to the tag the operator's last release produced; see the chart's GitHub release page for the per-component bundle table.",
+              "default": "v1.0.0-rc.3",
+              "description": "Image tag for the operator, pinned to the release this chart version bundles and kept current by Renovate. Set this or image.digest; with both empty, rendering fails.",
               "required": [],
               "title": "tag"
             }

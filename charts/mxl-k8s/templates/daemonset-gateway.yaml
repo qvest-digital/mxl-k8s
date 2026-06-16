@@ -78,7 +78,7 @@ spec:
       {{- end }}
       containers:
         - name: gateway
-          image: {{ include "mxlk8s.image" (dict "global" .Values.global "image" .Values.gateway.image "Chart" .Chart) }}
+          image: {{ include "mxlk8s.image" (dict "global" .Values.global "image" .Values.gateway.image) }}
           imagePullPolicy: {{ include "mxlk8s.imagePullPolicy" (dict "global" .Values.global "image" .Values.gateway.image) }}
           args:
             {{- include "mxlk8s.flags.render" (dict "flags" .Values.gateway.flags) | nindent 12 }}
@@ -129,7 +129,14 @@ spec:
                 {{- end }}
               {{- end }}
           resources:
-            {{- toYaml .Values.gateway.resources | nindent 12 }}
+            {{- $resources := deepCopy .Values.gateway.resources -}}
+            {{- with .Values.gateway.rdma.resourceName -}}
+              {{- $requests := default (dict) $resources.requests -}}
+              {{- $limits   := default (dict) $resources.limits -}}
+              {{- $_ := set $resources "requests" (merge $requests (dict . 1)) -}}
+              {{- $_ := set $resources "limits"   (merge $limits   (dict . 1)) -}}
+            {{- end }}
+            {{- toYaml $resources | nindent 12 }}
           volumeMounts:
             - name: mxl-domain
               mountPath: {{ .Values.gateway.hostPath.domain }}

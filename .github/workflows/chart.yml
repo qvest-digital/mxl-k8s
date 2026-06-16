@@ -13,13 +13,15 @@ on:
       - 'config/crd/**'
       - '.github/workflows/chart.yml'
   # release-please.yml calls this workflow as a reusable workflow
-  # when a charts/mxl-k8s release tag has just been cut. Listening
-  # on release:published instead does not work: release-please-action
-  # creates the release with the default GITHUB_TOKEN, and events
-  # produced by GITHUB_TOKEN do not start downstream workflow runs.
-  # workflow_call (and workflow_dispatch, for manual recovery) are
-  # the documented exceptions, so we drive the release publish
-  # through them.
+  # when a charts/mxl-k8s release tag has just been cut, gated on
+  # the per-component release_created output. Pre-PAT a
+  # release:published listener was not an option either: release-
+  # please-action created the release with GITHUB_TOKEN and events
+  # produced by GITHUB_TOKEN do not start downstream runs. With
+  # release-please-action now authenticated through
+  # RELEASE_PLEASE_TOKEN that restriction no longer applies, but
+  # the explicit gating remains preferable to a tag-prefix filter
+  # on release:published. workflow_dispatch covers manual recovery.
   workflow_call:
     inputs:
       release_tag:
@@ -43,16 +45,25 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # helm-schema and helm-unittest tags upstream are bare semver (no v
-  # prefix); go install and helm plugin install accept that form.
-  HELM_VERSION: v3.18.4
+  # Renovate tracks each of these via the inline `# renovate:` marker
+  # on the line directly above the value (see the CI-tool-versions
+  # custom manager in renovate.json). helm-schema tags are bare semver;
+  # helm-unittest tags are v-prefixed, so extractVersion strips the v
+  # to keep the bare value `helm plugin install --version` expects.
+  # renovate: datasource=github-releases depName=helm/helm versioning=semver
+  HELM_VERSION: v4.2.0
+  # renovate: datasource=github-releases depName=helm-unittest/helm-unittest versioning=semver extractVersion=^v(?<version>.+)$
   HELM_UNITTEST_VERSION: "1.1.0"
-  HELM_SCHEMA_VERSION: "0.23.2"
+  # renovate: datasource=github-releases depName=dadav/helm-schema versioning=semver
+  HELM_SCHEMA_VERSION: "0.23.3"
+  # renovate: datasource=go depName=github.com/norwoodj/helm-docs versioning=semver
   HELM_DOCS_VERSION: v1.14.2
-  KUBECONFORM_VERSION: v0.6.7
+  # renovate: datasource=github-releases depName=yannh/kubeconform versioning=semver
+  KUBECONFORM_VERSION: v0.7.0
   # mikefarah/yq for in-place yaml editing of values.yaml at
   # package-time. Pinned because we rely on `yq -i` semantics.
-  YQ_VERSION: v4.44.6
+  # renovate: datasource=github-releases depName=mikefarah/yq versioning=semver
+  YQ_VERSION: v4.53.2
 
 jobs:
   meta:
@@ -113,7 +124,10 @@ jobs:
           version: ${{ env.HELM_VERSION }}
 
       - name: Install helm-unittest
-        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version "${HELM_UNITTEST_VERSION}"
+        # helm 4 verifies plugin provenance by default and aborts when
+        # the source ships none; the unittest release has no signature,
+        # so opt out of verification explicitly.
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version "${HELM_UNITTEST_VERSION}" --verify=false
 
       - uses: actions/setup-go@v6
         with:
@@ -225,14 +239,14 @@ jobs:
           chmod +x /usr/local/bin/yq
           yq --version
 
-      # hack/chart-resolve-tags.sh patches charts/mxl-k8s/values.yaml
-      # in place with the right image tag per component: dev for
-      # 0.0.0-dev* chart builds (track main HEAD), otherwise the
-      # per-component version from .github/release-please-manifest.json.
-      # The script also writes a Markdown table of the resolved tags
-      # to stdout; we save it for the publish-bundled-component-table
-      # step below.
-      - name: Resolve per-component image tags into values.yaml
+      # hack/chart-resolve-tags.sh emits the bundled-component table and,
+      # for the floating dev build (0.0.0-dev*), rewrites each
+      # <component>.image.tag to "dev" so the dev chart tracks main HEAD
+      # images. Release builds keep the per-component pins committed in
+      # values.yaml (Renovate keeps those current), so the diff below is
+      # empty for a release and confirms it ships exactly those pins. The
+      # table is saved for the publish-bundled-component-table step.
+      - name: Emit bundled-component table (dev build pins :dev)
         env:
           VERSION: ${{ needs.meta.outputs.version }}
         run: |

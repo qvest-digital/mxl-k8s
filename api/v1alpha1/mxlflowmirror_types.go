@@ -5,7 +5,7 @@ import (
 )
 
 // MxlFlowMirrorPhase is the lifecycle state of a mirror.
-// +kubebuilder:validation:Enum=Pending;Materializing;Ready;Failed
+// +kubebuilder:validation:Enum=Pending;Materializing;Ready;Degraded;Failed
 type MxlFlowMirrorPhase string
 
 const (
@@ -15,9 +15,15 @@ const (
 	// MxlFlowMirrorMaterializing means the gateway is establishing
 	// the libmxl-fabrics connection.
 	MxlFlowMirrorMaterializing MxlFlowMirrorPhase = "Materializing"
-	// MxlFlowMirrorReady means the mirror is live and grains are
-	// flowing.
+	// MxlFlowMirrorReady means the handshake is complete and grain
+	// activity has been observed within the freshness window.
 	MxlFlowMirrorReady MxlFlowMirrorPhase = "Ready"
+	// MxlFlowMirrorDegraded means the handshake is complete but no
+	// grain progress has been observed for longer than the target
+	// gateway's freshness window. The mirror may recover without
+	// operator intervention; inspect status.conditions for the
+	// reason.
+	MxlFlowMirrorDegraded MxlFlowMirrorPhase = "Degraded"
 	// MxlFlowMirrorFailed means the mirror failed permanently.
 	// Inspect status.conditions for the cause.
 	MxlFlowMirrorFailed MxlFlowMirrorPhase = "Failed"
@@ -75,6 +81,36 @@ type MxlFlowMirrorStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// LastGrainAt is the wall-clock time of the most recent grain
+	// commit observed by the target gateway. Used to demote Ready
+	// to Degraded when no grains have flowed for the freshness
+	// window.
+	// +optional
+	LastGrainAt *metav1.Time `json:"lastGrainAt,omitempty"`
+
+	// LastSentAt is the wall-clock time of the most recent grain
+	// the source-side gateway successfully handed to libmxl-fabrics
+	// for transfer. Set on every source-side flusher tick once the
+	// initiator is live. Target-side recovery uses the delta between
+	// LastSentAt and LastGrainAt to distinguish "source is sending
+	// but target is wedged" (rebuild) from "source is idle"
+	// (leave alone). Unset before the first transfer.
+	// +optional
+	// +nullable
+	LastSentAt *metav1.Time `json:"lastSentAt,omitempty"`
+
+	// LastError is the most recent reconcile error message recorded
+	// by the source gateway when bounded backoff is engaged. Empty
+	// after a successful reconcile.
+	// +optional
+	LastError string `json:"lastError,omitempty"`
+
+	// AttemptCount is the number of consecutive failed AddTarget
+	// attempts since the last successful reconcile. Reset to zero
+	// when the source gateway succeeds.
+	// +optional
+	AttemptCount int32 `json:"attemptCount,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -89,6 +125,16 @@ type MxlFlowMirrorStatus struct {
 
 // MxlFlowMirror represents the desired and observed state of one
 // (flow, target node) mirror.
+//
+// metadata.ownerReferences acts as a per-consumer refcount: each
+// MxlReceiver (or other consumer) that requests this flow on this
+// target node is appended as a non-controller, non-blocking owner,
+// and the operator deletes the mirror when the last owner ref is
+// removed. Tear-down is driven by the operator on that transition,
+// not by Kubernetes garbage collection. Consumers must not set
+// controller=true on their owner ref; multiple owners cannot all
+// be controllers, and the owner ref does not gate GC. The current
+// set of consumers is visible via kubectl describe.
 type MxlFlowMirror struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

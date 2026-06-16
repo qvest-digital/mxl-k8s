@@ -1,5 +1,7 @@
 package mirror
 
+import "github.com/qvest-digital/go-mxl/fabrics"
+
 // The two per-mirror progress loops below sit at the heart of every
 // data-plane bug the gateway has shipped. They are also the only
 // pieces of this package whose state machine can be exercised
@@ -14,6 +16,21 @@ package mirror
 // needs. No interface gymnastics, no mockery boilerplate; the loops
 // stay where they were, and only their parameter list changed.
 
+// initiatorOpener is the source reconciler's seam onto the
+// cgo-dependent libmxl-fabrics Initiator setup path. Production
+// binds it to libmxlOpener, which is a thin struct wrapping the
+// existing FlowReader + Initiator + AddTarget sequence.
+// Tests bind it to an inline fake whose open method returns canned
+// sourceEntry values without touching libmxl or libmxl-fabrics.
+//
+// The interface keeps the production binary free of a swappable
+// function pointer that a malicious or buggy caller could redirect
+// at runtime: the field on SourceReconciler is an interface value
+// the constructor sets once and never reassigns.
+type initiatorOpener interface {
+	open(flowID, targetInfoStr string, provider fabrics.Provider) (*sourceEntry, error)
+}
+
 // RuntimeProbe asks the source-side flow reader for the current head
 // index. Production reads it from mxl.Reader.Runtime(); tests return
 // a value the scenario controls.
@@ -21,8 +38,8 @@ type RuntimeProbe func() (head uint64, err error)
 
 // TransferFunc transfers one grain from the source flow to the
 // target. The bool return signals "grain was skipped" - production
-// returns it true when grain.TotalSlices == 0 (continuous flows have
-// no slice subdivision and v0 does not transfer them).
+// returns it true when grain.TotalSlices == 0. Continuous (audio)
+// flows take the sample-transfer path and never reach this loop.
 //
 // A non-nil error breaks the per-tick loop; the next tick re-reads
 // head and re-tries from lastSent+1.
@@ -43,3 +60,22 @@ type ReadGrainFunc func() (idx uint64, err error)
 // (OpenGrain + Commit) so consumer FlowReaders see it. Production
 // passes a closure over the per-mirror *mxl.Writer.
 type CommitFunc func(idx uint64) error
+
+// SampleTransferFunc transfers a contiguous run of `count` samples
+// ending at headIndex from a continuous source flow to the target.
+// Production calls Initiator.TransferSamples; tests record the
+// (headIndex, count) pairs. A non-nil error breaks the per-tick loop;
+// the next tick re-reads head and re-tries from lastSent+1.
+type SampleTransferFunc func(headIndex uint64, count int) error
+
+// ReadSamplesFunc polls the target side for an arrived run of samples,
+// returning the ending head index and the sample count. Returns
+// fabrics.ErrNotReady when nothing landed since the previous call so
+// the loop can sleep. Any other error is fatal: it tells the loop to
+// exit and the recovery callback to fire.
+type ReadSamplesFunc func() (headIndex uint64, count int, err error)
+
+// CommitSamplesFunc finishes one arrived run of samples on the local
+// writer (OpenSamples + Commit) so consumer FlowReaders see it.
+// Production passes a closure over the per-mirror *mxl.Writer.
+type CommitSamplesFunc func(headIndex uint64, count int) error

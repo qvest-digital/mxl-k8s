@@ -7,6 +7,16 @@ Chart name + version label.
 {{- end -}}
 
 {{/*
+Sanitised app.kubernetes.io/version. K8s label values forbid '+',
+which is legal in semver build-metadata; collapse to '_' to match
+mxlk8s.chart's existing convention.
+Call as: include "mxlk8s.appVersion" .Chart
+*/}}
+{{- define "mxlk8s.appVersion" -}}
+{{- .AppVersion | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
 Common labels applied to every object.
 */}}
 {{- define "mxlk8s.labels" -}}
@@ -15,7 +25,7 @@ app.kubernetes.io/name: {{ .Chart.Name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- if .Chart.AppVersion }}
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/version: {{ include "mxlk8s.appVersion" .Chart | quote }}
 {{- end }}
 {{- with .Values.global.commonLabels }}
 {{ toYaml . }}
@@ -42,7 +52,7 @@ makes the apiserver reject the workload at install time.
 helm.sh/chart: {{ include "mxlk8s.chart" .Context }}
 app.kubernetes.io/managed-by: {{ .Context.Release.Service }}
 {{- if .Context.Chart.AppVersion }}
-app.kubernetes.io/version: {{ .Context.Chart.AppVersion | quote }}
+app.kubernetes.io/version: {{ include "mxlk8s.appVersion" .Context.Chart | quote }}
 {{- end }}
 {{ include "mxlk8s.selectorLabels" . }}
 {{- with .Context.Values.global.commonLabels }}
@@ -51,13 +61,12 @@ app.kubernetes.io/version: {{ .Context.Chart.AppVersion | quote }}
 {{- end -}}
 
 {{/*
-Resolve the image reference for one component. Digest beats tag. Tag
-falls back to "v" prepended to chart appVersion, matching the
-"v<VERSION>" tags that images.yml publishes to ghcr.io. An explicit
-image.tag is used verbatim so digests, "pre", "latest", or
-externally-mirrored tags pass through unchanged.
+Resolve the image reference for one component. Digest beats tag. An
+explicit image.tag is used verbatim so digests, "pre", "latest", or
+externally-mirrored tags pass through unchanged. With neither tag nor
+digest set, rendering fails: every component pins one or the other.
 
-Call as: include "mxlk8s.image" (dict "global" .Values.global "image" .Values.operator.image "Chart" .Chart)
+Call as: include "mxlk8s.image" (dict "global" .Values.global "image" .Values.operator.image)
 */}}
 {{- define "mxlk8s.image" -}}
 {{- $registry := .global.image.registry -}}
@@ -65,7 +74,7 @@ Call as: include "mxlk8s.image" (dict "global" .Values.global "image" .Values.op
 {{- if .image.digest -}}
 {{- printf "%s/%s@%s" $registry $repo .image.digest -}}
 {{- else -}}
-{{- $tag := default (printf "v%s" .Chart.AppVersion) .image.tag -}}
+{{- $tag := required "set <component>.image.tag or .image.digest" .image.tag -}}
 {{- printf "%s/%s:%s" $registry $repo $tag -}}
 {{- end -}}
 {{- end -}}
@@ -91,9 +100,13 @@ Call as: include "mxlk8s.serviceAccountName" (dict "Context" . "component" "oper
 
 {{/*
 Render a flags map as a sorted list of --key=value args. Boolean true
-becomes --key (no value); boolean false omits the flag. Empty strings
-omit the flag. Lists join on commas. Keys render in lexical order so
-diff-on-rerender is stable.
+becomes --key (no value); boolean false omits the flag. An explicit
+empty string emits --key= (bare equals) so a caller can suppress a
+binary's downward-API fallback (for example,
+gateway.flags.bindAddress: "" turns off the POD_IP default and lets
+libfabric pick the interface). An absent key (parent map set to {})
+still omits the flag entirely. Lists join on commas. Keys render in
+lexical order so diff-on-rerender is stable.
 
 Call as: include "mxlk8s.flags.render" (dict "flags" .Values.operator.flags)
 */}}
@@ -112,9 +125,7 @@ Call as: include "mxlk8s.flags.render" (dict "flags" .Values.operator.flags)
       {{- $lines = append $lines (printf "- --%s=%s" $kebab (join "," $v)) -}}
     {{- end -}}
   {{- else if eq (kindOf $v) "string" -}}
-    {{- if ne $v "" -}}
-      {{- $lines = append $lines (printf "- --%s=%s" $kebab $v) -}}
-    {{- end -}}
+    {{- $lines = append $lines (printf "- --%s=%s" $kebab $v) -}}
   {{- else -}}
     {{- $lines = append $lines (printf "- --%s=%v" $kebab $v) -}}
   {{- end -}}

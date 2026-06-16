@@ -16,6 +16,9 @@ resources:
   - 10-writer.yaml
   - 20-receiver.yaml
   - 21-reader.yaml
+  - 11-writer-audio.yaml
+  - 22-receiver-audio.yaml
+  - 23-reader-audio.yaml
 
 # The demo writer (mxl-gst-testsrc) needs an NMOS flow definition
 # pointed at via --video-config-file. We ship it verbatim from
@@ -25,5 +28,6 @@ configMapGenerator:
   - name: mxl-demo-flow-config
     files:
       - flow-video-v210.json
+      - flow-audio-f32.json
 generatorOptions:
   disableNameSuffixHash: true

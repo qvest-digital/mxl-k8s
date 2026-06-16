@@ -1,0 +1,35 @@
+{{- if and .Values.gateway.enabled .Values.cleanup.preDeleteDomainWipe.enabled .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Chart.Name }}-predelete-domain-cleanup
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "predelete-domain-cleanup") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-30"
+    helm.sh/hook-delete-policy: hook-succeeded,hook-failed,before-hook-creation
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Chart.Name }}-predelete-domain-cleanup
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "predelete-domain-cleanup") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-30"
+    helm.sh/hook-delete-policy: hook-succeeded,hook-failed,before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Chart.Name }}-predelete-domain-cleanup
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Chart.Name }}-predelete-domain-cleanup
+    namespace: {{ include "mxlk8s.namespace" . }}
+{{- end }}

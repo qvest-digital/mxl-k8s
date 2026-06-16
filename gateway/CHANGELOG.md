@@ -1,5 +1,46 @@
 # Changelog
 
+## [1.0.0-rc.5](https://github.com/qvest-digital/mxl-k8s/compare/gateway/v1.0.0-rc.4...gateway/v1.0.0-rc.5) (2026-06-02)
+
+
+### Features
+
+* **examples:** add audio sample transfer to the TCP demo ([#112](https://github.com/qvest-digital/mxl-k8s/issues/112)) ([f9245a8](https://github.com/qvest-digital/mxl-k8s/commit/f9245a8d2f6fcca3ea34ad6c2b12179f93cbbd95))
+* **gateway:** mirror continuous audio flows via sample transfer ([#111](https://github.com/qvest-digital/mxl-k8s/issues/111)) ([0807b88](https://github.com/qvest-digital/mxl-k8s/commit/0807b88d3e18e2efb660c7a2330b99ca7f71c529))
+
+
+### Build System
+
+* **gateway:** migrate to go-mxl v1.0.0-rc.9 ([#106](https://github.com/qvest-digital/mxl-k8s/issues/106)) ([d3a52b0](https://github.com/qvest-digital/mxl-k8s/commit/d3a52b01fdf035d8e408d6ed575345b60300161d))
+
+
+### Miscellaneous
+
+* **deps:** update module github.com/qvest-digital/mxl-k8s/api to v1.0.0-rc.2 ([#105](https://github.com/qvest-digital/mxl-k8s/issues/105)) ([6652a9f](https://github.com/qvest-digital/mxl-k8s/commit/6652a9f297fb8eb84d0a2f149f0788b8362a79ef))
+
+## [1.0.0-rc.4](https://github.com/qvest-digital/mxl-k8s/compare/gateway/v1.0.0-rc.3...gateway/v1.0.0-rc.4) (2026-05-27)
+
+
+### Features
+
+* **chart:** expose gateway pprof bind address ([f32db01](https://github.com/qvest-digital/mxl-k8s/commit/f32db0158adf99863d25c76ac9a78ed9f8709e31))
+* **gateway:** pprof bind address flag ([#101](https://github.com/qvest-digital/mxl-k8s/issues/101)) ([f32db01](https://github.com/qvest-digital/mxl-k8s/commit/f32db0158adf99863d25c76ac9a78ed9f8709e31))
+* **operator,gateway,agent:** harden MxlFlowMirror lifecycle ([#79](https://github.com/qvest-digital/mxl-k8s/issues/79)) ([a8aa3e3](https://github.com/qvest-digital/mxl-k8s/commit/a8aa3e306ea77e8856008d0dad57a0052331db3b))
+
+
+### Bug Fixes
+
+* **gateway:** close entry on sourceNode mismatch ([#97](https://github.com/qvest-digital/mxl-k8s/issues/97)) ([3434e83](https://github.com/qvest-digital/mxl-k8s/commit/3434e83adae7eeaf464dff1330a84ed33977522e))
+* **gateway:** recover targets wedged after first grain ([#87](https://github.com/qvest-digital/mxl-k8s/issues/87)) ([fe49ca3](https://github.com/qvest-digital/mxl-k8s/commit/fe49ca302296afd517118b08f3309d33b2b7a526))
+* **gateway:** recover targets wedged in silent ErrNotReady ([#85](https://github.com/qvest-digital/mxl-k8s/issues/85)) ([943c266](https://github.com/qvest-digital/mxl-k8s/commit/943c266d997646febb74f10183389826f88c71e6))
+
+
+### Build System
+
+* **gateway:** bump go-mxl to 1.0.0-rc.6 ([#98](https://github.com/qvest-digital/mxl-k8s/issues/98)) ([4a3a3eb](https://github.com/qvest-digital/mxl-k8s/commit/4a3a3eb010f22aa5286ae401f4dcded6abe09496))
+* **gateway:** bump go-mxl to 1.0.0-rc.7 ([#102](https://github.com/qvest-digital/mxl-k8s/issues/102)) ([aadb15d](https://github.com/qvest-digital/mxl-k8s/commit/aadb15dd02878058d102cc232ea84d6a1573f21a))
+* **gateway:** bump go-mxl to 1.0.0-rc.8 ([#103](https://github.com/qvest-digital/mxl-k8s/issues/103)) ([97023a6](https://github.com/qvest-digital/mxl-k8s/commit/97023a69a284fff4a2f9d8364c642206487663db))
+
 ## [1.0.0-rc.3](https://github.com/qvest-digital/mxl-k8s/compare/gateway/v1.0.0-rc.2...gateway/v1.0.0-rc.3) (2026-05-19)
 
 

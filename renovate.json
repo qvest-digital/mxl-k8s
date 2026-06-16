@@ -9,40 +9,83 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Track tagged releases of dmf-mxl/mxl (or any fork) pinned in .github/libmxl.version",
-      "fileMatch": ["^\\.github/libmxl\\.version$"],
+      "description": "Pin the chart-bundled module images (operator, agent, gateway) to their ghcr releases via inline markers in values.yaml",
+      "fileMatch": ["^charts/mxl-k8s/values\\.yaml$"],
       "matchStrings": [
-        "^https://github\\.com/(?<depName>[^/]+/[^/]+)/tree/(?<currentValue>[^\\s/]+)\\s*$"
+        "tag: \"(?<currentValue>[^\"]+)\"\\s+#\\s*renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?"
+      ]
+    },
+    {
+      "customType": "regex",
+      "description": "Track CI/build tool versions pinned in workflow env blocks and the Makefile via inline `# renovate:` markers (helm, helm-unittest, helm-schema, helm-docs, kubeconform, yq, gotestsum, controller-tools, mockery). The marker sits on the line directly above the value; the value line may be a workflow `KEY: value` or a Makefile `KEY ?= value`.",
+      "fileMatch": [
+        "^\\.github/workflows/chart\\.yml$",
+        "^\\.github/workflows/ci\\.yml$",
+        "^\\.github/workflows/images\\.yml$",
+        "^\\.github/workflows/chart-autofix\\.yml$",
+        "^Makefile$"
       ],
-      "datasourceTemplate": "github-releases",
-      "versioningTemplate": "loose"
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?(?: extractVersion=(?<extractVersion>\\S+))?[ \\t]*\\n[ \\t]*[\\w.-]+[ \\t]*(?::|\\?=|=)[ \\t]*[\"']?(?<currentValue>[^\"'\\s#]+)"
+      ]
     }
   ],
   "packageRules": [
     {
-      "description": "Group Go module bumps into one PR per module",
+      "description": "Group third-party Go module bumps into one PR; deps(gomod) so release-please folds a dependency move into each affected module's next release",
       "matchManagers": ["gomod"],
       "groupName": "Go modules",
-      "semanticCommitType": "chore",
-      "semanticCommitScope": "deps"
+      "semanticCommitType": "deps",
+      "semanticCommitScope": "gomod"
     },
     {
       "description": "Group GitHub Actions bumps into one PR",
       "matchManagers": ["github-actions"],
       "groupName": "GitHub Actions",
-      "semanticCommitType": "ci",
-      "semanticCommitScope": "deps"
+      "semanticCommitType": "deps",
+      "semanticCommitScope": "actions"
     },
     {
-      "description": "libmxl is intentionally not delayed so upstream-breaking releases surface immediately via a CI-red PR",
+      "description": "CI/build tool versions tracked via inline markers in workflows and the Makefile. Third-party, so the default stability delay applies; these files are not under a release-please package path, so the bump does not cut a release.",
       "matchManagers": ["custom.regex"],
-      "matchFileNames": [".github/libmxl.version"],
+      "matchFileNames": [
+        ".github/workflows/*.yml",
+        "Makefile"
+      ],
+      "groupName": "CI tool versions",
+      "semanticCommitType": "deps",
+      "semanticCommitScope": "tools"
+    },
+    {
+      "description": "operator/agent/gateway are tracked by the custom regex manager below with their full ghcr path. Renovate's built-in helm-values manager also detects them from values.yaml, but only as the bare repository (operator/agent/gateway) because the registry lives under global.image.registry; that docker lookup returns no-result and warns on the dependency dashboard. Disable the helm-values copies; busybox and bitnami/kubectl keep their working helm-values detection.",
+      "matchManagers": ["helm-values"],
+      "matchPackageNames": ["operator", "agent", "gateway"],
+      "enabled": false
+    },
+    {
+      "description": "Chart-bundled module images are intra-repo and not stability-gated, so a new module (pre)release re-pins the chart immediately via a deps(chart) PR that release-please turns into a chart release",
+      "matchManagers": ["custom.regex"],
+      "matchDatasources": ["docker"],
+      "matchPackageNames": [
+        "ghcr.io/qvest-digital/mxl-k8s/operator",
+        "ghcr.io/qvest-digital/mxl-k8s/agent",
+        "ghcr.io/qvest-digital/mxl-k8s/gateway"
+      ],
+      "groupName": "mxl-k8s module images",
       "minimumReleaseAge": "0 days",
       "schedule": ["at any time"],
-      "commitMessageTopic": "libmxl",
-      "semanticCommitType": "build",
-      "semanticCommitScope": "libmxl",
-      "labels": ["dependencies", "libmxl"]
+      "semanticCommitType": "deps",
+      "semanticCommitScope": "chart"
+    },
+    {
+      "description": "The intra-repo api module require is not stability-gated; its bumps flow immediately in their own PR",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["github.com/qvest-digital/mxl-k8s/api"],
+      "groupName": "mxl-k8s api module",
+      "minimumReleaseAge": "0 days",
+      "schedule": ["at any time"],
+      "semanticCommitType": "deps",
+      "semanticCommitScope": "api"
     }
   ]
 }

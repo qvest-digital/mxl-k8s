@@ -1,0 +1,11 @@
+# Chart values overlay for the KIND demo cluster. Consumed by
+# hack/kind-up.sh via `helm upgrade --install -f`.
+#
+# image.tag is intentionally not pinned here. hack/kind-up.sh passes
+# `--set <component>.image.tag=$TAG` so the same overlay works for
+# both BUILD=local ($TAG=dev) and BUILD=<sha-tag> ($TAG=$BUILD_TAG).
+global:
+  image:
+    # Images are kind-loaded directly into containerd; the chart must
+    # not try to pull them from ghcr.io.
+    pullPolicy: IfNotPresent

@@ -165,6 +165,13 @@ turns it into one `MxlFlowMirror` per distinct target node; the
 gateway pair sets up the libmxl-fabrics transport; the flow appears
 locally before the consumer pod starts reading.
 
+If another `MxlReceiver` already targets the same flow on the same
+node, the existing `MxlFlowMirror` is shared and this receiver is
+appended to the mirror's `metadata.ownerReferences`. Deleting one
+receiver removes its owner ref; the operator tears the mirror down
+only when the last owner ref is gone. `kubectl describe
+mxlflowmirror <name>` lists the current owners.
+
 ```yaml
 apiVersion: mxl.qvest-digital.com/v1alpha1
 kind: MxlReceiver
@@ -285,7 +292,7 @@ work in code but have not been exercised continuously.
 - [`docs/architecture/`](./architecture/): runtime walkthrough of
   the operator, agent, gateway, and shim.
 - [`docs/BUILD.md`](./BUILD.md): local-build prerequisites and the
-  cgo lane for `agent` and `gateway`.
+  cgo lane for `gateway`.
 - [`docs/RDMA.md`](./RDMA.md): host setup for the `verbs` and
   `efa` providers.
 - [`docs/KIND.md`](./KIND.md): KIND demo walkthrough.

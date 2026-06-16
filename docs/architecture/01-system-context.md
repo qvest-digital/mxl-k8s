@@ -37,8 +37,8 @@ node, and then get out of the way of the data path.
     code paths are accepted by the API but not exercised in routine
     CI).
 - **External, linked in**
-  - `libmxl.so` is linked into the gateway, the agent, the writer
-    pod, and the consumer pod.
+  - `libmxl.so` is linked into the gateway, the writer pod, and the
+    consumer pod.
   - `libmxl-fabrics.so` is linked into the gateway only.
 
 ## Actors
@@ -80,11 +80,7 @@ node, and then get out of the way of the data path.
   (one tmpfs per node, shared by every libmxl handle on that node).
   Pods that link libmxl mount the domain in.
 - **Cluster-state-only cross-node coordination.** There is no
-  gateway-to-gateway RPC. The `ipc/v1` package defines a
-  `LocalControl` gRPC service intended for future agent ↔ gateway
-  local control over a UDS, but no runtime code uses it today (see
-  the comment on `service LocalControl` in
-  [`ipc/v1/control.proto`](../../ipc/v1/control.proto)).
+  gateway-to-gateway RPC.
 
 ## Provider coverage
 

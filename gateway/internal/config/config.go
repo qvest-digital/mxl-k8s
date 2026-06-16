@@ -41,9 +41,21 @@ type Config struct {
 	// MetricsAddr is the address for prometheus metrics.
 	MetricsAddr string
 
+	// PprofAddr is the address the net/http/pprof endpoint binds to.
+	// Empty disables the endpoint. The chart's values.schema.json
+	// constrains this to loopback (127.0.0.1: or localhost:) so an
+	// operator with multi-NIC pods cannot accidentally expose pprof.
+	PprofAddr string
+
 	// ResyncPeriod is how often the gateway refreshes
 	// MxlNodeCapabilities status.
 	ResyncPeriod time.Duration
+
+	// DegradedAfter is the inactivity window the target-side
+	// reconciler uses to demote a Ready mirror to Degraded and to
+	// invalidate its Reconcile fast-path. Matches the operator-side
+	// MxlFlowMirror freshness expectation.
+	DegradedAfter time.Duration
 }
 
 // FromFlags populates a Config from command-line flags.
@@ -64,8 +76,14 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"Address the health probe endpoint binds to.")
 	fs.StringVar(&c.MetricsAddr, "metrics-bind-address", ":8080",
 		"Address the metrics endpoint binds to.")
+	fs.StringVar(&c.PprofAddr, "pprof-bind-address", "",
+		"Address the net/http/pprof endpoint binds to. Empty disables. "+
+			"Must be a loopback bind (127.0.0.1: or localhost:); use "+
+			"kubectl port-forward to reach it.")
 	fs.DurationVar(&c.ResyncPeriod, "resync-period", 30*time.Second,
 		"How often to refresh MxlNodeCapabilities status.")
+	fs.DurationVar(&c.DegradedAfter, "degraded-after", 10*time.Second,
+		"Grain-commit inactivity after which the target gateway demotes a mirror to Degraded.")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}

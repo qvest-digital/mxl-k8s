@@ -11,7 +11,6 @@
   "initial-version": "1.0.0-rc.0",
   "packages": {
     "api":      { "component": "api" },
-    "ipc":      { "component": "ipc" },
     "agent":    { "component": "agent" },
     "operator": { "component": "operator" },
     "gateway":  { "component": "gateway" },
@@ -28,6 +27,7 @@
   "changelog-sections": [
     {"type": "feat",     "section": "Features"},
     {"type": "fix",      "section": "Bug Fixes"},
+    {"type": "deps",     "section": "Dependencies"},
     {"type": "perf",     "section": "Performance"},
     {"type": "revert",   "section": "Reverts"},
     {"type": "refactor", "section": "Code Refactoring"},

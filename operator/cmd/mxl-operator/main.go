@@ -15,6 +15,7 @@ import (
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/domain"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/flow"
+	"github.com/qvest-digital/mxl-k8s/operator/internal/leasecheck"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/mirror"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/nodecaps"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/receiver"
@@ -67,7 +68,12 @@ func main() {
 		{"MxlDomain", (&domain.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
 		{"MxlFlow", (&flow.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
 		{"MxlFlowMirror", (&mirror.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
-		{"MxlReceiver", (&receiver.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+		{"MxlReceiver", (&receiver.Reconciler{
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+			Scheme:    mgr.GetScheme(),
+			Lease:     &leasecheck.Checker{Client: mgr.GetClient()},
+		}).SetupWithManager},
 		{"MxlNodeCapabilities", (&nodecaps.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
 	}
 	for _, rc := range reconcilers {

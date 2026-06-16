@@ -1,0 +1,36 @@
+# VCS and local worktrees
+.git/
+.claude/worktrees/
+
+# Graphify output and caches
+graphify-out/
+.graphify/
+.graphify-cache/
+
+# Local tool caches and scratch dirs
+.cache/
+.go-build/
+tmp/
+
+# Build and test artifacts
+bin/
+testbin/
+kind-diagnostics/
+coverage.*
+*.out
+*.coverprofile
+profile.cov
+*.prof
+*.pprof
+*.test
+*.log
+
+# Vendored dependencies and frontend build outputs
+vendor/
+node_modules/
+dist/
+build/
+
+# Helm dependency and package outputs
+charts/mxl-k8s/charts/
+charts/mxl-k8s/*.tgz

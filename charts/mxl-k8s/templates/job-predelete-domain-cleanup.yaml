@@ -1,0 +1,102 @@
+{{- if and .Values.gateway.enabled .Values.cleanup.preDeleteDomainWipe.enabled -}}
+{{- $selector := list -}}
+{{- range $k, $v := .Values.agent.nodeSelector -}}
+{{- $selector = append $selector (printf "%s=%s" $k $v) -}}
+{{- end -}}
+{{- $selectorArg := join "," $selector -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Chart.Name }}-predelete-domain-cleanup
+  namespace: {{ include "mxlk8s.namespace" . }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "predelete-domain-cleanup") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: hook-succeeded,hook-failed,before-hook-creation
+    {{- with .Values.global.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  completionMode: Indexed
+  completions: {{ .Values.cleanup.preDeleteDomainWipe.nodeCount }}
+  parallelism: {{ .Values.cleanup.preDeleteDomainWipe.nodeCount }}
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.cleanup.preDeleteDomainWipe.timeoutSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "predelete-domain-cleanup") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Chart.Name }}-predelete-domain-cleanup
+      restartPolicy: Never
+      {{- with .Values.global.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Each indexed completion lands on a distinct node so a single
+      # Job covers every agent node exactly once.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "mxlk8s.selectorLabels" (dict "Context" . "component" "predelete-domain-cleanup") | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+      {{- with .Values.agent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: nodecount-guard
+          image: {{ .Values.cleanup.preDeleteDomainWipe.guardImage }}
+          env:
+            - name: NODE_SELECTOR
+              value: {{ $selectorArg | quote }}
+            - name: CONFIGURED
+              value: {{ .Values.cleanup.preDeleteDomainWipe.nodeCount | quote }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              if [ -z "$NODE_SELECTOR" ]; then
+                schedulable=$(kubectl get nodes -o name | wc -l)
+              else
+                schedulable=$(kubectl get nodes -l "$NODE_SELECTOR" -o name | wc -l)
+              fi
+              if [ "$CONFIGURED" = "1" ] && [ "$schedulable" -gt 1 ]; then
+                echo "FATAL: cleanup.preDeleteDomainWipe.nodeCount=1 but $schedulable schedulable agent nodes detected."
+                echo "       Set nodeCount=$schedulable in values, or disable the predelete wipe (enabled: false) and accept the partial wipe risk."
+                exit 1
+              fi
+              echo "ok: nodeCount=$CONFIGURED, schedulable agent nodes=$schedulable"
+      containers:
+        - name: cleanup
+          image: {{ .Values.cleanup.preDeleteDomainWipe.image }}
+          env:
+            - name: DOMAIN_PATH
+              value: {{ .Values.gateway.flags.domainPath | quote }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              : "${DOMAIN_PATH:?DOMAIN_PATH must be set}"
+              [ -d "$DOMAIN_PATH" ] || exit 0
+              find "$DOMAIN_PATH" -mindepth 1 -maxdepth 1 -type d -name ".mxl-flow" -print0 \
+                | xargs -0 -r rm -rf
+          volumeMounts:
+            - name: domain
+              mountPath: {{ .Values.gateway.flags.domainPath }}
+      volumes:
+        - name: domain
+          hostPath:
+            path: {{ .Values.gateway.flags.domainPath }}
+            type: DirectoryOrCreate
+{{- end }}

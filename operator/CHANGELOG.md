@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.0.0-rc.3](https://github.com/qvest-digital/mxl-k8s/compare/operator/v1.0.0-rc.2...operator/v1.0.0-rc.3) (2026-06-02)
+
+
+### Miscellaneous
+
+* **deps:** update k8s.io/utils digest to ff6756f ([#110](https://github.com/qvest-digital/mxl-k8s/issues/110)) ([c60f82d](https://github.com/qvest-digital/mxl-k8s/commit/c60f82d51f842646a2bc9121d9d04cd663edad87))
+* **deps:** update module github.com/qvest-digital/mxl-k8s/api to v1.0.0-rc.2 ([#105](https://github.com/qvest-digital/mxl-k8s/issues/105)) ([6652a9f](https://github.com/qvest-digital/mxl-k8s/commit/6652a9f297fb8eb84d0a2f149f0788b8362a79ef))
+
+## [1.0.0-rc.2](https://github.com/qvest-digital/mxl-k8s/compare/operator/v1.0.0-rc.1...operator/v1.0.0-rc.2) (2026-05-27)
+
+
+### Features
+
+* **operator,gateway,agent:** harden MxlFlowMirror lifecycle ([#79](https://github.com/qvest-digital/mxl-k8s/issues/79)) ([a8aa3e3](https://github.com/qvest-digital/mxl-k8s/commit/a8aa3e306ea77e8856008d0dad57a0052331db3b))
+
+
+### Bug Fixes
+
+* **operator:** refcount shared mirrors via OwnerReferences ([#86](https://github.com/qvest-digital/mxl-k8s/issues/86)) ([48f27c2](https://github.com/qvest-digital/mxl-k8s/commit/48f27c29af6162fe071891305f45e79abd6e0513))
+* **operator:** require LabelCreatedByReceiverNamespace on cross-ns adopt ([8fd6dc1](https://github.com/qvest-digital/mxl-k8s/commit/8fd6dc1634211c7e368ef703cbf9e6b0e03a1431))
+* **operator:** scrub mirror owner refs to dead receivers ([8fd6dc1](https://github.com/qvest-digital/mxl-k8s/commit/8fd6dc1634211c7e368ef703cbf9e6b0e03a1431))
+* **operator:** scrub mirror refs to dead receivers ([#90](https://github.com/qvest-digital/mxl-k8s/issues/90)) ([8fd6dc1](https://github.com/qvest-digital/mxl-k8s/commit/8fd6dc1634211c7e368ef703cbf9e6b0e03a1431))
+
 ## [1.0.0-rc.1](https://github.com/qvest-digital/mxl-k8s/compare/operator/v1.0.0-rc.0...operator/v1.0.0-rc.1) (2026-05-18)
 
 

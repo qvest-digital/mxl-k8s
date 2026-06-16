@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
-# Resolve <component>.image.tag in charts/mxl-k8s/values.yaml from
-# .github/release-please-manifest.json so the chart pins per
-# component instead of falling back to a single chart-wide
-# Chart.AppVersion.
+# Set <component>.image.tag in charts/mxl-k8s/values.yaml for the
+# floating dev chart, and emit the bundled-component table for any
+# build.
 #
 # Usage:
 #   hack/chart-resolve-tags.sh <mode-or-version>
 #
-# The single argument is either an explicit mode (dev | release)
-# or a chart version string, in which case the mode is auto-
-# detected:
-#   - "0.0.0-dev*"  -> dev      (track main HEAD; pin "dev")
-#   - anything else -> release  (read .github/release-please-manifest.json)
+# The single argument is either an explicit mode (dev | release) or a
+# chart version string, in which case the mode is auto-detected:
+#   - "0.0.0-dev*"  -> dev      (track main HEAD; rewrite tags to "dev")
+#   - anything else -> release  (keep the committed per-component pins)
 #
-# The script writes in place. After running locally,
+# Release builds ship the pins committed in values.yaml as-is. Renovate
+# keeps those current: a bump opens a deps(chart) PR that release-please
+# turns into a chart release, so the committed pins are already correct
+# at package time and nothing is resolved. Only the dev channel rewrites
+# the tags, to "dev", so the 0.0.0-dev chart tracks the :dev images
+# built on every merge to main.
+#
+# In dev mode the script writes in place; after running locally,
 # `git checkout -- charts/mxl-k8s/values.yaml` reverts.
 #
-# On stdout: a Markdown table of the resolved tags so a caller (the
+# On stdout: a Markdown table of the effective tags so a caller (the
 # chart workflow) can paste it into the GitHub release notes or the
 # workflow summary.
 
@@ -24,7 +29,6 @@ set -euo pipefail
 
 arg="${1:?usage: $0 <dev|release|<chart-version>>}"
 values=charts/mxl-k8s/values.yaml
-manifest=.github/release-please-manifest.json
 components=(operator agent gateway)
 
 case "$arg" in
@@ -33,19 +37,11 @@ case "$arg" in
   *)            mode=release ;;
 esac
 
-case "$mode" in
-  dev)
-    for c in "${components[@]}"; do
-      yq -i ".${c}.image.tag = \"dev\"" "$values"
-    done
-    ;;
-  release)
-    for c in "${components[@]}"; do
-      v=$(jq -r ".\"${c}\"" "$manifest")
-      yq -i ".${c}.image.tag = \"v${v}\"" "$values"
-    done
-    ;;
-esac
+if [ "$mode" = dev ]; then
+  for c in "${components[@]}"; do
+    yq -i ".${c}.image.tag = \"dev\"" "$values"
+  done
+fi
 
 echo "## Bundled component versions"
 echo ""

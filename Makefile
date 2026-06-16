@@ -1,12 +1,17 @@
-CONTROLLER_TOOLS_VERSION ?= v0.18.0
+# renovate: datasource=go depName=sigs.k8s.io/controller-tools versioning=semver
+CONTROLLER_TOOLS_VERSION ?= v0.21.0
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
-BUF_VERSION ?= v1.50.0
-BUF ?= go run github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
 
+# renovate: datasource=go depName=gotest.tools/gotestsum versioning=semver
 GOTESTSUM_VERSION ?= v1.13.0
 GOTESTSUM ?= go run gotest.tools/gotestsum@$(GOTESTSUM_VERSION)
-MOCKERY_VERSION ?= v3.5.4
+# renovate: datasource=go depName=github.com/vektra/mockery/v3 versioning=semver
+MOCKERY_VERSION ?= v3.7.0
 MOCKERY ?= go run github.com/vektra/mockery/v3@$(MOCKERY_VERSION)
+# SETUP_ENVTEST_VERSION (a controller-runtime release branch) and
+# ENVTEST_K8S_VERSION (an envtest asset version that trails upstream
+# Kubernetes) have no clean Renovate datasource and are bumped by hand.
+# Keep them in step with the .github/workflows/ci.yml copies.
 SETUP_ENVTEST_VERSION ?= release-0.22
 SETUP_ENVTEST ?= go run sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)
 ENVTEST_K8S_VERSION ?= 1.31.0
@@ -15,11 +20,11 @@ COVERAGE_DIR ?= $(CURDIR)/bin
 TEST_TIMEOUT ?= 5m
 TEST_ARGS ?= -race -timeout $(TEST_TIMEOUT)
 
-MODULES := api ipc operator agent gateway
-PURE_TEST_MODULES := api ipc operator agent
+MODULES := api operator agent gateway
+PURE_TEST_MODULES := api operator agent
 
 .PHONY: all
-all: gen-api gen-ipc lint build
+all: gen-api lint build
 
 .PHONY: lint
 lint:
@@ -48,26 +53,13 @@ gen-api:
 gen-rbac:
 	$(CONTROLLER_GEN) rbac:roleName=mxl-operator paths=./operator/... output:rbac:dir=./config/rbac
 
-.PHONY: gen-ipc
-gen-ipc:
-	cd ipc && $(BUF) generate
-
 CRD_GEN_PATHS := config/ api/v1alpha1/zz_generated.deepcopy.go
-IPC_GEN_PATHS := ipc/v1
 
 .PHONY: manifests-check
 manifests-check: gen-api gen-rbac
 	@if ! git diff --exit-code -- $(CRD_GEN_PATHS); then \
 		echo "Generated CRD/DeepCopy/RBAC files are out of sync."; \
 		echo "Run 'make gen-api gen-rbac' and commit the result."; \
-		exit 1; \
-	fi
-
-.PHONY: ipc-check
-ipc-check: gen-ipc
-	@if ! git diff --exit-code -- $(IPC_GEN_PATHS); then \
-		echo "Generated proto files are out of sync."; \
-		echo "Run 'make gen-ipc' and commit the result."; \
 		exit 1; \
 	fi
 
@@ -101,14 +93,14 @@ chart-check: chart-crd-sync chart-schema chart-docs
 		exit 1; \
 	fi
 
-# Pin per-component image tags in charts/mxl-k8s/values.yaml so a
+# Set per-component image tags in charts/mxl-k8s/values.yaml for a
 # local `helm install ./charts/mxl-k8s` or `helm template
-# ./charts/mxl-k8s` resolves to the same image tags the CI-published
-# chart would carry. `MODE` is one of `dev`, `rc`, `stable` (default
-# `rc`). The chart workflow runs the same script with the chart's
-# version at package time; local users can match either flow.
+# ./charts/mxl-k8s`. `MODE=dev` rewrites every tag to "dev" to match
+# the floating dev chart; `MODE=release` (default) keeps the committed
+# per-component pins, which is what a release chart ships. The chart
+# workflow runs the same script at package time.
 # `make chart-resolve-reset` reverts values.yaml.
-MODE ?= rc
+MODE ?= release
 
 .PHONY: chart-resolve
 chart-resolve:
@@ -122,10 +114,10 @@ HELM_SCHEMA ?= $(shell go env GOPATH)/bin/helm-schema
 HELM_DOCS   ?= $(shell go env GOPATH)/bin/helm-docs
 
 .PHONY: generated-check
-generated-check: manifests-check ipc-check chart-check
+generated-check: manifests-check chart-check
 
 # --- Test targets ---
-# `make test`         runs unit tests across pure-Go modules (api, ipc,
+# `make test`         runs unit tests across pure-Go modules (api,
 #                     operator, agent). The operator suite needs the
 #                     kube-apiserver + etcd binaries that envtest provides;
 #                     they are fetched into $(ENVTEST_DIR) on demand and
@@ -203,24 +195,58 @@ mocks-check: mocks
 	fi
 
 # --- KIND demo helpers ---
-# `make kind-up`     builds the four component images, creates (or
+# `make kind-up`     builds the five component images, creates (or
 #                    reuses) a 3-node KIND cluster, loads the images,
-#                    applies examples/tcp-demo, and waits for the
-#                    MxlFlowMirror to reach Ready.
+#                    installs the mxl-k8s Helm chart against
+#                    examples/kind/values.yaml, applies the demo
+#                    workload from examples/kind/demo/, and waits
+#                    for the MxlFlowMirror to reach Ready.
 # `make kind-down`   deletes the cluster.
 # `make kind-status` prints a quick status summary.
+# `make kind-test`   runs the integration suite in
+#                    test/integration/kind against the cluster spun
+#                    up by `make kind-up`. Failure diagnostics land
+#                    under KIND_DIAG_DIR for the kind-integration
+#                    GitHub Actions job to upload as an artifact.
+#
+# Requires: docker (or podman), kind, kubectl, helm.
 #
 # Override the cluster name with KIND_CLUSTER=<name>.
 # Use Podman instead of Docker: CONTAINER_RUNTIME=podman
 #   e.g. `make kind-up CONTAINER_RUNTIME=podman`
+<<<<<<< improvement-mxl-stability
+=======
+#
+# Image source selector (BUILD):
+#   unset / BUILD=local  build the five component images locally as
+#                        ghcr.io/qvest-digital/mxl-k8s/<comp>:dev and
+#                        kind-load them (existing behaviour).
+#   BUILD=<tag>          skip the local build; pull
+#                        ghcr.io/<owner>/mxl-k8s/<component>:<tag> for
+#                        every component, kind-load it, and install
+#                        the chart with --set <comp>.image.tag=<tag>.
+#   e.g. `make kind-up BUILD=sha-abc1234`
+#        `make kind-up BUILD=v1.0.0-rc.3`
+>>>>>>> main
 
 KIND_CLUSTER ?= mxl-k8s-demo
 # Container runtime: "docker" (default) or "podman".
 CONTAINER_RUNTIME ?= docker
+<<<<<<< improvement-mxl-stability
 
 .PHONY: kind-up
 kind-up:
 	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) bash hack/kind-up.sh
+=======
+# Image source: "local" (default) or a CI-produced image tag.
+BUILD ?= local
+# Where the integration suite writes failure diagnostics.
+KIND_DIAG_DIR ?= $(CURDIR)/kind-diagnostics
+
+.PHONY: kind-up
+kind-up:
+	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) BUILD=$(BUILD) bash hack/kind-up.sh
+>>>>>>> main
 
 .PHONY: kind-down
 kind-down:
@@ -229,3 +255,10 @@ kind-down:
 .PHONY: kind-status
 kind-status:
 	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) bash hack/kind-status.sh
+<<<<<<< improvement-mxl-stability
+=======
+
+.PHONY: kind-test
+kind-test:
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND_DIAG_DIR=$(KIND_DIAG_DIR) bash test/integration/kind/run.sh
+>>>>>>> main

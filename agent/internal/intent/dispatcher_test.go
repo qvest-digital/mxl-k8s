@@ -381,6 +381,197 @@ func TestEnsureMirror_Idempotent(t *testing.T) {
 	assert.Equal(t, first.Name, second.Name)
 }
 
+// TestEnsureMirror_StampsIntentLabels asserts the contract the
+// operator's intent-GC controller depends on: every mirror the
+// agent creates must carry LabelCreatedByIntent (with the local
+// node name as value) and LabelRequestorPodUID (with the consumer
+// pod's UID), and Spec.Requestor must name the pod. Without these
+// the GC cannot tell intent-created mirrors apart from
+// receiver-created ones and cannot detect pod replacement.
+func TestEnsureMirror_StampsIntentLabels(t *testing.T) {
+	scheme := newScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		Build()
+
+	d := &Dispatcher{
+		Client:     c,
+		DomainPath: "/run/mxl/domain",
+		NodeName:   "n-target",
+		Provider:   mxlv1alpha1.ProviderTCP,
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "consumer", UID: "uid-42"},
+	}
+
+	got, err := d.ensureMirror(context.Background(), flowID, "n-src", pod)
+	require.NoError(t, err)
+
+	var live mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Namespace: "ns", Name: got.Name}, &live))
+
+	assert.Equal(t, "n-target", live.Labels[mxlv1alpha1.LabelCreatedByIntent],
+		"LabelCreatedByIntent must carry the local node name so the GC "+
+			"can tell which agent stamped the mirror")
+	assert.Equal(t, "uid-42", live.Labels[mxlv1alpha1.LabelRequestorPodUID],
+		"LabelRequestorPodUID lets a label selector find every mirror "+
+			"tied to a given pod UID without unmarshalling spec")
+	require.NotNil(t, live.Spec.Requestor)
+	assert.Equal(t, "consumer", live.Spec.Requestor.Name)
+	assert.Equal(t, "ns", live.Spec.Requestor.Namespace)
+	assert.Equal(t, "uid-42", live.Spec.Requestor.UID)
+	_, receiverLabel := live.Labels[mxlv1alpha1.LabelCreatedByReceiver]
+	assert.False(t, receiverLabel,
+		"a mirror the agent created must not carry the receiver label; "+
+			"the receiver reconciler would then try to GC it and race "+
+			"the intent reconciler")
+}
+
+// TestEnsureMirror_ExistingReceiverMirror_LeftIntact asserts that
+// when the receiver reconciler has already created a mirror for the
+// same (flow, target node), the agent reuses it without rewriting
+// ownership: no intent label is added, the receiver label stays,
+// and Spec.Requestor remains nil. Otherwise the two reconcilers
+// would both claim the mirror and race on deletion.
+func TestEnsureMirror_ExistingReceiverMirror_LeftIntact(t *testing.T) {
+	scheme := newScheme(t)
+	existing := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns",
+			Name:      MirrorName(flowID, "n-target"),
+			Labels: map[string]string{
+				mxlv1alpha1.LabelCreatedByReceiver: "rcv-1",
+			},
+		},
+		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
+			FlowID:     flowID,
+			SourceNode: "n-src",
+			TargetNode: "n-target",
+			Provider:   mxlv1alpha1.ProviderTCP,
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(existing).
+		Build()
+
+	d := &Dispatcher{
+		Client:     c,
+		DomainPath: "/run/mxl/domain",
+		NodeName:   "n-target",
+		Provider:   mxlv1alpha1.ProviderTCP,
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "consumer", UID: "uid-7"},
+	}
+
+	got, err := d.ensureMirror(context.Background(), flowID, "n-src", pod)
+	require.NoError(t, err)
+	assert.Equal(t, existing.Name, got.Name)
+
+	var live mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Namespace: "ns", Name: existing.Name}, &live))
+
+	assert.Equal(t, "rcv-1", live.Labels[mxlv1alpha1.LabelCreatedByReceiver],
+		"the receiver label must survive: deleting it would orphan the "+
+			"mirror from the receiver's GC pass")
+	_, intentLabel := live.Labels[mxlv1alpha1.LabelCreatedByIntent]
+	assert.False(t, intentLabel,
+		"the agent must not claim co-ownership of a receiver-owned "+
+			"mirror; the intent reconciler would then race the receiver "+
+			"reconciler to delete it")
+	assert.Nil(t, live.Spec.Requestor,
+		"writing Spec.Requestor onto a receiver-owned mirror would "+
+			"trip the intent GC into deleting it when the consumer "+
+			"pod goes away, even though the receiver still wants it")
+}
+
+// fakeLeaseChecker hands back a canned IsFresh answer per (flowID,
+// node) pair so tests can drive resolveSourceNode's skip-stale logic
+// without spinning up a coordination.k8s.io fake.
+type fakeLeaseChecker struct {
+	fresh map[string]bool
+}
+
+func (f *fakeLeaseChecker) IsFresh(_ context.Context, flowID, node string) (bool, error) {
+	v, ok := f.fresh[flowID+"/"+node]
+	return ok && v, nil
+}
+
+func TestResolveSourceNode_SkipsStaleOriginByLease(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme(t)
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: metav1.ObjectMeta{Name: flowID},
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: flowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{
+				// Stale Origin first: the dispatcher must skip it and
+				// keep scanning rather than return it.
+				{NodeName: "n-stale", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+				{NodeName: "n-fresh", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(flow).
+		Build()
+	d := &Dispatcher{
+		Client:   c,
+		NodeName: "n1",
+		Lease: &fakeLeaseChecker{fresh: map[string]bool{
+			flowID + "/n-fresh": true,
+			// n-stale intentionally absent: missing = not fresh.
+		}},
+	}
+
+	node, ok, err := d.resolveSourceNode(ctx, flowID)
+	require.NoError(t, err)
+	assert.True(t, ok,
+		"a second Origin with a fresh Lease must be the dispatcher's "+
+			"answer even when an earlier Origin entry is present but stale; "+
+			"otherwise a partitioned producer permanently masks a recovered one")
+	assert.Equal(t, "n-fresh", node)
+}
+
+func TestResolveSourceNode_AllStaleOriginsReturnsNotOK(t *testing.T) {
+	ctx := context.Background()
+	scheme := newScheme(t)
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: metav1.ObjectMeta{Name: flowID},
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: flowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{
+				{NodeName: "n-stale-1", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+				{NodeName: "n-stale-2", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(flow).
+		Build()
+	d := &Dispatcher{
+		Client:   c,
+		NodeName: "n1",
+		Lease:    &fakeLeaseChecker{fresh: map[string]bool{}},
+	}
+
+	_, ok, err := d.resolveSourceNode(ctx, flowID)
+	require.NoError(t, err)
+	assert.False(t, ok,
+		"when every Origin's Lease is expired the dispatcher must report "+
+			"no source; routing a Materialize call at a stale Origin would "+
+			"only hand the shim back a 'no grains' wait until the timeout")
+}
+
 func TestEnsureMirror_EmptyProviderDefaultsToAuto(t *testing.T) {
 	scheme := newScheme(t)
 	c := fake.NewClientBuilder().

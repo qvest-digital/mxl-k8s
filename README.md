@@ -38,7 +38,11 @@ Four pieces, all running inside the cluster:
 - A cluster-scoped **operator** reconciles `MxlReceiver` intent
   ("this pod wants to consume that flow") into one
   `MxlFlowMirror` per (flow, target-node). Multiple consumers on
-  the same node share a single mirror.
+  the same node share a single mirror; the share is refcounted
+  through the mirror's `metadata.ownerReferences`, so removing
+  one consumer leaves the mirror in place for the others and the
+  operator tears the mirror down only when the last owner ref is
+  gone.
 - An **LD_PRELOAD shim** in consumer pods turns the first
   libmxl probe (`access`, `stat`, `open`, ...) for a not-yet-
   materialised flow into a synchronous wait on the local agent.
@@ -125,8 +129,10 @@ IRSA), and the FluxCD `HelmRelease` snippet.
 
 The repo ships a KIND cluster that runs an end-to-end TCP flow
 across two worker nodes. Requires Docker, [`kind`][kind] >= 0.20,
-and `kubectl`. Linux host with a kernel >= 5.17 (the agent's
-`fanotify` needs `FAN_REPORT_DFID_NAME`).
+`kubectl`, and `helm`. Linux host with a kernel >= 5.17 (the
+agent's `fanotify` needs `FAN_REPORT_DFID_NAME`).
+
+For docker run:
 
 For docker run:
 
@@ -137,15 +143,21 @@ make kind-up
 or for podman:
 
 ```sh
+<<<<<<< improvement-mxl-stability
 make kind-down CONTAINER_RUNTIME=podman
+=======
+make kind-up CONTAINER_RUNTIME=podman
+>>>>>>> main
 ```
 
 That builds every component image locally, brings up a
 three-node KIND cluster (control plane plus two workers),
-applies the [`examples/tcp-demo`](examples/tcp-demo/) bundle, and
-waits for the `MxlFlowMirror` to reach `Ready`. After about a
-minute the writer pod is producing grains on one worker and the
-reader pod is consuming them on the other.
+installs the `mxl-k8s` Helm chart against the overlay in
+[`examples/kind/`](examples/kind/), applies the demo writer/
+reader workload from [`examples/kind/demo/`](examples/kind/demo/),
+and waits for the `MxlFlowMirror` to reach `Ready`. After about
+a minute the writer pod is producing grains on one worker and
+the reader pod is consuming them on the other.
 
 ```sh
 kubectl --context kind-mxl-k8s-demo -n mxl-system logs pod/mxl-tcp-demo-reader
@@ -160,21 +172,20 @@ and what to look at if convergence stalls.
 
 ## Repository layout
 
-The repo is a Go workspace with five modules:
+The repo is a Go workspace with four modules:
 
 | Module | Path | Purpose |
 | --- | --- | --- |
 | `api` | `github.com/qvest-digital/mxl-k8s/api` | CRD types. |
-| `ipc` | `github.com/qvest-digital/mxl-k8s/ipc` | gRPC contract between agent and gateway. |
 | `operator` | `github.com/qvest-digital/mxl-k8s/operator` | Cluster operator that reconciles the CRDs. |
-| `agent` | `github.com/qvest-digital/mxl-k8s/agent` | Per-node DaemonSet. Links libmxl via [`go-mxl`][go-mxl]. |
-| `gateway` | `github.com/qvest-digital/mxl-k8s/gateway` | Per-node DaemonSet. Links libmxl-fabrics via [`go-mxl/fabrics`][go-mxl]. |
+| `agent` | `github.com/qvest-digital/mxl-k8s/agent` | Per-node DaemonSet. Pure Go; watches the domain via `fanotify`, does not link libmxl. |
+| `gateway` | `github.com/qvest-digital/mxl-k8s/gateway` | Per-node DaemonSet. Links libmxl + libmxl-fabrics via [`go-mxl`][go-mxl]. |
 
 [`docs/USAGE.md`](docs/USAGE.md) covers the prerequisites for a
 media function (container, libmxl link, capabilities) and how to
 integrate it as a producer or consumer.
 [`docs/BUILD.md`](docs/BUILD.md) covers local-build prerequisites
-and the cgo lane for `agent` and `gateway`.
+and the cgo lane for `gateway`.
 [`CLAUDE.md`](CLAUDE.md) carries the contributor rules.
 
 [mxl]: https://github.com/dmf-mxl/mxl

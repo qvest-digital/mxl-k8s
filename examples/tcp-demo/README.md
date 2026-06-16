@@ -38,6 +38,20 @@ then skip the shim and just open the flow directly. The shim turns
 that into "the application doesn't need to declare anything; the
 first open is the declaration".
 
+## Audio (sample) variant
+
+Alongside the video/grain pair, the demo includes an audio pair that
+exercises the continuous (sample) data path. `11-writer-audio.yaml`
+runs `write-samples` into the 48 kHz stereo flow defined by
+`flow-audio-f32.json`; `22-receiver-audio.yaml` and
+`23-reader-audio.yaml` mirror it onto a second node where
+`read-samples` prints one line per arrived sample batch. The gateway
+selects the sample-transfer path from the flow's data format, so the
+audio and video pairs run side by side over the same control plane.
+`23-reader-audio.yaml` runs `read-samples` in an `until` loop because
+that tool exits until the mirrored flow has a committed head; the loop
+keeps the pod up while the flow warms up.
+
 ## Prerequisites
 
 - A two-node Linux cluster, kernel >= 5.17 on the worker nodes
@@ -57,18 +71,18 @@ to a registry you control and replace the `image:` fields).
 
 ```sh
 # From the repo root:
-docker build -f docker/operator.Dockerfile -t local/mxl-operator:dev .
-docker build -f docker/agent.Dockerfile    -t local/mxl-domain-agent:dev .
-docker build -f docker/gateway.Dockerfile  -t local/mxl-fabrics-gateway:dev .
-docker build -f docker/shim.Dockerfile     -t local/mxl-shim:dev .
+docker build -f docker/operator.Dockerfile -t ghcr.io/qvest-digital/mxl-k8s/operator:dev .
+docker build -f docker/agent.Dockerfile    -t ghcr.io/qvest-digital/mxl-k8s/agent:dev .
+docker build -f docker/gateway.Dockerfile  -t ghcr.io/qvest-digital/mxl-k8s/gateway:dev .
+docker build -f docker/shim.Dockerfile     -t ghcr.io/qvest-digital/mxl-k8s/shim:dev .
 ```
 
 If your runtime can't see the local docker daemon (e.g. k3s with
 containerd), import the images:
 
 ```sh
-for img in mxl-operator mxl-domain-agent mxl-fabrics-gateway mxl-shim; do
-  docker save local/${img}:dev | sudo k3s ctr images import -
+for img in operator agent gateway shim; do
+  docker save ghcr.io/qvest-digital/mxl-k8s/${img}:dev | sudo k3s ctr images import -
 done
 ```
 

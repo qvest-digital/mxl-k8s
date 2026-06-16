@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
+	_ "net/http/pprof" // registers /debug/pprof handlers on http.DefaultServeMux
 	"os"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -74,12 +78,31 @@ func run(args []string) error {
 		return fmt.Errorf("construct manager: %w", err)
 	}
 
+	if cfg.PprofAddr != "" {
+		pprofSrv := &http.Server{
+			Addr:              cfg.PprofAddr,
+			Handler:           http.DefaultServeMux,
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		go func() {
+			if err := pprofSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				setupLog.Error(err, "pprof server")
+			}
+		}()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = pprofSrv.Shutdown(shutdownCtx)
+		}()
+	}
+
 	if err := (&mirror.TargetReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		NodeName:    cfg.NodeName,
-		BindAddress: cfg.BindAddress,
-		Handles:     handles,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		NodeName:      cfg.NodeName,
+		BindAddress:   cfg.BindAddress,
+		Handles:       handles,
+		DegradedAfter: cfg.DegradedAfter,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup target reconciler: %w", err)
 	}
@@ -124,6 +147,7 @@ func run(args []string) error {
 		"bindAddress", cfg.BindAddress,
 		"providers", providerNames(cfg.Providers),
 		"probeAddr", cfg.ProbeAddr,
+		"pprofAddr", cfg.PprofAddr,
 		"resyncPeriod", cfg.ResyncPeriod)
 
 	return mgr.Start(ctrl.SetupSignalHandler())

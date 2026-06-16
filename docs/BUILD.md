@@ -1,93 +1,79 @@
 # Local build
 
-This repo is a Go workspace with five modules. Two of them (`agent`,
-`gateway`) link against libmxl and libmxl-fabrics via cgo; the rest are
-pure Go.
+This repo is a Go workspace with four modules. One of them (`gateway`)
+links libmxl and libmxl-fabrics via cgo, transitively through the
+`go-mxl` binding; the rest are pure Go.
 
 ## Toolchain
 
-- Go >= 1.26
-- A C/C++ toolchain (clang-19 or gcc), CMake >= 3.20, Ninja, pkg-config.
+- Go >= 1.26.
+- For the `gateway` cgo build: a C compiler, `pkg-config`, and libmxl +
+  libmxl-fabrics installed with headers and pkg-config files (see
+  below).
 - Linux kernel >= 5.17 on the host that will run the agent. The
   agent's `fanotify` watcher needs `FAN_REPORT_DFID_NAME`.
 
 ## Pure-Go modules
 
-`api`, `ipc`, and `operator` build without any system libraries:
+`api`, `operator`, and `agent` build without any system libraries.
+`agent` watches the libmxl domain through `fanotify`
+(`golang.org/x/sys/unix`) and does not link libmxl itself:
 
 ```sh
-for m in api ipc operator; do (cd "$m" && go build ./... && go vet ./...); done
+for m in api operator agent; do (cd "$m" && go build ./... && go vet ./...); done
 ```
 
-## CGo modules (libmxl + libmxl-fabrics)
+## CGo module: gateway (libmxl + libmxl-fabrics)
 
-`agent` requires libmxl. `gateway` additionally requires libmxl-fabrics.
-Both are built from the same upstream source pinned by
-[`.github/libmxl.version`](../.github/libmxl.version): the file holds
-one `https://github.com/<owner>/<repo>/tree/<ref>` URL. Renovate
-maintains it; humans should update it the same way.
+`gateway` is the only cgo module. It imports the `go-mxl` binding
+(`go-mxl/mxl` and `go-mxl/fabrics`), so the build links both libmxl and
+libmxl-fabrics. Both libraries must be installed with headers and
+pkg-config files (`libmxl.pc`, `libmxl-fabrics.pc`). `go-mxl` owns the
+libmxl version.
 
-### Install once
+### In the go-mxl builder image (CI path)
 
-```sh
-# Build deps.
-sudo apt-get install -y --no-install-recommends \
-    build-essential cmake ninja-build clang-19 lld-19 \
-    pkg-config bison flex curl zip unzip tar git ca-certificates \
-    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-    libfabric-dev libfabric-bin
+CI and [`docker/gateway.Dockerfile`](../docker/gateway.Dockerfile) build
+`gateway` inside the published `go-mxl` builder image, which already has
+the Go toolchain, libmxl, libmxl-fabrics, libfabric, and a working
+`PKG_CONFIG_PATH`. The image tag tracks the `go-mxl` release the
+`gateway` module requires (currently
+`ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.9`); bump it together
+with the `go-mxl` require in `gateway/go.mod`.
 
-# vcpkg (libmxl pulls its third-party deps through vcpkg).
-git clone --filter=tree:0 https://github.com/microsoft/vcpkg.git ~/vcpkg
-~/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+### On the host
 
-# Read the pin and split the URL.
-url=$(tr -d '[:space:]' < .github/libmxl.version)
-rest=${url#https://github.com/}
-repo=${rest%%/tree/*}
-ref=${rest#*/tree/}
-
-# Clone and build libmxl with fabrics enabled.
-git clone "https://github.com/$repo.git" /tmp/mxl
-git -C /tmp/mxl checkout "$ref"
-cmake --preset Linux-Clang-Release -S /tmp/mxl \
-    -DBUILD_DOCS=OFF \
-    -DMXL_ENABLE_FABRICS_OFI=ON \
-    -DCMAKE_INSTALL_PREFIX=/opt/libmxl
-cmake --build /tmp/mxl/build/Linux-Clang-Release
-sudo cmake --install /tmp/mxl/build/Linux-Clang-Release
-
-# libmxl.pc declares Requires.private: spdlog but ships spdlog as a
-# static lib; strip the line so pkg-config doesn't trip over it.
-sudo sed -i '/^Requires.private:/d' /opt/libmxl/lib/pkgconfig/libmxl.pc
-```
-
-### Per-shell
+Install libmxl + libmxl-fabrics by following
+[go-mxl's README](https://github.com/qvest-digital/go-mxl), then point
+pkg-config at them and build:
 
 ```sh
 export PKG_CONFIG_PATH=/opt/libmxl/lib/pkgconfig
 export LD_LIBRARY_PATH=/opt/libmxl/lib
-```
-
-Verify pkg-config sees both libraries:
-
-```sh
 pkg-config --exists libmxl libmxl-fabrics && echo OK
-```
-
-### Build the CGo modules
-
-```sh
-for m in agent gateway; do (cd "$m" && go build ./... && go vet ./...); done
+(cd gateway && go build ./... && go vet ./...)
 ```
 
 ## Integration tests
 
-Integration tests under the `mxl_integration` build tag exercise a real
-libmxl install (and, for the gateway, real fabric endpoints):
+Integration testing runs against a local KIND cluster: `make kind-up`
+brings up the demo and `make kind-test` runs the suite (see
+[`docs/KIND.md`](KIND.md)). Plain `go test ./...` per module needs no
+cluster.
 
-```sh
-(cd agent && go test -tags mxl_integration ./...)
-```
+## Graphify
 
-The default unit/vet/build jobs don't run these.
+This repo carries a [Graphify](https://github.com/safishamsi/graphify)
+knowledge graph under `graphify-out/`. The graph is committed so a
+fresh clone already has it; `.graphifyignore` controls what gets
+indexed.
+
+Graphify is optional. To rebuild the graph locally, query it, or
+have it auto-rebuild after each commit, install the `graphifyy`
+PyPI package (CLI: `graphify`) and run `graphify hook install`.
+Manage the hook with `graphify hook status` and
+`graphify hook uninstall`.
+
+See the upstream
+[common commands](https://github.com/safishamsi/graphify#common-commands)
+for usage.
