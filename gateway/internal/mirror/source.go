@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -312,6 +313,14 @@ func runTransferLoop(
 		}
 		for idx := lastSent + 1; idx <= int64(head); idx++ {
 			if _, err := transferGrain(uint64(idx)); err != nil {
+				// "too late" means the grain is permanently gone from
+				// the ring buffer — skip all missed grains and realign
+				// to the current head so the loop can resume.
+				if isTooLateErr(err) {
+					l.Info("grain aged out, realigning to head", "skippedFrom", idx, "head", head)
+					lastSent = int64(head)
+					break
+				}
 				l.Error(err, "TransferGrain", "index", idx)
 				break
 			}
@@ -322,6 +331,12 @@ func runTransferLoop(
 			l.Error(err, "MakeProgress")
 		}
 	}
+}
+
+// isTooLateErr returns true when the error indicates the requested
+// grain has been permanently overwritten in the ring buffer.
+func isTooLateErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "too late")
 }
 
 func (r *SourceReconciler) closeEntry(key types.NamespacedName) {

@@ -159,6 +159,49 @@ func TestRunTransferLoop_TransferErrorBreaksInnerLoopButLoopSurvives(t *testing.
 			"must retry from lastSent+1 (idx=2 again here)")
 }
 
+func TestRunTransferLoop_TooLateRealignsToHead(t *testing.T) {
+	// When a grain is permanently gone ("too late"), the loop must
+	// advance lastSent to head so the next tick can resume from the
+	// live position rather than retrying the same stale index forever.
+
+	// Probe returns 0 initially, then 10 forever (simulating the
+	// writer advancing by 10 grains).
+	var probeCalls atomic.Int32
+	probe := func() (uint64, error) {
+		if probeCalls.Add(1) == 1 {
+			return 0, nil
+		}
+		return 10, nil
+	}
+
+	// Transfer: idx 1 succeeds, idx 2 returns "too late", idx 3+
+	// succeed (proving the loop advanced past 2).
+	var transferred atomic.Int32
+	transfer := func(idx uint64) (bool, error) {
+		if idx == 2 {
+			return false, errors.New("mxl: out of range (too late)")
+		}
+		transferred.Add(1)
+		return false, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go runTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil }, time.Millisecond)
+
+	// After realigning to head=10, the next tick probes head=10
+	// again, loop range is empty (lastSent==10). No further stalls.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	// idx=1 succeeded before the "too late" at idx=2. After realign,
+	// lastSent jumps to 10. On subsequent ticks head stays 10, so no
+	// more transfers happen. We expect exactly 1 successful transfer.
+	assert.Equal(t, int32(1), transferred.Load(),
+		"after too-late realign, loop must skip to head and not retry stale indices")
+}
+
 func TestRunTransferLoop_InitialProbeErrorReturnsEarly(t *testing.T) {
 	// If the very first Runtime probe fails, the loop returns and
 	// closes done without ever spinning. Catches a regression where
