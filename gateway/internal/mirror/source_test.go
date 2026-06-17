@@ -200,7 +200,7 @@ func TestRunTransferLoop_TooLateRealignsToHead(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil }, time.Millisecond)
+	go runTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil }, time.Millisecond, nil)
 
 	// After realigning to head=10, the next tick probes head=10
 	// again, loop range is empty (lastSent==10). No further stalls.

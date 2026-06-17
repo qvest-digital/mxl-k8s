@@ -15,8 +15,6 @@
 #
 # Set CONTAINER_RUNTIME=podman (or pass via the Makefile) to use
 # Podman instead of Docker.
-<<<<<<< improvement-mxl-stability
-=======
 #
 # Set BUILD=<tag> to skip the local image build and use CI-produced
 # images instead. With BUILD unset or BUILD=local (the default) the
@@ -28,23 +26,17 @@
 #
 # Set IMAGE_REGISTRY=<prefix> to override the registry prefix.
 # Default is ghcr.io/qvest-digital/mxl-k8s.
->>>>>>> main
 
 set -euo pipefail
 
 CLUSTER_NAME="${KIND_CLUSTER:-mxl-k8s-demo}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
-<<<<<<< improvement-mxl-stability
-=======
 BUILD="${BUILD-local}"
 IMAGE_REGISTRY="${IMAGE_REGISTRY:-ghcr.io/qvest-digital/mxl-k8s}"
->>>>>>> main
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../" && pwd)"
 KIND_CONFIG="${REPO_ROOT}/hack/kind-config.yaml"
 KUBECTL=(kubectl --context "kind-${CLUSTER_NAME}")
 
-<<<<<<< improvement-mxl-stability
-=======
 # Validate BUILD before any side effects. Empty string is rejected;
 # "local" enables the local-build path; anything else is treated as
 # a CI image tag.
@@ -64,7 +56,6 @@ case "$BUILD" in
     ;;
 esac
 
->>>>>>> main
 # When using podman, tell KIND to use the podman provider.
 if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
   export KIND_EXPERIMENTAL_PROVIDER=podman
@@ -117,18 +108,6 @@ if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
     echo "  Fix:  podman machine stop && podman machine set --memory 4096 && podman machine start" >&2
   fi
 fi
-<<<<<<< improvement-mxl-stability
-
-log "Building images"
-cd "$REPO_ROOT"
-for i in "${!IMAGE_DOCKERFILES[@]}"; do
-  dockerfile="${IMAGE_DOCKERFILES[$i]}"
-  tag="${IMAGE_TAGS[$i]}"
-  echo "  -> ${tag}"
-  $CONTAINER_RUNTIME build -q -f "${dockerfile}" -t "${tag}" . > /dev/null
-done
-
-=======
 
 if [[ "$BUILD_MODE" == "local" ]]; then
   log "Building images"
@@ -148,7 +127,6 @@ else
   done
 fi
 
->>>>>>> main
 CLUSTER_REUSED=false
 if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
   # Verify the existing cluster's nodes are actually running.
@@ -194,23 +172,7 @@ load_image() {
 log "Loading images into the cluster"
 for tag in "${IMAGE_TAGS[@]}"; do
   echo "  -> ${tag}"
-<<<<<<< improvement-mxl-stability
-  if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
-    # Podman stores unqualified images under localhost/, but Kubernetes
-    # resolves them as docker.io/. Re-tag so containerd inside the
-    # KIND nodes finds them under the name the pods actually request.
-    canonical="docker.io/${tag}"
-    $CONTAINER_RUNTIME tag "$tag" "$canonical" 2>/dev/null || true
-    tmptar="$(mktemp "${TMPDIR:-/tmp}/kind-image-XXXXXX")"
-    $CONTAINER_RUNTIME save -o "$tmptar" "$canonical"
-    kind load image-archive --name "$CLUSTER_NAME" "$tmptar"
-    rm -f "$tmptar"
-  else
-    kind load docker-image --name "$CLUSTER_NAME" "$tag"
-  fi
-=======
   load_image "$tag"
->>>>>>> main
 done
 
 # The demo workload (writer/reader) and the shim init-container in
@@ -261,29 +223,6 @@ log "Waiting for CRDs to establish"
 log "Applying the demo workload"
 apply_demo
 
-# On re-runs the kubelet caches images by tag, so re-loading a :dev
-<<<<<<< improvement-mxl-stability
-# image doesn't get picked up by existing pods. Force a rollout
-# restart and replace bare demo pods so everything runs against the
-# freshly-loaded images. Skip this on a brand-new cluster where the
-# first apply already schedules the correct images.
-if [[ "$CLUSTER_REUSED" == "true" ]]; then
-  if "${KUBECTL[@]}" -n mxl-system get deploy/mxl-operator >/dev/null 2>&1; then
-    log "Rolling out latest images"
-    "${KUBECTL[@]}" -n mxl-system rollout restart deploy/mxl-operator ds/mxl-domain-agent ds/mxl-fabrics-gateway || true
-  fi
-  # Wait for the deletes to complete -- re-applying while a pod is
-  # still Terminating leaves the new pod in limbo (apply observes
-  # the live object and treats it as a no-op).
-  "${KUBECTL[@]}" -n mxl-system delete pod mxl-tcp-demo-writer mxl-tcp-demo-reader --ignore-not-found --force --grace-period=0
-  "${KUBECTL[@]}" apply -k "${REPO_ROOT}/examples/tcp-demo/"
-fi
-
-log "Waiting for control-plane workloads (timeout ${ROLLOUT_TIMEOUT_SECS}s)"
-"${KUBECTL[@]}" -n mxl-system rollout status deploy/mxl-operator         --timeout="${ROLLOUT_TIMEOUT_SECS}s"
-"${KUBECTL[@]}" -n mxl-system rollout status ds/mxl-domain-agent         --timeout="${ROLLOUT_TIMEOUT_SECS}s"
-"${KUBECTL[@]}" -n mxl-system rollout status ds/mxl-fabrics-gateway      --timeout="${ROLLOUT_TIMEOUT_SECS}s"
-=======
 # image doesn't get picked up by existing demo pods. Force the bare
 # pods to be recreated so they pick up the freshly-loaded images.
 # The chart's --wait above already covers the operator/agent/gateway
@@ -298,7 +237,6 @@ if [[ "$CLUSTER_REUSED" == "true" ]]; then
     --ignore-not-found --force --grace-period=0
   apply_demo
 fi
->>>>>>> main
 
 log "Waiting for MxlFlowMirror to reach Ready (timeout ${MIRROR_TIMEOUT_SECS}s)"
 deadline=$(( $(date +%s) + MIRROR_TIMEOUT_SECS ))

@@ -143,11 +143,7 @@ make kind-up
 or for podman:
 
 ```sh
-<<<<<<< improvement-mxl-stability
-make kind-down CONTAINER_RUNTIME=podman
-=======
 make kind-up CONTAINER_RUNTIME=podman
->>>>>>> main
 ```
 
 That builds every component image locally, brings up a

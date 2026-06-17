@@ -587,13 +587,6 @@ func runTransferLoop(
 		}
 		for idx := lastSent + 1; idx <= int64(head); idx++ {
 			if _, err := transferGrain(uint64(idx)); err != nil {
-<<<<<<< improvement-mxl-stability
-				// "too late" means the grain is permanently gone from
-				// the ring buffer — skip all missed grains and realign
-				// to the current head so the loop can resume.
-				if isTooLateErr(err) {
-					l.Info("grain aged out, realigning to head", "skippedFrom", idx, "head", head)
-=======
 				// libmxl reports "out of range (too late)" when the
 				// writer has already overwritten the slot the reader
 				// is asking for. The grains between lastSent+1 and
@@ -610,7 +603,6 @@ func runTransferLoop(
 					if tracker != nil {
 						tracker.recordAgedOut(time.Now())
 					}
->>>>>>> main
 					lastSent = int64(head)
 					break
 				}
@@ -629,12 +621,12 @@ func runTransferLoop(
 	}
 }
 
-<<<<<<< improvement-mxl-stability
 // isTooLateErr returns true when the error indicates the requested
 // grain has been permanently overwritten in the ring buffer.
 func isTooLateErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "too late")
-=======
+}
+
 // runSampleTransferLoop pumps newly committed samples that appear on a
 // continuous (audio) source flow into the initiator until ctx is
 // canceled. Closes done on exit. It mirrors runTransferLoop but moves
@@ -737,7 +729,6 @@ func runSampleTransferLoop(
 // has lapped the reader" signal.
 func isReaderAgedOut(err error) bool {
 	return err != nil && strings.Contains(err.Error(), readerAgedOutMarker)
->>>>>>> main
 }
 
 func (r *SourceReconciler) closeEntry(key types.NamespacedName) {
