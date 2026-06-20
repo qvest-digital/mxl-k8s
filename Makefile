@@ -6,7 +6,7 @@ CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTR
 GOTESTSUM_VERSION ?= v1.13.0
 GOTESTSUM ?= go run gotest.tools/gotestsum@$(GOTESTSUM_VERSION)
 # renovate: datasource=go depName=github.com/vektra/mockery/v3 versioning=semver
-MOCKERY_VERSION ?= v3.7.0
+MOCKERY_VERSION ?= v3.7.1
 MOCKERY ?= go run github.com/vektra/mockery/v3@$(MOCKERY_VERSION)
 # SETUP_ENVTEST_VERSION (a controller-runtime release branch) and
 # ENVTEST_K8S_VERSION (an envtest asset version that trails upstream
