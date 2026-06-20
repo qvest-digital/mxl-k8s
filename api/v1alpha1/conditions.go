@@ -36,6 +36,17 @@ const (
 	// could not register the target descriptor with the initiator.
 	ReasonAddTargetFailed = "AddTargetFailed"
 
+	// ReasonOpenTargetFailed marks a mirror whose target gateway could
+	// not open the local writer or the libmxl-fabrics target endpoint
+	// (Target.Setup). Without it the failure surfaced only in the
+	// gateway log while the mirror sat silently at an empty phase.
+	ReasonOpenTargetFailed = "OpenTargetFailed"
+
+	// ReasonFlowDefinitionEmpty marks a mirror whose MxlFlow exists but
+	// carries no spec.definition yet, so the target side cannot open the
+	// local writer. Transient while the producer publishes the flow.
+	ReasonFlowDefinitionEmpty = "FlowDefinitionEmpty"
+
 	// ReasonReaderAgedOut marks a mirror whose source-side flow
 	// reader fell behind the writer and advanced past the missed
 	// grains.
