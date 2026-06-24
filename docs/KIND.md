@@ -215,3 +215,196 @@ the runner, and runs `make kind-test`. New assertions land as
 `test/integration/kind/cases/<NN>-<name>.sh`; no runner changes
 required. See the suite's [`README.md`](../test/integration/kind/README.md)
 for the case-authoring conventions.
+
+## NMOS verification
+
+The agent's NMOS IS-04/IS-05 sender proxy is disabled by default.
+To exercise it in the KIND cluster, enable it in the demo values
+overlay at [`examples/kind/values.yaml`](../examples/kind/values.yaml):
+
+```yaml
+agent:
+  flags:
+    nmosBindAddress: ":1080"
+```
+
+Then `make kind-up` (or re-run against an existing cluster to
+trigger a rollout restart). Once the agent pods are back to
+`Running`, port-forward to one of them:
+
+```sh
+kubectl --context kind-mxl-k8s-demo -n mxl-system \
+  port-forward ds/mxl-k8s-agent 1080:1080
+```
+
+### IS-04 Node API
+
+```sh
+# Version listing
+curl http://localhost:1080/x-nmos/node/
+# ["v1.3/"]
+
+# Node self
+curl http://localhost:1080/x-nmos/node/v1.3/self
+```
+
+The node resource advertises the Kubernetes node name as
+`hostname`, and the `api.endpoints` array carries the host and
+port from the bind address:
+
+```json
+{
+  "id": "<uuid-v5>",
+  "version": "2026-...",
+  "label": "mxl-k8s-demo-worker",
+  "hostname": "mxl-k8s-demo-worker",
+  "api": {
+    "versions": ["v1.3"],
+    "endpoints": [{"host": "mxl-k8s-demo-worker", "port": 1080, "protocol": "http"}]
+  },
+  "href": "http://mxl-k8s-demo-worker:1080/x-nmos/node/v1.3/"
+}
+```
+
+```sh
+# Devices
+curl http://localhost:1080/x-nmos/node/v1.3/devices
+```
+
+One device per MXL domain, type `urn:x-nmos:device:generic`, with
+the sender IDs in `senders`:
+
+```json
+[
+  {
+    "id": "<uuid-v5>",
+    "type": "urn:x-nmos:device:generic",
+    "node_id": "<node-uuid>",
+    "senders": ["<sender-uuid>"],
+    "receivers": []
+  }
+]
+```
+
+```sh
+# Sources, flows, senders
+curl http://localhost:1080/x-nmos/node/v1.3/sources
+curl http://localhost:1080/x-nmos/node/v1.3/flows
+curl http://localhost:1080/x-nmos/node/v1.3/senders
+```
+
+Each MXL flow with origin on this node produces one source, one
+flow, and one sender. The flow's `format` and `media_type` come
+from the flow definition JSON (e.g. `urn:x-nmos:format:video` and
+`video/v210` for the demo's v210 flow). The sender's `transport`
+is `urn:x-nmos:transport:mxl`:
+
+```json
+[
+  {
+    "id": "<sender-uuid>",
+    "flow_id": "5fbec3b1-1b0f-417d-9059-8b94a47197ed",
+    "transport": "urn:x-nmos:transport:mxl",
+    "device_id": "<device-uuid>",
+    "subscription": {"active": true, "receiver_id": null}
+  }
+]
+```
+
+Receivers always return an empty array (the proxy is senders-only):
+
+```sh
+curl http://localhost:1080/x-nmos/node/v1.3/receivers
+# []
+```
+
+### IS-05 Connection Management
+
+```sh
+# Version listing
+curl http://localhost:1080/x-nmos/connection/
+# ["v1.1/"]
+
+# Get the sender ID from IS-04
+SENDER_ID=$(curl -s http://localhost:1080/x-nmos/node/v1.3/senders | jq -r '.[0].id')
+```
+
+Active state -- MXL senders are always active with
+`activate_immediate`:
+
+```sh
+curl http://localhost:1080/x-nmos/connection/v1.1/single/senders/$SENDER_ID/active
+```
+
+```json
+{
+  "sender_id": "5fbec3b1-1b0f-417d-9059-8b94a47197ed",
+  "receiver_id": null,
+  "master_enable": true,
+  "activation": {
+    "mode": "activate_immediate",
+    "requested_time": null,
+    "activation_time": "2026-06-24T14:30:00.000000000Z"
+  },
+  "transport_file": {
+    "data": "{\"mxl_domain_id\":\"<domain-name>\",\"mxl_flow_id\":\"5fbec3b1-1b0f-417d-9059-8b94a47197ed\"}",
+    "type": "application/json"
+  },
+  "transport_params": [
+    {
+      "mxl_domain_id": "<domain-name>",
+      "mxl_flow_id": "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
+    }
+  ]
+}
+```
+
+Staged state is read-only. PATCH requests are accepted but return
+the current active parameters unchanged:
+
+```sh
+curl http://localhost:1080/x-nmos/connection/v1.1/single/senders/$SENDER_ID/staged
+```
+
+Constraints restrict each parameter to the single concrete value
+the sender exposes (no `auto`):
+
+```sh
+curl http://localhost:1080/x-nmos/connection/v1.1/single/senders/$SENDER_ID/constraints
+```
+
+```json
+[
+  {
+    "mxl_domain_id": {"enum": ["<domain-name>"]},
+    "mxl_flow_id": {"enum": ["5fbec3b1-1b0f-417d-9059-8b94a47197ed"]}
+  }
+]
+```
+
+Transport file always returns `404`. Per BCP-007-03 an MXL IS-05
+sender's `/transportfile` endpoint MUST always return a 404; the
+transport descriptor is carried by the `transport_file` field of
+the `active`/`staged` resources instead:
+
+```sh
+curl -i http://localhost:1080/x-nmos/connection/v1.1/single/senders/$SENDER_ID/transportfile
+# HTTP/1.1 404 Not Found
+```
+
+### nmos-testing BCP-007-03 suite
+
+The [nmos-testing](https://github.com/AMWA-TV/nmos-testing) tool
+includes a BCP-007-03 test suite. To run it against the KIND
+cluster:
+
+1. Install nmos-testing per its README.
+2. Point it at the agent's Node API URL
+   (`http://<node-ip>:1080/x-nmos/node/`).
+3. Run the IS-04 Node and IS-05 Connection test suites with the
+   BCP-007-03 transport enabled.
+
+The agent proxy passes the IS-04 discovery and IS-05 sender
+read-only paths. The staged PATCH path is accepted but does not
+mutate state, which is expected for MXL's always-active sender
+model.
