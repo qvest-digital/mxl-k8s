@@ -14,7 +14,7 @@ func (h *HandlerEnv) HandleNodeVersions(w http.ResponseWriter, _ *http.Request) 
 }
 
 func (h *HandlerEnv) HandleConnectionVersions(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, []string{"v1.2/"})
+	writeJSON(w, []string{"v1.1/"})
 }
 
 func (h *HandlerEnv) HandleNode(w http.ResponseWriter, _ *http.Request) {
@@ -77,11 +77,11 @@ func (h *HandlerEnv) HandleSenderStaged(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *HandlerEnv) HandleSenderTransportFile(w http.ResponseWriter, r *http.Request) {
-	state, ok := h.senderState(w, r.PathValue("senderID"))
-	if !ok {
-		return
-	}
-	writeJSON(w, state.TransportParams[0])
+	// BCP-007-03 (MXL IS-05 Senders and Receivers): the /transportfile
+	// endpoint of an MXL IS-05 Sender MUST always return a 404. MXL transport
+	// parameters are conveyed via the active/staged resources, not a transport
+	// file, so there is no file to serve regardless of the sender ID.
+	writeError(w, http.StatusNotFound, "not found", "MXL IS-05 senders do not expose a transport file")
 }
 
 func (h *HandlerEnv) HandleSenderConstraints(w http.ResponseWriter, r *http.Request) {
@@ -150,8 +150,8 @@ func (h *HandlerEnv) resources(w http.ResponseWriter) (types.ResourceSet, bool) 
 	resources.Node.API.Endpoints = []types.Endpoint{{Host: h.Host, Port: h.Port, Protocol: "http"}}
 	if len(resources.Devices) > 0 {
 		resources.Devices[0].Controls = []types.Control{{
-			Href: fmt.Sprintf("http://%s/x-nmos/connection/v1.2/", net.JoinHostPort(h.Host, fmt.Sprint(h.Port))),
-			Type: "urn:x-nmos:control:cm-v1.2",
+			Href: fmt.Sprintf("http://%s/x-nmos/connection/v1.1/", net.JoinHostPort(h.Host, fmt.Sprint(h.Port))),
+			Type: "urn:x-nmos:control:sr-ctrl/v1.1",
 		}}
 	}
 	return resources, true

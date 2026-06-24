@@ -21,8 +21,8 @@ const (
 	nodeBasePath            = "/x-nmos/node/"
 	nodeV13Path             = "/x-nmos/node/v1.3/"
 	connectionBasePath      = "/x-nmos/connection/"
-	connectionV12Path       = "/x-nmos/connection/v1.2/"
-	connectionSenderV12Path = "/x-nmos/connection/v1.2/single/senders/"
+	connectionV11Path       = "/x-nmos/connection/v1.1/"
+	connectionSenderV11Path = "/x-nmos/connection/v1.1/single/senders/"
 	activationModeImmediate = "activate_immediate"
 	readHeaderTimeout       = 5 * time.Second
 	shutdownTimeout         = 5 * time.Second

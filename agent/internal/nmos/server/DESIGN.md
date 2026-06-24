@@ -17,11 +17,11 @@
 | GET | `/x-nmos/node/v1.3/senders` | `handleSenders` |
 | GET | `/x-nmos/node/v1.3/receivers` | `handleReceivers` |
 | GET | `/x-nmos/connection/` | `handleConnectionVersions` |
-| GET | `/x-nmos/connection/v1.2/` | `handleConnectionVersions` |
-| GET | `/x-nmos/connection/v1.2/single/senders/{id}/active` | `handleSenderActive` |
-| GET, PATCH | `/x-nmos/connection/v1.2/single/senders/{id}/staged` | `handleSenderStaged` |
-| GET | `/x-nmos/connection/v1.2/single/senders/{id}/constraints` | `handleSenderConstraints` |
-| GET | `/x-nmos/connection/v1.2/single/senders/{id}/transportfile` | `handleSenderTransportFile` |
+| GET | `/x-nmos/connection/v1.1/` | `handleConnectionVersions` |
+| GET | `/x-nmos/connection/v1.1/single/senders/{id}/active` | `handleSenderActive` |
+| GET, PATCH | `/x-nmos/connection/v1.1/single/senders/{id}/staged` | `handleSenderStaged` |
+| GET | `/x-nmos/connection/v1.1/single/senders/{id}/constraints` | `handleSenderConstraints` |
+| GET | `/x-nmos/connection/v1.1/single/senders/{id}/transportfile` | `handleSenderTransportFile` |
 
 The connection sender routes are currently dispatched through a single `handleConnectionSender` function that manually parses the URL suffix — a workaround predating Go 1.22 pattern support.
 
@@ -160,18 +160,18 @@ func (s *Server) routes() http.Handler {
 
     // IS-05 discovery
     mux.HandleFunc("GET /x-nmos/connection/", s.env.HandleConnectionVersions)
-    mux.HandleFunc("GET /x-nmos/connection/v1.2/", s.env.HandleConnectionVersions)
+    mux.HandleFunc("GET /x-nmos/connection/v1.1/", s.env.HandleConnectionVersions)
 
     // IS-05 sender resources
-    mux.HandleFunc("GET /x-nmos/connection/v1.2/single/senders/{senderID}/active",
+    mux.HandleFunc("GET /x-nmos/connection/v1.1/single/senders/{senderID}/active",
         s.env.HandleSenderActive)
-    mux.HandleFunc("GET /x-nmos/connection/v1.2/single/senders/{senderID}/staged",
+    mux.HandleFunc("GET /x-nmos/connection/v1.1/single/senders/{senderID}/staged",
         s.env.HandleSenderStaged)
-    mux.HandleFunc("PATCH /x-nmos/connection/v1.2/single/senders/{senderID}/staged",
+    mux.HandleFunc("PATCH /x-nmos/connection/v1.1/single/senders/{senderID}/staged",
         s.env.HandleSenderStaged)
-    mux.HandleFunc("GET /x-nmos/connection/v1.2/single/senders/{senderID}/constraints",
+    mux.HandleFunc("GET /x-nmos/connection/v1.1/single/senders/{senderID}/constraints",
         s.env.HandleSenderConstraints)
-    mux.HandleFunc("GET /x-nmos/connection/v1.2/single/senders/{senderID}/transportfile",
+    mux.HandleFunc("GET /x-nmos/connection/v1.1/single/senders/{senderID}/transportfile",
         s.env.HandleSenderTransportFile)
 
     // 404 catch-all — ServeMux returns 405 for wrong method, 404 for unmatched path
@@ -200,7 +200,7 @@ func (s *Server) routes() http.Handler {
 - The `map[string]route` in `routes()`
 - The `http.HandlerFunc` wrapper with `strings.HasPrefix` fallback
 - The entire `handleConnectionSender` method (48 lines — its switch/case logic is absorbed into ServeMux dispatch)
-- `connectionSenderV12Path` constant (no longer used for prefix matching)
+- `connectionSenderV11Path` constant (no longer used for prefix matching)
 
 ---
 
@@ -383,7 +383,7 @@ Ordered for minimal risk, each step independently compilable and testable:
 ### Step 5: Switch to Go 1.22+ ServeMux in `router.go`
 - Create `router.go`
 - Replace map-based `routes()` with `http.NewServeMux()` + method-pattern registration
-- Delete: `route` struct, `getRoute()`, `handleConnectionSender()`, `connectionSenderV12Path` constant
+- Delete: `route` struct, `getRoute()`, `handleConnectionSender()`, `connectionSenderV11Path` constant
 - Update handlers to use `r.PathValue("senderID")`
 - **Compile and run tests** — tests must still pass; pay special attention to 404/405 behavior which may differ slightly (ServeMux returns more specific responses)
 

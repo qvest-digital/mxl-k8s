@@ -15,12 +15,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET "+nodeV13Path+"receivers", s.env.HandleReceivers)
 
 	mux.HandleFunc("GET "+connectionBasePath+"{$}", s.env.HandleConnectionVersions)
-	mux.HandleFunc("GET "+connectionV12Path+"{$}", s.env.HandleConnectionVersions)
-	mux.HandleFunc("GET "+connectionSenderV12Path+"{senderID}/active", s.env.HandleSenderActive)
-	mux.HandleFunc("GET "+connectionSenderV12Path+"{senderID}/staged", s.env.HandleSenderStaged)
-	mux.HandleFunc("PATCH "+connectionSenderV12Path+"{senderID}/staged", s.env.HandleSenderStaged)
-	mux.HandleFunc("GET "+connectionSenderV12Path+"{senderID}/constraints", s.env.HandleSenderConstraints)
-	mux.HandleFunc("GET "+connectionSenderV12Path+"{senderID}/transportfile", s.env.HandleSenderTransportFile)
+	mux.HandleFunc("GET "+connectionV11Path+"{$}", s.env.HandleConnectionVersions)
+	mux.HandleFunc("GET "+connectionSenderV11Path+"{senderID}/active", s.env.HandleSenderActive)
+	mux.HandleFunc("GET "+connectionSenderV11Path+"{senderID}/staged", s.env.HandleSenderStaged)
+	mux.HandleFunc("PATCH "+connectionSenderV11Path+"{senderID}/staged", s.env.HandleSenderStaged)
+	mux.HandleFunc("GET "+connectionSenderV11Path+"{senderID}/constraints", s.env.HandleSenderConstraints)
+	mux.HandleFunc("GET "+connectionSenderV11Path+"{senderID}/transportfile", s.env.HandleSenderTransportFile)
 
 	return LoggingMiddleware(s.opts.Logger)(
 		RecoverMiddleware(s.opts.Logger)(

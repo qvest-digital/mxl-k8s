@@ -91,11 +91,11 @@ func TestConnectionAPISenderEndpointsExposeReadOnlyTransportParams(t *testing.T)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/connection/", nil))
 	require.Equal(t, http.StatusOK, rr.Code)
-	require.JSONEq(t, `["v1.2/"]`, rr.Body.String())
+	require.JSONEq(t, `["v1.1/"]`, rr.Body.String())
 
 	for _, path := range []string{
-		"/x-nmos/connection/v1.2/single/senders/" + senderID + "/active",
-		"/x-nmos/connection/v1.2/single/senders/" + senderID + "/staged",
+		"/x-nmos/connection/v1.1/single/senders/" + senderID + "/active",
+		"/x-nmos/connection/v1.1/single/senders/" + senderID + "/staged",
 	} {
 		t.Run(path, func(t *testing.T) {
 			rr := httptest.NewRecorder()
@@ -113,7 +113,7 @@ func TestConnectionAPISenderEndpointsExposeReadOnlyTransportParams(t *testing.T)
 
 	rr = httptest.NewRecorder()
 	body := strings.NewReader(`{"master_enable":false,"transport_params":[{"mxl_domain_id":"auto","mxl_flow_id":"auto"}]}`)
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPatch, "/x-nmos/connection/v1.2/single/senders/"+senderID+"/staged", body))
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPatch, "/x-nmos/connection/v1.1/single/senders/"+senderID+"/staged", body))
 	require.Equal(t, http.StatusOK, rr.Code)
 	var patched types.SenderState
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &patched))
@@ -123,7 +123,7 @@ func TestConnectionAPISenderEndpointsExposeReadOnlyTransportParams(t *testing.T)
 	require.Equal(t, flowID, *patched.TransportParams[0].MxlFlowID)
 
 	rr = httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/connection/v1.2/single/senders/"+senderID+"/constraints", nil))
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/connection/v1.1/single/senders/"+senderID+"/constraints", nil))
 	require.Equal(t, http.StatusOK, rr.Code)
 	var constraints []types.TransportParamConstraint
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &constraints))
@@ -134,9 +134,9 @@ func TestConnectionAPISenderEndpointsExposeReadOnlyTransportParams(t *testing.T)
 	require.NotContains(t, constraints[0].MxlFlowID.Enum, "auto")
 
 	rr = httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/connection/v1.2/single/senders/"+senderID+"/transportfile", nil))
-	require.Equal(t, http.StatusOK, rr.Code)
-	require.JSONEq(t, `{"mxl_domain_id":"11111111-1111-4111-8111-111111111111","mxl_flow_id":"5fbec3b1-1b0f-417d-9059-8b94a47197ed"}`, rr.Body.String())
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/connection/v1.1/single/senders/"+senderID+"/transportfile", nil))
+	// BCP-007-03: MXL IS-05 senders MUST always return 404 for /transportfile.
+	require.Equal(t, http.StatusNotFound, rr.Code)
 }
 
 func TestVersionCorsMethodAndErrorResponses(t *testing.T) {
@@ -288,7 +288,7 @@ func TestConnectionSenderRoutesRejectUnsupportedMethodsAsJSON(t *testing.T) {
 	h := New(Options{NodeName: "node-a", DomainID: domainID, Host: "127.0.0.1", Port: 1080, Cache: cache})
 
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/x-nmos/connection/v1.2/single/senders/not-a-sender/active", nil))
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/x-nmos/connection/v1.1/single/senders/not-a-sender/active", nil))
 	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
 	require.JSONEq(t, `{"code":405,"error":"method not allowed","debug":"POST is not supported"}`, rr.Body.String())
@@ -311,7 +311,7 @@ func TestSenderActiveHasSenderIDAndTransportFile(t *testing.T) {
 	for _, endpoint := range []string{"active", "staged"} {
 		t.Run(endpoint, func(t *testing.T) {
 			rr := httptest.NewRecorder()
-			path := "/x-nmos/connection/v1.2/single/senders/" + senderID + "/" + endpoint
+			path := "/x-nmos/connection/v1.1/single/senders/" + senderID + "/" + endpoint
 			h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
 			require.Equal(t, http.StatusOK, rr.Code)
 
@@ -356,8 +356,8 @@ func TestDeviceControlsAdvertisesIS05Endpoint(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &devices))
 	require.Len(t, devices, 1)
 	require.Len(t, devices[0].Controls, 1)
-	require.Equal(t, "urn:x-nmos:control:cm-v1.2", devices[0].Controls[0].Type)
-	require.Contains(t, devices[0].Controls[0].Href, "/x-nmos/connection/v1.2/")
+	require.Equal(t, "urn:x-nmos:control:sr-ctrl/v1.1", devices[0].Controls[0].Type)
+	require.Contains(t, devices[0].Controls[0].Href, "/x-nmos/connection/v1.1/")
 }
 
 type staticCache struct {
