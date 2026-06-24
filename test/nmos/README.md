@@ -8,7 +8,7 @@ API) sender proxy implementation.
 | File | Purpose |
 |------|---------|
 | `nmos_integration_test.go` | Go test suite validating IS-04/IS-05 endpoints |
-| `run-nmos-tests.sh` | Shell script: build, start, test, teardown |
+| `run-nmos-tests.sh` | Shell script: verify server, run tests, report |
 | `README.md` | This file |
 
 ## Quick start
@@ -19,9 +19,6 @@ API) sender proxy implementation.
 
 # Run against an existing server:
 ./test/nmos/run-nmos-tests.sh --server-url http://nmos-host:port
-
-# Skip AMWA tests:
-./test/nmos/run-nmos-tests.sh --skip-amwa
 
 # Run Go tests directly (requires a running server):
 NMOS_SERVER_URL=http://127.0.0.1:8080 go test -tags integration -v ./test/nmos/...
@@ -55,12 +52,6 @@ NMOS_SERVER_URL=http://127.0.0.1:8080 go test -tags integration -v ./test/nmos/.
 - Senders expose transport file via IS-05
 - Receiver not implemented (empty list)
 
-### AMWA nmos-testing (optional)
-- IS-04-01: Node API conformance
-- IS-05-01: Connection API sender tests
-- IS-05-02: Transport file tests
-- Runs only if `nmos-testing` is installed; skipped otherwise
-
 ## Known limitations
 
 | Limitation | Rationale |
@@ -68,12 +59,17 @@ NMOS_SERVER_URL=http://127.0.0.1:8080 go test -tags integration -v ./test/nmos/.
 | Receiver not implemented | Sender proxy scope; IS-05 Receiver endpoints return empty |
 | Sender staged is read-only | Senders are always-active; PATCH accepted for controller compatibility |
 | No DNS-SD testing | BCP-007-03 DNS-SD advertisement requires network stack testing outside this suite |
-| AMWA nmos-testing optional | Requires pip install nmos-testing and a NMOS Registry |
 | No kind cluster tests | Kubernetes-based testing deferred to CI pipeline |
+
+## AMWA nmos-testing
+
+AMWA [nmos-testing](https://github.com/AMWA-TV/nmos-testing) is a separate
+semi-automated test tool. Its test suites are not integrated into this test
+path. Non-interactive suites from nmos-testing may be incorporated later as a
+separate effort.
 
 ## Requirements
 
 - Go 1.21+
 - curl
-- Optional: AMWA nmos-testing (`pip install nmos-testing`)
-- Optional: Running MXL agent with NMOS server enabled
+- Running MXL agent with NMOS server enabled

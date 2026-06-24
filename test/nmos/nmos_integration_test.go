@@ -8,11 +8,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
-	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -449,32 +446,6 @@ func TestBCP00703ReceiverNotImplemented(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// AMWA nmos-testing integration (optional -- runs if the tool is installed)
-// ---------------------------------------------------------------------------
-
-func TestAMWANMOSTesting(t *testing.T) {
-	if _, err := exec.LookPath("nmos-testing"); err != nil {
-		t.Skip("nmos-testing not installed; skipping AMWA test suite")
-	}
-
-	// Run IS-04-01 test suite against our server.
-	t.Run("IS-04-01", func(t *testing.T) {
-		cmd := exec.Command("nmos-testing",
-			"--host", extractHost(),
-			"--port", extractPort(),
-			"--version", "v1.3",
-			"--selector", "test_01")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		err := cmd.Run()
-		// nmos-testing returns 0 on all-pass, non-zero on any failure.
-		if err != nil {
-			t.Logf("nmos-testing IS-04-01 exited with error (may include expected failures for Receiver): %v", err)
-		}
-	})
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -497,18 +468,4 @@ func getSenderIDs(t *testing.T) []string {
 	return ids
 }
 
-func extractHost() string {
-	host, _, _ := net.SplitHostPort(strings.TrimPrefix(nmosServerURL, "http://"))
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	return host
-}
 
-func extractPort() string {
-	_, port, _ := net.SplitHostPort(strings.TrimPrefix(nmosServerURL, "http://"))
-	if port == "" {
-		port = "8080"
-	}
-	return port
-}
