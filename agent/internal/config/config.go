@@ -39,6 +39,10 @@ type Config struct {
 	// dispatcher allows before giving up on a mirror reaching
 	// Ready.
 	MaterializeTimeout time.Duration
+
+	// NMOSBindAddress is the HTTP listen address for the NMOS IS-04
+	// Node API. Empty disables NMOS serving.
+	NMOSBindAddress string
 }
 
 // FromFlags populates a Config from command-line flags.
@@ -60,6 +64,8 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"UDS path for the on-demand intent endpoint. Empty disables.")
 	fs.DurationVar(&c.MaterializeTimeout, "materialize-timeout", 5*time.Second,
 		"Per-request budget for the intent dispatcher waiting for a mirror Ready.")
+	fs.StringVar(&c.NMOSBindAddress, "nmos-bind-address", "",
+		"Address the NMOS IS-04 Node API binds to. Empty disables NMOS serving.")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
