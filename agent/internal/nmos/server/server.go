@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -15,8 +16,12 @@ import (
 )
 
 const (
-	nodeBasePath = "/x-nmos/node/"
-	nodeV13Path  = "/x-nmos/node/v1.3/"
+	nodeBasePath            = "/x-nmos/node/"
+	nodeV13Path             = "/x-nmos/node/v1.3/"
+	connectionBasePath      = "/x-nmos/connection/"
+	connectionSenderV12Path = "/x-nmos/connection/v1.2/single/senders/"
+	connectionV12Path       = "/x-nmos/connection/v1.2/"
+	activationModeImmediate = "activate_immediate"
 )
 
 // Cache is the watcher read interface the NMOS server needs.
@@ -82,29 +87,93 @@ type Server struct {
 }
 
 func (s *Server) routes() http.Handler {
-	routes := map[string]http.Handler{
-		nodeBasePath:              http.HandlerFunc(s.handleVersions),
-		nodeV13Path:               http.HandlerFunc(s.handleNode),
-		nodeV13Path + "self":      http.HandlerFunc(s.handleNode),
-		nodeV13Path + "devices":   http.HandlerFunc(s.handleDevices),
-		nodeV13Path + "sources":   http.HandlerFunc(s.handleSources),
-		nodeV13Path + "flows":     http.HandlerFunc(s.handleFlows),
-		nodeV13Path + "senders":   http.HandlerFunc(s.handleSenders),
-		nodeV13Path + "receivers": http.HandlerFunc(s.handleReceivers),
+	routes := map[string]route{
+		nodeBasePath:              getRoute(s.handleNodeVersions),
+		nodeV13Path:               getRoute(s.handleNode),
+		nodeV13Path + "self":      getRoute(s.handleNode),
+		nodeV13Path + "devices":   getRoute(s.handleDevices),
+		nodeV13Path + "sources":   getRoute(s.handleSources),
+		nodeV13Path + "flows":     getRoute(s.handleFlows),
+		nodeV13Path + "senders":   getRoute(s.handleSenders),
+		nodeV13Path + "receivers": getRoute(s.handleReceivers),
+		connectionBasePath:        getRoute(s.handleConnectionVersions),
+		connectionV12Path:         getRoute(s.handleConnectionVersions),
 	}
 	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h, ok := routes[r.URL.Path]
-		if !ok {
-			writeError(w, http.StatusNotFound, "not found", "resource not found")
+		if h, ok := routes[r.URL.Path]; ok {
+			h.serve(w, r)
 			return
 		}
-		h.ServeHTTP(w, r)
+		if strings.HasPrefix(r.URL.Path, connectionSenderV12Path) {
+			s.handleConnectionSender(w, r)
+			return
+		}
+		writeError(w, http.StatusNotFound, "not found", "resource not found")
 	})
-	return loggingMiddleware(s.opts.Logger)(recoverMiddleware(s.opts.Logger)(corsMiddleware(methodMiddleware(router))))
+	return loggingMiddleware(s.opts.Logger)(recoverMiddleware(s.opts.Logger)(corsMiddleware(router)))
 }
 
-func (s *Server) handleVersions(w http.ResponseWriter, _ *http.Request) {
+type route struct {
+	handler http.Handler
+	methods map[string]struct{}
+}
+
+func getRoute(fn func(http.ResponseWriter, *http.Request)) route {
+	return route{handler: http.HandlerFunc(fn), methods: map[string]struct{}{http.MethodGet: {}}}
+}
+
+func (r route) serve(w http.ResponseWriter, req *http.Request) {
+	if _, ok := r.methods[req.Method]; !ok {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", fmt.Sprintf("%s is not supported", req.Method))
+		return
+	}
+	r.handler.ServeHTTP(w, req)
+}
+
+func (s *Server) handleConnectionSender(w http.ResponseWriter, r *http.Request) {
+	suffix := strings.TrimPrefix(r.URL.Path, connectionSenderV12Path)
+	parts := strings.Split(suffix, "/")
+	if len(parts) != 2 || parts[0] == "" {
+		writeError(w, http.StatusNotFound, "not found", "resource not found")
+		return
+	}
+	senderID, endpoint := parts[0], parts[1]
+	switch endpoint {
+	case "active":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", fmt.Sprintf("%s is not supported", r.Method))
+			return
+		}
+		s.handleSenderActive(w, r, senderID)
+	case "staged":
+		if r.Method != http.MethodGet && r.Method != http.MethodPatch {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", fmt.Sprintf("%s is not supported", r.Method))
+			return
+		}
+		s.handleSenderStaged(w, r, senderID)
+	case "constraints":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", fmt.Sprintf("%s is not supported", r.Method))
+			return
+		}
+		s.handleSenderConstraints(w, r, senderID)
+	case "transportfile":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", fmt.Sprintf("%s is not supported", r.Method))
+			return
+		}
+		s.handleSenderTransportFile(w, r, senderID)
+	default:
+		writeError(w, http.StatusNotFound, "not found", "resource not found")
+	}
+}
+
+func (s *Server) handleNodeVersions(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, []string{"v1.3/"})
+}
+
+func (s *Server) handleConnectionVersions(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, []string{"v1.2/"})
 }
 
 func (s *Server) handleNode(w http.ResponseWriter, _ *http.Request) {
@@ -151,6 +220,71 @@ func (s *Server) handleReceivers(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, []any{})
 }
 
+func (s *Server) handleSenderActive(w http.ResponseWriter, _ *http.Request, senderID string) {
+	state, ok := s.senderState(w, senderID)
+	if !ok {
+		return
+	}
+	writeJSON(w, state)
+}
+
+func (s *Server) handleSenderStaged(w http.ResponseWriter, _ *http.Request, senderID string) {
+	// MXL senders are always active from IS-05's point of view; staged PATCH
+	// requests are accepted for controller compatibility but are read-only and
+	// always return the current active transport parameters.
+	s.handleSenderActive(w, nil, senderID)
+}
+
+func (s *Server) handleSenderTransportFile(w http.ResponseWriter, _ *http.Request, senderID string) {
+	state, ok := s.senderState(w, senderID)
+	if !ok {
+		return
+	}
+	writeJSON(w, state.TransportParams[0])
+}
+
+func (s *Server) handleSenderConstraints(w http.ResponseWriter, _ *http.Request, senderID string) {
+	state, ok := s.senderState(w, senderID)
+	if !ok {
+		return
+	}
+	params := state.TransportParams[0]
+	constraint := types.TransportParamConstraint{}
+	if params.MxlDomainID != nil {
+		constraint.MxlDomainID.Enum = []string{*params.MxlDomainID}
+	}
+	if params.MxlFlowID != nil {
+		constraint.MxlFlowID.Enum = []string{*params.MxlFlowID}
+	}
+	writeJSON(w, []types.TransportParamConstraint{constraint})
+}
+
+func (s *Server) senderState(w http.ResponseWriter, senderID string) (types.SenderState, bool) {
+	resources, ok := s.resources(w)
+	if !ok {
+		return types.SenderState{}, false
+	}
+	var flowID string
+	for _, sender := range resources.Senders {
+		if sender.ID == senderID {
+			flowID = sender.FlowID
+			break
+		}
+	}
+	if flowID == "" {
+		writeError(w, http.StatusNotFound, "not found", "sender not found")
+		return types.SenderState{}, false
+	}
+	domainID := s.opts.DomainID
+	params := types.SenderTransportParams{MxlDomainID: &domainID, MxlFlowID: &flowID}
+	return types.SenderState{
+		ReceiverID:      nil,
+		MasterEnable:    true,
+		Activation:      types.SenderActivation{Mode: activationModeImmediate, RequestedTime: nil, ActivationTime: nmosVersion(s.opts.Now())},
+		TransportParams: []types.SenderTransportParams{params},
+	}, true
+}
+
 func (s *Server) resources(w http.ResponseWriter) (types.ResourceSet, bool) {
 	if s.opts.Cache == nil {
 		writeError(w, http.StatusInternalServerError, "internal error", "NMOS cache is not configured")
@@ -179,7 +313,7 @@ type errorResponse struct {
 
 func setCommonHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, PATCH, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept")
 }
 
@@ -188,16 +322,6 @@ func corsMiddleware(next http.Handler) http.Handler {
 		setCommonHeaders(w)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func methodMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed", fmt.Sprintf("%s is not supported", r.Method))
 			return
 		}
 		next.ServeHTTP(w, r)

@@ -72,6 +72,84 @@ func TestNodeAPIEndpointsServeIS04Resources(t *testing.T) {
 	require.Equal(t, []types.Endpoint{{Host: "127.0.0.1", Port: 1080, Protocol: "http"}}, node.API.Endpoints)
 }
 
+func TestConnectionAPISenderEndpointsExposeReadOnlyTransportParams(t *testing.T) {
+	domainID := "11111111-1111-4111-8111-111111111111"
+	flowID := "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
+	flow := mxlFlow("flow-a", flowID, `{
+		"id":"5fbec3b1-1b0f-417d-9059-8b94a47197ed",
+		"description":"MXL Test Flow",
+		"tags":{},
+		"format":"urn:x-nmos:format:video",
+		"label":"MXL Test Flow",
+		"parents":[],
+		"media_type":"video/v210"
+	}`)
+	flow.Status.Locations = []mxlv1.MxlFlowLocation{{NodeName: "node-a", Phase: mxlv1.MxlFlowLocationOrigin}}
+	cache := &staticCache{
+		domain: mxlv1.MxlDomain{ObjectMeta: metav1.ObjectMeta{Name: domainID}, Spec: mxlv1.MxlDomainSpec{NodeName: "node-a", HostPath: "/run/mxl/domain"}},
+		flows:  []mxlv1.MxlFlow{flow},
+	}
+	h := New(Options{NodeName: "node-a", DomainID: domainID, Host: "127.0.0.1", Port: 1080, Cache: cache})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/node/v1.3/senders", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	var senders []types.Sender
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &senders))
+	require.Len(t, senders, 1)
+	senderID := senders[0].ID
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/connection/", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.JSONEq(t, `["v1.2/"]`, rr.Body.String())
+
+	for _, path := range []string{
+		"/x-nmos/connection/v1.2/single/senders/" + senderID + "/active",
+		"/x-nmos/connection/v1.2/single/senders/" + senderID + "/staged",
+	} {
+		t.Run(path, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+			require.Equal(t, http.StatusOK, rr.Code)
+			var state types.SenderState
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &state))
+			require.True(t, state.MasterEnable)
+			require.Equal(t, "activate_immediate", state.Activation.Mode)
+			require.Len(t, state.TransportParams, 1)
+			require.Equal(t, domainID, *state.TransportParams[0].MxlDomainID)
+			require.Equal(t, flowID, *state.TransportParams[0].MxlFlowID)
+		})
+	}
+
+	rr = httptest.NewRecorder()
+	body := strings.NewReader(`{"master_enable":false,"transport_params":[{"mxl_domain_id":"auto","mxl_flow_id":"auto"}]}`)
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPatch, "/x-nmos/connection/v1.2/single/senders/"+senderID+"/staged", body))
+	require.Equal(t, http.StatusOK, rr.Code)
+	var patched types.SenderState
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &patched))
+	require.True(t, patched.MasterEnable)
+	require.Len(t, patched.TransportParams, 1)
+	require.Equal(t, domainID, *patched.TransportParams[0].MxlDomainID)
+	require.Equal(t, flowID, *patched.TransportParams[0].MxlFlowID)
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/connection/v1.2/single/senders/"+senderID+"/constraints", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	var constraints []types.TransportParamConstraint
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &constraints))
+	require.Len(t, constraints, 1)
+	require.Equal(t, []string{domainID}, constraints[0].MxlDomainID.Enum)
+	require.Equal(t, []string{flowID}, constraints[0].MxlFlowID.Enum)
+	require.NotContains(t, constraints[0].MxlDomainID.Enum, "auto")
+	require.NotContains(t, constraints[0].MxlFlowID.Enum, "auto")
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/connection/v1.2/single/senders/"+senderID+"/transportfile", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.JSONEq(t, `{"mxl_domain_id":"11111111-1111-4111-8111-111111111111","mxl_flow_id":"5fbec3b1-1b0f-417d-9059-8b94a47197ed"}`, rr.Body.String())
+}
+
 func TestVersionCorsMethodAndErrorResponses(t *testing.T) {
 	h := New(Options{NodeName: "node-a", DomainID: "node-a", Host: "127.0.0.1", Port: 1080, Cache: &staticCache{}})
 
