@@ -75,20 +75,8 @@ func TestNodeAPIEndpointsServeIS04Resources(t *testing.T) {
 func TestConnectionAPISenderEndpointsExposeReadOnlyTransportParams(t *testing.T) {
 	domainID := "11111111-1111-4111-8111-111111111111"
 	flowID := "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
-	flow := mxlFlow("flow-a", flowID, `{
-		"id":"5fbec3b1-1b0f-417d-9059-8b94a47197ed",
-		"description":"MXL Test Flow",
-		"tags":{},
-		"format":"urn:x-nmos:format:video",
-		"label":"MXL Test Flow",
-		"parents":[],
-		"media_type":"video/v210"
-	}`)
-	flow.Status.Locations = []mxlv1.MxlFlowLocation{{NodeName: "node-a", Phase: mxlv1.MxlFlowLocationOrigin}}
-	cache := &staticCache{
-		domain: mxlv1.MxlDomain{ObjectMeta: metav1.ObjectMeta{Name: domainID}, Spec: mxlv1.MxlDomainSpec{NodeName: "node-a", HostPath: "/run/mxl/domain"}},
-		flows:  []mxlv1.MxlFlow{flow},
-	}
+	flow, cache := senderFlowAndCache(domainID, flowID)
+	_ = flow
 	h := New(Options{NodeName: "node-a", DomainID: domainID, Host: "127.0.0.1", Port: 1080, Cache: cache})
 
 	rr := httptest.NewRecorder()
@@ -184,6 +172,37 @@ func TestServerReturnsErrorWhenCacheCannotBuildResources(t *testing.T) {
 	require.JSONEq(t, `{"code":500,"error":"internal error","debug":"MxlDomain node-a is not cached"}`, rr.Body.String())
 }
 
+func TestHTTPMiddlewareAddsCORSAndDefaultJSONContentType(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	})
+	h := CORSMiddleware(ContentTypeMiddleware(next))
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/node/v1.3/senders", nil))
+
+	require.Equal(t, http.StatusAccepted, rr.Code)
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	require.Equal(t, "*", rr.Header().Get("Access-Control-Allow-Origin"))
+	require.Contains(t, rr.Header().Get("Access-Control-Allow-Methods"), http.MethodPatch)
+	require.Contains(t, rr.Header().Get("Access-Control-Allow-Headers"), "Accept")
+}
+
+func TestHTTPMiddlewareRecoversPanicsAsJSONErrors(t *testing.T) {
+	h := RecoverMiddleware(ctrlzap.New())(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}))
+
+	rr := httptest.NewRecorder()
+	require.NotPanics(t, func() {
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/panic", nil))
+	})
+
+	require.Equal(t, http.StatusInternalServerError, rr.Code)
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	require.JSONEq(t, `{"code":500,"error":"internal error","debug":"unexpected server error"}`, rr.Body.String())
+}
+
 func TestServerRecoversPanicsAsJSONErrors(t *testing.T) {
 	h := New(Options{NodeName: "node-a", DomainID: "node-a", Cache: panicCache{}})
 
@@ -231,6 +250,49 @@ func TestServerAcceptsControllerRuntimeZapLogger(t *testing.T) {
 	require.Contains(t, logs.String(), `"msg":"NMOS request"`)
 }
 
+func TestHandlerEnvHandlersCanBeTestedDirectly(t *testing.T) {
+	domainID := "11111111-1111-4111-8111-111111111111"
+	flowID := "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
+	_, cache := senderFlowAndCache(domainID, flowID)
+	env := &HandlerEnv{
+		Cache:    cache,
+		NodeName: "node-a",
+		DomainID: domainID,
+		Host:     "127.0.0.1",
+		Port:     1080,
+	}
+
+	rr := httptest.NewRecorder()
+	env.HandleSenders(rr, httptest.NewRequest(http.MethodGet, "/handler-test", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	var senders []types.Sender
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &senders))
+	require.Len(t, senders, 1)
+
+	rr = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/handler-test", nil)
+	req.SetPathValue("senderID", senders[0].ID)
+	env.HandleSenderActive(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var state types.SenderState
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &state))
+	require.Equal(t, domainID, *state.TransportParams[0].MxlDomainID)
+	require.Equal(t, flowID, *state.TransportParams[0].MxlFlowID)
+}
+
+func TestConnectionSenderRoutesRejectUnsupportedMethodsAsJSON(t *testing.T) {
+	domainID := "11111111-1111-4111-8111-111111111111"
+	flowID := "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
+	_, cache := senderFlowAndCache(domainID, flowID)
+	h := New(Options{NodeName: "node-a", DomainID: domainID, Host: "127.0.0.1", Port: 1080, Cache: cache})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/x-nmos/connection/v1.2/single/senders/not-a-sender/active", nil))
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	require.JSONEq(t, `{"code":405,"error":"method not allowed","debug":"POST is not supported"}`, rr.Body.String())
+}
+
 type staticCache struct {
 	domain        mxlv1.MxlDomain
 	flows         []mxlv1.MxlFlow
@@ -256,6 +318,24 @@ func (panicCache) GetDomain(string) (mxlv1.MxlDomain, bool) {
 
 func (panicCache) GetDomainFlows(string) []mxlv1.MxlFlow {
 	panic("cache exploded")
+}
+
+func senderFlowAndCache(domainID string, flowID string) (mxlv1.MxlFlow, *staticCache) {
+	flow := mxlFlow("flow-a", flowID, `{
+		"id":"`+flowID+`",
+		"description":"MXL Test Flow",
+		"tags":{},
+		"format":"urn:x-nmos:format:video",
+		"label":"MXL Test Flow",
+		"parents":[],
+		"media_type":"video/v210"
+	}`)
+	flow.Status.Locations = []mxlv1.MxlFlowLocation{{NodeName: "node-a", Phase: mxlv1.MxlFlowLocationOrigin}}
+	cache := &staticCache{
+		domain: mxlv1.MxlDomain{ObjectMeta: metav1.ObjectMeta{Name: domainID}, Spec: mxlv1.MxlDomainSpec{NodeName: "node-a", HostPath: "/run/mxl/domain"}},
+		flows:  []mxlv1.MxlFlow{flow},
+	}
+	return flow, cache
 }
 
 func mxlFlow(name string, id string, definition string) mxlv1.MxlFlow {
