@@ -328,12 +328,14 @@ on that node. Each sender's `transport` is
 ### Query IS-05 Connection Management
 
 IS-05 sender endpoints are under
-`/x-nmos/connection/v1.2/single/senders/{senderID}/`:
+`/x-nmos/connection/v1.1/single/senders/{senderID}/`:
 
 ```sh
 SENDER_ID=$(curl -s http://localhost:1080/x-nmos/node/v1.3/senders | jq -r '.[0].id')
-curl http://localhost:1080/x-nmos/connection/v1.2/single/senders/$SENDER_ID/active
-curl http://localhost:1080/x-nmos/connection/v1.2/single/senders/$SENDER_ID/transportfile
+curl http://localhost:1080/x-nmos/connection/v1.1/single/senders/$SENDER_ID/active
+# /transportfile always returns 404 per BCP-007-03 (MXL senders have no
+# transport file; transport params are read from the active resource).
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:1080/x-nmos/connection/v1.1/single/senders/$SENDER_ID/transportfile
 ```
 
 The `active` response carries `mxl_domain_id` and `mxl_flow_id` in

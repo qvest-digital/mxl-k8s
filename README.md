@@ -32,7 +32,7 @@ Four pieces, all running inside the cluster:
 - A per-node **agent** DaemonSet watches `/run/mxl/domain` via
   `fanotify` and publishes each flow on the Kubernetes API. When
   NMOS is enabled (`--nmos-bind-address`), the agent also serves
-  IS-04 Node API v1.3 and IS-05 Connection Management v1.2 so
+  IS-04 Node API v1.3 and IS-05 Connection Management v1.1 so
   NMOS controllers can discover and inspect MXL flows per
   [BCP-007-03](docs/NMOS.md).
 - A per-node **gateway** DaemonSet owns the libmxl-fabrics

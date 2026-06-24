@@ -32,7 +32,7 @@ NMOS_SERVER_URL=http://127.0.0.1:8080 go test -tags integration -v ./test/nmos/.
 - Device, Source, Flow, Sender, Receiver listing
 - Empty receiver list (Receiver not implemented)
 
-### IS-05 Connection API (v1.2)
+### IS-05 Connection API (v1.1)
 - Version discovery (`/x-nmos/connection/`)
 - Sender active resource retrieval
 - Sender staged resource (read-only, controller-compatible)
