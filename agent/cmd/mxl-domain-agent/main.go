@@ -4,8 +4,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -23,6 +25,8 @@ import (
 	"github.com/qvest-digital/mxl-k8s/agent/internal/flowpublisher"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/intent"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/intentsock"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/nmos/server"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/nmos/watcher"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/originlease"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/podlookup"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/statfs"
@@ -60,7 +64,7 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("build kubeconfig: %w", err)
 	}
-	kClient, err := client.New(restCfg, client.Options{Scheme: scheme})
+	kClient, err := client.NewWithWatch(restCfg, client.Options{Scheme: scheme})
 	if err != nil {
 		return fmt.Errorf("build client: %w", err)
 	}
@@ -80,6 +84,33 @@ func run(args []string) error {
 	}
 	if err := domainPub.EnsureExists(ctx); err != nil {
 		return err
+	}
+
+	if cfg.NMOSBindAddress != "" {
+		nmosCache := watcher.New(kClient)
+		go func() {
+			if err := nmosCache.Run(ctx); err != nil {
+				setupLog.Error(err, "NMOS cache watcher exited")
+			}
+		}()
+		select {
+		case <-nmosCache.Started():
+		case <-ctx.Done():
+			return nil
+		}
+		advertiseHost, advertisePort := nmosEndpoint(cfg.NMOSBindAddress, cfg.NodeName)
+		nmosHandler := server.New(server.Options{
+			NodeName: cfg.NodeName,
+			DomainID: domainPub.Name(),
+			Host:     advertiseHost,
+			Port:     advertisePort,
+			Cache:    nmosCache,
+		})
+		go func() {
+			if err := server.Run(ctx, cfg.NMOSBindAddress, nmosHandler); err != nil {
+				setupLog.Error(err, "NMOS server exited")
+			}
+		}()
 	}
 
 	leaseMgr := originlease.New(kClient, cfg.NodeName)
@@ -185,6 +216,22 @@ func runDispatcher(ctx context.Context, in <-chan fanotify.Event, fp *flowpublis
 			}
 		}
 	}
+}
+
+// nmosEndpoint returns the host and port the node resource advertises.
+func nmosEndpoint(bindAddress string, fallbackHost string) (string, int) {
+	host, portText, err := net.SplitHostPort(bindAddress)
+	if err != nil {
+		return fallbackHost, 0
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = fallbackHost
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return host, 0
+	}
+	return host, port
 }
 
 // runProbes serves /healthz and /readyz on addr. /readyz returns 503

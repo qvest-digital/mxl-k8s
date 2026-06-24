@@ -1,0 +1,129 @@
+package server
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/qvest-digital/mxl-k8s/agent/internal/nmos/types"
+	mxlv1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
+	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+)
+
+func TestNodeAPIEndpointsServeIS04Resources(t *testing.T) {
+	flow := mxlFlow("flow-a", "5fbec3b1-1b0f-417d-9059-8b94a47197ed", `{
+		"id":"5fbec3b1-1b0f-417d-9059-8b94a47197ed",
+		"description":"MXL Test Flow",
+		"tags":{},
+		"format":"urn:x-nmos:format:video",
+		"label":"MXL Test Flow",
+		"parents":[],
+		"media_type":"video/v210"
+	}`)
+	flow.Status.Locations = []mxlv1.MxlFlowLocation{{NodeName: "node-a", Phase: mxlv1.MxlFlowLocationOrigin}}
+	cache := &staticCache{
+		domain: mxlv1.MxlDomain{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}, Spec: mxlv1.MxlDomainSpec{NodeName: "node-a", HostPath: "/run/mxl/domain"}},
+		flows:  []mxlv1.MxlFlow{flow},
+	}
+	h := New(Options{NodeName: "node-a", DomainID: "node-a", Host: "127.0.0.1", Port: 1080, Cache: cache})
+
+	cases := []struct {
+		path    string
+		into    any
+		wantLen int
+	}{
+		{path: "/x-nmos/node/v1.3/devices", into: &[]types.Device{}, wantLen: 1},
+		{path: "/x-nmos/node/v1.3/sources", into: &[]types.Source{}, wantLen: 1},
+		{path: "/x-nmos/node/v1.3/flows", into: &[]types.Flow{}, wantLen: 1},
+		{path: "/x-nmos/node/v1.3/senders", into: &[]types.Sender{}, wantLen: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			require.Equal(t, http.StatusOK, rr.Code)
+			require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+			require.Equal(t, "*", rr.Header().Get("Access-Control-Allow-Origin"))
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), tc.into))
+			b, err := json.Marshal(tc.into)
+			require.NoError(t, err)
+			var rows []json.RawMessage
+			require.NoError(t, json.Unmarshal(b, &rows))
+			require.Len(t, rows, tc.wantLen)
+		})
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/node/v1.3/", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	var node types.Node
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &node))
+	require.Equal(t, "node-a", node.Hostname)
+	require.Equal(t, "http://127.0.0.1:1080/x-nmos/node/v1.3/", node.Href)
+	require.Equal(t, []string{"v1.3"}, node.API.Versions)
+	require.Equal(t, []types.Endpoint{{Host: "127.0.0.1", Port: 1080, Protocol: "http"}}, node.API.Endpoints)
+}
+
+func TestVersionCorsMethodAndErrorResponses(t *testing.T) {
+	h := New(Options{NodeName: "node-a", DomainID: "node-a", Host: "127.0.0.1", Port: 1080, Cache: &staticCache{}})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/node/", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.JSONEq(t, `["v1.3/"]`, rr.Body.String())
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodOptions, "/x-nmos/node/v1.3/senders", nil))
+	require.Equal(t, http.StatusNoContent, rr.Code)
+	require.Contains(t, rr.Header().Get("Access-Control-Allow-Methods"), http.MethodGet)
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/x-nmos/node/v1.3/senders", nil))
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	require.JSONEq(t, `{"code":405,"error":"method not allowed","debug":"POST is not supported"}`, rr.Body.String())
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/node/v1.3/not-there", nil))
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.JSONEq(t, `{"code":404,"error":"not found","debug":"resource not found"}`, rr.Body.String())
+}
+
+func TestServerReturnsErrorWhenCacheCannotBuildResources(t *testing.T) {
+	h := New(Options{NodeName: "node-a", DomainID: "node-a", Cache: &staticCache{missingDomain: true}})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/node/v1.3/senders", nil))
+	require.Equal(t, http.StatusInternalServerError, rr.Code)
+	require.JSONEq(t, `{"code":500,"error":"internal error","debug":"MxlDomain node-a is not cached"}`, rr.Body.String())
+}
+
+type staticCache struct {
+	domain        mxlv1.MxlDomain
+	flows         []mxlv1.MxlFlow
+	missingDomain bool
+}
+
+func (s *staticCache) GetDomain(id string) (mxlv1.MxlDomain, bool) {
+	if s.missingDomain || s.domain.Name != id {
+		return mxlv1.MxlDomain{}, false
+	}
+	return s.domain, true
+}
+
+func (s *staticCache) GetDomainFlows(string) []mxlv1.MxlFlow {
+	return append([]mxlv1.MxlFlow(nil), s.flows...)
+}
+
+func mxlFlow(name string, id string, definition string) mxlv1.MxlFlow {
+	return mxlv1.MxlFlow{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: mxlv1.MxlFlowSpec{
+			ID:         id,
+			Definition: runtime.RawExtension{Raw: []byte(definition)},
+		},
+	}
+}
