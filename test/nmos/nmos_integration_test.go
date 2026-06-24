@@ -173,7 +173,7 @@ func TestIS05Versions(t *testing.T) {
 }
 
 func TestIS05VersionsSubresource(t *testing.T) {
-	resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.2/")
+	resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.1/")
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -190,7 +190,7 @@ func TestIS05SenderActive(t *testing.T) {
 	}
 	for _, senderID := range senders {
 		t.Run(senderID, func(t *testing.T) {
-			resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.2/single/senders/" + senderID + "/active")
+			resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.1/single/senders/" + senderID + "/active")
 			require.NoError(t, err)
 			defer resp.Body.Close()
 			assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -216,7 +216,7 @@ func TestIS05SenderStagedReadOnly(t *testing.T) {
 	for _, senderID := range senders {
 		t.Run(senderID, func(t *testing.T) {
 			// GET staged -- must return current active state.
-			resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.2/single/senders/" + senderID + "/staged")
+			resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.1/single/senders/" + senderID + "/staged")
 			require.NoError(t, err)
 			defer resp.Body.Close()
 			assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -229,7 +229,7 @@ func TestIS05SenderStagedReadOnly(t *testing.T) {
 			// PATCH staged -- accepted but read-only, returns active state.
 			patchBody := []byte(`{"master_enable": false}`)
 			req, err := http.NewRequest(http.MethodPatch,
-				nmosServerURL+"/x-nmos/connection/v1.2/single/senders/"+senderID+"/staged",
+				nmosServerURL+"/x-nmos/connection/v1.1/single/senders/"+senderID+"/staged",
 				bytes.NewReader(patchBody))
 			require.NoError(t, err)
 			req.Header.Set("Content-Type", "application/json")
@@ -250,7 +250,7 @@ func TestIS05SenderTransportFile(t *testing.T) {
 	}
 	for _, senderID := range senders {
 		t.Run(senderID, func(t *testing.T) {
-			resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.2/single/senders/" + senderID + "/transportfile")
+			resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.1/single/senders/" + senderID + "/transportfile")
 			require.NoError(t, err)
 			defer resp.Body.Close()
 			assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -271,7 +271,7 @@ func TestIS05SenderConstraints(t *testing.T) {
 	}
 	for _, senderID := range senders {
 		t.Run(senderID, func(t *testing.T) {
-			resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.2/single/senders/" + senderID + "/constraints")
+			resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.1/single/senders/" + senderID + "/constraints")
 			require.NoError(t, err)
 			defer resp.Body.Close()
 			assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -299,7 +299,7 @@ func TestIS05SenderConstraints(t *testing.T) {
 }
 
 func TestIS05SenderNotFound(t *testing.T) {
-	resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.2/single/senders/nonexistent-sender-id/active")
+	resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.1/single/senders/nonexistent-sender-id/active")
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
@@ -367,7 +367,7 @@ func TestNotFoundPaths(t *testing.T) {
 	for _, path := range []string{
 		"/x-nmos/foo/",
 		"/x-nmos/node/v1.3/nonexistent",
-		"/x-nmos/connection/v1.2/single/receivers/abc/active",
+		"/x-nmos/connection/v1.1/single/receivers/abc/active",
 	} {
 		t.Run(path, func(t *testing.T) {
 			resp, err := http.Get(nmosServerURL + path)
@@ -380,7 +380,7 @@ func TestNotFoundPaths(t *testing.T) {
 }
 
 func TestErrorResponseFormat(t *testing.T) {
-	resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.2/single/senders/nonexistent/active")
+	resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.1/single/senders/nonexistent/active")
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -418,7 +418,7 @@ func TestBCP00703SenderHasTransportFile(t *testing.T) {
 	}
 	for _, senderID := range senders {
 		t.Run(senderID, func(t *testing.T) {
-			resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.2/single/senders/" + senderID + "/transportfile")
+			resp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.1/single/senders/" + senderID + "/transportfile")
 			require.NoError(t, err)
 			defer resp.Body.Close()
 			assert.Equal(t, http.StatusOK, resp.StatusCode,
@@ -439,7 +439,7 @@ func TestBCP00703ReceiverNotImplemented(t *testing.T) {
 	assert.Empty(t, receivers, "BCP-007-03: receivers not implemented, expect empty list")
 
 	// IS-05 connection endpoint must not list receiver resources.
-	connResp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.2/")
+	connResp, err := http.Get(nmosServerURL + "/x-nmos/connection/v1.1/")
 	require.NoError(t, err)
 	defer connResp.Body.Close()
 	assert.Equal(t, http.StatusOK, connResp.StatusCode)
@@ -467,5 +467,3 @@ func getSenderIDs(t *testing.T) []string {
 	}
 	return ids
 }
-
-
