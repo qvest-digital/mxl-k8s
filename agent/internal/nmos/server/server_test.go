@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr/funcr"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/nmos/types"
@@ -291,6 +292,72 @@ func TestConnectionSenderRoutesRejectUnsupportedMethodsAsJSON(t *testing.T) {
 	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
 	require.JSONEq(t, `{"code":405,"error":"method not allowed","debug":"POST is not supported"}`, rr.Body.String())
+}
+
+func TestSenderActiveHasSenderIDAndTransportFile(t *testing.T) {
+	domainID := "11111111-1111-4111-8111-111111111111"
+	flowID := "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
+	_, cache := senderFlowAndCache(domainID, flowID)
+	h := New(Options{NodeName: "node-a", DomainID: domainID, Host: "127.0.0.1", Port: 1080, Cache: cache})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/node/v1.3/senders", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	var senders []types.Sender
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &senders))
+	require.Len(t, senders, 1)
+	senderID := senders[0].ID
+
+	for _, endpoint := range []string{"active", "staged"} {
+		t.Run(endpoint, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			path := "/x-nmos/connection/v1.2/single/senders/" + senderID + "/" + endpoint
+			h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+			require.Equal(t, http.StatusOK, rr.Code)
+
+			var raw map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
+			require.Contains(t, raw, "sender_id", "active/staged must contain sender_id")
+			require.Contains(t, raw, "transport_file", "active/staged must contain transport_file")
+			require.Contains(t, raw, "master_enable")
+			require.Contains(t, raw, "activation")
+			require.Contains(t, raw, "transport_params")
+
+			var sid string
+			require.NoError(t, json.Unmarshal(raw["sender_id"], &sid))
+			require.Equal(t, senderID, sid)
+
+			var tf types.TransportFile
+			require.NoError(t, json.Unmarshal(raw["transport_file"], &tf))
+			require.NotEmpty(t, tf.Data, "transport_file.data must be non-empty")
+			require.Equal(t, "application/json", tf.Type)
+		})
+	}
+}
+
+func TestNmosVersionIsTAITimestamp(t *testing.T) {
+	// TAI = UTC + 37 seconds (current leap-second offset).
+	utc := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
+	got := nmosVersion(utc)
+	want := "2026-06-24T12:00:37.000000000Z"
+	require.Equal(t, want, got)
+}
+
+func TestDeviceControlsAdvertisesIS05Endpoint(t *testing.T) {
+	domainID := "11111111-1111-4111-8111-111111111111"
+	flowID := "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
+	_, cache := senderFlowAndCache(domainID, flowID)
+	h := New(Options{NodeName: "node-a", DomainID: domainID, Host: "127.0.0.1", Port: 1080, Cache: cache})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/node/v1.3/devices", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	var devices []types.Device
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &devices))
+	require.Len(t, devices, 1)
+	require.Len(t, devices[0].Controls, 1)
+	require.Equal(t, "urn:x-nmos:control:cm-v1.2", devices[0].Controls[0].Type)
+	require.Contains(t, devices[0].Controls[0].Href, "/x-nmos/connection/v1.2/")
 }
 
 type staticCache struct {

@@ -119,9 +119,14 @@ func (h *HandlerEnv) senderState(w http.ResponseWriter, senderID string) (types.
 	domainID := h.DomainID
 	params := types.SenderTransportParams{MxlDomainID: &domainID, MxlFlowID: &flowID}
 	return types.SenderState{
-		ReceiverID:      nil,
-		MasterEnable:    true,
-		Activation:      types.SenderActivation{Mode: activationModeImmediate, RequestedTime: nil, ActivationTime: nmosVersion(h.now())},
+		SenderID:     senderID,
+		ReceiverID:   nil,
+		MasterEnable: true,
+		Activation:   types.SenderActivation{Mode: activationModeImmediate, RequestedTime: nil, ActivationTime: nmosVersion(h.now())},
+		TransportFile: types.TransportFile{
+			Data: fmt.Sprintf(`{"mxl_domain_id":"%s","mxl_flow_id":"%s"}`, domainID, flowID),
+			Type: "application/json",
+		},
 		TransportParams: []types.SenderTransportParams{params},
 	}, true
 }
@@ -143,6 +148,12 @@ func (h *HandlerEnv) resources(w http.ResponseWriter) (types.ResourceSet, bool) 
 	}
 	resources.Node.Href = fmt.Sprintf("http://%s/x-nmos/node/v1.3/", net.JoinHostPort(h.Host, fmt.Sprint(h.Port)))
 	resources.Node.API.Endpoints = []types.Endpoint{{Host: h.Host, Port: h.Port, Protocol: "http"}}
+	if len(resources.Devices) > 0 {
+		resources.Devices[0].Controls = []types.Control{{
+			Href: fmt.Sprintf("http://%s/x-nmos/connection/v1.2/", net.JoinHostPort(h.Host, fmt.Sprint(h.Port))),
+			Type: "urn:x-nmos:control:cm-v1.2",
+		}}
+	}
 	return resources, true
 }
 

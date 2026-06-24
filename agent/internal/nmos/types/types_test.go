@@ -62,6 +62,47 @@ func TestSenderTransportParamsMarshalRoundTrip(t *testing.T) {
 	require.JSONEq(t, `{"mxl_domain_id":null,"mxl_flow_id":null}`, string(nullJSON))
 }
 
+func TestTransportFileMarshalRoundTrip(t *testing.T) {
+	tf := TransportFile{
+		Data: `{"mxl_domain_id":"11111111-1111-4111-8111-111111111111","mxl_flow_id":"22222222-2222-4222-8222-222222222222"}`,
+		Type: "application/json",
+	}
+	got, err := json.Marshal(tf)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"data":"{\"mxl_domain_id\":\"11111111-1111-4111-8111-111111111111\",\"mxl_flow_id\":\"22222222-2222-4222-8222-222222222222\"}","type":"application/json"}`, string(got))
+
+	var roundTrip TransportFile
+	require.NoError(t, json.Unmarshal(got, &roundTrip))
+	require.Equal(t, tf, roundTrip)
+}
+
+func TestSenderStateMarshalHasSenderIDAndTransportFile(t *testing.T) {
+	domainID := "11111111-1111-4111-8111-111111111111"
+	flowID := "22222222-2222-4222-8222-222222222222"
+	state := SenderState{
+		SenderID:     "sender-id-123",
+		ReceiverID:   nil,
+		MasterEnable: true,
+		Activation:   SenderActivation{Mode: "activate_immediate", RequestedTime: nil, ActivationTime: "2026-06-24T12:00:37.000000000Z"},
+		TransportFile: TransportFile{
+			Data: `{"mxl_domain_id":"` + domainID + `","mxl_flow_id":"` + flowID + `"}`,
+			Type: "application/json",
+		},
+		TransportParams: []SenderTransportParams{{MxlDomainID: &domainID, MxlFlowID: &flowID}},
+	}
+	got, err := json.Marshal(state)
+	require.NoError(t, err)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(got, &decoded))
+	require.Equal(t, "sender-id-123", decoded["sender_id"])
+	require.Contains(t, decoded, "transport_file")
+	tf, ok := decoded["transport_file"].(map[string]any)
+	require.True(t, ok)
+	require.NotEmpty(t, tf["data"])
+	require.Equal(t, "application/json", tf["type"])
+}
+
 func TestNodeDeviceSourceFlowMarshalRoundTrip(t *testing.T) {
 	node := Node{
 		ID:          "11111111-1111-4111-8111-111111111111",

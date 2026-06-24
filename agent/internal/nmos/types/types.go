@@ -155,11 +155,21 @@ type SenderActivation struct {
 	ActivationTime string  `json:"activation_time"`
 }
 
+// TransportFile is the IS-05 transport_file object carried in active/staged
+// sender responses. For BCP-007-03 MXL, Data carries the MXL transport
+// parameters as a JSON string and Type identifies the transport file media type.
+type TransportFile struct {
+	Data string `json:"data"`
+	Type string `json:"type"`
+}
+
 // SenderState is an IS-05 active or staged sender response.
 type SenderState struct {
+	SenderID        string                  `json:"sender_id"`
 	ReceiverID      *string                 `json:"receiver_id"`
 	MasterEnable    bool                    `json:"master_enable"`
 	Activation      SenderActivation        `json:"activation"`
+	TransportFile   TransportFile           `json:"transport_file"`
 	TransportParams []SenderTransportParams `json:"transport_params"`
 }
 

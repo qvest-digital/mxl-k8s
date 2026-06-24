@@ -171,6 +171,14 @@ func methodNotAllowed(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusMethodNotAllowed, "method not allowed", fmt.Sprintf("%s is not supported", r.Method))
 }
 
+// leapSeconds is the current TAI-UTC offset. As of January 2017 the offset
+// is 37 seconds; it will remain valid until the next announced leap second.
+// IS-04 resource versions must be TAI timestamps (UTC + leap seconds).
+const leapSeconds = 37
+
+// nmosVersion returns a TAI timestamp string suitable for IS-04 resource
+// version fields. TAI = UTC + leapSeconds.
 func nmosVersion(t time.Time) string {
-	return t.UTC().Format("2006-01-02T15:04:05.000000000Z")
+	tai := t.UTC().Add(leapSeconds * time.Second)
+	return tai.Format("2006-01-02T15:04:05.000000000Z")
 }
