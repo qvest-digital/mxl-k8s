@@ -323,7 +323,7 @@ curl http://localhost:1080/x-nmos/node/v1.3/receivers
 ```sh
 # Version listing
 curl http://localhost:1080/x-nmos/connection/
-# ["v1.2/"]
+# ["v1.1/"]
 
 # Get the sender ID from IS-04
 SENDER_ID=$(curl -s http://localhost:1080/x-nmos/node/v1.3/senders | jq -r '.[0].id')
@@ -333,17 +333,22 @@ Active state -- MXL senders are always active with
 `activate_immediate`:
 
 ```sh
-curl http://localhost:1080/x-nmos/connection/v1.2/single/senders/$SENDER_ID/active
+curl http://localhost:1080/x-nmos/connection/v1.1/single/senders/$SENDER_ID/active
 ```
 
 ```json
 {
+  "sender_id": "5fbec3b1-1b0f-417d-9059-8b94a47197ed",
   "receiver_id": null,
   "master_enable": true,
   "activation": {
     "mode": "activate_immediate",
     "requested_time": null,
     "activation_time": "2026-06-24T14:30:00.000000000Z"
+  },
+  "transport_file": {
+    "data": "{\"mxl_domain_id\":\"<domain-name>\",\"mxl_flow_id\":\"5fbec3b1-1b0f-417d-9059-8b94a47197ed\"}",
+    "type": "application/json"
   },
   "transport_params": [
     {
@@ -358,14 +363,14 @@ Staged state is read-only. PATCH requests are accepted but return
 the current active parameters unchanged:
 
 ```sh
-curl http://localhost:1080/x-nmos/connection/v1.2/single/senders/$SENDER_ID/staged
+curl http://localhost:1080/x-nmos/connection/v1.1/single/senders/$SENDER_ID/staged
 ```
 
 Constraints restrict each parameter to the single concrete value
 the sender exposes (no `auto`):
 
 ```sh
-curl http://localhost:1080/x-nmos/connection/v1.2/single/senders/$SENDER_ID/constraints
+curl http://localhost:1080/x-nmos/connection/v1.1/single/senders/$SENDER_ID/constraints
 ```
 
 ```json
@@ -377,18 +382,14 @@ curl http://localhost:1080/x-nmos/connection/v1.2/single/senders/$SENDER_ID/cons
 ]
 ```
 
-Transport file returns the first transport_params leg as a
-standalone object:
+Transport file always returns `404`. Per BCP-007-03 an MXL IS-05
+sender's `/transportfile` endpoint MUST always return a 404; the
+transport descriptor is carried by the `transport_file` field of
+the `active`/`staged` resources instead:
 
 ```sh
-curl http://localhost:1080/x-nmos/connection/v1.2/single/senders/$SENDER_ID/transportfile
-```
-
-```json
-{
-  "mxl_domain_id": "<domain-name>",
-  "mxl_flow_id": "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
-}
+curl -i http://localhost:1080/x-nmos/connection/v1.1/single/senders/$SENDER_ID/transportfile
+# HTTP/1.1 404 Not Found
 ```
 
 ### nmos-testing BCP-007-03 suite

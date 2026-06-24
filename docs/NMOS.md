@@ -8,7 +8,7 @@ NMOS.
 
 The proxy is opt-in: it starts only when the agent is launched with
 `--nmos-bind-address`. When enabled, the agent serves IS-04 Node API
-v1.3 and IS-05 Connection Management v1.2 on the same HTTP listener.
+v1.3 and IS-05 Connection Management v1.1 on the same HTTP listener.
 
 ## Architecture
 
@@ -100,20 +100,20 @@ is `urn:x-nmos:transport:mxl`. The `subscription` block reports
 `active: true` because MXL senders are always live once the flow
 exists on the domain.
 
-## IS-05 Connection Management v1.2
+## IS-05 Connection Management v1.1
 
 The server implements sender-only endpoints under
 `/x-nmos/connection/`:
 
 | Endpoint | Response |
 | --- | --- |
-| `GET /x-nmos/connection/` | Version listing: `["v1.2/"]` |
-| `GET /x-nmos/connection/v1.2/` | Version listing (alias) |
-| `GET .../v1.2/single/senders/{senderID}/active` | Active transport state |
-| `GET .../v1.2/single/senders/{senderID}/staged` | Staged state (read-only) |
-| `PATCH .../v1.2/single/senders/{senderID}/staged` | Accepted, returns active state |
-| `GET .../v1.2/single/senders/{senderID}/constraints` | Parameter constraints |
-| `GET .../v1.2/single/senders/{senderID}/transportfile` | Transport params leg |
+| `GET /x-nmos/connection/` | Version listing: `["v1.1/"]` |
+| `GET /x-nmos/connection/v1.1/` | Version listing (alias) |
+| `GET .../v1.1/single/senders/{senderID}/active` | Active transport state |
+| `GET .../v1.1/single/senders/{senderID}/staged` | Staged state (read-only) |
+| `PATCH .../v1.1/single/senders/{senderID}/staged` | Accepted, returns active state |
+| `GET .../v1.1/single/senders/{senderID}/constraints` | Parameter constraints |
+| `GET .../v1.1/single/senders/{senderID}/transportfile` | Always `404` (BCP-007-03) |
 
 ### Sender state
 
@@ -137,8 +137,41 @@ The `constraints` endpoint returns enum constraints that restrict
 each sender currently exposes. This tells controllers there is no
 parameter flexibility to negotiate.
 
-The `transportfile` endpoint returns the first (and only)
-`transport_params` leg as a standalone JSON object.
+The `active` and `staged` responses carry the IS-05 sender
+connection resource fields. In addition to `transport_params`,
+each response includes `sender_id` (the IS-04 sender UUID) and a
+`transport_file` object whose `data` is the MXL transport
+descriptor JSON (`{"mxl_domain_id":"...","mxl_flow_id":"..."}`)
+with `type` `application/json`:
+
+```json
+{
+  "sender_id": "5fbec3b1-1b0f-417d-9059-8b94a47197ed",
+  "receiver_id": null,
+  "master_enable": true,
+  "activation": {
+    "mode": "activate_immediate",
+    "requested_time": null,
+    "activation_time": "2026-06-24T12:00:37.000000000Z"
+  },
+  "transport_file": {
+    "data": "{\"mxl_domain_id\":\"node-a\",\"mxl_flow_id\":\"5fbec3b1-1b0f-417d-9059-8b94a47197ed\"}",
+    "type": "application/json"
+  },
+  "transport_params": [
+    {
+      "mxl_domain_id": "node-a",
+      "mxl_flow_id": "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
+    }
+  ]
+}
+```
+
+The `transportfile` endpoint always returns `404`. Per
+[BCP-007-03][bcp-007-03], an MXL IS-05 Sender's `/transportfile`
+endpoint MUST always return a 404; MXL transport parameters are
+conveyed via the `active`/`staged` resources and the
+`transport_file` field above, not via a separate transport file.
 
 ## ID generation
 
@@ -197,8 +230,10 @@ NMOS. Key aspects:
 - Transport type `urn:x-nmos:transport:mxl` on all senders.
 - IS-05 transport parameters `mxl_domain_id` and `mxl_flow_id`
   carry the MXL domain and flow identifiers.
-- The transport file endpoint returns the transport parameter leg
-  as JSON, consistent with the BCP's transportfile format.
+- The sender `/transportfile` endpoint always returns `404`, as
+  required by BCP-007-03 for MXL IS-05 senders; the transport
+  descriptor is carried by the `transport_file` field of the
+  `active`/`staged` resources instead.
 - Senders are always active (`activate_immediate`), reflecting
   that MXL flows are live once the flow directory exists on the
   domain.
