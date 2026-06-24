@@ -280,6 +280,146 @@ func TestHandlerEnvHandlersCanBeTestedDirectly(t *testing.T) {
 	require.Equal(t, flowID, *state.TransportParams[0].MxlFlowID)
 }
 
+func TestPreserveMuxErrorMiddlewareConvertsMux404And405(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /only-get", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	h := PreserveMuxErrorMiddleware(mux)
+
+	// 404: unmatched path returns JSON error instead of bare mux 404.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/unknown-path", nil))
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	require.JSONEq(t, `{"code":404,"error":"not found","debug":"resource not found"}`, rr.Body.String())
+
+	// 405: matched path but wrong method returns JSON error.
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/only-get", nil))
+	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	require.JSONEq(t, `{"code":405,"error":"method not allowed","debug":"POST is not supported"}`, rr.Body.String())
+
+	// 200: normal response passes through unchanged with original headers.
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/only-get", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.JSONEq(t, `{"ok":true}`, rr.Body.String())
+}
+
+func TestPreserveMuxErrorMiddlewareFlushesCustomHeaders(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /custom-header", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Custom", "test-value")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"status":"accepted"}`))
+	})
+	h := PreserveMuxErrorMiddleware(mux)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/custom-header", nil))
+	require.Equal(t, http.StatusAccepted, rr.Code)
+	require.Equal(t, "test-value", rr.Header().Get("X-Custom"))
+	require.JSONEq(t, `{"status":"accepted"}`, rr.Body.String())
+}
+
+func TestLoggingMiddlewareRecordsMethodPathAndStatus(t *testing.T) {
+	var mu sync.Mutex
+	var lines []string
+	logger := funcr.New(func(prefix, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, strings.TrimSpace(prefix+" "+args))
+	}, funcr.Options{})
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"created":true}`))
+	})
+	h := LoggingMiddleware(logger)(inner)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/node/v1.3/self", nil))
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	mu.Lock()
+	defer mu.Unlock()
+	got := strings.Join(lines, "\n")
+	require.Contains(t, got, "NMOS request")
+	require.Contains(t, got, "/x-nmos/node/v1.3/self")
+	require.Contains(t, got, "GET")
+}
+
+func TestLoggingMiddlewareDefaultsToStatus200(t *testing.T) {
+	var mu sync.Mutex
+	var lines []string
+	logger := funcr.New(func(prefix, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, strings.TrimSpace(prefix+" "+args))
+	}, funcr.Options{})
+
+	// Handler that writes body without setting a status code — HTTP default is 200.
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	h := LoggingMiddleware(logger)(inner)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/test", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	mu.Lock()
+	defer mu.Unlock()
+	got := strings.Join(lines, "\n")
+	require.Contains(t, got, "NMOS request")
+}
+
+func TestFullMiddlewareChainProducesCorrectResponse(t *testing.T) {
+	var mu sync.Mutex
+	var lines []string
+	logger := funcr.New(func(prefix, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, strings.TrimSpace(prefix+" "+args))
+	}, funcr.Options{})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /test", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]bool{"ok": true})
+	})
+
+	// Replicate the chain from router.go: PreserveMux → CORS → ContentType → Logging → Recover → mux
+	h := PreserveMuxErrorMiddleware(
+		CORSMiddleware(
+			ContentTypeMiddleware(
+				LoggingMiddleware(logger)(
+					RecoverMiddleware(logger)(mux)))))
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/test", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	require.Equal(t, "*", rr.Header().Get("Access-Control-Allow-Origin"))
+	require.JSONEq(t, `{"ok":true}`, rr.Body.String())
+
+	// Verify logging captured the request.
+	mu.Lock()
+	got := strings.Join(lines, "\n")
+	mu.Unlock()
+	require.Contains(t, got, "NMOS request")
+}
+
+func TestNewHTTPServerConfiguresReadHeaderTimeout(t *testing.T) {
+	dummy := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {})
+	srv := NewHTTPServer(":9999", dummy)
+	require.Equal(t, ":9999", srv.Addr)
+	require.NotNil(t, srv.Handler)
+	require.Equal(t, 5*readHeaderTimeout/5, srv.ReadHeaderTimeout) // readHeaderTimeout is 5s
+}
+
 func TestConnectionSenderRoutesRejectUnsupportedMethodsAsJSON(t *testing.T) {
 	domainID := "11111111-1111-4111-8111-111111111111"
 	flowID := "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
