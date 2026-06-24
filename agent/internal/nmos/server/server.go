@@ -33,7 +33,10 @@ type Options struct {
 	Port     int
 	Cache    Cache
 	Now      func() time.Time
-	Logger   logr.Logger
+	// Logger is controller-runtime's logging facade. In the agent it is
+	// backed by the zap logger configured in main.go; keeping the server on
+	// logr avoids creating a second zap configuration inside this package.
+	Logger logr.Logger
 }
 
 // New returns an HTTP handler for the NMOS IS-04 Node API v1.3.

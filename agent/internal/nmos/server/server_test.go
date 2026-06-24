@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	ctrlzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 func TestNodeAPIEndpointsServeIS04Resources(t *testing.T) {
@@ -136,6 +138,19 @@ func TestServerLogsThroughInjectedControllerRuntimeLogger(t *testing.T) {
 	require.NotEmpty(t, got)
 	require.Contains(t, got, "NMOS request panic")
 	require.Contains(t, got, "NMOS request")
+}
+
+func TestServerAcceptsControllerRuntimeZapLogger(t *testing.T) {
+	var logs bytes.Buffer
+	logger := ctrlzap.New(ctrlzap.WriteTo(&logs), ctrlzap.UseDevMode(false))
+	h := New(Options{NodeName: "node-a", DomainID: "node-a", Cache: panicCache{}, Logger: logger})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/node/v1.3/senders", nil))
+
+	require.Equal(t, http.StatusInternalServerError, rr.Code)
+	require.Contains(t, logs.String(), `"msg":"NMOS request panic"`)
+	require.Contains(t, logs.String(), `"msg":"NMOS request"`)
 }
 
 type staticCache struct {
