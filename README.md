@@ -30,7 +30,11 @@ up there.
 Four pieces, all running inside the cluster:
 
 - A per-node **agent** DaemonSet watches `/run/mxl/domain` via
-  `fanotify` and publishes each flow on the Kubernetes API.
+  `fanotify` and publishes each flow on the Kubernetes API. When
+  NMOS is enabled (`--nmos-bind-address`), the agent also serves
+  IS-04 Node API v1.3 and IS-05 Connection Management v1.2 so
+  NMOS controllers can discover and inspect MXL flows per
+  [BCP-007-03](docs/NMOS.md).
 - A per-node **gateway** DaemonSet owns the libmxl-fabrics
   handles: FlowReader on producer nodes, FlowWriter on consumer
   nodes, Initiator/Target on the fabric, and the per-grain
@@ -172,12 +176,14 @@ The repo is a Go workspace with four modules:
 | --- | --- | --- |
 | `api` | `github.com/qvest-digital/mxl-k8s/api` | CRD types. |
 | `operator` | `github.com/qvest-digital/mxl-k8s/operator` | Cluster operator that reconciles the CRDs. |
-| `agent` | `github.com/qvest-digital/mxl-k8s/agent` | Per-node DaemonSet. Pure Go; watches the domain via `fanotify`, does not link libmxl. |
+| `agent` | `github.com/qvest-digital/mxl-k8s/agent` | Per-node DaemonSet. Pure Go; watches the domain via `fanotify`, does not link libmxl. Optionally serves NMOS IS-04/IS-05 sender proxy (see [docs/NMOS.md](docs/NMOS.md)). |
 | `gateway` | `github.com/qvest-digital/mxl-k8s/gateway` | Per-node DaemonSet. Links libmxl + libmxl-fabrics via [`go-mxl`][go-mxl]. |
 
 [`docs/USAGE.md`](docs/USAGE.md) covers the prerequisites for a
 media function (container, libmxl link, capabilities) and how to
 integrate it as a producer or consumer.
+[`docs/NMOS.md`](docs/NMOS.md) covers the NMOS IS-04/IS-05 sender
+proxy that makes MXL flows discoverable by NMOS controllers.
 [`docs/BUILD.md`](docs/BUILD.md) covers local-build prerequisites
 and the cgo lane for `gateway`.
 [`CLAUDE.md`](CLAUDE.md) carries the contributor rules.

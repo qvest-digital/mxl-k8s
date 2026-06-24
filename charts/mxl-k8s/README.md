@@ -151,6 +151,21 @@ operator:
       eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/mxl-operator
 ```
 
+### NMOS sender proxy
+
+Enable the agent's NMOS IS-04/IS-05 sender proxy by setting a
+non-empty bind address. See [docs/NMOS.md](../../docs/NMOS.md) for
+the API reference.
+
+```yaml
+agent:
+  flags:
+    nmosBindAddress: ":1080"
+```
+
+An empty or absent value disables NMOS. The port must not conflict
+with the probe (`:8081`) or metrics (`:8080`) ports.
+
 ## Source Code
 
 * <https://github.com/qvest-digital/mxl-k8s>
