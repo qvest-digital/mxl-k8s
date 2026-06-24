@@ -172,7 +172,7 @@ The repo is a Go workspace with four modules:
 | --- | --- | --- |
 | `api` | `github.com/qvest-digital/mxl-k8s/api` | CRD types. |
 | `operator` | `github.com/qvest-digital/mxl-k8s/operator` | Cluster operator that reconciles the CRDs. |
-| `agent` | `github.com/qvest-digital/mxl-k8s/agent` | Per-node DaemonSet. Pure Go; watches the domain via `fanotify`, does not link libmxl. |
+| `agent` | `github.com/qvest-digital/mxl-k8s/agent` | Per-node DaemonSet. Pure Go; watches the domain via `fanotify`, serves the intent UDS and an NMOS IS-04/IS-05 API for broadcast-controller discovery and connection management. Does not link libmxl. |
 | `gateway` | `github.com/qvest-digital/mxl-k8s/gateway` | Per-node DaemonSet. Links libmxl + libmxl-fabrics via [`go-mxl`][go-mxl]. |
 
 [`docs/USAGE.md`](docs/USAGE.md) covers the prerequisites for a

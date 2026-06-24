@@ -60,8 +60,10 @@ node, and then get out of the way of the data path.
   only -- they log events and write nothing.
 - **Agent** (`agent/cmd/mxl-domain-agent`) -- DaemonSet. Watches the
   node's tmpfs domain with `fanotify`, publishes `MxlFlow.status.
-  locations` and `MxlDomain.status` for this node, and serves the
-  intent UDS at `/run/mxl/agent.sock`.
+  locations` and `MxlDomain.status` for this node, serves the
+  intent UDS at `/run/mxl/agent.sock`, and runs an NMOS IS-04/IS-05
+  HTTP server that exposes MXL senders as NMOS nodes, devices,
+  sources, flows, senders, and receivers for broadcast controllers.
 - **Gateway** (`gateway/cmd/mxl-fabrics-gateway`) -- DaemonSet, runs
   with `hostNetwork: true`. Hosts the source and target
   `MxlFlowMirror` reconcilers and the capabilities publisher in one

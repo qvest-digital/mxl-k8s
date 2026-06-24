@@ -122,6 +122,38 @@ deadline exceeded"}` and the shim propagates `ENOENT` to the
 caller. The consumer pod's libmxl then retries the open on its own
 schedule.
 
+### NMOS server
+
+The agent also runs an embedded HTTP server that implements a subset of
+the [AMWA NMOS](https://specs.amwa.tv/nmos) IS-04 Discovery &
+Registration API (v1.3) and IS-05 Connection Management API (v1.2).
+This lets broadcast controllers that speak NMOS discover MXL senders
+and manage their connections without knowing about mxl-k8s CRDs.
+
+The server reads from the same `MxlDomain` and `MxlFlow` watcher cache
+that the intent path uses. It exposes the following NMOS endpoints:
+
+| API | Endpoint | Response |
+| --- | --- | --- |
+| IS-04 Node | `GET /x-nmos/node/v1.3/` | Node resource (self) |
+| IS-04 Node | `GET /x-nmos/node/v1.3/self` | Same node resource |
+| IS-04 Node | `GET /x-nmos/node/v1.3/devices` | One device per MXL sender |
+| IS-04 Node | `GET /x-nmos/node/v1.3/sources` | One source per MXL sender flow |
+| IS-04 Node | `GET /x-nmos/node/v1.3/flows` | One flow per MXL sender flow |
+| IS-04 Node | `GET /x-nmos/node/v1.3/senders` | One sender per MXL sender |
+| IS-04 Node | `GET /x-nmos/node/v1.3/receivers` | Empty list (MXL receivers are not exposed) |
+| IS-05 Connection | `GET /x-nmos/connection/v1.2/single/senders/{id}/active` | Active connection parameters (staged transport params) |
+| IS-05 Connection | `GET/PATCH /x-nmos/connection/v1.2/single/senders/{id}/staged` | Staged transport parameters |
+| IS-05 Connection | `GET /x-nmos/connection/v1.2/single/senders/{id}/constraints` | Connection constraints |
+| IS-05 Connection | `GET /x-nmos/connection/v1.2/single/senders/{id}/transportfile` | SDP transport file |
+
+The NMOS server is started alongside the fanotify watcher in the agent
+binary (`agent/cmd/mxl-domain-agent`). It binds to `127.0.0.1` by
+default and does not require `hostNetwork`. MXL sender data originates
+from `MxlFlow.status.locations` and `MxlDomain.status`; the watcher
+cache in `agent/internal/nmos/cache/` is kept in sync by the same
+controller-runtime informer that feeds the intent path.
+
 ## Shim
 
 `shim/libmxl-intent.c` -- a tiny LD_PRELOAD library. No CRD access,
