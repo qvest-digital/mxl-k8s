@@ -105,6 +105,7 @@ func run(args []string) error {
 			Host:     advertiseHost,
 			Port:     advertisePort,
 			Cache:    nmosCache,
+			Logger:   ctrl.Log.WithName("nmos-server"),
 		})
 		go func() {
 			if err := server.Run(ctx, cfg.NMOSBindAddress, nmosHandler); err != nil {

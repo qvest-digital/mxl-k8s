@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/nmos/types"
 	mxlv1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/stretchr/testify/require"
@@ -101,6 +104,40 @@ func TestServerReturnsErrorWhenCacheCannotBuildResources(t *testing.T) {
 	require.JSONEq(t, `{"code":500,"error":"internal error","debug":"MxlDomain node-a is not cached"}`, rr.Body.String())
 }
 
+func TestServerRecoversPanicsAsJSONErrors(t *testing.T) {
+	h := New(Options{NodeName: "node-a", DomainID: "node-a", Cache: panicCache{}})
+
+	rr := httptest.NewRecorder()
+	require.NotPanics(t, func() {
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/node/v1.3/senders", nil))
+	})
+	require.Equal(t, http.StatusInternalServerError, rr.Code)
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+	require.Equal(t, "*", rr.Header().Get("Access-Control-Allow-Origin"))
+	require.JSONEq(t, `{"code":500,"error":"internal error","debug":"unexpected server error"}`, rr.Body.String())
+}
+
+func TestServerLogsThroughInjectedControllerRuntimeLogger(t *testing.T) {
+	var mu sync.Mutex
+	var lines []string
+	logger := funcr.New(func(prefix, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, strings.TrimSpace(prefix+" "+args))
+	}, funcr.Options{})
+	h := New(Options{NodeName: "node-a", DomainID: "node-a", Cache: panicCache{}, Logger: logger})
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/x-nmos/node/v1.3/senders", nil))
+
+	mu.Lock()
+	defer mu.Unlock()
+	got := strings.Join(lines, "\n")
+	require.NotEmpty(t, got)
+	require.Contains(t, got, "NMOS request panic")
+	require.Contains(t, got, "NMOS request")
+}
+
 type staticCache struct {
 	domain        mxlv1.MxlDomain
 	flows         []mxlv1.MxlFlow
@@ -116,6 +153,16 @@ func (s *staticCache) GetDomain(id string) (mxlv1.MxlDomain, bool) {
 
 func (s *staticCache) GetDomainFlows(string) []mxlv1.MxlFlow {
 	return append([]mxlv1.MxlFlow(nil), s.flows...)
+}
+
+type panicCache struct{}
+
+func (panicCache) GetDomain(string) (mxlv1.MxlDomain, bool) {
+	panic("cache exploded")
+}
+
+func (panicCache) GetDomainFlows(string) []mxlv1.MxlFlow {
+	panic("cache exploded")
 }
 
 func mxlFlow(name string, id string, definition string) mxlv1.MxlFlow {
