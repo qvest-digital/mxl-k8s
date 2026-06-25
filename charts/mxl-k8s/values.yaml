@@ -236,6 +236,14 @@ agent:
     # @schema
     healthProbeBindAddress: ":8081"
     # @schema
+    # pattern: ^$|^:[0-9]+$|^[0-9.]+:[0-9]+$
+    # @schema
+    # -- Bind address for the NMOS IS-04/IS-05 sender proxy. Empty
+    # disables NMOS. Use a host:port form or just :port; the agent
+    # falls back to the Kubernetes node name when advertising an
+    # all-interfaces bind.
+    nmosBindAddress: ""
+    # @schema
     # enum: ["debug", "info", "warn", "error"]
     # @schema
     zapLogLevel: info
