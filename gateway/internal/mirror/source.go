@@ -517,6 +517,19 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 	return entry, nil
 }
 
+const (
+	// maxMirrorLag is how far lastSent may trail the live head before
+	// we give up trying to catch up grain-by-grain and resync to the
+	// tail. Kept below the producer's ring depth (a handful of grains)
+	// so we only resync once the backlog is genuinely unreadable, not
+	// during a normal one- or two-grain catch-up.
+	maxMirrorLag int64 = 4
+	// mirrorResyncLag is how many grains behind the head we resume
+	// after a resync, so we land on a fully committed grain rather than
+	// one still being written at the head.
+	mirrorResyncLag int64 = 2
+)
+
 // progressTracker is the subset of sourceEntry the transfer loop
 // updates. Defined as an interface so tests can inject a stub
 // without constructing a full sourceEntry.
@@ -585,6 +598,29 @@ func runTransferLoop(
 			l.Error(err, "Runtime")
 			continue
 		}
+
+		// A mirror can only transfer grains the producer still holds in
+		// its ring, which is only a handful of grains deep. Two cases
+		// strand lastSent far behind the live head, where every
+		// GetGrain fails "out of range (too late)" and the loop wedges
+		// forever retrying the same dead index:
+		//
+		//   - attach: the first Runtime() probe can report head 0
+		//     before the reader has observed a grain, pinning lastSent
+		//     at 0 while the real (large) head only appears later;
+		//   - fall-behind: a stall (scheduling, fabric backpressure)
+		//     lets the producer lap us by more than the ring depth.
+		//
+		// In both cases the aged-out grains are gone for good; the only
+		// recovery is to abandon them and resync to the live tail.
+		if h := int64(head); h > maxMirrorLag && lastSent < h-maxMirrorLag {
+			if lastSent > 0 {
+				l.V(1).Info("mirror fell out of producer ring, resyncing to head",
+					"lastSent", lastSent, "head", h)
+			}
+			lastSent = h - mirrorResyncLag - 1
+		}
+
 		for idx := lastSent + 1; idx <= int64(head); idx++ {
 			if _, err := transferGrain(uint64(idx)); err != nil {
 				// libmxl reports "out of range (too late)" when the
@@ -606,7 +642,11 @@ func runTransferLoop(
 					lastSent = int64(head)
 					break
 				}
-				l.Error(err, "TransferGrain", "index", idx)
+				// Otherwise the head grain is still committing; it lands
+				// next tick. V(1) so the steady-state "not yet committed"
+				// case doesn't spam error logs every tick.
+				l.V(1).Info("grain not transferable yet, will retry",
+					"index", idx, "head", head)
 				break
 			}
 			if tracker != nil {

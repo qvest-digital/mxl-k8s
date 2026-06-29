@@ -131,6 +131,58 @@ func TestRunTransferLoop_TailsFromHead(t *testing.T) {
 	}
 }
 
+func TestRunTransferLoop_ResyncsToHeadWhenLapped(t *testing.T) {
+	// Attach race: the first Runtime probe reports head 0 (the reader
+	// has not observed a grain yet), then the real head appears far
+	// ahead. The producer only still holds grains near the head in its
+	// ring, so replaying from index 1 fails "out of range (too late)".
+	// The loop must resync to the live head and transfer fresh grains
+	// rather than wedge forever on the aged-out index.
+	var calls atomic.Int32
+	probe := func() (uint64, error) {
+		if calls.Add(1) == 1 {
+			return 0, nil
+		}
+		return 1000, nil
+	}
+
+	var mu sync.Mutex
+	var transferred []uint64
+	transfer := func(idx uint64) (bool, error) {
+		// Only grains within maxMirrorLag of the head are still in the
+		// producer ring; older indices have aged out.
+		if int64(idx) < 1000-maxMirrorLag {
+			return false, errors.New("mxl: out of range (too late)")
+		}
+		mu.Lock()
+		transferred = append(transferred, idx)
+		mu.Unlock()
+		return false, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go runTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil }, time.Millisecond, nil)
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(transferred) > 0
+	}, time.Second, time.Millisecond,
+		"loop must resync to the live head and transfer fresh grains, "+
+			"not wedge on the aged-out index 1")
+
+	cancel()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, idx := range transferred {
+		assert.GreaterOrEqualf(t, int64(idx), 1000-maxMirrorLag-1,
+			"after resync, transfers must be near the live head; got %d", idx)
+	}
+}
+
 func TestRunTransferLoop_TransferErrorBreaksInnerLoopButLoopSurvives(t *testing.T) {
 	// On a tick that fails the transfer, the loop must break the
 	// per-grain inner pass but keep going on the next tick. If it
