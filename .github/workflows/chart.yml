@@ -51,19 +51,19 @@ env:
   # helm-unittest tags are v-prefixed, so extractVersion strips the v
   # to keep the bare value `helm plugin install --version` expects.
   # renovate: datasource=github-releases depName=helm/helm versioning=semver
-  HELM_VERSION: v4.2.0
+  HELM_VERSION: v4.2.2
   # renovate: datasource=github-releases depName=helm-unittest/helm-unittest versioning=semver extractVersion=^v(?<version>.+)$
-  HELM_UNITTEST_VERSION: "1.1.0"
+  HELM_UNITTEST_VERSION: "1.1.1"
   # renovate: datasource=github-releases depName=dadav/helm-schema versioning=semver
-  HELM_SCHEMA_VERSION: "0.23.3"
+  HELM_SCHEMA_VERSION: "0.23.4"
   # renovate: datasource=go depName=github.com/norwoodj/helm-docs versioning=semver
   HELM_DOCS_VERSION: v1.14.2
   # renovate: datasource=github-releases depName=yannh/kubeconform versioning=semver
-  KUBECONFORM_VERSION: v0.7.0
+  KUBECONFORM_VERSION: v0.8.0
   # mikefarah/yq for in-place yaml editing of values.yaml at
   # package-time. Pinned because we rely on `yq -i` semantics.
   # renovate: datasource=github-releases depName=mikefarah/yq versioning=semver
-  YQ_VERSION: v4.53.2
+  YQ_VERSION: v4.53.3
 
 jobs:
   meta:
