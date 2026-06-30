@@ -608,6 +608,56 @@ func TestTarget_FlowNotFoundOmitsTargetInfoAndLastGrain(t *testing.T) {
 			"flusher records a real commit")
 }
 
+func TestTarget_EmptyFlowDefinitionSurfacesConditionAndRequeues(t *testing.T) {
+	// An MxlFlow that exists but whose producer has not published a
+	// spec.definition yet must not wedge the mirror at an empty phase:
+	// the target side surfaces Phase=Materializing + a TargetProgress=
+	// False/FlowDefinitionEmpty condition and requeues, mirroring the
+	// flow-not-found branch. Before this, an empty definition returned a
+	// bare reconciler error and left the mirror at an empty phase, so the
+	// consumer and the cluster diagnostics (which only see the CR, not
+	// the gateway log) had no signal for why it never reached Ready.
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{})
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: metav1.ObjectMeta{Name: "flow-1"},
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: "flow-1"},
+		// Definition intentionally omitted -> Raw is empty.
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}, &mxlv1alpha1.MxlFlow{}).
+		WithObjects(mirror, flow).
+		Build()
+
+	r := &TargetReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		NodeName: "node-a",
+		targets:  map[types.NamespacedName]*targetEntry{},
+	}
+	req := reconcile.Request{NamespacedName: key}
+
+	res, err := r.Reconcile(context.Background(), req)
+	require.NoError(t, err,
+		"an unpublished flow definition is transient, not a reconciler "+
+			"error; it must come back as a benign requeue")
+	assert.Equal(t, 2*time.Second, res.RequeueAfter)
+
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &got))
+	assert.Equal(t, mxlv1alpha1.MxlFlowMirrorMaterializing, got.Status.Phase,
+		"an existing flow with an empty definition must surface as "+
+			"Materializing, not the bare-error empty phase that left the "+
+			"mirror invisible to consumers and diagnostics")
+	require.Len(t, got.Status.Conditions, 1)
+	cond := got.Status.Conditions[0]
+	assert.Equal(t, mxlv1alpha1.ConditionTypeTargetProgress, cond.Type)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, mxlv1alpha1.ReasonFlowDefinitionEmpty, cond.Reason)
+}
+
 func TestTarget_RecoverFromFatalErrorClearsRecoveringOnRebuildFailure(t *testing.T) {
 	// Codifies the comment above target.go's defer entry.recovering.Store(false):
 	// when openFabricSide returns an error during recovery the flusher

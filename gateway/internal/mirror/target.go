@@ -288,13 +288,26 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, fmt.Errorf("get MxlFlow %s: %w", mirror.Spec.FlowID, err)
 	}
 	if len(flow.Spec.Definition.Raw) == 0 {
-		return ctrl.Result{}, fmt.Errorf("MxlFlow %s has empty spec.definition", mirror.Spec.FlowID)
+		// The MxlFlow exists but the producer has not published its
+		// definition yet. Treat it like a not-yet-materialized flow:
+		// surface the reason and requeue instead of returning a bare
+		// error that leaves the mirror sitting at an empty phase.
+		r.surfaceTargetFailure(ctx, &mirror, mxlv1alpha1.ReasonFlowDefinitionEmpty,
+			fmt.Sprintf("MxlFlow %s has empty spec.definition", mirror.Spec.FlowID))
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
 	provider := mapProvider(mirror.Spec.Provider)
 
 	entry, err := r.openTarget(req.NamespacedName, string(flow.Spec.Definition.Raw), provider)
 	if err != nil {
+		// openTarget wraps NewWriter + the libmxl-fabrics Target.Setup,
+		// whose errors otherwise land only in the gateway log — the mirror
+		// is left at an empty phase, so the consumer (and cluster
+		// diagnostics, which only see the CR) get no signal for why it
+		// never went Ready. Surface the cause, then let the rate-limited
+		// requeue retry.
+		r.surfaceTargetFailure(ctx, &mirror, mxlv1alpha1.ReasonOpenTargetFailed, err.Error())
 		return ctrl.Result{}, fmt.Errorf("open target: %w", err)
 	}
 
@@ -832,6 +845,27 @@ func (r *TargetReconciler) applyTargetStatus(
 		client.FieldOwner(targetFieldOwner),
 		client.ForceOwnership,
 	)
+}
+
+// surfaceTargetFailure publishes Phase=Materializing plus a
+// TargetProgress=False condition carrying the reason the target side
+// could not be established yet. Best-effort: a failed status write must
+// not mask the original error the caller returns/requeues on, so the
+// result is intentionally ignored. It exists so a target-open failure
+// shows up in MxlFlowMirror status (and `kubectl describe`) instead of
+// the mirror wedging silently at an empty phase — the producer, the
+// consumer, and the cluster diagnostics only observe the CR, never the
+// gateway log. Only reached on the pre-Ready path (the Reconcile
+// fast-path returns earlier for a live, fresh, Ready mirror), so this
+// never demotes a healthy mirror.
+func (r *TargetReconciler) surfaceTargetFailure(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, reason, message string) {
+	_ = r.applyTargetStatus(ctx, mirror, mxlv1alpha1.MxlFlowMirrorMaterializing, nil, nil, &metav1.Condition{
+		Type:               mxlv1alpha1.ConditionTypeTargetProgress,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: metav1.Now(),
+	})
 }
 
 // degradedAfter returns the configured grain-commit freshness window,
