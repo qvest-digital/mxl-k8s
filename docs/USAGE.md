@@ -284,6 +284,76 @@ selects the libmxl-fabrics provider for the cross-node transfer:
 Only `tcp` is part of routine CI today. The non-`tcp` providers
 work in code but have not been exercised continuously.
 
+## NMOS integration
+
+The agent can serve as an NMOS IS-04 Node and IS-05 Connection
+Management sender proxy, making MXL flows discoverable by NMOS
+controllers per [BCP-007-03](./NMOS.md). The proxy is opt-in and
+runs on the same process as the agent.
+
+### Enable NMOS
+
+Set the `--nmos-bind-address` flag on the agent. In Helm:
+
+```yaml
+agent:
+  flags:
+    nmosBindAddress: ":1080"
+```
+
+An empty value (the default) disables NMOS serving. The port must
+not conflict with the probe (`:8081`) or metrics (`:8080`) ports.
+
+### Query the IS-04 Node API
+
+Once enabled, the agent serves the Node API on every node where
+the agent DaemonSet runs. Port-forward to a specific agent pod:
+
+```sh
+kubectl -n mxl-system port-forward ds/mxl-k8s-agent 1080:1080
+```
+
+Then:
+
+```sh
+curl http://localhost:1080/x-nmos/node/v1.3/self
+curl http://localhost:1080/x-nmos/node/v1.3/senders
+curl http://localhost:1080/x-nmos/node/v1.3/flows
+```
+
+The `senders` array lists one sender per MXL flow whose origin is
+on that node. Each sender's `transport` is
+`urn:x-nmos:transport:mxl`.
+
+### Query IS-05 Connection Management
+
+IS-05 sender endpoints are under
+`/x-nmos/connection/v1.1/single/senders/{senderID}/`:
+
+```sh
+SENDER_ID=$(curl -s http://localhost:1080/x-nmos/node/v1.3/senders | jq -r '.[0].id')
+curl http://localhost:1080/x-nmos/connection/v1.1/single/senders/$SENDER_ID/active
+# /transportfile always returns 404 per BCP-007-03 (MXL senders have no
+# transport file; transport params are read from the active resource).
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:1080/x-nmos/connection/v1.1/single/senders/$SENDER_ID/transportfile
+```
+
+The `active` response carries `mxl_domain_id` and `mxl_flow_id` in
+`transport_params[0]`. See [NMOS.md](./NMOS.md) for the full
+endpoint reference and response shapes.
+
+### What NMOS controllers see
+
+- Each agent pod advertises one IS-04 Node (the Kubernetes node)
+  with one Device (the MXL domain).
+- Every MXL flow with origin on that node appears as a Source,
+  Flow, and Sender.
+- Senders are always active (`activate_immediate`). The `staged`
+  endpoint accepts PATCH for controller compatibility but returns
+  the current active parameters unchanged.
+- The IS-05 `constraints` endpoint restricts `mxl_domain_id` and
+  `mxl_flow_id` to the single concrete value each sender exposes.
+
 ## See also
 
 - [Root README](../README.md): project scope and the DMF coverage
@@ -296,3 +366,5 @@ work in code but have not been exercised continuously.
 - [`docs/RDMA.md`](./RDMA.md): host setup for the `verbs` and
   `efa` providers.
 - [`docs/KIND.md`](./KIND.md): KIND demo walkthrough.
+- [`docs/NMOS.md`](./NMOS.md): NMOS IS-04/IS-05 sender proxy
+  architecture and API reference.

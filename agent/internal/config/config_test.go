@@ -41,6 +41,7 @@ func TestFromFlags_DefaultsFireWhenArgsProvided(t *testing.T) {
 	assert.Equal(t, 30*time.Second, c.ResyncPeriod)
 	assert.Equal(t, "/run/mxl/agent.sock", c.IntentSocketPath)
 	assert.Equal(t, 5*time.Second, c.MaterializeTimeout)
+	assert.Equal(t, "", c.NMOSBindAddress)
 }
 
 func TestFromFlags_OverridesAreRespected(t *testing.T) {
@@ -56,6 +57,7 @@ func TestFromFlags_OverridesAreRespected(t *testing.T) {
 		"--resync-period=15s",
 		"--intent-socket=/tmp/mxl.sock",
 		"--materialize-timeout=2s",
+		"--nmos-bind-address=:1080",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "/data/mxl", c.DomainPath)
@@ -66,6 +68,7 @@ func TestFromFlags_OverridesAreRespected(t *testing.T) {
 	assert.Equal(t, 15*time.Second, c.ResyncPeriod)
 	assert.Equal(t, "/tmp/mxl.sock", c.IntentSocketPath)
 	assert.Equal(t, 2*time.Second, c.MaterializeTimeout)
+	assert.Equal(t, ":1080", c.NMOSBindAddress)
 }
 
 func TestFromFlags_NodeNameFallsBackToEnv(t *testing.T) {
