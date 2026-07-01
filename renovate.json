@@ -39,6 +39,12 @@
       "semanticCommitScope": "gomod"
     },
     {
+      "description": "go-mxl's CI publishes throwaway tags such as v1.0.0-rc.9.test226 that outsort the real rc.N prereleases only because they carry an extra semver prerelease identifier (rc.9.test226 > rc.9). Reject any version with a .test segment so only real releases and rc prereleases are tracked",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["github.com/qvest-digital/go-mxl"],
+      "allowedVersions": "!/\\.test/"
+    },
+    {
       "description": "Group GitHub Actions bumps into one PR",
       "matchManagers": ["github-actions"],
       "groupName": "GitHub Actions",

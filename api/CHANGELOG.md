@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.0-rc.3](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.2...api/v1.0.0-rc.3) (2026-07-01)
+
+
+### Bug Fixes
+
+* **gateway:** surface target-open failures in MxlFlowMirror status ([#127](https://github.com/qvest-digital/mxl-k8s/issues/127)) ([b20a1ca](https://github.com/qvest-digital/mxl-k8s/commit/b20a1ca5f52c89d8b43e694d9aca9cb82635fff6))
+
+
+### Dependencies
+
+* **gomod:** update go modules ([#123](https://github.com/qvest-digital/mxl-k8s/issues/123)) ([811033d](https://github.com/qvest-digital/mxl-k8s/commit/811033d8144c8c9bc5414322256338dac436dbce))
+
 ## [1.0.0-rc.2](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.1...api/v1.0.0-rc.2) (2026-05-27)
 
 
