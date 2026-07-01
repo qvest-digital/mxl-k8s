@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.0.0-rc.7](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.6...charts/mxl-k8s/v1.0.0-rc.7) (2026-07-01)
+
+
+### Features
+
+* **chart:** pin bundled module images, require tag or digest ([#115](https://github.com/qvest-digital/mxl-k8s/issues/115)) ([8181f07](https://github.com/qvest-digital/mxl-k8s/commit/8181f072fc5584acdc090483157cf6cefc0e90f5))
+
+
+### Dependencies
+
+* **tools:** update ci tool versions ([#120](https://github.com/qvest-digital/mxl-k8s/issues/120)) ([db6473e](https://github.com/qvest-digital/mxl-k8s/commit/db6473eda06b53c49d3429be4288bba593de76dc))
+
+
+### Code Refactoring
+
+* **chart:** package committed image pins ([#118](https://github.com/qvest-digital/mxl-k8s/issues/118)) ([b840fd0](https://github.com/qvest-digital/mxl-k8s/commit/b840fd06c7c602bc49c358d1f49b78e3449619a5))
+
 ## [1.0.0-rc.6](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.5...charts/mxl-k8s/v1.0.0-rc.6) (2026-06-02)
 
 
