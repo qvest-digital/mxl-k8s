@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.0-rc.6](https://github.com/qvest-digital/mxl-k8s/compare/gateway/v1.0.0-rc.5...gateway/v1.0.0-rc.6) (2026-07-01)
+
+
+### Bug Fixes
+
+* **gateway:** resync mirror to live head when it falls out of the producer ring ([#132](https://github.com/qvest-digital/mxl-k8s/issues/132)) ([a331444](https://github.com/qvest-digital/mxl-k8s/commit/a33144452827b69763852206aacf401385f9dc84))
+* **gateway:** surface target-open failures in MxlFlowMirror status ([#127](https://github.com/qvest-digital/mxl-k8s/issues/127)) ([b20a1ca](https://github.com/qvest-digital/mxl-k8s/commit/b20a1ca5f52c89d8b43e694d9aca9cb82635fff6))
+
+
+### Dependencies
+
+* **gomod:** update go modules ([#123](https://github.com/qvest-digital/mxl-k8s/issues/123)) ([811033d](https://github.com/qvest-digital/mxl-k8s/commit/811033d8144c8c9bc5414322256338dac436dbce))
+
 ## [1.0.0-rc.5](https://github.com/qvest-digital/mxl-k8s/compare/gateway/v1.0.0-rc.4...gateway/v1.0.0-rc.5) (2026-06-02)
 
 

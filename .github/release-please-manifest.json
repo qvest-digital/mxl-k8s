@@ -1,8 +1,8 @@
 {
-  "api": "1.0.0-rc.2",
+  "api": "1.0.0-rc.3",
   "agent": "1.0.0-rc.5",
   "operator": "1.0.0-rc.3",
-  "gateway": "1.0.0-rc.5",
+  "gateway": "1.0.0-rc.6",
   "shim": "1.0.0-rc.3",
   "charts/mxl-k8s": "1.0.0-rc.6"
 }
