@@ -12,7 +12,7 @@ WORKDIR /workspace
 COPY api/ api/
 COPY gateway/ gateway/
 WORKDIR /workspace/gateway
-ENV GOWORK=off
+ENV GOWORK=off GOFLAGS=-mod=mod
 RUN git config --global --add safe.directory '*' && \
     go mod download && \
     go build -trimpath -ldflags="-s -w" -o /out/mxl-fabrics-gateway ./cmd/mxl-fabrics-gateway
