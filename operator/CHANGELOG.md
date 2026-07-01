@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.4](https://github.com/qvest-digital/mxl-k8s/compare/operator/v1.0.0-rc.3...operator/v1.0.0-rc.4) (2026-07-01)
+
+
+### Dependencies
+
+* **gomod:** update go modules ([#123](https://github.com/qvest-digital/mxl-k8s/issues/123)) ([811033d](https://github.com/qvest-digital/mxl-k8s/commit/811033d8144c8c9bc5414322256338dac436dbce))
+
 ## [1.0.0-rc.3](https://github.com/qvest-digital/mxl-k8s/compare/operator/v1.0.0-rc.2...operator/v1.0.0-rc.3) (2026-06-02)
 
 
