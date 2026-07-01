@@ -323,22 +323,24 @@ func (rt *recordingTracker) snapshot() ([]uint64, int) {
 }
 
 func TestRunTransferLoop_AdvancesLastSentOnAgedOutError(t *testing.T) {
-	// The writer has lapped the reader. Initial probe head=0 means
-	// the loop's lastSent starts at 0. On the first tick the probe
-	// reports head=5, so the loop tries idx=1 first; transferGrain
+	// A grain ages out while the lag stays within maxMirrorLag, so the
+	// proactive resync never fires and the aged-out grain surfaces only
+	// as a transferGrain error. Initial probe head=0 pins lastSent at
+	// 0. On the first tick the probe reports head=3 (lag 3, at or below
+	// maxMirrorLag), so the loop tries idx=1 first; transferGrain
 	// returns the libmxl "out of range (too late)" string. The loop
-	// must advance lastSent to head (5) and signal the tracker. On
-	// the next tick the probe reports head=20: transfers must resume
-	// from 6 onward, never re-attempting the unrecoverable 2..5.
+	// must advance lastSent to head (3) and signal the tracker. On the
+	// next tick the probe reports head=6: transfers must resume from 4
+	// onward, never re-attempting the unrecoverable 2..3.
 	var probeCalls atomic.Int32
 	probe := func() (uint64, error) {
 		switch probeCalls.Add(1) {
 		case 1:
 			return 0, nil
 		case 2:
-			return 5, nil
+			return 3, nil
 		default:
-			return 20, nil
+			return 6, nil
 		}
 	}
 
@@ -363,7 +365,7 @@ func TestRunTransferLoop_AdvancesLastSentOnAgedOutError(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		for _, v := range attempts {
-			if v == 6 {
+			if v == 4 {
 				return true
 			}
 		}
@@ -387,9 +389,52 @@ func TestRunTransferLoop_AdvancesLastSentOnAgedOutError(t *testing.T) {
 		"the aged-out skip must reach the tracker so the reconciler "+
 			"can surface SourceProgress=ReaderAgedOut")
 	for _, idx := range transfers {
-		assert.NotContains(t, []uint64{1, 2, 3, 4, 5}, idx,
+		assert.NotContains(t, []uint64{1, 2, 3}, idx,
 			"a recorded transfer for an aged-out index would mean the "+
 				"loop counted a fictional success against the tracker")
+	}
+}
+
+func TestRunTransferLoop_ResyncRecordsAgedOutOnFallBehind(t *testing.T) {
+	// The mirror transfers a few grains, then the producer laps it by
+	// more than maxMirrorLag before the next tick. The proactive resync
+	// abandons the stranded grains and lands near the live head; it
+	// must also signal the tracker so the reconciler can surface
+	// SourceProgress=ReaderAgedOut, matching the aged-out error path.
+	var probeCalls atomic.Int32
+	probe := func() (uint64, error) {
+		switch probeCalls.Add(1) {
+		case 1:
+			return 0, nil
+		case 2:
+			return 2, nil
+		default:
+			return 100, nil
+		}
+	}
+
+	transfer := func(uint64) (bool, error) { return false, nil }
+
+	tracker := &recordingTracker{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go runTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil }, time.Millisecond, tracker)
+
+	require.Eventually(t, func() bool {
+		_, agedOuts := tracker.snapshot()
+		return agedOuts >= 1
+	}, time.Second, time.Millisecond,
+		"a fall-behind resync must reach the tracker so the reconciler "+
+			"can surface SourceProgress=ReaderAgedOut")
+
+	cancel()
+	<-done
+
+	transfers, _ := tracker.snapshot()
+	for _, idx := range transfers {
+		assert.Truef(t, idx <= 2 || idx >= uint64(100-maxMirrorLag),
+			"transfers must be the pre-resync grains or land near the "+
+				"live head after resync; got %d", idx)
 	}
 }
 

@@ -617,6 +617,15 @@ func runTransferLoop(
 			if lastSent > 0 {
 				l.V(1).Info("mirror fell out of producer ring, resyncing to head",
 					"lastSent", lastSent, "head", h)
+				// Resyncing abandons the grains between lastSent and
+				// the tail. Signal the tracker so the reconciler can
+				// publish SourceProgress=ReaderAgedOut, matching the
+				// skip-ahead path in runSampleTransferLoop. The attach
+				// case (lastSent == 0) never held those grains, so it
+				// tails the live flow silently.
+				if tracker != nil {
+					tracker.recordAgedOut(time.Now())
+				}
 			}
 			lastSent = h - mirrorResyncLag - 1
 		}
