@@ -38,7 +38,7 @@ CI and [`docker/gateway.Dockerfile`](../docker/gateway.Dockerfile) build
 the Go toolchain, libmxl, libmxl-fabrics, libfabric, and a working
 `PKG_CONFIG_PATH`. The image tag tracks the `go-mxl` release the
 `gateway` module requires (currently
-`ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.9`); bump it together
+`ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.10`); bump it together
 with the `go-mxl` require in `gateway/go.mod`.
 
 ### On the host

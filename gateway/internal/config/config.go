@@ -69,7 +69,7 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.StringVar(&c.BindAddress, "bind-address", os.Getenv("POD_IP"),
 		"Local address libmxl-fabrics endpoints bind to (defaults to $POD_IP, empty for all interfaces).")
 	fs.StringVar(&providers, "providers", "tcp",
-		"Comma-separated libmxl-fabrics providers to advertise (auto,tcp,verbs,efa,shm).")
+		"Comma-separated libmxl-fabrics providers to advertise (any,tcp,verbs,efa,shm; auto is an alias for any).")
 	fs.StringVar(&c.Kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"),
 		"Path to a kubeconfig file. Empty uses the in-cluster config.")
 	fs.StringVar(&c.ProbeAddr, "health-probe-bind-address", ":8081",
@@ -91,6 +91,13 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	for _, name := range strings.Split(providers, ",") {
 		name = strings.TrimSpace(name)
 		if name == "" {
+			continue
+		}
+		// fabrics.ParseProvider accepts concrete provider names only;
+		// the any sentinel has no parseable string form. "any" is its
+		// String() form, "auto" the pre-v1.1 libmxl-fabrics name.
+		if name == "any" || name == "auto" {
+			c.Providers = append(c.Providers, fabrics.ProviderAny)
 			continue
 		}
 		p, err := fabrics.ParseProvider(name)
