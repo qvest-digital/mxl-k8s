@@ -65,6 +65,24 @@ func TestFromFlags_MultipleProviders(t *testing.T) {
 			"the slice order to bias selection inside libmxl-fabrics")
 }
 
+func TestFromFlags_ProviderSentinelAliases(t *testing.T) {
+	t.Setenv("NODE_NAME", "n1")
+	t.Setenv("MXL_DOMAIN", "/d")
+	t.Setenv("POD_IP", "")
+	t.Setenv("KUBECONFIG", "")
+
+	c, err := FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), []string{
+		"--providers=any,auto",
+	})
+	require.NoError(t, err)
+	assert.Equal(t,
+		[]fabrics.Provider{fabrics.ProviderAny, fabrics.ProviderAny},
+		c.Providers,
+		"fabrics.ParseProvider rejects the any sentinel's string forms, so "+
+			"the flag parser must map \"any\" and the legacy \"auto\" to "+
+			"ProviderAny itself; existing deployments pass --providers=auto")
+}
+
 func TestFromFlags_InvalidProvider(t *testing.T) {
 	t.Setenv("NODE_NAME", "n1")
 	t.Setenv("MXL_DOMAIN", "/d")

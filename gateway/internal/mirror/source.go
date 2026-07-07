@@ -408,9 +408,11 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 		return nil, fmt.Errorf("NewInitiator: %w", err)
 	}
 	if err := initiator.Setup(fabrics.InitiatorConfig{
-		Endpoint: fabrics.EndpointAddress{Node: o.BindAddress},
-		Provider: provider,
-		Reader:   reader,
+		Interface: fabrics.InterfaceConfig{
+			Provider: provider,
+			Address:  fabrics.EndpointAddress{Node: o.BindAddress},
+		},
+		Reader: reader,
 	}); err != nil {
 		_ = initiator.Close()
 		_ = reader.Close()

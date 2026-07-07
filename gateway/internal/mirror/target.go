@@ -387,9 +387,11 @@ func (r *TargetReconciler) openFabricSide(writer *mxl.Writer, provider fabrics.P
 		return nil, nil, "", fmt.Errorf("NewTarget: %w", err)
 	}
 	info, err := target.Setup(fabrics.TargetConfig{
-		Endpoint: fabrics.EndpointAddress{Node: r.BindAddress},
-		Provider: provider,
-		Writer:   writer,
+		Interface: fabrics.InterfaceConfig{
+			Provider: provider,
+			Address:  fabrics.EndpointAddress{Node: r.BindAddress},
+		},
+		Writer: writer,
 	})
 	if err != nil {
 		_ = target.Close()

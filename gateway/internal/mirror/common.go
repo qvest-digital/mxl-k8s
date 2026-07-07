@@ -28,7 +28,8 @@ import (
 )
 
 // mapProvider translates the API enum into the fabrics package enum.
-// Unknown / empty values map to ProviderAuto.
+// The CRD "auto" value and unknown / empty values map to ProviderAny,
+// which lets libmxl-fabrics pick a provider at runtime.
 func mapProvider(p mxlv1alpha1.MxlFabricsProvider) fabrics.Provider {
 	switch p {
 	case mxlv1alpha1.ProviderTCP:
@@ -40,5 +41,5 @@ func mapProvider(p mxlv1alpha1.MxlFabricsProvider) fabrics.Provider {
 	case mxlv1alpha1.ProviderSHM:
 		return fabrics.ProviderSHM
 	}
-	return fabrics.ProviderAuto
+	return fabrics.ProviderAny
 }

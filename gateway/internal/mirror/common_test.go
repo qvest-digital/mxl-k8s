@@ -18,15 +18,15 @@ func TestMapProvider(t *testing.T) {
 		{mxlv1alpha1.ProviderVerbs, fabrics.ProviderVerbs},
 		{mxlv1alpha1.ProviderEFA, fabrics.ProviderEFA},
 		{mxlv1alpha1.ProviderSHM, fabrics.ProviderSHM},
-		{mxlv1alpha1.ProviderAuto, fabrics.ProviderAuto},
-		{"", fabrics.ProviderAuto},
-		{"made-up", fabrics.ProviderAuto},
+		{mxlv1alpha1.ProviderAuto, fabrics.ProviderAny},
+		{"", fabrics.ProviderAny},
+		{"made-up", fabrics.ProviderAny},
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.in), func(t *testing.T) {
 			assert.Equal(t, tc.want, mapProvider(tc.in),
 				"every CRD enum value must map to a known fabrics provider; "+
-					"silent fallthrough to Auto for unknown inputs preserves "+
+					"silent fallthrough to Any for unknown inputs preserves "+
 					"upgrade compatibility for receivers that pin a new provider "+
 					"the gateway version does not understand yet")
 		})
