@@ -6,7 +6,7 @@ require (
 	github.com/qvest-digital/mxl-k8s/api v1.0.0-rc.3
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/goleak v1.3.0
-	golang.org/x/sys v0.46.0
+	golang.org/x/sys v0.47.0
 	k8s.io/api v0.36.2
 	k8s.io/apimachinery v0.36.2
 	k8s.io/client-go v0.36.2
