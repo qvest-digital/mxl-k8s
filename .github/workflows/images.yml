@@ -528,7 +528,7 @@ jobs:
       - uses: azure/setup-helm@v5
         with:
           # renovate: datasource=github-releases depName=helm/helm versioning=semver
-          version: v4.2.2
+          version: v4.2.3
 
       # `make kind-up BUILD=<tag>` pulls images from GHCR. GHCR
       # packages are private regardless of event, so the runner
