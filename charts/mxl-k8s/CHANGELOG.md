@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.0-rc.9](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.8...charts/mxl-k8s/v1.0.0-rc.9) (2026-07-21)
+
+
+### Features
+
+* resolve mirror provider from node capabilities instead of stamping auto ([#154](https://github.com/qvest-digital/mxl-k8s/issues/154)) ([731b245](https://github.com/qvest-digital/mxl-k8s/commit/731b245d152960b1da8aba5c9ef89bbb1a3fd4a7))
+
+
+### Dependencies
+
+* **chart:** update mxl-k8s module images ([#160](https://github.com/qvest-digital/mxl-k8s/issues/160)) ([39b364d](https://github.com/qvest-digital/mxl-k8s/commit/39b364d27a397acfdf84731e69325fa8f374c5d4))
+* **chart:** update mxl-k8s module images ([#161](https://github.com/qvest-digital/mxl-k8s/issues/161)) ([e57c419](https://github.com/qvest-digital/mxl-k8s/commit/e57c41946ffaa8ed61a77ee1e9ee14309b5e5da2))
+* **chart:** update mxl-k8s module images ([#163](https://github.com/qvest-digital/mxl-k8s/issues/163)) ([ee1a4e0](https://github.com/qvest-digital/mxl-k8s/commit/ee1a4e03768bad51b463eef907f7b8af8f8b599f))
+
 ## [1.0.0-rc.8](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.7...charts/mxl-k8s/v1.0.0-rc.8) (2026-07-01)
 
 
