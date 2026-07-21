@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
 // Config holds the agent's runtime configuration.
@@ -39,6 +41,13 @@ type Config struct {
 	// dispatcher allows before giving up on a mirror reaching
 	// Ready.
 	MaterializeTimeout time.Duration
+
+	// Provider is an explicit per-cluster libmxl-fabrics provider
+	// override for on-demand mirrors. Empty (or "auto") lets the
+	// dispatcher resolve a concrete provider from the source and
+	// target nodes' MxlNodeCapabilities; any other value is stamped
+	// onto every intent mirror verbatim and bypasses resolution.
+	Provider string
 }
 
 // FromFlags populates a Config from command-line flags.
@@ -60,6 +69,10 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"UDS path for the on-demand intent endpoint. Empty disables.")
 	fs.DurationVar(&c.MaterializeTimeout, "materialize-timeout", 5*time.Second,
 		"Per-request budget for the intent dispatcher waiting for a mirror Ready.")
+	fs.StringVar(&c.Provider, "provider", "",
+		"Explicit libmxl-fabrics provider (tcp, verbs, efa, shm) stamped "+
+			"onto on-demand mirrors. Empty or 'auto' resolves per node from "+
+			"MxlNodeCapabilities.")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -79,6 +92,16 @@ func (c *Config) Validate() error {
 	}
 	if c.NodeName == "" {
 		return fmt.Errorf("--node-name (or $NODE_NAME) is required")
+	}
+	switch mxlv1alpha1.MxlFabricsProvider(c.Provider) {
+	case "",
+		mxlv1alpha1.ProviderAuto,
+		mxlv1alpha1.ProviderTCP,
+		mxlv1alpha1.ProviderVerbs,
+		mxlv1alpha1.ProviderEFA,
+		mxlv1alpha1.ProviderSHM:
+	default:
+		return fmt.Errorf("--provider %q is not one of tcp, verbs, efa, shm, auto", c.Provider)
 	}
 	return nil
 }

@@ -127,6 +127,7 @@ func run(args []string) error {
 			Resolver:           &podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName},
 			DomainPath:         cfg.DomainPath,
 			NodeName:           cfg.NodeName,
+			Provider:           mxlv1alpha1.MxlFabricsProvider(cfg.Provider),
 			MaterializeTimeout: cfg.MaterializeTimeout,
 			Lease:              leaseMgr,
 		}
