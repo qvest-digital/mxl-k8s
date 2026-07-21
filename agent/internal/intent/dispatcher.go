@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/podlookup"
+	"github.com/qvest-digital/mxl-k8s/api/selection"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -229,9 +230,9 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string
 		return nil, err
 	}
 
-	provider := d.Provider
-	if provider == "" {
-		provider = mxlv1alpha1.ProviderAuto
+	provider, err := d.resolveProvider(ctx, flowID, sourceNode)
+	if err != nil {
+		return nil, err
 	}
 
 	desired := &mxlv1alpha1.MxlFlowMirror{
@@ -265,6 +266,58 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string
 		return &existing, nil
 	}
 	return desired, nil
+}
+
+// resolveProvider decides which libmxl-fabrics provider an on-demand
+// mirror between sourceNode and this node should carry. A non-empty,
+// non-auto d.Provider is an explicit per-cluster override and is used
+// verbatim; otherwise the choice is resolved from the two nodes'
+// MxlNodeCapabilities. The result is always concrete -- a mirror is
+// never created with provider auto, which libmxl-fabrics can no longer
+// resolve on its own.
+func (d *Dispatcher) resolveProvider(ctx context.Context, flowID, sourceNode string) (mxlv1alpha1.MxlFabricsProvider, error) {
+	if d.Provider != "" && d.Provider != mxlv1alpha1.ProviderAuto {
+		return d.Provider, nil
+	}
+
+	srcCaps, err := d.nodeCapabilities(ctx, sourceNode)
+	if err != nil {
+		return "", fmt.Errorf("source node capabilities: %w", err)
+	}
+	tgtCaps, err := d.nodeCapabilities(ctx, d.NodeName)
+	if err != nil {
+		return "", fmt.Errorf("target node capabilities: %w", err)
+	}
+
+	provider, rerr := selection.Resolve(srcCaps, tgtCaps)
+	l := log.FromContext(ctx).WithName("intent").WithValues(
+		"flowID", flowID,
+		"sourceNode", sourceNode,
+		"targetNode", d.NodeName,
+		"provider", provider,
+	)
+	if rerr != nil {
+		l.Info("resolved mirror provider with fallback", "reason", rerr.Error())
+	} else {
+		l.Info("resolved mirror provider")
+	}
+	return provider, nil
+}
+
+// nodeCapabilities reads the cluster-scoped MxlNodeCapabilities the
+// gateway publishes for nodeName (named after the node). A missing
+// resource yields an empty status so the resolver falls back rather
+// than failing the materialization on a node whose gateway has not
+// probed yet.
+func (d *Dispatcher) nodeCapabilities(ctx context.Context, nodeName string) (mxlv1alpha1.MxlNodeCapabilitiesStatus, error) {
+	var caps mxlv1alpha1.MxlNodeCapabilities
+	if err := d.Client.Get(ctx, types.NamespacedName{Name: nodeName}, &caps); err != nil {
+		if apierrors.IsNotFound(err) {
+			return mxlv1alpha1.MxlNodeCapabilitiesStatus{}, nil
+		}
+		return mxlv1alpha1.MxlNodeCapabilitiesStatus{}, err
+	}
+	return caps.Status, nil
 }
 
 func (d *Dispatcher) waitReady(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror) error {

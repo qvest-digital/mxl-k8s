@@ -52,6 +52,14 @@ const (
 	// grains.
 	ReasonReaderAgedOut = "ReaderAgedOut"
 
+	// ReasonProviderUnresolved marks a mirror the gateway refused to
+	// set up because spec.provider is still auto. libmxl-fabrics no
+	// longer resolves auto itself (v1.1.0-beta-1 dropped it), so the
+	// agent or operator must stamp a concrete provider before the
+	// gateway sees the mirror; forwarding auto makes fi_getinfo fail
+	// on an RDMA fabric.
+	ReasonProviderUnresolved = "ProviderUnresolved"
+
 	// ReasonLeaseExpired marks an MxlFlow whose origin Lease has
 	// passed its renewal deadline.
 	ReasonLeaseExpired = "LeaseExpired"

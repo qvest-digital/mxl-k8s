@@ -429,6 +429,73 @@ func TestEnsureMirror_StampsIntentLabels(t *testing.T) {
 			"the intent reconciler")
 }
 
+// nodeCaps builds an MxlNodeCapabilities for a node advertising the
+// named providers. Seeded via WithObjects so the fake client persists
+// the status the resolver reads.
+func nodeCaps(node string, providers ...mxlv1alpha1.MxlFabricsProvider) *mxlv1alpha1.MxlNodeCapabilities {
+	caps := &mxlv1alpha1.MxlNodeCapabilities{
+		ObjectMeta: metav1.ObjectMeta{Name: node},
+		Spec:       mxlv1alpha1.MxlNodeCapabilitiesSpec{NodeName: node},
+	}
+	for _, p := range providers {
+		caps.Status.Providers = append(caps.Status.Providers,
+			mxlv1alpha1.MxlFabricsProviderCapability{Name: p})
+	}
+	return caps
+}
+
+// TestEnsureMirror_ResolvesProviderFromCapabilities asserts that with
+// no explicit override the agent stamps the mirror with a concrete
+// provider resolved from the source and target nodes' capabilities,
+// preferring verbs over the tcp both nodes also advertise.
+func TestEnsureMirror_ResolvesProviderFromCapabilities(t *testing.T) {
+	scheme := newScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(
+			nodeCaps("n-src", mxlv1alpha1.ProviderTCP, mxlv1alpha1.ProviderVerbs),
+			nodeCaps("n1", mxlv1alpha1.ProviderTCP, mxlv1alpha1.ProviderVerbs),
+		).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		Build()
+
+	// Provider left empty: the dispatcher must resolve, not default to
+	// auto.
+	d := &Dispatcher{Client: c, DomainPath: "/run/mxl/domain", NodeName: "n1"}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "consumer", UID: "uid-1"},
+	}
+
+	got, err := d.ensureMirror(context.Background(), flowID, "n-src", pod)
+	require.NoError(t, err)
+	assert.Equal(t, mxlv1alpha1.ProviderVerbs, got.Spec.Provider,
+		"the resolver must prefer verbs, the highest-preference provider "+
+			"both nodes advertise")
+}
+
+// TestEnsureMirror_FallsBackToTCPWithoutCapabilities asserts that when
+// neither node has published MxlNodeCapabilities the agent still stamps
+// a concrete provider (tcp) rather than leaving the mirror on auto,
+// which the gateway would reject.
+func TestEnsureMirror_FallsBackToTCPWithoutCapabilities(t *testing.T) {
+	scheme := newScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		Build()
+
+	d := &Dispatcher{Client: c, DomainPath: "/run/mxl/domain", NodeName: "n1"}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "consumer", UID: "uid-1"},
+	}
+
+	got, err := d.ensureMirror(context.Background(), flowID, "n-src", pod)
+	require.NoError(t, err)
+	assert.Equal(t, mxlv1alpha1.ProviderTCP, got.Spec.Provider)
+	assert.NotEqual(t, mxlv1alpha1.ProviderAuto, got.Spec.Provider,
+		"a mirror must never be created with provider auto")
+}
+
 // TestEnsureMirror_ExistingReceiverMirror_LeftIntact asserts that
 // when the receiver reconciler has already created a mirror for the
 // same (flow, target node), the agent reuses it without rewriting
@@ -572,10 +639,19 @@ func TestResolveSourceNode_AllStaleOriginsReturnsNotOK(t *testing.T) {
 			"only hand the shim back a 'no grains' wait until the timeout")
 }
 
-func TestEnsureMirror_EmptyProviderDefaultsToAuto(t *testing.T) {
+// TestEnsureMirror_ExplicitProviderBypassesResolution asserts that a
+// concrete Provider override on the dispatcher is stamped verbatim,
+// even when the nodes' capabilities would resolve to a different
+// provider. The override is the per-cluster escape hatch that skips
+// resolution entirely.
+func TestEnsureMirror_ExplicitProviderBypassesResolution(t *testing.T) {
 	scheme := newScheme(t)
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
+		WithObjects(
+			nodeCaps("n-src", mxlv1alpha1.ProviderVerbs),
+			nodeCaps("n1", mxlv1alpha1.ProviderVerbs),
+		).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
 		Build()
 
@@ -583,7 +659,7 @@ func TestEnsureMirror_EmptyProviderDefaultsToAuto(t *testing.T) {
 		Client:     c,
 		DomainPath: "/run/mxl/domain",
 		NodeName:   "n1",
-		// Provider left empty
+		Provider:   mxlv1alpha1.ProviderTCP,
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "p", UID: "u"},
@@ -595,9 +671,9 @@ func TestEnsureMirror_EmptyProviderDefaultsToAuto(t *testing.T) {
 	var live mxlv1alpha1.MxlFlowMirror
 	require.NoError(t, c.Get(context.Background(),
 		types.NamespacedName{Namespace: "ns", Name: got.Name}, &live))
-	assert.Equal(t, mxlv1alpha1.ProviderAuto, live.Spec.Provider,
-		"an empty Provider on the dispatcher must default to Auto so the "+
-			"gateway picks the provider at materialization time")
+	assert.Equal(t, mxlv1alpha1.ProviderTCP, live.Spec.Provider,
+		"an explicit Provider override must be stamped verbatim and skip "+
+			"resolution, even when the nodes both advertise verbs")
 }
 
 var _ = client.IgnoreNotFound

@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/qvest-digital/mxl-k8s/api/selection"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -110,6 +111,7 @@ type nodeTarget struct {
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlreceivers/finalizers,verbs=update
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflows,verbs=get;list;watch
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlnodecapabilities,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch
 
@@ -582,6 +584,58 @@ func (r *Reconciler) resolveTargetNodes(ctx context.Context, recv *mxlv1alpha1.M
 	return out, nil
 }
 
+// resolveProvider decides which libmxl-fabrics provider the mirror
+// between sourceNode and targetNode should carry. A concrete
+// spec.provider on the receiver passes through untouched; auto or an
+// unset provider is resolved from the two nodes' MxlNodeCapabilities.
+// The result is always concrete -- the operator never writes a mirror
+// with provider auto, which libmxl-fabrics can no longer resolve.
+func (r *Reconciler) resolveProvider(ctx context.Context, recv *mxlv1alpha1.MxlReceiver, sourceNode, targetNode string) (mxlv1alpha1.MxlFabricsProvider, error) {
+	p := recv.Spec.Provider
+	if p != "" && p != mxlv1alpha1.ProviderAuto {
+		return p, nil
+	}
+
+	srcCaps, err := r.nodeCapabilities(ctx, sourceNode)
+	if err != nil {
+		return "", fmt.Errorf("source node capabilities: %w", err)
+	}
+	tgtCaps, err := r.nodeCapabilities(ctx, targetNode)
+	if err != nil {
+		return "", fmt.Errorf("target node capabilities: %w", err)
+	}
+
+	provider, rerr := selection.Resolve(srcCaps, tgtCaps)
+	l := log.FromContext(ctx).WithValues(
+		"flowID", recv.Spec.FlowID,
+		"sourceNode", sourceNode,
+		"targetNode", targetNode,
+		"provider", provider,
+	)
+	if rerr != nil {
+		l.Info("resolved mirror provider with fallback", "reason", rerr.Error())
+	} else {
+		l.V(1).Info("resolved mirror provider")
+	}
+	return provider, nil
+}
+
+// nodeCapabilities reads the cluster-scoped MxlNodeCapabilities the
+// gateway publishes for nodeName (named after the node). A missing
+// resource yields an empty status so the resolver falls back rather
+// than failing the reconcile on a node whose gateway has not probed
+// yet.
+func (r *Reconciler) nodeCapabilities(ctx context.Context, nodeName string) (mxlv1alpha1.MxlNodeCapabilitiesStatus, error) {
+	var caps mxlv1alpha1.MxlNodeCapabilities
+	if err := r.Get(ctx, types.NamespacedName{Name: nodeName}, &caps); err != nil {
+		if apierrors.IsNotFound(err) {
+			return mxlv1alpha1.MxlNodeCapabilitiesStatus{}, nil
+		}
+		return mxlv1alpha1.MxlNodeCapabilitiesStatus{}, err
+	}
+	return caps.Status, nil
+}
+
 // ensureMirror creates the MxlFlowMirror for (flow, target) if it
 // does not already exist, or merge-patches spec.sourceNode and
 // spec.provider on the existing mirror when they no longer match
@@ -594,15 +648,15 @@ func (r *Reconciler) resolveTargetNodes(ctx context.Context, recv *mxlv1alpha1.M
 // suffix and stay unique to the receiver.
 func (r *Reconciler) ensureMirror(ctx context.Context, recv *mxlv1alpha1.MxlReceiver, sourceNode string, target nodeTarget) (*mxlv1alpha1.MxlFlowMirror, error) {
 	name := mirrorNameForReceiver(recv, target)
-	provider := recv.Spec.Provider
-	if provider == "" {
-		provider = mxlv1alpha1.ProviderAuto
+	provider, err := r.resolveProvider(ctx, recv, sourceNode, target.node)
+	if err != nil {
+		return nil, err
 	}
 
 	sameNs := target.namespace == recv.Namespace
 
 	var existing mxlv1alpha1.MxlFlowMirror
-	err := r.Get(ctx, types.NamespacedName{Namespace: target.namespace, Name: name}, &existing)
+	err = r.Get(ctx, types.NamespacedName{Namespace: target.namespace, Name: name}, &existing)
 	if err == nil {
 		if sameNs {
 			if err := r.ensureOwnerRef(ctx, recv, &existing); err != nil {

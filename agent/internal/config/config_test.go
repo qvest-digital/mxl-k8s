@@ -107,6 +107,21 @@ func TestValidate(t *testing.T) {
 			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1"},
 			wantErr: "",
 		},
+		{
+			name:    "explicit provider override",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", Provider: "verbs"},
+			wantErr: "",
+		},
+		{
+			name:    "auto provider is accepted (resolves per node)",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", Provider: "auto"},
+			wantErr: "",
+		},
+		{
+			name:    "unknown provider rejected",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", Provider: "rdma"},
+			wantErr: "--provider",
+		},
 	}
 
 	for _, tc := range cases {

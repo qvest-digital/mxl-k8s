@@ -253,7 +253,21 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 	}
 
-	provider := mapProvider(mirror.Spec.Provider)
+	provider, err := providerForSetup(&mirror)
+	if err != nil {
+		// Never forward auto into libmxl-fabrics: surface the reason on
+		// status and stop. The agent or operator patches spec.provider to
+		// a concrete value, which wakes this reconciler through its watch.
+		if perr := r.publishSourceProgress(ctx, req.NamespacedName, sourceProgressState{
+			status:  metav1.ConditionFalse,
+			reason:  mxlv1alpha1.ReasonProviderUnresolved,
+			message: err.Error(),
+		}); perr != nil {
+			l.Error(perr, "publish ProviderUnresolved")
+		}
+		l.Info("refusing source setup: mirror provider is unresolved", "error", err.Error())
+		return ctrl.Result{}, nil
+	}
 
 	// Seed the in-memory AddTarget attempts counter from the persisted
 	// status.attemptCount so a gateway pod restart does not reset the

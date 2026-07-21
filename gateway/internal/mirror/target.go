@@ -297,7 +297,15 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	provider := mapProvider(mirror.Spec.Provider)
+	provider, err := providerForSetup(&mirror)
+	if err != nil {
+		// Never forward auto into libmxl-fabrics: surface the reason on
+		// status and stop. The agent or operator patches spec.provider to
+		// a concrete value, which wakes this reconciler through its watch.
+		r.surfaceTargetFailure(ctx, &mirror, mxlv1alpha1.ReasonProviderUnresolved, err.Error())
+		l.Info("refusing target setup: mirror provider is unresolved", "error", err.Error())
+		return ctrl.Result{}, nil
+	}
 
 	entry, err := r.openTarget(req.NamespacedName, string(flow.Spec.Definition.Raw), provider)
 	if err != nil {
