@@ -1543,7 +1543,7 @@
               "type": "string"
             },
             "tag": {
-              "default": "v1.0.0-rc.4",
+              "default": "v1.0.0-rc.5",
               "description": "Image tag for the operator, pinned to the release this chart version bundles and kept current by Renovate. Set this or image.digest; with both empty, rendering fails.",
               "required": [],
               "title": "tag"
