@@ -228,6 +228,15 @@ agent:
     materializeTimeout: 5s
     resyncPeriod: 30s
     # @schema
+    # enum: ["", "tcp", "verbs", "efa", "shm", "auto"]
+    # @schema
+    # -- Explicit libmxl-fabrics provider stamped onto on-demand
+    # (intent-driven) mirrors, bypassing per-node resolution. Empty (or
+    # "auto") resolves a concrete provider from the source and target
+    # nodes' MxlNodeCapabilities; set a concrete value to force one
+    # cluster-wide.
+    provider: ""
+    # @schema
     # pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$
     # @schema
     metricsBindAddress: ":8080"

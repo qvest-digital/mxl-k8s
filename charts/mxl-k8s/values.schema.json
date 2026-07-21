@@ -145,6 +145,20 @@
               "required": [],
               "title": "metricsBindAddress"
             },
+            "provider": {
+              "default": "",
+              "description": "Explicit libmxl-fabrics provider stamped onto on-demand (intent-driven) mirrors, bypassing per-node resolution. Empty (or \"auto\") resolves a concrete provider from the source and target nodes' MxlNodeCapabilities; set a concrete value to force one cluster-wide.",
+              "enum": [
+                "",
+                "tcp",
+                "verbs",
+                "efa",
+                "shm",
+                "auto"
+              ],
+              "required": [],
+              "title": "provider"
+            },
             "resyncPeriod": {
               "default": "30s",
               "title": "resyncPeriod",
