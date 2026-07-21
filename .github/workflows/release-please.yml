@@ -288,3 +288,57 @@ jobs:
           GH_REPO: ${{ github.repository }}
           PR: ${{ steps.pr.outputs['pull-request-number'] }}
         run: gh pr merge --auto --squash "$PR"
+
+  # While a charts/mxl-k8s release PR is open, keep a sticky comment
+  # on it listing the module image tags values.yaml pins on main --
+  # the images the chart vendors if the PR merges as-is. The release
+  # PR branch only moves when the release-please job above rebases it
+  # onto main, so refreshing after every pass keeps the comment in
+  # step with the PR head. The default token is enough here: a
+  # comment does not need to start workflow runs.
+  comment-chart-release-pins:
+    needs: [release-please]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Upsert vendored-images comment
+        run: |
+          set -eu
+          pr=$(gh pr list \
+            --head "release-please--branches--main--components--charts/mxl-k8s" \
+            --json number --jq '.[0].number // empty')
+          if [ -z "$pr" ]; then
+            echo "No open chart release PR."
+            exit 0
+          fi
+          marker="<!-- chart-vendored-images -->"
+          body=$(mktemp)
+          {
+            echo "$marker"
+            echo "Module images vendored by this chart release:"
+            echo
+            echo "| Image | Tag |"
+            echo "| --- | --- |"
+            for c in operator agent gateway; do
+              tag=$(sed -nE "s|.*tag: \"([^\"]+)\" # renovate: datasource=docker depName=ghcr\.io/qvest-digital/mxl-k8s/${c} versioning=semver.*|\1|p" charts/mxl-k8s/values.yaml)
+              : "${tag:?no pin found for ${c} in values.yaml}"
+              echo "| ghcr.io/qvest-digital/mxl-k8s/${c} | ${tag} |"
+            done
+          } > "$body"
+          existing=$(gh api "repos/${GH_REPO}/issues/${pr}/comments" --paginate \
+            | jq -r --arg m "$marker" '.[] | select(.body | startswith($m)) | .id' \
+            | head -n1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/${GH_REPO}/issues/comments/${existing}" \
+              -F body=@"$body" > /dev/null
+            echo "Updated comment ${existing} on PR #${pr}."
+          else
+            gh pr comment "$pr" --body-file "$body"
+          fi
