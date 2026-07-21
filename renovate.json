@@ -25,6 +25,7 @@
         "/^\\.github/workflows/ci\\.yml$/",
         "/^\\.github/workflows/images\\.yml$/",
         "/^\\.github/workflows/chart-autofix\\.yml$/",
+        "/^\\.github/workflows/release-please\\.yml$/",
         "/^Makefile$/"
       ],
       "matchStrings": [
