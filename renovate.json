@@ -10,7 +10,9 @@
     {
       "customType": "regex",
       "description": "Pin the chart-bundled module images (operator, agent, gateway) to their ghcr releases via inline markers in values.yaml",
-      "fileMatch": ["^charts/mxl-k8s/values\\.yaml$"],
+      "managerFilePatterns": [
+        "/^charts/mxl-k8s/values\\.yaml$/"
+      ],
       "matchStrings": [
         "tag: \"(?<currentValue>[^\"]+)\"\\s+#\\s*renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?"
       ]
@@ -18,12 +20,12 @@
     {
       "customType": "regex",
       "description": "Track CI/build tool versions pinned in workflow env blocks and the Makefile via inline `# renovate:` markers (helm, helm-unittest, helm-schema, helm-docs, kubeconform, yq, gotestsum, controller-tools, mockery). The marker sits on the line directly above the value; the value line may be a workflow `KEY: value` or a Makefile `KEY ?= value`.",
-      "fileMatch": [
-        "^\\.github/workflows/chart\\.yml$",
-        "^\\.github/workflows/ci\\.yml$",
-        "^\\.github/workflows/images\\.yml$",
-        "^\\.github/workflows/chart-autofix\\.yml$",
-        "^Makefile$"
+      "managerFilePatterns": [
+        "/^\\.github/workflows/chart\\.yml$/",
+        "/^\\.github/workflows/ci\\.yml$/",
+        "/^\\.github/workflows/images\\.yml$/",
+        "/^\\.github/workflows/chart-autofix\\.yml$/",
+        "/^Makefile$/"
       ],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?(?: extractVersion=(?<extractVersion>\\S+))?[ \\t]*\\n[ \\t]*[\\w.-]+[ \\t]*(?::|\\?=|=)[ \\t]*[\"']?(?<currentValue>[^\"'\\s#]+)"
