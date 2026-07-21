@@ -3,7 +3,7 @@ module github.com/qvest-digital/mxl-k8s/operator
 go 1.26.0
 
 require (
-	github.com/qvest-digital/mxl-k8s/api v1.0.0-rc.3
+	github.com/qvest-digital/mxl-k8s/api v1.0.0-rc.4
 	github.com/stretchr/testify v1.11.1
 	k8s.io/api v0.36.2
 	k8s.io/apimachinery v0.36.2
