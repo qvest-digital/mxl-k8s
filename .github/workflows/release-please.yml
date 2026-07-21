@@ -38,9 +38,8 @@ jobs:
       gateway_tag:       ${{ steps.rp.outputs['gateway--tag_name'] }}
       shim_released:     ${{ steps.rp.outputs['shim--release_created'] }}
       shim_tag:          ${{ steps.rp.outputs['shim--tag_name'] }}
-      # No api_tag: bump-go-consumers reads the released version from
-      # the manifest file instead (see the comment on that job).
       api_released:      ${{ steps.rp.outputs['api--release_created'] }}
+      api_tag:           ${{ steps.rp.outputs['api--tag_name'] }}
     steps:
       - id: rp
         uses: googleapis/release-please-action@v5
@@ -120,14 +119,20 @@ jobs:
   # has no Go workspace plugin, and the Mend-hosted Renovate app picks
   # such bumps up only on its own scan cadence (hours to days, plus Go
   # module proxy indexing lag for gomod). The two jobs below close the
-  # loop in the same run that cut the release. Both sync from
-  # .github/release-please-manifest.json at the checked-out commit --
-  # the release PR merge that triggered this run is the commit that
-  # updated the manifest -- so each run is idempotent, independent of
-  # event ordering across overlapping releases, and self-healing if an
-  # earlier run was missed. The intra-repo rules in renovate.json stay
-  # as a backstop; a later Renovate scan finds the pins current and
-  # does nothing.
+  # loop in the same run that cut the release.
+  #
+  # Version resolution order matters. The release-please job acts on
+  # live repository state, not on the checked-out commit: it can cut
+  # a release for a release PR that merged while this run was already
+  # in progress. The checkout then predates the release and its
+  # manifest does not carry the new version yet, so a manifest-only
+  # sync sees no drift and opens no PR (observed with the operator
+  # 1.0.0-rc.5 release, cut in the run of the preceding push). The
+  # per-component tag outputs are therefore authoritative for
+  # whatever was released in this run; the manifest at the
+  # checked-out commit covers everything else. The intra-repo rules
+  # in renovate.json stay as a backstop; a later Renovate scan finds
+  # the pins current and does nothing.
   #
   # A workflow_dispatch run executes both jobs regardless of the
   # release outputs. The manifest sync makes that safe: with pins
@@ -172,11 +177,18 @@ jobs:
           go-version: '1.26'
           check-latest: true
 
-      - name: Sync api requires from the manifest
+      - name: Sync api requires
         id: sync
+        env:
+          API_RELEASED: ${{ needs.release-please.outputs.api_released }}
+          API_TAG: ${{ needs.release-please.outputs.api_tag }}
         run: |
           set -eu
-          version=$(jq -re .api .github/release-please-manifest.json)
+          if [ "${API_RELEASED}" = "true" ] && [ -n "${API_TAG}" ]; then
+            version="${API_TAG#api/v}"
+          else
+            version=$(jq -re .api .github/release-please-manifest.json)
+          fi
           for m in agent operator gateway; do
             (cd "$m" \
               && go mod edit -require="github.com/qvest-digital/mxl-k8s/api@v${version}" \
@@ -243,13 +255,32 @@ jobs:
           go-version: '1.26'
           check-latest: true
 
-      - name: Sync image pins from the manifest
+      - name: Sync image pins
         id: sync
+        env:
+          OPERATOR_RELEASED: ${{ needs.release-please.outputs.operator_released }}
+          OPERATOR_TAG: ${{ needs.release-please.outputs.operator_tag }}
+          AGENT_RELEASED: ${{ needs.release-please.outputs.agent_released }}
+          AGENT_TAG: ${{ needs.release-please.outputs.agent_tag }}
+          GATEWAY_RELEASED: ${{ needs.release-please.outputs.gateway_released }}
+          GATEWAY_TAG: ${{ needs.release-please.outputs.gateway_tag }}
         run: |
           set -eu
+          released_version() {
+            case "$1" in
+              operator) rel="${OPERATOR_RELEASED}" tag="${OPERATOR_TAG}" ;;
+              agent)    rel="${AGENT_RELEASED}"    tag="${AGENT_TAG}" ;;
+              gateway)  rel="${GATEWAY_RELEASED}"  tag="${GATEWAY_TAG}" ;;
+            esac
+            if [ "${rel}" = "true" ] && [ -n "${tag}" ]; then
+              echo "${tag#"$1"/v}"
+            else
+              jq -re --arg c "$1" '.[$c]' .github/release-please-manifest.json
+            fi
+          }
           pins=""
           for c in operator agent gateway; do
-            version=$(jq -re --arg c "$c" '.[$c]' .github/release-please-manifest.json)
+            version=$(released_version "$c")
             marker="# renovate: datasource=docker depName=ghcr.io/qvest-digital/mxl-k8s/${c} versioning=semver"
             sed -E -i "s|(tag: )\"[^\"]*\"( ${marker})$|\1\"v${version}\"\2|" charts/mxl-k8s/values.yaml
             grep -qF "tag: \"v${version}\" ${marker}" charts/mxl-k8s/values.yaml
@@ -294,8 +325,10 @@ jobs:
   # the images the chart vendors if the PR merges as-is. The release
   # PR branch only moves when the release-please job above rebases it
   # onto main, so refreshing after every pass keeps the comment in
-  # step with the PR head. The default token is enough here: a
-  # comment does not need to start workflow runs.
+  # step with the PR head. A note is appended for every pin that lags
+  # the latest release, i.e. while a post-release/chart-pins PR has
+  # not merged yet. The default token is enough here: a comment does
+  # not need to start workflow runs.
   comment-chart-release-pins:
     needs: [release-please]
     runs-on: ubuntu-24.04
@@ -309,6 +342,13 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Upsert vendored-images comment
+        env:
+          OPERATOR_RELEASED: ${{ needs.release-please.outputs.operator_released }}
+          OPERATOR_TAG: ${{ needs.release-please.outputs.operator_tag }}
+          AGENT_RELEASED: ${{ needs.release-please.outputs.agent_released }}
+          AGENT_TAG: ${{ needs.release-please.outputs.agent_tag }}
+          GATEWAY_RELEASED: ${{ needs.release-please.outputs.gateway_released }}
+          GATEWAY_TAG: ${{ needs.release-please.outputs.gateway_tag }}
         run: |
           set -eu
           pr=$(gh pr list \
@@ -318,8 +358,21 @@ jobs:
             echo "No open chart release PR."
             exit 0
           fi
+          released_version() {
+            case "$1" in
+              operator) rel="${OPERATOR_RELEASED}" tag="${OPERATOR_TAG}" ;;
+              agent)    rel="${AGENT_RELEASED}"    tag="${AGENT_TAG}" ;;
+              gateway)  rel="${GATEWAY_RELEASED}"  tag="${GATEWAY_TAG}" ;;
+            esac
+            if [ "${rel}" = "true" ] && [ -n "${tag}" ]; then
+              echo "${tag#"$1"/v}"
+            else
+              jq -re --arg c "$1" '.[$c]' .github/release-please-manifest.json
+            fi
+          }
           marker="<!-- chart-vendored-images -->"
           body=$(mktemp)
+          notes=""
           {
             echo "$marker"
             echo "Module images vendored by this chart release:"
@@ -327,10 +380,15 @@ jobs:
             echo "| Image | Tag |"
             echo "| --- | --- |"
             for c in operator agent gateway; do
-              tag=$(sed -nE "s|.*tag: \"([^\"]+)\" # renovate: datasource=docker depName=ghcr\.io/qvest-digital/mxl-k8s/${c} versioning=semver.*|\1|p" charts/mxl-k8s/values.yaml)
-              : "${tag:?no pin found for ${c} in values.yaml}"
-              echo "| ghcr.io/qvest-digital/mxl-k8s/${c} | ${tag} |"
+              pin=$(sed -nE "s|.*tag: \"([^\"]+)\" # renovate: datasource=docker depName=ghcr\.io/qvest-digital/mxl-k8s/${c} versioning=semver.*|\1|p" charts/mxl-k8s/values.yaml)
+              : "${pin:?no pin found for ${c} in values.yaml}"
+              echo "| ghcr.io/qvest-digital/mxl-k8s/${c} | ${pin} |"
+              released="v$(released_version "$c")"
+              if [ "${pin}" != "${released}" ]; then
+                notes=$(printf '%s\n- %s is pinned at %s while %s is the latest release; the pin lands via a post-release/chart-pins PR.' "${notes}" "${c}" "${pin}" "${released}")
+              fi
             done
+            [ -z "$notes" ] || printf '%s\n' "$notes"
           } > "$body"
           existing=$(gh api "repos/${GH_REPO}/issues/${pr}/comments" --paginate \
             | jq -r --arg m "$marker" '.[] | select(.body | startswith($m)) | .id' \
