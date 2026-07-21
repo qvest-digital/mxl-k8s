@@ -509,6 +509,10 @@ func mirrorWithFinalizer(name, ns, node, flowID, targetInfo string) *mxlv1alpha1
 			FlowID:     flowID,
 			SourceNode: node,
 			TargetNode: "node-b",
+			// Mirrors carry a concrete provider once the agent or
+			// operator has resolved it; an unresolved spec stops at
+			// providerForSetup before the paths these tests exercise.
+			Provider: mxlv1alpha1.ProviderTCP,
 		},
 		Status: mxlv1alpha1.MxlFlowMirrorStatus{
 			TargetInfo: targetInfo,
