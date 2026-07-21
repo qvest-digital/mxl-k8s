@@ -129,6 +129,12 @@ jobs:
   # as a backstop; a later Renovate scan finds the pins current and
   # does nothing.
   #
+  # A workflow_dispatch run executes both jobs regardless of the
+  # release outputs. The manifest sync makes that safe: with pins
+  # already current there is no diff and no PR is opened, and with
+  # stale pins the run catches up releases cut while these jobs did
+  # not yet exist or whose run was missed.
+  #
   # Both jobs open their PR with the PAT for the same reason the rest
   # of this file uses it: pushes and PRs made with the default
   # GITHUB_TOKEN do not start workflow runs, which would leave the
@@ -152,7 +158,9 @@ jobs:
   # next api release.
   bump-go-consumers:
     needs: [release-please]
-    if: needs.release-please.outputs.api_released == 'true'
+    if: >-
+      needs.release-please.outputs.api_released == 'true' ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -214,7 +222,8 @@ jobs:
     if: >-
       needs.release-please.outputs.operator_released == 'true' ||
       needs.release-please.outputs.agent_released == 'true' ||
-      needs.release-please.outputs.gateway_released == 'true'
+      needs.release-please.outputs.gateway_released == 'true' ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
