@@ -129,7 +129,7 @@ jobs:
         # so opt out of verification explicitly.
         run: helm plugin install https://github.com/helm-unittest/helm-unittest --version "${HELM_UNITTEST_VERSION}" --verify=false
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
           check-latest: true
