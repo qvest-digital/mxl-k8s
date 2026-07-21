@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.0-rc.6](https://github.com/qvest-digital/mxl-k8s/compare/agent/v1.0.0-rc.5...agent/v1.0.0-rc.6) (2026-07-21)
+
+
+### Features
+
+* resolve mirror provider from node capabilities instead of stamping auto ([#154](https://github.com/qvest-digital/mxl-k8s/issues/154)) ([731b245](https://github.com/qvest-digital/mxl-k8s/commit/731b245d152960b1da8aba5c9ef89bbb1a3fd4a7))
+
+
+### Dependencies
+
+* **api:** bump api module to v1.0.0-rc.4 ([#159](https://github.com/qvest-digital/mxl-k8s/issues/159)) ([2afcadb](https://github.com/qvest-digital/mxl-k8s/commit/2afcadb10ef8c11741ac43d3cf9ee297cd1ae71e))
+* **api:** update module github.com/qvest-digital/mxl-k8s/api to v1.0.0-rc.3 ([#139](https://github.com/qvest-digital/mxl-k8s/issues/139)) ([5444825](https://github.com/qvest-digital/mxl-k8s/commit/54448254f61ada511bd3c75dd1019ce610cfb477))
+* **gomod:** update module golang.org/x/sys to v0.47.0 ([#138](https://github.com/qvest-digital/mxl-k8s/issues/138)) ([c3b1ee9](https://github.com/qvest-digital/mxl-k8s/commit/c3b1ee90215abb373060e8493c3a82ab84171697))
+
+
+### Build System
+
+* **deps:** bump golang.org/x/net from 0.49.0 to 0.55.0 in /agent ([#145](https://github.com/qvest-digital/mxl-k8s/issues/145)) ([5da8e16](https://github.com/qvest-digital/mxl-k8s/commit/5da8e166ee9114686c98099cf908d8f354bb985f))
+
 ## [1.0.0-rc.5](https://github.com/qvest-digital/mxl-k8s/compare/agent/v1.0.0-rc.4...agent/v1.0.0-rc.5) (2026-07-01)
 
 
