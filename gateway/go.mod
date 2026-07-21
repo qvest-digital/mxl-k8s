@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/qvest-digital/go-mxl v1.0.0-rc.10
-	github.com/qvest-digital/mxl-k8s/api v1.0.0-rc.3
+	github.com/qvest-digital/mxl-k8s/api v1.0.0-rc.4
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/goleak v1.3.0
 	k8s.io/api v0.36.2
