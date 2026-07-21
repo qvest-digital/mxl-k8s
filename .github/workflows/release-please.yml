@@ -38,6 +38,9 @@ jobs:
       gateway_tag:       ${{ steps.rp.outputs['gateway--tag_name'] }}
       shim_released:     ${{ steps.rp.outputs['shim--release_created'] }}
       shim_tag:          ${{ steps.rp.outputs['shim--tag_name'] }}
+      # No api_tag: bump-go-consumers reads the released version from
+      # the manifest file instead (see the comment on that job).
+      api_released:      ${{ steps.rp.outputs['api--release_created'] }}
     steps:
       - id: rp
         uses: googleapis/release-please-action@v5
@@ -112,3 +115,167 @@ jobs:
     uses: ./.github/workflows/images.yml
     with:
       release_tag: ${{ needs.release-please.outputs.shim_tag }}
+
+  # Intra-repo version pins do not update themselves: release-please
+  # has no Go workspace plugin, and the Mend-hosted Renovate app picks
+  # such bumps up only on its own scan cadence (hours to days, plus Go
+  # module proxy indexing lag for gomod). The two jobs below close the
+  # loop in the same run that cut the release. Both sync from
+  # .github/release-please-manifest.json at the checked-out commit --
+  # the release PR merge that triggered this run is the commit that
+  # updated the manifest -- so each run is idempotent, independent of
+  # event ordering across overlapping releases, and self-healing if an
+  # earlier run was missed. The intra-repo rules in renovate.json stay
+  # as a backstop; a later Renovate scan finds the pins current and
+  # does nothing.
+  #
+  # Both jobs open their PR with the PAT for the same reason the rest
+  # of this file uses it: pushes and PRs made with the default
+  # GITHUB_TOKEN do not start workflow runs, which would leave the
+  # bump PR without CI. Auto-merge requires "Allow auto-merge" in the
+  # repository settings; the step degrades to a warning when it is
+  # off and the PR waits for a manual merge. CI gates the merge
+  # either way.
+
+  # After an api release: point the api require of agent, operator,
+  # and gateway at the released version. go mod edit + tidy resolve
+  # api through each module's local replace directive, so the freshly
+  # cut tag does not need to be visible on proxy.golang.org yet. The
+  # PR merges as deps(api) and release-please folds the dependency
+  # move into each consumer's next release.
+  #
+  # No go work sync, and the PR is scoped to the three consumer
+  # directories: the workspace resolves api through go.work, so a
+  # consumer require bump cannot change the workspace selection or
+  # go.work.sum, and sync would write workspace-level raises into
+  # api/go.mod -- a path change that would immediately propose the
+  # next api release.
+  bump-go-consumers:
+    needs: [release-please]
+    if: needs.release-please.outputs.api_released == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Sync api requires from the manifest
+        id: sync
+        run: |
+          set -eu
+          version=$(jq -re .api .github/release-please-manifest.json)
+          for m in agent operator gateway; do
+            (cd "$m" \
+              && go mod edit -require="github.com/qvest-digital/mxl-k8s/api@v${version}" \
+              && go mod tidy)
+          done
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - id: pr
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          branch: post-release/api-consumers
+          delete-branch: true
+          add-paths: |
+            agent
+            operator
+            gateway
+          commit-message: "deps(api): bump api module to v${{ steps.sync.outputs.version }}"
+          title: "deps(api): bump api module to v${{ steps.sync.outputs.version }}"
+          body: >-
+            Aligns the api require of agent, operator, and gateway with
+            the version recorded in .github/release-please-manifest.json.
+            Opened by the bump-go-consumers job in release-please.yml.
+
+      - name: Enable auto-merge
+        if: steps.pr.outputs['pull-request-number'] != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ steps.pr.outputs['pull-request-number'] }}
+        run: gh pr merge --auto --squash "$PR"
+
+  # After an operator, agent, or gateway release: re-pin the chart's
+  # bundled module images. values.schema.json and README.md embed
+  # values.yaml defaults, so they are regenerated here with the same
+  # tool pins chart-autofix.yml uses -- the PR must be drift-free at
+  # creation because auto-merge does not wait for a chart-autofix
+  # push. The PR merges as deps(chart) and release-please turns it
+  # into the next chart release.
+  bump-chart-pins:
+    needs: [release-please]
+    if: >-
+      needs.release-please.outputs.operator_released == 'true' ||
+      needs.release-please.outputs.agent_released == 'true' ||
+      needs.release-please.outputs.gateway_released == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      # Keep in lock-step with the generator pins in chart.yml and
+      # chart-autofix.yml. Same depNames, so Renovate bumps all
+      # copies together.
+      # renovate: datasource=github-releases depName=dadav/helm-schema versioning=semver
+      HELM_SCHEMA_VERSION: "0.23.4"
+      # renovate: datasource=go depName=github.com/norwoodj/helm-docs versioning=semver
+      HELM_DOCS_VERSION: v1.14.2
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Sync image pins from the manifest
+        id: sync
+        run: |
+          set -eu
+          pins=""
+          for c in operator agent gateway; do
+            version=$(jq -re --arg c "$c" '.[$c]' .github/release-please-manifest.json)
+            marker="# renovate: datasource=docker depName=ghcr.io/qvest-digital/mxl-k8s/${c} versioning=semver"
+            sed -E -i "s|(tag: )\"[^\"]*\"( ${marker})$|\1\"v${version}\"\2|" charts/mxl-k8s/values.yaml
+            grep -qF "tag: \"v${version}\" ${marker}" charts/mxl-k8s/values.yaml
+            pins="${pins}${pins:+, }${c} v${version}"
+          done
+          echo "pins=${pins}" >> "$GITHUB_OUTPUT"
+
+      - name: Install helm-schema and helm-docs
+        run: |
+          go install github.com/dadav/helm-schema/cmd/helm-schema@${HELM_SCHEMA_VERSION}
+          go install github.com/norwoodj/helm-docs/cmd/helm-docs@${HELM_DOCS_VERSION}
+
+      - name: Regenerate chart artefacts
+        run: make chart-schema chart-docs
+
+      - id: pr
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          branch: post-release/chart-pins
+          delete-branch: true
+          add-paths: charts/mxl-k8s
+          commit-message: "deps(chart): update mxl-k8s module images"
+          title: "deps(chart): update mxl-k8s module images"
+          body: >-
+            ${{ steps.sync.outputs.pins }}.
+            Aligns the chart-bundled module image pins with the versions
+            recorded in .github/release-please-manifest.json. Opened by
+            the bump-chart-pins job in release-please.yml.
+
+      - name: Enable auto-merge
+        if: steps.pr.outputs['pull-request-number'] != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ steps.pr.outputs['pull-request-number'] }}
+        run: gh pr merge --auto --squash "$PR"
