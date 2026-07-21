@@ -90,7 +90,7 @@ operator:
     # -- Image tag for the operator, pinned to the release this chart
     # version bundles and kept current by Renovate. Set this or
     # image.digest; with both empty, rendering fails.
-    tag: "v1.0.0-rc.4" # renovate: datasource=docker depName=ghcr.io/qvest-digital/mxl-k8s/operator versioning=semver
+    tag: "v1.0.0-rc.5" # renovate: datasource=docker depName=ghcr.io/qvest-digital/mxl-k8s/operator versioning=semver
     # -- Image digest. Wins over tag when set.
     # @schema
     # pattern: ^$|^sha256:[0-9a-f]{64}$
