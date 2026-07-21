@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.0-rc.7](https://github.com/qvest-digital/mxl-k8s/compare/gateway/v1.0.0-rc.6...gateway/v1.0.0-rc.7) (2026-07-21)
+
+
+### Features
+
+* resolve mirror provider from node capabilities instead of stamping auto ([#154](https://github.com/qvest-digital/mxl-k8s/issues/154)) ([731b245](https://github.com/qvest-digital/mxl-k8s/commit/731b245d152960b1da8aba5c9ef89bbb1a3fd4a7))
+
+
+### Dependencies
+
+* **api:** bump api module to v1.0.0-rc.4 ([#159](https://github.com/qvest-digital/mxl-k8s/issues/159)) ([2afcadb](https://github.com/qvest-digital/mxl-k8s/commit/2afcadb10ef8c11741ac43d3cf9ee297cd1ae71e))
+* **api:** update module github.com/qvest-digital/mxl-k8s/api to v1.0.0-rc.3 ([#139](https://github.com/qvest-digital/mxl-k8s/issues/139)) ([5444825](https://github.com/qvest-digital/mxl-k8s/commit/54448254f61ada511bd3c75dd1019ce610cfb477))
+* **gateway:** follow libmxl-fabrics v1.1.0-beta-1 interface API ([#146](https://github.com/qvest-digital/mxl-k8s/issues/146)) ([3e6b3ce](https://github.com/qvest-digital/mxl-k8s/commit/3e6b3ce1d6dce2a5ef7316720a5737cb20f2ff08))
+
+
+### Build System
+
+* **deps:** bump golang.org/x/net from 0.49.0 to 0.55.0 in /gateway ([#147](https://github.com/qvest-digital/mxl-k8s/issues/147)) ([53fb581](https://github.com/qvest-digital/mxl-k8s/commit/53fb581e60cdef7c3a64cc2fdcf2fb29ac180414))
+
 ## [1.0.0-rc.6](https://github.com/qvest-digital/mxl-k8s/compare/gateway/v1.0.0-rc.5...gateway/v1.0.0-rc.6) (2026-07-01)
 
 
