@@ -451,6 +451,72 @@ func Test_ensureMirror_StampsLabelOnCreate(t *testing.T) {
 	assert.Equal(t, "r", m.Labels[mxlv1alpha1.LabelCreatedByReceiver])
 }
 
+// nodeCaps builds an MxlNodeCapabilities advertising the named
+// providers, seeded via WithObjects so the fake client persists the
+// status resolveProvider reads.
+func nodeCaps(node string, providers ...mxlv1alpha1.MxlFabricsProvider) *mxlv1alpha1.MxlNodeCapabilities {
+	caps := &mxlv1alpha1.MxlNodeCapabilities{
+		ObjectMeta: metav1.ObjectMeta{Name: node},
+		Spec:       mxlv1alpha1.MxlNodeCapabilitiesSpec{NodeName: node},
+	}
+	for _, p := range providers {
+		caps.Status.Providers = append(caps.Status.Providers,
+			mxlv1alpha1.MxlFabricsProviderCapability{Name: p})
+	}
+	return caps
+}
+
+// Test_ensureMirror_ResolvesProviderWhenAuto asserts that a receiver
+// with an auto (or unset) provider gets a concrete provider resolved
+// from the source and target nodes' capabilities, preferring verbs
+// over the tcp both nodes also advertise.
+func Test_ensureMirror_ResolvesProviderWhenAuto(t *testing.T) {
+	ctx := context.Background()
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r"},
+		Spec: mxlv1alpha1.MxlReceiverSpec{
+			FlowID:   "11111111-2222-3333-4444-555555555555",
+			Provider: mxlv1alpha1.ProviderAuto,
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(unitScheme(t)).
+		WithObjects(
+			nodeCaps("n-src", mxlv1alpha1.ProviderTCP, mxlv1alpha1.ProviderVerbs),
+			nodeCaps("n-tgt", mxlv1alpha1.ProviderTCP, mxlv1alpha1.ProviderVerbs),
+		).
+		Build()
+	r := &Reconciler{Client: c}
+
+	m, err := r.ensureMirror(ctx, recv, "n-src", nodeTarget{node: "n-tgt", namespace: "ns"})
+	require.NoError(t, err)
+	assert.Equal(t, mxlv1alpha1.ProviderVerbs, m.Spec.Provider,
+		"an auto receiver must resolve to the highest-preference provider "+
+			"both nodes advertise, never stay auto")
+}
+
+// Test_ensureMirror_FallsBackToTCPWithoutCapabilities asserts that an
+// auto receiver whose nodes have no published capabilities still gets a
+// concrete provider (tcp) rather than a mirror stuck on auto.
+func Test_ensureMirror_FallsBackToTCPWithoutCapabilities(t *testing.T) {
+	ctx := context.Background()
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r"},
+		Spec: mxlv1alpha1.MxlReceiverSpec{
+			FlowID: "11111111-2222-3333-4444-555555555555",
+			// Provider unset: must resolve, not default to auto.
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).Build()
+	r := &Reconciler{Client: c}
+
+	m, err := r.ensureMirror(ctx, recv, "n-src", nodeTarget{node: "n-tgt", namespace: "ns"})
+	require.NoError(t, err)
+	assert.Equal(t, mxlv1alpha1.ProviderTCP, m.Spec.Provider)
+	assert.NotEqual(t, mxlv1alpha1.ProviderAuto, m.Spec.Provider,
+		"a mirror must never be created with provider auto")
+}
+
 func Test_PodWatch_EnqueuesReceiversOnNodeChange(t *testing.T) {
 	ctx := context.Background()
 
