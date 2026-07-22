@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -325,6 +326,133 @@ func TestInitialSync_DemotesOriginForFlowsNoLongerOnDisk(t *testing.T) {
 	assert.Equal(t, mxlv1alpha1.MxlFlowLocationReady, byNode["other"],
 		"other-node locations are out of this agent's scope; "+
 			"InitialSync must not touch them")
+}
+
+func TestPromoteStaleLocalOrigins_RepublishesStaleLocation(t *testing.T) {
+	scheme := newScheme(t)
+	domain := t.TempDir()
+	flowDir := filepath.Join(domain, validFlowID+".mxl-flow")
+	require.NoError(t, os.Mkdir(flowDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(flowDir, FlowDefName),
+		[]byte(`{"id":"`+validFlowID+`"}`), 0o644))
+
+	// Stale with no LastObserved: the shape PublishVanished leaves
+	// behind, and the shape a dropped PublishAppeared conflict never
+	// repairs.
+	existing := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: ObjectMeta(validFlowID),
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: validFlowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{
+				{NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationStale},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(existing).
+		Build()
+
+	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	require.NoError(t, p.promoteStaleLocalOrigins(context.Background(),
+		map[string]struct{}{validFlowID: {}}))
+
+	var got mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
+	require.Len(t, got.Status.Locations, 1)
+	loc := got.Status.Locations[0]
+	assert.Equal(t, mxlv1alpha1.MxlFlowLocationOrigin, loc.Phase,
+		"an on-disk flow stuck Stale must be re-published to Origin; "+
+			"leaving it Stale strands the source gateway's rotation "+
+			"detector, which only re-arms on a fresh LastObserved")
+	require.NotNil(t, loc.LastObserved)
+}
+
+func TestPromoteStaleLocalOrigins_RepublishesMissingLocationEntry(t *testing.T) {
+	scheme := newScheme(t)
+	domain := t.TempDir()
+	flowDir := filepath.Join(domain, validFlowID+".mxl-flow")
+	require.NoError(t, os.Mkdir(flowDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(flowDir, FlowDefName),
+		[]byte(`{"id":"`+validFlowID+`"}`), 0o644))
+
+	// MxlFlow exists (another node published it) but carries no
+	// location entry for n1 at all -- the shape a dropped first-ever
+	// PublishAppeared on this node leaves behind.
+	existing := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: ObjectMeta(validFlowID),
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: validFlowID},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(existing).
+		Build()
+
+	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	require.NoError(t, p.promoteStaleLocalOrigins(context.Background(),
+		map[string]struct{}{validFlowID: {}}))
+
+	var got mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
+	require.Len(t, got.Status.Locations, 1)
+	assert.Equal(t, "n1", got.Status.Locations[0].NodeName)
+	assert.Equal(t, mxlv1alpha1.MxlFlowLocationOrigin, got.Status.Locations[0].Phase)
+}
+
+func TestPromoteStaleLocalOrigins_LeavesHealthyLocationUntouched(t *testing.T) {
+	scheme := newScheme(t)
+	domain := t.TempDir()
+	flowDir := filepath.Join(domain, validFlowID+".mxl-flow")
+	require.NoError(t, os.Mkdir(flowDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(flowDir, FlowDefName),
+		[]byte(`{"id":"`+validFlowID+`"}`), 0o644))
+
+	originalObserved := metav1.NewTime(metav1.Now().Add(-time.Hour))
+	existing := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: ObjectMeta(validFlowID),
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: validFlowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{
+				{NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationOrigin, LastObserved: &originalObserved},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(existing).
+		Build()
+
+	// The fake client's object tracker round-trips seeded objects
+	// through its codec, which truncates metav1.Time to second
+	// precision -- read the seeded value back instead of comparing
+	// against originalObserved directly, or a same-second reopen
+	// (impossible below in the second-truncated stored value, but
+	// generally the discipline to follow for metav1.Time) would look
+	// identical to a no-op regardless of whether the code under test
+	// actually left it alone.
+	var before mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &before))
+	beforeObserved := before.Status.Locations[0].LastObserved
+
+	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	require.NoError(t, p.promoteStaleLocalOrigins(context.Background(),
+		map[string]struct{}{validFlowID: {}}))
+
+	var got mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
+	require.Len(t, got.Status.Locations, 1)
+	assert.True(t, got.Status.Locations[0].LastObserved.Equal(beforeObserved),
+		"promoteStaleLocalOrigins must not touch an already-healthy "+
+			"location: RunLocalRescan calls it on every tick, and "+
+			"refreshing LastObserved on a steady-state flow would read "+
+			"to the source gateway as a genuine rotation, forcing a "+
+			"spurious reader reopen once per rescan interval")
 }
 
 // fakeLease records Renew/Release calls and lets a test return a

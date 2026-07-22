@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -166,33 +167,45 @@ func (p *Publisher) PublishVanished(ctx context.Context, dirName string) error {
 	return nil
 }
 
+// upsertLocation is retried on a conflict: status.locations is read-
+// modify-written by every node's agent concurrently (each node owns
+// only its own slice entry, but all entries live in the same status
+// subresource), so a fanotify event racing another node's write is
+// routine, not exceptional. The fanotify dispatcher calls this once
+// per event and only logs a returned error -- an unretried conflict
+// here permanently drops the appearance/vanish it was reporting, and
+// for an Origin location that is the source gateway's only signal
+// that the flow's writer rotated.
 func (p *Publisher) upsertLocation(ctx context.Context, flowID string, phase mxlv1alpha1.MxlFlowLocationPhase, observed *metav1.Time) error {
-	var obj mxlv1alpha1.MxlFlow
-	if err := p.Client.Get(ctx, types.NamespacedName{Name: flowID}, &obj); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var obj mxlv1alpha1.MxlFlow
+		if err := p.Client.Get(ctx, types.NamespacedName{Name: flowID}, &obj); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("get MxlFlow %s: %w", flowID, err)
 		}
-		return fmt.Errorf("get MxlFlow %s: %w", flowID, err)
-	}
 
-	found := false
-	for i := range obj.Status.Locations {
-		if obj.Status.Locations[i].NodeName == p.NodeName {
-			obj.Status.Locations[i].Phase = phase
-			obj.Status.Locations[i].LastObserved = observed
-			found = true
-			break
+		found := false
+		for i := range obj.Status.Locations {
+			if obj.Status.Locations[i].NodeName == p.NodeName {
+				obj.Status.Locations[i].Phase = phase
+				obj.Status.Locations[i].LastObserved = observed
+				found = true
+				break
+			}
 		}
-	}
-	if !found {
-		obj.Status.Locations = append(obj.Status.Locations, mxlv1alpha1.MxlFlowLocation{
-			NodeName:     p.NodeName,
-			Phase:        phase,
-			LastObserved: observed,
-		})
-	}
+		if !found {
+			obj.Status.Locations = append(obj.Status.Locations, mxlv1alpha1.MxlFlowLocation{
+				NodeName:     p.NodeName,
+				Phase:        phase,
+				LastObserved: observed,
+			})
+		}
 
-	if err := p.Client.Status().Update(ctx, &obj); err != nil {
+		return p.Client.Status().Update(ctx, &obj)
+	})
+	if err != nil {
 		return fmt.Errorf("update MxlFlow %s status: %w", flowID, err)
 	}
 	return nil
@@ -298,6 +311,62 @@ func (p *Publisher) demoteVanishedLocalOrigins(ctx context.Context, onDisk map[s
 	return nil
 }
 
+// localLocationHealthy reports whether flow.status.locations carries
+// a non-Stale entry for this node with a LastObserved timestamp. A
+// missing entry, a Stale phase, or a nil timestamp are all states
+// that leave the source gateway's rotation detector permanently
+// unable to fire: its baseline is recorded once at reader-open, and
+// a nil baseline never counts as rotated no matter what arrives
+// later.
+func (p *Publisher) localLocationHealthy(flow *mxlv1alpha1.MxlFlow) bool {
+	for _, loc := range flow.Status.Locations {
+		if loc.NodeName != p.NodeName {
+			continue
+		}
+		return loc.Phase != mxlv1alpha1.MxlFlowLocationStale && loc.LastObserved != nil
+	}
+	return false
+}
+
+// promoteStaleLocalOrigins re-publishes any on-disk flow whose
+// location entry for this node is unhealthy per localLocationHealthy
+// -- missing, Stale, or timestamp-less. It is the symmetric repair to
+// demoteVanishedLocalOrigins: that function heals a location that
+// outlived its directory, this one heals a directory whose location
+// never landed or got stuck, most commonly a status-update conflict
+// that exhausted upsertLocation's retries, or a fanotify event lost
+// before the watcher started.
+//
+// Gating on health (rather than unconditionally re-publishing, the
+// way InitialSync does at startup) matters here: RunLocalRescan calls
+// this on every tick, and an unconditional PublishAppeared would
+// refresh LastObserved on already-healthy flows too, which the
+// source gateway's rotation detector reads as a genuine rotation --
+// producing a spurious reader reopen on every steady-state flow once
+// per rescan interval.
+func (p *Publisher) promoteStaleLocalOrigins(ctx context.Context, onDisk map[string]struct{}) error {
+	l := log.FromContext(ctx).WithName("flowpublisher.promote")
+	for id := range onDisk {
+		var flow mxlv1alpha1.MxlFlow
+		err := p.Client.Get(ctx, types.NamespacedName{Name: id}, &flow)
+		switch {
+		case apierrors.IsNotFound(err):
+			// No MxlFlow yet; PublishAppeared below creates it.
+		case err != nil:
+			l.Error(err, "get MxlFlow for promote pass", "flowID", id)
+			continue
+		default:
+			if p.localLocationHealthy(&flow) {
+				continue
+			}
+		}
+		if err := p.PublishAppeared(ctx, id+FlowDirSuffix); err != nil {
+			l.Error(err, "promote stale local origin failed", "flowID", id)
+		}
+	}
+	return nil
+}
+
 // RunRenewLoop renews the Lease for every Origin flow currently on
 // disk on a fixed interval. Stops when ctx is done. A zero or
 // negative interval falls back to 10s -- a third of the agent's
@@ -354,6 +423,9 @@ func (p *Publisher) RunLocalRescan(ctx context.Context, interval time.Duration) 
 			}
 			if err := p.demoteVanishedLocalOrigins(ctx, ids); err != nil {
 				l.Error(err, "demote pass failed")
+			}
+			if err := p.promoteStaleLocalOrigins(ctx, ids); err != nil {
+				l.Error(err, "promote pass failed")
 			}
 		}
 	}
