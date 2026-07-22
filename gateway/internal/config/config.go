@@ -56,6 +56,20 @@ type Config struct {
 	// invalidate its Reconcile fast-path. Matches the operator-side
 	// MxlFlowMirror freshness expectation.
 	DegradedAfter time.Duration
+
+	// KubeAPIQPS is the sustained request rate the Kubernetes API
+	// client allows before throttling. The per-mirror status flushers
+	// publish roughly one PATCH per second per flowing mirror, so the
+	// sustained write rate scales with the flowing mirrors on the
+	// node. client-go falls back to 5 QPS when the limit is unset,
+	// which saturates at a handful of mirrors and queues status
+	// writes behind second-long delays - stale LastSentAt/LastGrainAt
+	// then skews the cross-side stuck-handshake comparison.
+	KubeAPIQPS float64
+
+	// KubeAPIBurst is the burst ceiling of the Kubernetes API client
+	// rate limiter.
+	KubeAPIBurst int
 }
 
 // FromFlags populates a Config from command-line flags.
@@ -84,6 +98,10 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"How often to refresh MxlNodeCapabilities status.")
 	fs.DurationVar(&c.DegradedAfter, "degraded-after", 10*time.Second,
 		"Grain-commit inactivity after which the target gateway demotes a mirror to Degraded.")
+	fs.Float64Var(&c.KubeAPIQPS, "kube-api-qps", 50,
+		"Sustained Kubernetes API request rate allowed before client-side throttling.")
+	fs.IntVar(&c.KubeAPIBurst, "kube-api-burst", 100,
+		"Burst ceiling of the Kubernetes API client rate limiter.")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -126,6 +144,12 @@ func (c *Config) Validate() error {
 	}
 	if len(c.Providers) == 0 {
 		return fmt.Errorf("--providers must list at least one provider")
+	}
+	if c.KubeAPIQPS <= 0 {
+		return fmt.Errorf("--kube-api-qps must be positive, got %v", c.KubeAPIQPS)
+	}
+	if c.KubeAPIBurst <= 0 {
+		return fmt.Errorf("--kube-api-burst must be positive, got %d", c.KubeAPIBurst)
 	}
 	return nil
 }
