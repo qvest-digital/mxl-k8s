@@ -48,6 +48,17 @@ type Config struct {
 	// target nodes' MxlNodeCapabilities; any other value is stamped
 	// onto every intent mirror verbatim and bypasses resolution.
 	Provider string
+
+	// KubeAPIQPS is the sustained request rate the Kubernetes API
+	// client allows before throttling. client-go falls back to
+	// 5 QPS when the limit is unset, which queues MxlFlow status
+	// publishes and intent mirror writes behind second-long delays
+	// during flow appear/vanish bursts.
+	KubeAPIQPS float64
+
+	// KubeAPIBurst is the burst ceiling of the Kubernetes API client
+	// rate limiter.
+	KubeAPIBurst int
 }
 
 // FromFlags populates a Config from command-line flags.
@@ -73,6 +84,10 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"Explicit libmxl-fabrics provider (tcp, verbs, efa, shm) stamped "+
 			"onto on-demand mirrors. Empty or 'auto' resolves per node from "+
 			"MxlNodeCapabilities.")
+	fs.Float64Var(&c.KubeAPIQPS, "kube-api-qps", 50,
+		"Sustained Kubernetes API request rate allowed before client-side throttling.")
+	fs.IntVar(&c.KubeAPIBurst, "kube-api-burst", 100,
+		"Burst ceiling of the Kubernetes API client rate limiter.")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -102,6 +117,12 @@ func (c *Config) Validate() error {
 		mxlv1alpha1.ProviderSHM:
 	default:
 		return fmt.Errorf("--provider %q is not one of tcp, verbs, efa, shm, auto", c.Provider)
+	}
+	if c.KubeAPIQPS <= 0 {
+		return fmt.Errorf("--kube-api-qps must be positive, got %v", c.KubeAPIQPS)
+	}
+	if c.KubeAPIBurst <= 0 {
+		return fmt.Errorf("--kube-api-burst must be positive, got %d", c.KubeAPIBurst)
 	}
 	return nil
 }
