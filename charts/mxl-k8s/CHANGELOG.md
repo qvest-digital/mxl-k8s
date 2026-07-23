@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.0-rc.10](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.9...charts/mxl-k8s/v1.0.0-rc.10) (2026-07-23)
+
+
+### Dependencies
+
+* **chart:** update mxl-k8s module images ([#169](https://github.com/qvest-digital/mxl-k8s/issues/169)) ([cbc21c3](https://github.com/qvest-digital/mxl-k8s/commit/cbc21c3eb45dcbccb3dafc8336a5580f4239eb2c))
+* **chart:** update mxl-k8s module images ([#171](https://github.com/qvest-digital/mxl-k8s/issues/171)) ([fa77fe5](https://github.com/qvest-digital/mxl-k8s/commit/fa77fe59a0accecf110ef063ee99eda3468f3749))
+
 ## [1.0.0-rc.9](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.8...charts/mxl-k8s/v1.0.0-rc.9) (2026-07-21)
 
 
