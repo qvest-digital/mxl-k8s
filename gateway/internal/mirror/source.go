@@ -140,8 +140,16 @@ type sourceEntry struct {
 	// entry's LastObserved timestamp for r.NodeName at the moment
 	// the FlowReader was opened. A subsequent reconcile that sees
 	// a newer timestamp tears the reader down and reopens it so
-	// the gateway tails the freshly rebound writer.
+	// the gateway tails the freshly rebound writer. May be nil (the
+	// location carried no LastObserved at open time); see
+	// originRotated for how that case is handled.
 	lastObservedOriginAt atomic.Pointer[time.Time]
+
+	// openedAt is the wall-clock time this entry's FlowReader was
+	// opened. Read-only after construction, set before the entry is
+	// published into r.sources under r.mu -- safe to read from
+	// Reconcile without its own synchronization, same as infoStr.
+	openedAt time.Time
 
 	// cancel stops the per-flow transfer goroutine; done is closed
 	// when the goroutine returns.
@@ -232,7 +240,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// re-registered the flow, typically after a pod restart).
 		// Tear down + reopen so the reader tails the fresh writer
 		// instead of holding a handle on a now-invalid ring.
-		if originRotated(existing.lastObservedOriginAt.Load(), originAt) {
+		if originRotated(existing.lastObservedOriginAt.Load(), originAt, existing.openedAt) {
 			l.Info("flow origin rotated, reopening reader")
 			r.closeEntry(req.NamespacedName)
 		} else if existing.infoStr == mirror.Status.TargetInfo {
@@ -288,6 +296,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		return ctrl.Result{}, fmt.Errorf("open initiator: %w", err)
 	}
+	entry.openedAt = time.Now()
 	if originAt != nil {
 		t := *originAt
 		entry.lastObservedOriginAt.Store(&t)
@@ -377,15 +386,49 @@ func (r *SourceReconciler) observedOriginAt(ctx context.Context, flowID string) 
 }
 
 // originRotated reports whether the freshly observed origin
-// timestamp is strictly after the one recorded on the entry. A nil
-// observation means "no data yet" and never counts as a rotation;
-// a nil baseline (entry never saw an origin timestamp) means the
-// first observation is not a rotation either.
-func originRotated(baseline, observed *time.Time) bool {
-	if observed == nil || baseline == nil {
+// timestamp indicates the flow's writer has rotated since this
+// reader was opened. A nil observation means "no data yet" and never
+// counts as a rotation.
+//
+// A non-nil baseline is the common case: the reader was opened while
+// the location already carried a LastObserved value, and any newer
+// observation is a rotation.
+//
+// A nil baseline means the reader opened while the location carried
+// no LastObserved yet -- Stale, or an appearance whose status write
+// had not landed (a status-update conflict, or a fanotify event that
+// raced the watcher's startup). Treating that case as "never rotated"
+// is wrong: lastObservedOriginAt is set once at open and never
+// reassigned except by a rotation-triggered reopen, so a permanently
+// false comparison leaves the reader unable to detect any future
+// rotation for its entire lifetime -- exactly the failure mode that
+// stranded a flow's mirror on a dead ring for two hours during a
+// production incident. Falling back to openedAt instead means any
+// origin observation landing after the reader opened counts as a
+// rotation, which can trigger one avoidable reopen (the writer that
+// created the pre-open observation might still be the live one) but
+// never silently strands the reader.
+func originRotated(baseline, observed *time.Time, openedAt time.Time) bool {
+	if observed == nil {
 		return false
 	}
-	return observed.After(*baseline)
+	if baseline != nil {
+		return observed.After(*baseline)
+	}
+	// observed is sourced from MxlFlow.status.locations[].lastObserved,
+	// a metav1.Time -- the Kubernetes API always truncates timestamps
+	// to second precision on the round trip through the apiserver,
+	// while openedAt is a full-precision local time.Time. Comparing
+	// them directly is unsafe: openedAt almost always carries a
+	// nonzero sub-second component, so a genuinely later observation
+	// that floors to the same second still compares Before it,
+	// spuriously reporting "not rotated". Truncate openedAt to the
+	// same second-floor grain before comparing so both sides use
+	// consistent precision; the cost is, at most, one extra reopen
+	// for an observation that turns out to predate the current
+	// reader by under a second, which is cheap next to silently
+	// stranding the reader for its entire lifetime.
+	return !observed.Before(openedAt.Truncate(time.Second))
 }
 
 // libmxlOpener is the production initiatorOpener implementation. It
