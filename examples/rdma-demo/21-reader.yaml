@@ -39,21 +39,23 @@ spec:
         capabilities:
           add: ["IPC_LOCK", "SYS_RESOURCE"]
       volumeMounts:
-        - name: mxl-domain
-          mountPath: /run/mxl/domain
+        # Mount /run/mxl as a whole rather than the domain subdir and
+        # agent.sock separately. A single-file hostPath mount pins the
+        # socket's inode at container start; when the agent DaemonSet
+        # restarts it unlinks and recreates agent.sock, and an
+        # already-running consumer pod would keep talking to the
+        # orphaned inode forever. Mounting the directory re-resolves
+        # the path on every connect, so it always reaches the agent
+        # that's actually listening.
+        - name: mxl-run
+          mountPath: /run/mxl
         - name: intent-shim
           mountPath: /opt/mxl-intent
           readOnly: true
-        - name: agent-sock
-          mountPath: /run/mxl/agent.sock
   volumes:
-    - name: mxl-domain
+    - name: mxl-run
       hostPath:
-        path: /run/mxl/domain
+        path: /run/mxl
         type: DirectoryOrCreate
     - name: intent-shim
       emptyDir: {}
-    - name: agent-sock
-      hostPath:
-        path: /run/mxl/agent.sock
-        type: Socket

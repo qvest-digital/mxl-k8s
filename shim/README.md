@@ -26,7 +26,15 @@ In a consumer pod:
 3. Set `LD_PRELOAD=/path/to/libmxl-intent.so`.
 4. Mount the agent's UDS (`/run/mxl/agent.sock`) into the main
    container so the shim can reach it. `MXL_INTENT_SOCK` overrides
-   the default path.
+   the default path. Mount the containing directory (`/run/mxl`),
+   not the socket file by itself: a single-file hostPath mount
+   pins the socket's inode at container start, and the agent
+   unlinks and recreates `agent.sock` on every restart. A consumer
+   pod already running when that happens keeps the old, orphaned
+   inode and never reaches the agent again until the pod itself
+   restarts. Mounting the directory re-resolves the path on every
+   connect, so it always reaches whichever agent is currently
+   listening.
 
 See `examples/tcp-demo/21-reader.yaml` for a working example.
 
