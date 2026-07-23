@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.0-rc.7](https://github.com/qvest-digital/mxl-k8s/compare/agent/v1.0.0-rc.6...agent/v1.0.0-rc.7) (2026-07-23)
+
+
+### Bug Fixes
+
+* **gateway:** detect origin rotation for a reader opened before Stale clears ([#166](https://github.com/qvest-digital/mxl-k8s/issues/166)) ([18addab](https://github.com/qvest-digital/mxl-k8s/commit/18addab361ae3c1f13b59dd26d3b4e1fa781b8fe))
+* **gateway:** gate stuck-handshake recovery on source activity ([#165](https://github.com/qvest-digital/mxl-k8s/issues/165)) ([4c330dd](https://github.com/qvest-digital/mxl-k8s/commit/4c330ddd1a854f63526fe65378e6a413dab6fee9))
+
 ## [1.0.0-rc.6](https://github.com/qvest-digital/mxl-k8s/compare/agent/v1.0.0-rc.5...agent/v1.0.0-rc.6) (2026-07-21)
 
 
