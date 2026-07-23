@@ -41,6 +41,11 @@ func TestFromFlags_DefaultsFireWhenArgsProvided(t *testing.T) {
 	assert.Equal(t, 30*time.Second, c.ResyncPeriod)
 	assert.Equal(t, "/run/mxl/agent.sock", c.IntentSocketPath)
 	assert.Equal(t, 5*time.Second, c.MaterializeTimeout)
+	assert.Equal(t, 50.0, c.KubeAPIQPS,
+		"client-go's 5 QPS fallback queues status publishes behind "+
+			"second-long delays during flow appear/vanish bursts; the "+
+			"default must stay well above that")
+	assert.Equal(t, 100, c.KubeAPIBurst)
 }
 
 func TestFromFlags_OverridesAreRespected(t *testing.T) {
@@ -104,18 +109,28 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:    "valid",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1"},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIQPS: 50, KubeAPIBurst: 100},
 			wantErr: "",
 		},
 		{
 			name:    "explicit provider override",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", Provider: "verbs"},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", Provider: "verbs", KubeAPIQPS: 50, KubeAPIBurst: 100},
 			wantErr: "",
 		},
 		{
 			name:    "auto provider is accepted (resolves per node)",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", Provider: "auto"},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", Provider: "auto", KubeAPIQPS: 50, KubeAPIBurst: 100},
 			wantErr: "",
+		},
+		{
+			name:    "zero qps rejected",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIBurst: 100},
+			wantErr: "--kube-api-qps",
+		},
+		{
+			name:    "zero burst rejected",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIQPS: 50},
+			wantErr: "--kube-api-burst",
 		},
 		{
 			name:    "unknown provider rejected",

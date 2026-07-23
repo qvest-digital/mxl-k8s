@@ -904,13 +904,36 @@ func (f *targetWatchdogFixture) stopFlusher(t *testing.T) {
 	f.cancel = nil
 }
 
+// stampSourceActivity publishes a LastSentAt onto the fixture's
+// mirror status. The neverHandshook branch requires source activity
+// after fabricOpenedAt before it escalates, so watchdog tests that
+// want the branch to fire stamp a fresh LastSentAt first.
+//
+// The status is re-fetched before each attempt so concurrent flusher
+// writes do not collide on resourceVersion (same shape as
+// armPostHandshakeWedge).
+func (f *targetWatchdogFixture) stampSourceActivity(t *testing.T, at time.Time) {
+	t.Helper()
+	for i := 0; i < 5; i++ {
+		var current mxlv1alpha1.MxlFlowMirror
+		require.NoError(t, f.c.Get(context.Background(), f.key, &current))
+		current.Status.LastSentAt = &metav1.Time{Time: at}
+		if err := f.c.Status().Update(context.Background(), &current); err == nil {
+			return
+		}
+	}
+	t.Fatal("stampSourceActivity: status update raced concurrent writes after 5 attempts")
+}
+
 func TestRunFlusher_StuckHandshake_TriggersRecovery(t *testing.T) {
-	// Fabric opened in the distant past, zero commits: the flusher
-	// must escalate into the recovery seam exactly once and increment
-	// recoveryAttempts. Without the escalation a silently-wedged
-	// libmxl-fabrics target stays Ready forever (no fatal ReadGrain
-	// to trigger onFatal) and consumer FlowReaders see no grains.
+	// Fabric opened in the distant past, zero commits, source active:
+	// the flusher must escalate into the recovery seam exactly once
+	// and increment recoveryAttempts. Without the escalation a
+	// silently-wedged libmxl-fabrics target stays Ready forever (no
+	// fatal ReadGrain to trigger onFatal) and consumer FlowReaders
+	// see no grains.
 	f := newTargetWatchdogFixture(t, 4)
+	f.stampSourceActivity(t, time.Now())
 	f.startFlusher(t)
 	defer f.stopFlusher(t)
 
@@ -925,6 +948,52 @@ func TestRunFlusher_StuckHandshake_TriggersRecovery(t *testing.T) {
 	}, time.Second, 5*time.Millisecond,
 		"the watchdog spawn must increment recoveryAttempts so the cap "+
 			"branch can count consecutive failures")
+}
+
+func TestRunFlusher_NeverHandshook_IdleSource_DoesNotTrigger(t *testing.T) {
+	// Zero commits since the fabric open is not enough to call a
+	// target wedged: a mirror status without any LastSentAt means the
+	// producer has never pushed a grain at this fabric side, and a
+	// rebuild cannot attract data that is not being sent. Without the
+	// source-activity gate an idle flow loops spawn->cap->drop->reopen
+	// forever, closing the writer (and every consumer FlowReader)
+	// every few seconds for as long as the producer stays quiet.
+	f := newTargetWatchdogFixture(t, 4)
+	f.startFlusher(t)
+	defer f.stopFlusher(t)
+
+	select {
+	case <-f.spawnCh:
+		t.Fatal("watchdog spawned recovery for a flow whose source never " +
+			"sent; neverHandshook requires LastSentAt after fabricOpenedAt")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	assert.Equal(t, uint32(0), f.entry.recoveryAttempts.Load(),
+		"an idle flow must not accumulate recovery attempts")
+}
+
+func TestRunFlusher_NeverHandshook_StaleSource_DoesNotTrigger(t *testing.T) {
+	// A LastSentAt that predates fabricOpenedAt belongs to a previous
+	// fabric side: those grains can never commit here, so they say
+	// nothing about the current handshake. Only source activity after
+	// the current open marks a genuine wedge.
+	f := newTargetWatchdogFixture(t, 4)
+	// Fixture stamps fabricOpenedAt an hour in the past; a send two
+	// hours ago predates it.
+	f.stampSourceActivity(t, time.Now().Add(-2*time.Hour))
+	f.startFlusher(t)
+	defer f.stopFlusher(t)
+
+	select {
+	case <-f.spawnCh:
+		t.Fatal("watchdog spawned recovery on pre-open source activity; " +
+			"neverHandshook requires LastSentAt after fabricOpenedAt")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	assert.Equal(t, uint32(0), f.entry.recoveryAttempts.Load(),
+		"pre-open source activity must not accumulate recovery attempts")
 }
 
 func TestRunFlusher_CommitDisarmsWatchdog(t *testing.T) {
@@ -960,6 +1029,7 @@ func TestRunFlusher_CapsRecoveryAttempts(t *testing.T) {
 	// exact spawn count + terminal status + entry removal + flusher
 	// exit in one test.
 	f := newTargetWatchdogFixture(t, int(maxStuckRebuilds)+2)
+	f.stampSourceActivity(t, time.Now())
 	f.startFlusher(t)
 
 	for i := uint32(0); i < maxStuckRebuilds; i++ {
@@ -1014,6 +1084,7 @@ func TestRunFlusher_CapPath_TerminalStatus(t *testing.T) {
 	// unable to distinguish this failure mode from other terminal
 	// states.
 	f := newTargetWatchdogFixture(t, int(maxStuckRebuilds)+2)
+	f.stampSourceActivity(t, time.Now())
 	f.startFlusher(t)
 
 	for i := uint32(0); i < maxStuckRebuilds; i++ {
@@ -1069,6 +1140,7 @@ func TestRunFlusher_CapResetsAfterCommit(t *testing.T) {
 		f.entry.recovering.Store(false)
 	}
 
+	f.stampSourceActivity(t, time.Now())
 	f.startFlusher(t)
 	defer func() {
 		if f.cancel != nil {
@@ -1146,6 +1218,7 @@ func TestRunFlusher_CapPath_NoDeadlock(t *testing.T) {
 	cancelCalled := make(chan struct{})
 	f.entry.cancel = func() { close(cancelCalled) }
 
+	f.stampSourceActivity(t, time.Now())
 	f.startFlusher(t)
 
 	for i := uint32(0); i < maxStuckRebuilds; i++ {
@@ -1197,6 +1270,7 @@ func TestRunFlusher_RecoveryGate_NoDoubleSpawnUnderRace(t *testing.T) {
 		// recovery still in flight when the next flusher tick fires.
 	}
 
+	f.stampSourceActivity(t, time.Now())
 	f.startFlusher(t)
 	defer f.stopFlusher(t)
 

@@ -979,9 +979,16 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// ErrNotReady forever - the progress loop never raises
 		// onFatal, so recoverFromFatalError never fires, and the
 		// flusher would otherwise just oscillate between Ready and
-		// Degraded as time goes by. Spawn recovery explicitly when
-		// no commit has landed since the fabric side opened and the
-		// stuck-handshake window has elapsed.
+		// Degraded as time goes by. Spawn recovery when no commit has
+		// landed since the fabric side opened, the stuck-handshake
+		// window has elapsed, *and* mirror.Status.LastSentAt postdates
+		// the open: zero commits alone cannot distinguish a wedged
+		// handshake from a flow whose producer simply is not sending.
+		// Without the source-activity gate an idle flow loops
+		// spawn->cap->drop->reopen forever - each reopen resets
+		// fabricOpenedAt, the window elapses again, and the cycle
+		// closes the writer (and every consumer FlowReader) every few
+		// seconds for as long as the producer stays quiet.
 		//
 		// postHandshakeWedge: the handshake succeeded and at least
 		// one grain committed, then the fabric side wedged silently.
@@ -998,9 +1005,16 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// the flusher directly): the watchdog must not fire on an
 		// entry whose fabric side was never actually opened.
 		openedAt := entry.fabricOpenedAt.Load()
-		neverHandshook := openedAt != nil &&
+		neverHandshook := false
+		if openedAt != nil &&
 			entry.commits.Load() == entry.commitsAtFabricOpen.Load() &&
-			time.Since(*openedAt) > r.stuckHandshakeAfter()
+			time.Since(*openedAt) > r.stuckHandshakeAfter() {
+			if mirror, err := r.fetchMirror(ctx, key); err == nil &&
+				mirror.Status.LastSentAt != nil &&
+				mirror.Status.LastSentAt.Time.After(*openedAt) {
+				neverHandshook = true
+			}
+		}
 		postHandshakeWedge := false
 		if openedAt != nil && entry.commits.Load() > entry.commitsAtFabricOpen.Load() {
 			lastCommit := entry.lastCommitAt.Load()
@@ -1087,9 +1101,16 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 				// LastSentAt change that lands in the same window
 				// must be observed before the spawn commits.
 				openedAt2 := entry.fabricOpenedAt.Load()
-				neverHandshook2 := openedAt2 != nil &&
+				neverHandshook2 := false
+				if openedAt2 != nil &&
 					entry.commits.Load() == entry.commitsAtFabricOpen.Load() &&
-					time.Since(*openedAt2) > r.stuckHandshakeAfter()
+					time.Since(*openedAt2) > r.stuckHandshakeAfter() {
+					if mirror, err := r.fetchMirror(ctx, key); err == nil &&
+						mirror.Status.LastSentAt != nil &&
+						mirror.Status.LastSentAt.Time.After(*openedAt2) {
+						neverHandshook2 = true
+					}
+				}
 				postHandshakeWedge2 := false
 				if openedAt2 != nil && entry.commits.Load() > entry.commitsAtFabricOpen.Load() {
 					lastCommit2 := entry.lastCommitAt.Load()

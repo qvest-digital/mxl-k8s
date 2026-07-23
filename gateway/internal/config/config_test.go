@@ -43,6 +43,11 @@ func TestFromFlags_DefaultsAndProvidersCSV(t *testing.T) {
 		"pprof endpoint is opt-in; the default must leave it off so a "+
 			"production gateway never serves /debug/pprof unprompted")
 	assert.Equal(t, 30*time.Second, c.ResyncPeriod)
+	assert.Equal(t, 50.0, c.KubeAPIQPS,
+		"client-go's 5 QPS fallback throttles the per-mirror status "+
+			"flushers at a handful of flowing mirrors; the default must "+
+			"stay well above that")
+	assert.Equal(t, 100, c.KubeAPIBurst)
 	require.Equal(t, []fabrics.Provider{fabrics.ProviderTCP}, c.Providers,
 		"default provider list must be exactly [tcp]; --providers tcp is the only "+
 			"setup that works out of the box without RDMA hardware on every node")
@@ -147,7 +152,9 @@ func TestValidate(t *testing.T) {
 		{"missing domain", Config{NodeName: "n", Providers: []fabrics.Provider{fabrics.ProviderTCP}}, "--domain-path"},
 		{"relative domain", Config{NodeName: "n", DomainPath: "rel", Providers: []fabrics.Provider{fabrics.ProviderTCP}}, "absolute"},
 		{"empty providers", Config{NodeName: "n", DomainPath: "/d"}, "--providers"},
-		{"valid", Config{NodeName: "n", DomainPath: "/d", Providers: []fabrics.Provider{fabrics.ProviderTCP}}, ""},
+		{"zero qps", Config{NodeName: "n", DomainPath: "/d", Providers: []fabrics.Provider{fabrics.ProviderTCP}, KubeAPIBurst: 100}, "--kube-api-qps"},
+		{"zero burst", Config{NodeName: "n", DomainPath: "/d", Providers: []fabrics.Provider{fabrics.ProviderTCP}, KubeAPIQPS: 50}, "--kube-api-burst"},
+		{"valid", Config{NodeName: "n", DomainPath: "/d", Providers: []fabrics.Provider{fabrics.ProviderTCP}, KubeAPIQPS: 50, KubeAPIBurst: 100}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

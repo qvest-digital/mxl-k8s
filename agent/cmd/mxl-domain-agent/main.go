@@ -60,6 +60,10 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("build kubeconfig: %w", err)
 	}
+	// client-go defaults to 5 QPS / 10 burst when the limits are left
+	// zero; flow appear/vanish bursts on a busy domain exceed that.
+	restCfg.QPS = float32(cfg.KubeAPIQPS)
+	restCfg.Burst = cfg.KubeAPIBurst
 	kClient, err := client.New(restCfg, client.Options{Scheme: scheme})
 	if err != nil {
 		return fmt.Errorf("build client: %w", err)

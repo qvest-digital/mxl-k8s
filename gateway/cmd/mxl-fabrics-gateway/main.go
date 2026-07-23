@@ -60,6 +60,11 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("build kubeconfig: %w", err)
 	}
+	// client-go defaults to 5 QPS / 10 burst when the limits are left
+	// zero; the per-mirror status flushers alone exceed that with a
+	// handful of flowing mirrors on the node.
+	restCfg.QPS = float32(cfg.KubeAPIQPS)
+	restCfg.Burst = cfg.KubeAPIBurst
 
 	// Open libmxl handles up front so any misconfiguration (bad
 	// domain path, missing .so) fails before the manager comes up.
