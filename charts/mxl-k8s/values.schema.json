@@ -911,7 +911,7 @@
               "type": "string"
             },
             "tag": {
-              "default": "v1.0.0-rc.7",
+              "default": "v1.0.0-rc.8",
               "description": "Image tag for the gateway, pinned to the release this chart version bundles and kept current by Renovate. Set this or image.digest; with both empty, rendering fails.",
               "required": [],
               "title": "tag"
