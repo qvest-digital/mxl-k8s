@@ -13,6 +13,7 @@ package intent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -209,12 +210,78 @@ func (d *Dispatcher) resolveSourceNode(ctx context.Context, flowID string) (stri
 	return "", false, nil
 }
 
+// repointMirror patches spec.sourceNode, and the provider that
+// follows from it, when the flow's origin has moved since the mirror
+// was created.
+//
+// Mirror names do not encode the source node, so a mirror created
+// while the origin sat on one node keeps addressing that node for
+// its entire life unless something rewrites the field. The node can
+// be drained, cordoned, or deleted outright and the mirror stays
+// pointed at it, permanently Degraded, while the consumer's every
+// retry finds the same stale object.
+//
+// Only intent-authored mirrors are touched. The receiver reconciler
+// owns drift on the mirrors it authored (patchMirrorIfDrifted) and
+// two writers on one field would fight over it.
+//
+// The merge-patch lists only the two spec keys, so the agent-owned
+// Requestor field and the labels that decide the GC contract stay
+// where they are.
+func (d *Dispatcher) repointMirror(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, flowID, sourceNode string) error {
+	if _, intent := mirror.Labels[mxlv1alpha1.LabelCreatedByIntent]; !intent {
+		return nil
+	}
+	if mirror.Spec.SourceNode == sourceNode {
+		return nil
+	}
+
+	provider, err := d.resolveProvider(ctx, flowID, sourceNode)
+	if err != nil {
+		return fmt.Errorf("resolve provider for repointed source %s: %w", sourceNode, err)
+	}
+
+	patch, err := json.Marshal(map[string]any{
+		"spec": map[string]any{
+			"sourceNode": sourceNode,
+			"provider":   string(provider),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal repoint patch: %w", err)
+	}
+	if err := d.Client.Patch(ctx, mirror, client.RawPatch(types.MergePatchType, patch)); err != nil {
+		return fmt.Errorf("repoint mirror %s/%s to source %s: %w",
+			mirror.Namespace, mirror.Name, sourceNode, err)
+	}
+
+	log.FromContext(ctx).WithName("intent").Info("repointed mirror to new origin",
+		"flowID", flowID,
+		"mirror", mirror.Namespace+"/"+mirror.Name,
+		"sourceNode", sourceNode,
+		"provider", provider)
+	return nil
+}
+
 func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string, pod metav1.Object) (*mxlv1alpha1.MxlFlowMirror, error) {
 	name := MirrorName(flowID, d.NodeName)
 
 	var existing mxlv1alpha1.MxlFlowMirror
 	err := d.Client.Get(ctx, types.NamespacedName{Namespace: pod.GetNamespace(), Name: name}, &existing)
 	if err == nil {
+		// Mirror names are a pure function of (flowID, targetNode),
+		// so a mirror still working through its finalizers occupies
+		// the only name this consumer can ever use. Handing it back
+		// would block the caller on an object that cannot become
+		// Ready. Fail instead; the shim retries and the name frees
+		// up once deletion completes.
+		if !existing.DeletionTimestamp.IsZero() {
+			return nil, fmt.Errorf("mirror %s/%s is terminating",
+				existing.Namespace, existing.Name)
+		}
+		if err := d.repointMirror(ctx, &existing, flowID, sourceNode); err != nil {
+			return nil, err
+		}
 		// A mirror with the same (flow, target node) name already
 		// exists. The pre-existing object is functionally
 		// sufficient for this consumer pod; reuse it as-is. The
