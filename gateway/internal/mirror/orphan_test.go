@@ -17,9 +17,8 @@ import (
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
-// deletingMirror builds a mirror that is already terminating and
-// carries both gateway finalizers. Holding both lets each test assert
-// that a reconciler drops only its own.
+// deletingMirror carries both gateway finalizers so each test can
+// assert a reconciler drops only its own.
 func deletingMirror(sourceNode, targetNode string) *mxlv1alpha1.MxlFlowMirror {
 	now := metav1.Now()
 	return &mxlv1alpha1.MxlFlowMirror{
@@ -40,13 +39,9 @@ func deletingMirror(sourceNode, targetNode string) *mxlv1alpha1.MxlFlowMirror {
 	}
 }
 
-// TestReconcile_SourceFinalizerReapedWhenSourceNodeGone covers the
-// deadlock that leaves a mirror in Terminating forever. Every branch
-// of the source reconciler past the ownership check is gated on
-// spec.sourceNode naming this node, so when that node is removed from
-// the cluster the only pod that would run the teardown is gone with
-// it. Nothing else owns the finalizer, so without the reaper the
-// object is undeletable for the lifetime of the cluster.
+// Without the reaper a mirror whose source node was removed is
+// undeletable: no surviving gateway claims it and nothing else owns
+// the finalizer.
 func TestReconcile_SourceFinalizerReapedWhenSourceNodeGone(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	mirror := deletingMirror("node-reclaimed", "node-c")
@@ -79,10 +74,9 @@ func TestReconcile_SourceFinalizerReapedWhenSourceNodeGone(t *testing.T) {
 		"the source reconciler must not touch the target side's finalizer")
 }
 
-// TestReconcile_SourceFinalizerKeptWhileSourceNodeExists is the guard
-// on the reaper: while the node is registered its gateway owns the
-// teardown, and stripping the finalizer here would race that pod into
-// leaking an open initiator.
+// The guard on the reaper: a registered node still has a gateway
+// that owns the teardown, and stripping the finalizer would race it
+// into leaking an open initiator.
 func TestReconcile_SourceFinalizerKeptWhileSourceNodeExists(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	mirror := deletingMirror("node-b", "node-c")
@@ -115,9 +109,8 @@ func TestReconcile_SourceFinalizerKeptWhileSourceNodeExists(t *testing.T) {
 		"while the source node is registered its gateway owns the teardown")
 }
 
-// TestReconcile_TargetFinalizerReapedWhenTargetNodeGone is the
-// target-side mirror image: the same ownership gate gives the same
-// orphaned finalizer when a target node is reclaimed.
+// Target-side mirror image: the same ownership gate orphans the same
+// way when a target node is reclaimed.
 func TestReconcile_TargetFinalizerReapedWhenTargetNodeGone(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	mirror := deletingMirror("node-b", "node-reclaimed")
@@ -148,8 +141,7 @@ func TestReconcile_TargetFinalizerReapedWhenTargetNodeGone(t *testing.T) {
 		"the target reconciler must not touch the source side's finalizer")
 }
 
-// TestReconcile_TargetFinalizerKeptWhileTargetNodeExists mirrors the
-// source-side guard.
+// Target-side counterpart of the source guard.
 func TestReconcile_TargetFinalizerKeptWhileTargetNodeExists(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	mirror := deletingMirror("node-b", "node-c")
@@ -179,9 +171,8 @@ func TestReconcile_TargetFinalizerKeptWhileTargetNodeExists(t *testing.T) {
 		"while the target node is registered its gateway owns the teardown")
 }
 
-// TestReconcile_LastOrphanedFinalizerCompletesDeletion checks the end
-// state the incident actually needs: once the reaped finalizer is the
-// only one left, the API server is free to remove the object.
+// The end state the incident needs: reaping the last finalizer lets
+// the deletion complete.
 func TestReconcile_LastOrphanedFinalizerCompletesDeletion(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	now := metav1.Now()

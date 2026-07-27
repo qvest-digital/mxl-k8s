@@ -69,10 +69,8 @@ type SourceReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	// APIReader is an uncached reader used only for the Node lookup
-	// that gates orphaned-finalizer reaping. SetupWithManager binds
-	// it to the manager's API reader; tests may set it directly. A
-	// nil value falls back to Client.
+	// APIReader is an uncached reader for the Node lookup that gates
+	// orphaned-finalizer reaping. Nil falls back to Client.
 	APIReader client.Reader
 
 	// NodeName is the Kubernetes node this gateway runs on. Mirrors
@@ -175,19 +173,11 @@ type sourceEntry struct {
 
 // reapOrphanedFinalizer drops SourceFinalizerName from a deleting
 // mirror whose spec.sourceNode names a Node that no longer exists.
-//
-// The source reconciler runs as a DaemonSet and every other branch
-// of Reconcile is gated on spec.sourceNode naming this node, so the
-// only pod that would otherwise complete the teardown is the one
-// that ran on the departed node. Nothing recreates it, no other
-// controller owns this finalizer, and the object hangs in
-// Terminating for the lifetime of the cluster.
-//
-// Node existence is what keeps this from racing a live owner: while
-// the Node object is present the finalizer is left alone and the
-// owning gateway performs the real teardown. Once the Node is gone
-// the libmxl reader and initiator it tracked went with it, so there
-// is no source-side state left to release.
+// Every other branch is gated on spec.sourceNode naming this node
+// and the gateway is a DaemonSet, so the pod that would run the
+// teardown died with the node and nothing else owns the finalizer.
+// Node existence is the guard against racing a live owner; once the
+// Node is gone so is the reader state the finalizer protected.
 func (r *SourceReconciler) reapOrphanedFinalizer(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror) (ctrl.Result, error) {
 	if mirror.DeletionTimestamp.IsZero() ||
 		!controllerutil.ContainsFinalizer(mirror, SourceFinalizerName) {
@@ -218,8 +208,7 @@ func (r *SourceReconciler) reapOrphanedFinalizer(ctx context.Context, mirror *mx
 	return ctrl.Result{}, nil
 }
 
-// nodeReader returns the reader used for Node lookups, preferring
-// the uncached APIReader when SetupWithManager has bound one.
+// nodeReader prefers the uncached APIReader SetupWithManager binds.
 func (r *SourceReconciler) nodeReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader

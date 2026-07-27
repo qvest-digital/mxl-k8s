@@ -14,13 +14,10 @@ import (
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
-// TestEnsureMirror_RepointsIntentMirrorAfterOriginMove covers a flow
-// whose origin moved to another node after the mirror was created.
-// Mirror names are a function of (flowID, targetNode) only, so the
-// same consumer keeps resolving to the same object; leaving
+// Mirror names encode only (flowID, targetNode), so a consumer keeps
+// resolving to the same object while the origin moves. Leaving
 // spec.sourceNode at its create-time value pins the mirror to a node
-// that may have been drained or deleted, and it stays Degraded there
-// forever.
+// that may since have been drained or deleted.
 func TestEnsureMirror_RepointsIntentMirrorAfterOriginMove(t *testing.T) {
 	scheme := newScheme(t)
 	existing := &mxlv1alpha1.MxlFlowMirror{
@@ -75,9 +72,8 @@ func TestEnsureMirror_RepointsIntentMirrorAfterOriginMove(t *testing.T) {
 		"the repoint patch must not disturb the labels that decide GC ownership")
 }
 
-// TestEnsureMirror_ReceiverMirrorNotRepointed keeps the two ownership
-// domains apart. The receiver reconciler patches drift on the mirrors
-// it authored; a second writer on the same field would fight it.
+// Keeps the two ownership domains apart: patchMirrorIfDrifted owns
+// drift on receiver-authored mirrors.
 func TestEnsureMirror_ReceiverMirrorNotRepointed(t *testing.T) {
 	scheme := newScheme(t)
 	existing := &mxlv1alpha1.MxlFlowMirror{
@@ -121,11 +117,9 @@ func TestEnsureMirror_ReceiverMirrorNotRepointed(t *testing.T) {
 		"receiver-authored mirrors are the receiver reconciler's to repoint")
 }
 
-// TestEnsureMirror_TerminatingMirrorNotReused stops the dispatcher
-// handing a consumer an object that is on its way out. Because the
-// name is derived from (flowID, targetNode), a mirror stuck on a
-// finalizer occupies the only name this consumer can use; returning
-// it would park the caller on a mirror that can never go Ready.
+// A mirror stuck on a finalizer occupies the only name this consumer
+// can use; returning it parks the caller on an object that can never
+// go Ready.
 func TestEnsureMirror_TerminatingMirrorNotReused(t *testing.T) {
 	scheme := newScheme(t)
 	now := metav1.Now()

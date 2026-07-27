@@ -10,29 +10,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// orphanRecheckInterval is how often a reconciler re-examines a
-// deleting MxlFlowMirror that belongs to another node. A Node
-// deletion produces no event on the MxlFlowMirror, so a mirror whose
-// deletion started while its node was still registered would
-// otherwise never be looked at again once the owning gateway died
-// mid-teardown. The interval only costs a cached Get per deleting
-// foreign mirror; in the common case the owning gateway completes
-// the deletion long before the first re-check fires.
+// orphanRecheckInterval re-examines a deleting foreign mirror on a
+// timer, because a Node deletion raises no event on the mirror.
 const orphanRecheckInterval = time.Minute
 
-// nodeGone reports whether the named Node object is absent from the
-// API.
-//
-// The read deliberately bypasses the manager cache. The gateway runs
-// as a DaemonSet and has no other reason to hold a cluster-wide Node
-// informer; a cached Get would start one on every node in the
-// cluster to serve a lookup that only fires while a mirror is being
-// deleted.
-//
-// An empty nodeName reports false: a mirror with no node recorded
-// has no owner to be orphaned from, and reaping on that basis would
-// strip the finalizer from an object a gateway may still be setting
-// up.
+// nodeGone reports whether the named Node is absent from the API.
+// The read bypasses the manager cache so a DaemonSet does not carry
+// a cluster-wide Node informer for a lookup that only fires while a
+// mirror is deleting. An empty nodeName reports false: a mirror with
+// no node recorded has no owner to be orphaned from.
 func nodeGone(ctx context.Context, reader client.Reader, nodeName string) (bool, error) {
 	if nodeName == "" {
 		return false, nil

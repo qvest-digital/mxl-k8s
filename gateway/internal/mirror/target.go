@@ -80,10 +80,8 @@ type TargetReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	// APIReader is an uncached reader used only for the Node lookup
-	// that gates orphaned-finalizer reaping. SetupWithManager binds
-	// it to the manager's API reader; tests may set it directly. A
-	// nil value falls back to Client.
+	// APIReader is an uncached reader for the Node lookup that gates
+	// orphaned-finalizer reaping. Nil falls back to Client.
 	APIReader client.Reader
 
 	// NodeName is the Kubernetes node this gateway runs on. Mirrors
@@ -214,10 +212,8 @@ type targetEntry struct {
 
 // reapOrphanedFinalizer drops TargetFinalizerName from a deleting
 // mirror whose spec.targetNode names a Node that no longer exists.
-// Symmetric with the source-side reaper: the target reconciler is
-// equally a DaemonSet gated on spec.targetNode, so a mirror whose
-// target node was removed has no pod left to complete its teardown
-// and would hang in Terminating indefinitely.
+// Symmetric with the source-side reaper; same DaemonSet gate, same
+// orphaned finalizer when the node it named is removed.
 func (r *TargetReconciler) reapOrphanedFinalizer(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror) (ctrl.Result, error) {
 	if mirror.DeletionTimestamp.IsZero() ||
 		!controllerutil.ContainsFinalizer(mirror, TargetFinalizerName) {
@@ -248,8 +244,7 @@ func (r *TargetReconciler) reapOrphanedFinalizer(ctx context.Context, mirror *mx
 	return ctrl.Result{}, nil
 }
 
-// nodeReader returns the reader used for Node lookups, preferring
-// the uncached APIReader when SetupWithManager has bound one.
+// nodeReader prefers the uncached APIReader SetupWithManager binds.
 func (r *TargetReconciler) nodeReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
