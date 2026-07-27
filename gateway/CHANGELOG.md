@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.0-rc.9](https://github.com/qvest-digital/mxl-k8s/compare/gateway/v1.0.0-rc.8...gateway/v1.0.0-rc.9) (2026-07-27)
+
+
+### Features
+
+* **api:** share MirrorName and DefaultLeaseDuration ([b3ba4df](https://github.com/qvest-digital/mxl-k8s/commit/b3ba4df1def925b50b3659359c68a0ee218fe5c7))
+
+
+### Bug Fixes
+
+* **agent:** repoint intent mirrors when the flow origin moves ([b3ba4df](https://github.com/qvest-digital/mxl-k8s/commit/b3ba4df1def925b50b3659359c68a0ee218fe5c7))
+* **agent:** report a stale Origin distinctly from an unknown flow ([b3ba4df](https://github.com/qvest-digital/mxl-k8s/commit/b3ba4df1def925b50b3659359c68a0ee218fe5c7))
+* **gateway:** reap mirror finalizers orphaned by node removal ([#176](https://github.com/qvest-digital/mxl-k8s/issues/176)) ([b3ba4df](https://github.com/qvest-digital/mxl-k8s/commit/b3ba4df1def925b50b3659359c68a0ee218fe5c7))
+
+
+### Dependencies
+
+* **api:** bump api module to v1.0.0-rc.5 ([#183](https://github.com/qvest-digital/mxl-k8s/issues/183)) ([7487fa2](https://github.com/qvest-digital/mxl-k8s/commit/7487fa2e5b8350b0e888f995fae583921ea53669))
+* **gomod:** update go modules to v0.36.3 ([#174](https://github.com/qvest-digital/mxl-k8s/issues/174)) ([594fb72](https://github.com/qvest-digital/mxl-k8s/commit/594fb72a4d43fa06db11ce08cc9c49b91fea678c))
+
 ## [1.0.0-rc.8](https://github.com/qvest-digital/mxl-k8s/compare/gateway/v1.0.0-rc.7...gateway/v1.0.0-rc.8) (2026-07-23)
 
 
