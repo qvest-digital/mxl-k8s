@@ -80,6 +80,12 @@ type TargetReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// APIReader is an uncached reader used only for the Node lookup
+	// that gates orphaned-finalizer reaping. SetupWithManager binds
+	// it to the manager's API reader; tests may set it directly. A
+	// nil value falls back to Client.
+	APIReader client.Reader
+
 	// NodeName is the Kubernetes node this gateway runs on. Mirrors
 	// with spec.targetNode set to a different node are ignored.
 	NodeName string
@@ -206,6 +212,53 @@ type targetEntry struct {
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors/finalizers,verbs=update
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflows,verbs=get;list;watch
 
+// reapOrphanedFinalizer drops TargetFinalizerName from a deleting
+// mirror whose spec.targetNode names a Node that no longer exists.
+// Symmetric with the source-side reaper: the target reconciler is
+// equally a DaemonSet gated on spec.targetNode, so a mirror whose
+// target node was removed has no pod left to complete its teardown
+// and would hang in Terminating indefinitely.
+func (r *TargetReconciler) reapOrphanedFinalizer(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror) (ctrl.Result, error) {
+	if mirror.DeletionTimestamp.IsZero() ||
+		!controllerutil.ContainsFinalizer(mirror, TargetFinalizerName) {
+		return ctrl.Result{}, nil
+	}
+
+	gone, err := nodeGone(ctx, r.nodeReader(), mirror.Spec.TargetNode)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("look up target node %s: %w", mirror.Spec.TargetNode, err)
+	}
+	if !gone {
+		return ctrl.Result{RequeueAfter: orphanRecheckInterval}, nil
+	}
+
+	controllerutil.RemoveFinalizer(mirror, TargetFinalizerName)
+	if err := r.Update(ctx, mirror); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("remove orphaned target finalizer: %w", err)
+	}
+	log.FromContext(ctx).Info("reaped orphaned target-side finalizer",
+		"mxlflowmirror", client.ObjectKeyFromObject(mirror),
+		"targetNode", mirror.Spec.TargetNode)
+	return ctrl.Result{}, nil
+}
+
+// nodeReader returns the reader used for Node lookups, preferring
+// the uncached APIReader when SetupWithManager has bound one.
+func (r *TargetReconciler) nodeReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get
+
 // Reconcile drives one MxlFlowMirror through its target-side
 // lifecycle.
 func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -218,7 +271,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	// Other-node mirrors are not ours.
 	if mirror.Spec.TargetNode != r.NodeName {
-		return ctrl.Result{}, nil
+		return r.reapOrphanedFinalizer(ctx, &mirror)
 	}
 
 	// Deletion path: tear down libmxl handles, drop the finalizer.
@@ -1251,6 +1304,9 @@ func (r *TargetReconciler) publishTargetProgress(ctx context.Context, key types.
 func (r *TargetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.targets == nil {
 		r.targets = make(map[types.NamespacedName]*targetEntry)
+	}
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&mxlv1alpha1.MxlFlowMirror{}).
