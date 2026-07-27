@@ -1,6 +1,6 @@
 {
   "api": "1.0.0-rc.5",
-  "agent": "1.0.0-rc.7",
+  "agent": "1.0.0-rc.8",
   "operator": "1.0.0-rc.5",
   "gateway": "1.0.0-rc.8",
   "shim": "1.0.0-rc.4",
