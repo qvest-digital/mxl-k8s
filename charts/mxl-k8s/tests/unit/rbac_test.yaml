@@ -42,3 +42,14 @@ tests:
             apiGroups: [""]
             resources: [pods]
             verbs: [get, list, watch]
+
+  - it: gateway role can get nodes so it can tell a reclaimed node from a live one
+    template: templates/rbac-gateway.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: [nodes]
+            verbs: [get]

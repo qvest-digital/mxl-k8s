@@ -21,10 +21,11 @@ import (
 // of cluster-scoped RBAC.
 const LeaseNamespace = apiv1alpha1.LeaseNamespace
 
-// DefaultLeaseDuration is the freshness window applied when a Lease
-// omits LeaseDurationSeconds. The agent writes 30s explicitly;
-// the fallback only matters for Leases authored outside the agent.
-const DefaultLeaseDuration = 30 * time.Second
+// DefaultLeaseDuration re-exports the shared api/v1alpha1 constant.
+// It is the freshness window applied when a Lease omits
+// LeaseDurationSeconds; the agent writes the same value explicitly,
+// so the fallback only matters for Leases authored elsewhere.
+const DefaultLeaseDuration = apiv1alpha1.DefaultLeaseDuration
 
 // Checker implements receiver.LeaseChecker on top of a kube client.
 type Checker struct {

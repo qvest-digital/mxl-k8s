@@ -69,6 +69,10 @@ type SourceReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// APIReader is an uncached reader for the Node lookup that gates
+	// orphaned-finalizer reaping. Nil falls back to Client.
+	APIReader client.Reader
+
 	// NodeName is the Kubernetes node this gateway runs on. Mirrors
 	// with spec.sourceNode set to a different node are ignored.
 	NodeName string
@@ -167,6 +171,53 @@ type sourceEntry struct {
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors/finalizers,verbs=update
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflows,verbs=get;list;watch
 
+// reapOrphanedFinalizer drops SourceFinalizerName from a deleting
+// mirror whose spec.sourceNode names a Node that no longer exists.
+// Every other branch is gated on spec.sourceNode naming this node
+// and the gateway is a DaemonSet, so the pod that would run the
+// teardown died with the node and nothing else owns the finalizer.
+// Node existence is the guard against racing a live owner; once the
+// Node is gone so is the reader state the finalizer protected.
+func (r *SourceReconciler) reapOrphanedFinalizer(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror) (ctrl.Result, error) {
+	if mirror.DeletionTimestamp.IsZero() ||
+		!controllerutil.ContainsFinalizer(mirror, SourceFinalizerName) {
+		return ctrl.Result{}, nil
+	}
+
+	gone, err := nodeGone(ctx, r.nodeReader(), mirror.Spec.SourceNode)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("look up source node %s: %w", mirror.Spec.SourceNode, err)
+	}
+	if !gone {
+		return ctrl.Result{RequeueAfter: orphanRecheckInterval}, nil
+	}
+
+	controllerutil.RemoveFinalizer(mirror, SourceFinalizerName)
+	if err := r.Update(ctx, mirror); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("remove orphaned source finalizer: %w", err)
+	}
+	log.FromContext(ctx).Info("reaped orphaned source-side finalizer",
+		"mxlflowmirror", client.ObjectKeyFromObject(mirror),
+		"sourceNode", mirror.Spec.SourceNode)
+	return ctrl.Result{}, nil
+}
+
+// nodeReader prefers the uncached APIReader SetupWithManager binds.
+func (r *SourceReconciler) nodeReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get
+
 // Reconcile drives one MxlFlowMirror through its source-side
 // lifecycle.
 func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -183,7 +234,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// against a producer-less .mxl-flow until the pod is bounced.
 		// closeEntry is a no-op when key absent (def at line 592).
 		r.closeEntry(req.NamespacedName)
-		return ctrl.Result{}, nil
+		return r.reapOrphanedFinalizer(ctx, &mirror)
 	}
 
 	if !mirror.DeletionTimestamp.IsZero() {
@@ -1078,6 +1129,9 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if r.attempts == nil {
 		r.attempts = make(map[types.NamespacedName]uint32)
+	}
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
 	}
 	if r.opener == nil {
 		r.opener = &libmxlOpener{

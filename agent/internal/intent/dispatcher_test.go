@@ -194,9 +194,12 @@ func TestMaterialize_MissingFlow_Errors(t *testing.T) {
 	// shortcut: when FlowChecker says true on second call, the
 	// dispatcher early-returns. Instead test the
 	// resolveSourceNode-missing-flow case by exercising it directly.
-	_, ok, err := d.resolveSourceNode(context.Background(), "missing-flow")
+	res, err := d.resolveSourceNode(context.Background(), "missing-flow")
 	require.NoError(t, err)
-	assert.False(t, ok)
+	assert.False(t, res.Found)
+	assert.False(t, res.AllStale,
+		"a flow with no MxlFlow at all is not the same as one whose "+
+			"Origins are all stale; the shim is told which")
 }
 
 func TestMaterialize_SourceIsLocalNode_NoOps(t *testing.T) {
@@ -227,14 +230,10 @@ func TestMaterialize_SourceIsLocalNode_NoOps(t *testing.T) {
 		NodeName:    "n1",
 		FlowChecker: func(string) bool { return false },
 	}
-	_, ok, err := d.resolveSourceNode(context.Background(), flowID)
+	res, err := d.resolveSourceNode(context.Background(), flowID)
 	require.NoError(t, err)
-	require.True(t, ok)
-
-	// Manually drive the same logic Materialize uses for the
-	// same-node branch by inspecting resolveSourceNode plus a check.
-	src, _, _ := d.resolveSourceNode(context.Background(), flowID)
-	assert.Equal(t, "n1", src)
+	require.True(t, res.Found)
+	assert.Equal(t, "n1", res.Node)
 
 	// No mirror has been created at this point.
 	var list mxlv1alpha1.MxlFlowMirrorList
@@ -598,13 +597,13 @@ func TestResolveSourceNode_SkipsStaleOriginByLease(t *testing.T) {
 		}},
 	}
 
-	node, ok, err := d.resolveSourceNode(ctx, flowID)
+	res, err := d.resolveSourceNode(ctx, flowID)
 	require.NoError(t, err)
-	assert.True(t, ok,
+	assert.True(t, res.Found,
 		"a second Origin with a fresh Lease must be the dispatcher's "+
 			"answer even when an earlier Origin entry is present but stale; "+
 			"otherwise a partitioned producer permanently masks a recovered one")
-	assert.Equal(t, "n-fresh", node)
+	assert.Equal(t, "n-fresh", res.Node)
 }
 
 func TestResolveSourceNode_AllStaleOriginsReturnsNotOK(t *testing.T) {
@@ -631,12 +630,15 @@ func TestResolveSourceNode_AllStaleOriginsReturnsNotOK(t *testing.T) {
 		Lease:    &fakeLeaseChecker{fresh: map[string]bool{}},
 	}
 
-	_, ok, err := d.resolveSourceNode(ctx, flowID)
+	res, err := d.resolveSourceNode(ctx, flowID)
 	require.NoError(t, err)
-	assert.False(t, ok,
+	assert.False(t, res.Found,
 		"when every Origin's Lease is expired the dispatcher must report "+
 			"no source; routing a Materialize call at a stale Origin would "+
 			"only hand the shim back a 'no grains' wait until the timeout")
+	assert.True(t, res.AllStale,
+		"every Origin candidate was rejected by the Lease check, which is "+
+			"a different answer from the flow being unknown")
 }
 
 // TestEnsureMirror_ExplicitProviderBypassesResolution asserts that a

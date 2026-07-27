@@ -13,6 +13,7 @@ package intent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -117,13 +118,17 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 	)
 	l.Info("intent request received")
 
-	sourceNode, ok, err := d.resolveSourceNode(wctx, flowID)
+	res, err := d.resolveSourceNode(wctx, flowID)
 	if err != nil {
 		return fmt.Errorf("resolve source node: %w", err)
 	}
-	if !ok {
+	if !res.Found {
+		if res.AllStale {
+			return errors.New("all Origin locations have an expired Lease")
+		}
 		return errors.New("MxlFlow not yet known cluster-wide")
 	}
+	sourceNode := res.Node
 	if sourceNode == d.NodeName {
 		// The flow's origin is this node; the producer should have
 		// created the file already. Either we raced with the agent's
@@ -183,30 +188,87 @@ func (d *Dispatcher) flowExistsLocally(flowID string) bool {
 	return err == nil
 }
 
-func (d *Dispatcher) resolveSourceNode(ctx context.Context, flowID string) (string, bool, error) {
+// originResolution separates the two ways resolving an origin can
+// come up empty, so the reason handed back to the shim says which
+// one happened. Mirrors originResolution in the operator's
+// receiver package, minus the Deadline the reconciler needs for its
+// RequeueAfter and a request-driven dispatcher does not.
+type originResolution struct {
+	Node     string
+	Found    bool
+	AllStale bool
+}
+
+func (d *Dispatcher) resolveSourceNode(ctx context.Context, flowID string) (originResolution, error) {
 	var flow mxlv1alpha1.MxlFlow
 	if err := d.Client.Get(ctx, types.NamespacedName{Name: flowID}, &flow); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", false, nil
+			return originResolution{}, nil
 		}
-		return "", false, err
+		return originResolution{}, err
 	}
+	sawOrigin := false
 	for _, loc := range flow.Status.Locations {
 		if loc.Phase != mxlv1alpha1.MxlFlowLocationOrigin {
 			continue
 		}
+		sawOrigin = true
 		if d.Lease == nil {
-			return loc.NodeName, true, nil
+			return originResolution{Node: loc.NodeName, Found: true}, nil
 		}
 		fresh, err := d.Lease.IsFresh(ctx, flowID, loc.NodeName)
 		if err != nil {
-			return "", false, err
+			return originResolution{}, err
 		}
 		if fresh {
-			return loc.NodeName, true, nil
+			return originResolution{Node: loc.NodeName, Found: true}, nil
 		}
 	}
-	return "", false, nil
+	return originResolution{AllStale: sawOrigin}, nil
+}
+
+// repointMirror patches spec.sourceNode, and the provider derived
+// from it, when the flow's origin has moved since the mirror was
+// created. Mirror names do not encode the source node, so without
+// this the mirror addresses its create-time node for life and stays
+// Degraded once that node goes away. Only intent-authored mirrors
+// are touched: patchMirrorIfDrifted owns the same drift for
+// receiver-authored ones, and two writers would fight. The
+// merge-patch lists only the two spec keys, leaving the agent-owned
+// Requestor and the GC labels alone.
+func (d *Dispatcher) repointMirror(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, flowID, sourceNode string) error {
+	if _, intent := mirror.Labels[mxlv1alpha1.LabelCreatedByIntent]; !intent {
+		return nil
+	}
+	if mirror.Spec.SourceNode == sourceNode {
+		return nil
+	}
+
+	provider, err := d.resolveProvider(ctx, flowID, sourceNode)
+	if err != nil {
+		return fmt.Errorf("resolve provider for repointed source %s: %w", sourceNode, err)
+	}
+
+	patch, err := json.Marshal(map[string]any{
+		"spec": map[string]any{
+			"sourceNode": sourceNode,
+			"provider":   string(provider),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal repoint patch: %w", err)
+	}
+	if err := d.Client.Patch(ctx, mirror, client.RawPatch(types.MergePatchType, patch)); err != nil {
+		return fmt.Errorf("repoint mirror %s/%s to source %s: %w",
+			mirror.Namespace, mirror.Name, sourceNode, err)
+	}
+
+	log.FromContext(ctx).WithName("intent").Info("repointed mirror to new origin",
+		"flowID", flowID,
+		"mirror", mirror.Namespace+"/"+mirror.Name,
+		"sourceNode", sourceNode,
+		"provider", provider)
+	return nil
 }
 
 func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string, pod metav1.Object) (*mxlv1alpha1.MxlFlowMirror, error) {
@@ -215,6 +277,16 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string
 	var existing mxlv1alpha1.MxlFlowMirror
 	err := d.Client.Get(ctx, types.NamespacedName{Namespace: pod.GetNamespace(), Name: name}, &existing)
 	if err == nil {
+		// A mirror working through its finalizers occupies the only
+		// name this consumer can use and can never reach Ready. Fail
+		// so the shim retries once the name frees up.
+		if !existing.DeletionTimestamp.IsZero() {
+			return nil, fmt.Errorf("mirror %s/%s is terminating",
+				existing.Namespace, existing.Name)
+		}
+		if err := d.repointMirror(ctx, &existing, flowID, sourceNode); err != nil {
+			return nil, err
+		}
 		// A mirror with the same (flow, target node) name already
 		// exists. The pre-existing object is functionally
 		// sufficient for this consumer pod; reuse it as-is. The
@@ -349,23 +421,11 @@ func (d *Dispatcher) waitReady(ctx context.Context, mirror *mxlv1alpha1.MxlFlowM
 	}
 }
 
-// MirrorName mirrors the operator's helper (operator/internal/
-// receiver.mirrorName). Keeping the algorithm identical here
-// guarantees the agent's on-demand path and the operator's
-// declarative path converge on the same MxlFlowMirror name for a
-// given (flow, target node), so the gateway sees exactly one
-// mirror per pair.
+// MirrorName re-exports the shared api/v1alpha1 helper. The agent's
+// on-demand path and the operator's declarative path must land on
+// the same name for a given (flow, target node) so the gateway sees
+// one mirror per pair; the shared definition makes that agreement
+// structural rather than a matter of two copies staying in step.
 func MirrorName(flowID, targetNode string) string {
-	joined := strings.ToLower(flowID + "--" + targetNode)
-	var b strings.Builder
-	b.Grow(len(joined))
-	for _, c := range joined {
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-':
-			b.WriteRune(c)
-		default:
-			b.WriteRune('-')
-		}
-	}
-	return b.String()
+	return mxlv1alpha1.MirrorName(flowID, targetNode)
 }

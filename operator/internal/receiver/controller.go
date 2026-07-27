@@ -742,23 +742,13 @@ func (r *Reconciler) patchMirrorIfDrifted(ctx context.Context, recv *mxlv1alpha1
 	return mirror, nil
 }
 
-// mirrorName produces a deterministic, DNS-subdomain-safe name from
-// (flowID, targetNode). FlowIDs are UUIDs; node names are
-// DNS-compliant; the result is lowercased and any non
-// [a-z0-9-] runes are replaced with '-'.
+// mirrorName wraps the shared api/v1alpha1 helper. The agent's
+// intent dispatcher derives the same name from the same inputs, so
+// the two ownership domains meet on one object per (flow, target
+// node); the shared definition keeps that from depending on two
+// copies staying in step.
 func mirrorName(flowID, targetNode string) string {
-	joined := strings.ToLower(flowID + "--" + targetNode)
-	var b strings.Builder
-	b.Grow(len(joined))
-	for _, c := range joined {
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-':
-			b.WriteRune(c)
-		default:
-			b.WriteRune('-')
-		}
-	}
-	return b.String()
+	return mxlv1alpha1.MirrorName(flowID, targetNode)
 }
 
 // mirrorNameForReceiver returns the mirror name the given receiver
