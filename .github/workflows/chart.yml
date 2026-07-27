@@ -53,7 +53,7 @@ env:
   # renovate: datasource=github-releases depName=helm/helm versioning=semver
   HELM_VERSION: v4.2.3
   # renovate: datasource=github-releases depName=helm-unittest/helm-unittest versioning=semver extractVersion=^v(?<version>.+)$
-  HELM_UNITTEST_VERSION: "1.1.1"
+  HELM_UNITTEST_VERSION: "1.1.2"
   # renovate: datasource=github-releases depName=dadav/helm-schema versioning=semver
   HELM_SCHEMA_VERSION: "0.23.4"
   # renovate: datasource=go depName=github.com/norwoodj/helm-docs versioning=semver
