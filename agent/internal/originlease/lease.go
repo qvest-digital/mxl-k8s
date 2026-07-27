@@ -29,10 +29,11 @@ import (
 const LeaseNamespace = apiv1alpha1.LeaseNamespace
 
 const (
-	// DefaultLeaseDuration is the renewal window stamped on every
-	// Lease the manager writes. A consumer treats RenewTime +
-	// LeaseDurationSeconds as the freshness deadline.
-	DefaultLeaseDuration = 30 * time.Second
+	// DefaultLeaseDuration re-exports the shared api/v1alpha1
+	// constant. It is the window stamped on every Lease the manager
+	// writes; a consumer treats RenewTime + LeaseDurationSeconds as
+	// the freshness deadline, so writer and checker have to agree.
+	DefaultLeaseDuration = apiv1alpha1.DefaultLeaseDuration
 
 	// DefaultRenewInterval is the cadence RunRenewLoop uses when the
 	// caller does not pass one. Set to a third of the default

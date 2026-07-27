@@ -1,6 +1,16 @@
 package v1alpha1
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
+
+// DefaultLeaseDuration is the validity window stamped on an Origin
+// Lease that carries no explicit spec.leaseDurationSeconds. The
+// renewer and both freshness checkers read it from here: a renewer
+// writing on one window while a checker expires on another would
+// make the two sides disagree about where a flow's Origin is.
+const DefaultLeaseDuration = 30 * time.Second
 
 // LeaseNamespace is the namespace every per-flow Origin Lease lives
 // in. Pinned so the agent's Role can be scoped to a single namespace
