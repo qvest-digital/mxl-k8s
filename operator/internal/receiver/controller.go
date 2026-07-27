@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -187,12 +188,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	var primary *mxlv1alpha1.MirrorRef
+	terminating := false
 	for _, t := range targets {
 		if t.node == res.Node {
 			continue
 		}
 		mirror, err := r.ensureMirror(ctx, &recv, res.Node, t)
 		if err != nil {
+			if errors.Is(err, errMirrorTerminating) {
+				terminating = true
+				continue
+			}
 			return ctrl.Result{}, fmt.Errorf("ensure mirror for %s in %s: %w", t.node, t.namespace, err)
 		}
 		if primary == nil {
@@ -201,6 +207,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 				Namespace: mirror.Namespace,
 			}
 		}
+	}
+	if terminating {
+		// A target the receiver still wants has no usable mirror, so
+		// the receiver is not bound however the other targets fared.
+		// markPending's requeue is what retries the create once the
+		// name frees up: mirror deletion completing raises an event
+		// here, but only while the object still carries a finalizer
+		// this operator watches.
+		return r.markPending(ctx, &recv, "mirror for a target is still terminating")
 	}
 
 	l.V(1).Info("reconciled",
@@ -636,6 +651,15 @@ func (r *Reconciler) nodeCapabilities(ctx context.Context, nodeName string) (mxl
 	return caps.Status, nil
 }
 
+// errMirrorTerminating reports that the mirror for a (flow, target)
+// pair exists but is being deleted. Mirror names are derived from
+// the pair, so the name stays taken until deletion completes and no
+// replacement can be created in the meantime. Adopting the dying
+// object instead would add an owner reference and patch spec on
+// something about to disappear, and would let the receiver report
+// Bound against a mirror that is already gone.
+var errMirrorTerminating = errors.New("mirror is terminating")
+
 // ensureMirror creates the MxlFlowMirror for (flow, target) if it
 // does not already exist, or merge-patches spec.sourceNode and
 // spec.provider on the existing mirror when they no longer match
@@ -658,6 +682,9 @@ func (r *Reconciler) ensureMirror(ctx context.Context, recv *mxlv1alpha1.MxlRece
 	var existing mxlv1alpha1.MxlFlowMirror
 	err = r.Get(ctx, types.NamespacedName{Namespace: target.namespace, Name: name}, &existing)
 	if err == nil {
+		if !existing.DeletionTimestamp.IsZero() {
+			return nil, errMirrorTerminating
+		}
 		if sameNs {
 			if err := r.ensureOwnerRef(ctx, recv, &existing); err != nil {
 				return nil, fmt.Errorf("ensure owner ref on %s/%s: %w",
@@ -696,6 +723,9 @@ func (r *Reconciler) ensureMirror(ctx context.Context, recv *mxlv1alpha1.MxlRece
 		if apierrors.IsAlreadyExists(err) {
 			if err := r.Get(ctx, types.NamespacedName{Namespace: target.namespace, Name: name}, &existing); err != nil {
 				return nil, err
+			}
+			if !existing.DeletionTimestamp.IsZero() {
+				return nil, errMirrorTerminating
 			}
 			if sameNs {
 				if err := r.ensureOwnerRef(ctx, recv, &existing); err != nil {

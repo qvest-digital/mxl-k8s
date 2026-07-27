@@ -1054,3 +1054,66 @@ func TestReconcile_LegacyLabelOnlyMirror_AdoptsOwnerRef(t *testing.T) {
 // the controller-runtime client.
 var _ = apierrors.IsNotFound
 var _ = corev1.Pod{}
+
+// A mirror pinned open by a gateway finalizer stays Terminating until
+// that gateway releases it. Mirror names are derived from (flow,
+// target node), so the receiver cannot create a replacement while the
+// name is taken: it reports Pending and retries rather than binding
+// to an object on its way out.
+func TestReconcile_TerminatingMirror_MarksPendingUntilNameFrees(t *testing.T) {
+	const keepalive = "test.mxl.qvest-digital.com/keepalive"
+	ctx := context.Background()
+	ns := env.NewNamespace(t)
+	r := &receiver.Reconciler{Client: env.Client, Scheme: env.Scheme}
+
+	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-a", "worker-target")))
+	flow := newFlow(t, "worker-source")
+	require.NoError(t, env.Client.Create(ctx,
+		testutil.NewReceiver(ns, "r", testutil.WithReceiverFlowID(flow.Spec.ID))))
+
+	reconcile(t, r, ns, "r")
+	require.Equal(t, mxlv1alpha1.MxlReceiverBound,
+		mustGetReceiver(t, env.Client, ns, "r").Status.Phase)
+
+	var mirrors mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
+	require.Len(t, mirrors.Items, 1)
+	mirror := mirrors.Items[0]
+	originalUID := mirror.UID
+
+	pinned := mirror.DeepCopy()
+	pinned.Finalizers = append(pinned.Finalizers, keepalive)
+	require.NoError(t, env.Client.Update(ctx, pinned))
+	require.NoError(t, env.Client.Delete(ctx, pinned))
+
+	var terminating mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, env.Client.Get(ctx,
+		types.NamespacedName{Namespace: ns, Name: mirror.Name}, &terminating))
+	require.False(t, terminating.DeletionTimestamp.IsZero(),
+		"fixture must leave the mirror terminating")
+
+	res := reconcile(t, r, ns, "r")
+	assert.Positive(t, res.RequeueAfter,
+		"the receiver has to come back once the name frees up")
+	assert.Equal(t, mxlv1alpha1.MxlReceiverPending,
+		mustGetReceiver(t, env.Client, ns, "r").Status.Phase,
+		"a target whose mirror is mid-deletion has no usable mirror, so the "+
+			"receiver is not Bound")
+
+	require.NoError(t, env.Client.Get(ctx,
+		types.NamespacedName{Namespace: ns, Name: mirror.Name}, &terminating))
+	assert.Equal(t, "worker-source", terminating.Spec.SourceNode,
+		"the reconcile must not patch spec onto a terminating mirror")
+
+	require.NoError(t, clearGatewayFinalizer(env.Client, &mirror, keepalive))
+	reconcile(t, r, ns, "r")
+
+	assert.Equal(t, mxlv1alpha1.MxlReceiverBound,
+		mustGetReceiver(t, env.Client, ns, "r").Status.Phase,
+		"once the name frees up the receiver creates a replacement and binds")
+	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
+	require.Len(t, mirrors.Items, 1)
+	assert.NotEqual(t, originalUID, mirrors.Items[0].UID,
+		"the replacement is a new object, not the resurrected tombstone")
+	assert.True(t, mirrors.Items[0].DeletionTimestamp.IsZero())
+}
