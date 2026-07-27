@@ -1,7 +1,7 @@
 CC      ?= gcc
 CFLAGS  ?= -O2 -Wall -Wextra -fPIC
 LDFLAGS ?= -shared
-LDLIBS  ?= -ldl
+LDLIBS  ?=
 
 .PHONY: all clean
 all: libmxl-intent.so

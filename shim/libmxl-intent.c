@@ -6,7 +6,7 @@
  *
  * Build:
  *     gcc -fPIC -shared -O2 -Wall -Wextra \
- *         -o libmxl-intent.so libmxl-intent.c -ldl
+ *         -o libmxl-intent.so libmxl-intent.c
  *
  * Use:
  *     LD_PRELOAD=/path/to/libmxl-intent.so /usr/local/bin/your-app
@@ -17,12 +17,21 @@
  * the agent, sends `{"path":"<absolute path>"}\n`, waits for
  * `{"ok":true}\n` (or an error), and retries the original call.
  *
- * Outside that narrow path the hooks fall straight through to the
- * real glibc implementation.
+ * The hooks reach the real libc through direct syscalls
+ * (SYS_openat, SYS_faccessat, SYS_newfstatat) rather than
+ * dlsym(RTLD_NEXT, ...), so the shim works against consumers built
+ * on older glibc as well as current ones. On glibc 2.28,
+ * dlsym(RTLD_NEXT, "open") can return NULL and turn every open call
+ * into ENOSYS, and stat / lstat are not exposed as plain symbols at
+ * all, only __xstat / __lxstat. Direct syscalls remove both failure
+ * modes; the kernel ABI on x86_64 and aarch64 matches glibc's
+ * struct stat.
+ *
+ * Outside the narrow flow_def.json path the hooks fall straight
+ * through to the kernel.
  */
 
 #define _GNU_SOURCE
-#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -34,33 +43,33 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #define DEFAULT_SOCK_PATH "/run/mxl/agent.sock"
 #define SOCK_ENV "MXL_INTENT_SOCK"
 #define FLOW_SUFFIX ".mxl-flow"
-#define DEF_FILENAME "flow_def.json"
 
-typedef int (*openat_fn)(int dirfd, const char *pathname, int flags, ...);
-typedef int (*open_fn)(const char *pathname, int flags, ...);
-typedef int (*access_fn)(const char *pathname, int mode);
-typedef int (*stat_fn)(const char *pathname, struct stat *buf);
-typedef int (*lstat_fn)(const char *pathname, struct stat *buf);
-
-static openat_fn real_openat = NULL;
-static open_fn   real_open   = NULL;
-static access_fn real_access = NULL;
-static stat_fn   real_stat   = NULL;
-static lstat_fn  real_lstat  = NULL;
-
-__attribute__((constructor)) static void shim_init(void)
+static int sys_openat(int dirfd, const char *pathname, int flags, mode_t mode)
 {
-	real_openat = (openat_fn)dlsym(RTLD_NEXT, "openat");
-	real_open   = (open_fn)  dlsym(RTLD_NEXT, "open");
-	real_access = (access_fn)dlsym(RTLD_NEXT, "access");
-	real_stat   = (stat_fn)  dlsym(RTLD_NEXT, "stat");
-	real_lstat  = (lstat_fn) dlsym(RTLD_NEXT, "lstat");
+	return (int)syscall(SYS_openat, dirfd, pathname, flags, mode);
+}
+
+static int sys_access(const char *pathname, int mode)
+{
+	return (int)syscall(SYS_faccessat, AT_FDCWD, pathname, mode, 0);
+}
+
+static int sys_stat(const char *pathname, struct stat *buf)
+{
+	return (int)syscall(SYS_newfstatat, AT_FDCWD, pathname, buf, 0);
+}
+
+static int sys_lstat(const char *pathname, struct stat *buf)
+{
+	return (int)syscall(SYS_newfstatat, AT_FDCWD, pathname, buf,
+			    AT_SYMLINK_NOFOLLOW);
 }
 
 /* Return true when path is absolute and contains a non-empty
@@ -162,17 +171,11 @@ int openat(int dirfd, const char *pathname, int flags, ...)
 	if (has_mode) {
 		va_list args;
 		va_start(args, flags);
-		mode = va_arg(args, mode_t);
+		mode = (mode_t)va_arg(args, int);
 		va_end(args);
 	}
 
-	if (!real_openat) {
-		errno = ENOSYS;
-		return -1;
-	}
-
-	int fd = has_mode ? real_openat(dirfd, pathname, flags, mode)
-			  : real_openat(dirfd, pathname, flags);
+	int fd = sys_openat(dirfd, pathname, flags, mode);
 	if (fd >= 0 || errno != ENOENT) return fd;
 
 	/* Only intervene for absolute flow_def.json paths. The shim is
@@ -188,8 +191,7 @@ int openat(int dirfd, const char *pathname, int flags, ...)
 		return -1;
 	}
 
-	return has_mode ? real_openat(dirfd, pathname, flags, mode)
-			: real_openat(dirfd, pathname, flags);
+	return sys_openat(dirfd, pathname, flags, mode);
 }
 
 /* libmxl resolves open(2) directly against libc rather than via
@@ -204,17 +206,11 @@ int open(const char *pathname, int flags, ...)
 	if (has_mode) {
 		va_list args;
 		va_start(args, flags);
-		mode = va_arg(args, mode_t);
+		mode = (mode_t)va_arg(args, int);
 		va_end(args);
 	}
 
-	if (!real_open) {
-		errno = ENOSYS;
-		return -1;
-	}
-
-	int fd = has_mode ? real_open(pathname, flags, mode)
-			  : real_open(pathname, flags);
+	int fd = sys_openat(AT_FDCWD, pathname, flags, mode);
 	if (fd >= 0 || errno != ENOENT) return fd;
 
 	if (!is_flow_path(pathname)) {
@@ -227,8 +223,7 @@ int open(const char *pathname, int flags, ...)
 		return -1;
 	}
 
-	return has_mode ? real_open(pathname, flags, mode)
-			: real_open(pathname, flags);
+	return sys_openat(AT_FDCWD, pathname, flags, mode);
 }
 
 /* libmxl probes the flow_def.json with access(F_OK) before
@@ -237,12 +232,7 @@ int open(const char *pathname, int flags, ...)
  * open or openat. */
 int access(const char *pathname, int mode)
 {
-	if (!real_access) {
-		errno = ENOSYS;
-		return -1;
-	}
-
-	int rc = real_access(pathname, mode);
+	int rc = sys_access(pathname, mode);
 	if (rc == 0 || errno != ENOENT) return rc;
 
 	if (!is_flow_path(pathname)) {
@@ -255,19 +245,17 @@ int access(const char *pathname, int mode)
 		return -1;
 	}
 
-	return real_access(pathname, mode);
+	return sys_access(pathname, mode);
 }
 
 /* libmxl also stat()s the flow_def.json during reader setup. Same
- * rationale as the access hook. */
+ * rationale as the access hook. On glibc < 2.33 the consumer
+ * binary reaches stat via inline __xstat and our `stat` symbol is
+ * never called; the hook still exists for glibc 2.33+ consumers
+ * that link to plain `stat`. */
 int stat(const char *pathname, struct stat *buf)
 {
-	if (!real_stat) {
-		errno = ENOSYS;
-		return -1;
-	}
-
-	int rc = real_stat(pathname, buf);
+	int rc = sys_stat(pathname, buf);
 	if (rc == 0 || errno != ENOENT) return rc;
 
 	if (!is_flow_path(pathname)) {
@@ -280,17 +268,12 @@ int stat(const char *pathname, struct stat *buf)
 		return -1;
 	}
 
-	return real_stat(pathname, buf);
+	return sys_stat(pathname, buf);
 }
 
 int lstat(const char *pathname, struct stat *buf)
 {
-	if (!real_lstat) {
-		errno = ENOSYS;
-		return -1;
-	}
-
-	int rc = real_lstat(pathname, buf);
+	int rc = sys_lstat(pathname, buf);
 	if (rc == 0 || errno != ENOENT) return rc;
 
 	if (!is_flow_path(pathname)) {
@@ -303,5 +286,5 @@ int lstat(const char *pathname, struct stat *buf)
 		return -1;
 	}
 
-	return real_lstat(pathname, buf);
+	return sys_lstat(pathname, buf);
 }
