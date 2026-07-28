@@ -65,6 +65,7 @@ jobs:
       demo_tools: ${{ steps.f.outputs.demo_tools }}
       workflow:   ${{ steps.f.outputs.workflow }}
       kind:       ${{ steps.f.outputs.kind }}
+      code:       ${{ steps.f.outputs.code }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -77,6 +78,14 @@ jobs:
             shim:       ['docker/shim.Dockerfile', 'shim/**']
             demo_tools: ['docker/demo-tools.Dockerfile']
             workflow:   ['.github/workflows/images.yml']
+            # True when the diff touches anything that is not
+            # markdown. The negation cannot be folded into the
+            # per-image filters above: dorny/paths-filter honours
+            # '!' only under predicate-quantifier 'every', and those
+            # filters are unions that 'every' could never satisfy.
+            # Standing alone it works under the default quantifier:
+            # true iff some changed file is not a .md.
+            code:       ['!**/*.md']
             kind:
               - 'hack/kind-*'
               - 'docker/**'
@@ -138,6 +147,11 @@ jobs:
       CHANGED_SHIM:       ${{ needs.changes.outputs.shim       || 'true' }}
       CHANGED_DEMO_TOOLS: ${{ needs.changes.outputs.demo_tools || 'true' }}
       CHANGED_WORKFLOW:   ${{ needs.changes.outputs.workflow   || 'false' }}
+      # Deliberately undefaulted: empty when the changes job is
+      # skipped (workflow_call / workflow_dispatch). The gate below
+      # fires only on an explicit 'false', so a release publish is
+      # never held back by it.
+      CHANGED_CODE:       ${{ needs.changes.outputs.code }}
     steps:
       - id: m
         run: |
@@ -167,6 +181,16 @@ jobs:
           )
           if [ "$CHANGED_WORKFLOW" = "true" ]; then
             for k in "${!wanted[@]}"; do wanted[$k]=true; done
+          fi
+
+          # A markdown-only diff cannot change an image. The per-image
+          # filters glob whole module directories, so release-please
+          # writing <component>/CHANGELOG.md matches them; without this
+          # every release PR rebuilds and republishes its component's
+          # image, and images-summary being a required check puts that
+          # build on the critical path to merging a changelog entry.
+          if [ "$CHANGED_CODE" = "false" ]; then
+            for k in "${!wanted[@]}"; do wanted[$k]=false; done
           fi
 
           push=false

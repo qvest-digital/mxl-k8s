@@ -41,6 +41,20 @@ jobs:
       api_released:      ${{ steps.rp.outputs['api--release_created'] }}
       api_tag:           ${{ steps.rp.outputs['api--tag_name'] }}
     steps:
+      - uses: actions/checkout@v7
+
+      # Runs before release-please so the same invocation recreates
+      # whatever it closes. release-please rewrites a component's
+      # branch when that component's pending release changes, not
+      # when main moves under it, so a release PR whose neighbouring
+      # manifest keys have since moved is stuck: workflow_dispatch
+      # regenerates stale contents, not a stale base, and "Update
+      # branch" refuses on conflict.
+      - name: Close release PRs that conflict with main
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: ./hack/reap-conflicted-release-prs.sh
+
       - id: rp
         uses: googleapis/release-please-action@v5
         with:
