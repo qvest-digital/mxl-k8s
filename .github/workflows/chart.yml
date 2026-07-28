@@ -6,12 +6,16 @@ on:
       - 'charts/mxl-k8s/**'
       - 'config/crd/**'
       - '.github/workflows/chart.yml'
+      # The pins job runs this script; without it here a change to the
+      # gate itself never reaches the gate.
+      - 'hack/check-chart-pins.sh'
   push:
     branches: [main]
     paths:
       - 'charts/mxl-k8s/**'
       - 'config/crd/**'
       - '.github/workflows/chart.yml'
+      - 'hack/check-chart-pins.sh'
   # release-please.yml calls this workflow as a reusable workflow
   # when a charts/mxl-k8s release tag has just been cut, gated on
   # the per-component release_created output. Pre-PAT a
