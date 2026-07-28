@@ -1214,10 +1214,23 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 func observedTargetState(entry *targetEntry, degradedAfter time.Duration, previous targetProgressState) targetProgressState {
 	lastAt := entry.lastCommitAt.Load()
 	if lastAt == nil {
-		// No commit observed yet. Leave Phase + Condition unset so the
-		// flusher does not publish before the handshake has produced
-		// any grain - the initial Reconcile already set Phase=Ready.
-		return targetProgressState{}
+		// Reconcile sets Phase=Ready the moment the fabric side opens,
+		// before any grain has arrived. Staying silent here leaves that
+		// optimistic Ready standing for the lifetime of a target that
+		// never receives one, which is what a mirror pointed at a
+		// departed source node looks like: Ready, no TargetProgress
+		// condition, no lastGrainAt. Once the open is older than the
+		// freshness window, report the absence for what it is.
+		openedAt := entry.fabricOpenedAt.Load()
+		if openedAt == nil || time.Since(*openedAt) < degradedAfter {
+			return targetProgressState{}
+		}
+		return targetProgressState{
+			phase:   mxlv1alpha1.MxlFlowMirrorDegraded,
+			status:  metav1.ConditionFalse,
+			reason:  mxlv1alpha1.ReasonNoGrains,
+			message: "no grain commits since the fabric side opened",
+		}
 	}
 	if time.Since(*lastAt) < degradedAfter {
 		reason := mxlv1alpha1.ReasonHandshakeComplete

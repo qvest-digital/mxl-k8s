@@ -126,3 +126,73 @@ collect_diagnostics() {
         > "$KIND_DIAG_DIR/${pod}.log"       2>&1 || true
   done
 }
+
+# --- MxlFlow location helpers -------------------------------------
+#
+# The filter that reads naturally for these, e.g.
+# .items[?(@.status.locations[*].nodeName=='x')], cannot be used:
+# kubectl's jsonpath engine rejects a comparison whose left side
+# expands to more than one element ("can only compare one element at
+# a time"), and any flow with a second location does exactly that.
+# Each helper emits one line per object and matches in shell instead.
+#
+# None of them discard stderr: a jsonpath or connection error must
+# not read as "this node carries nothing".
+
+# flows_on_node <node> -- names of MxlFlows carrying a location for
+# the node, one per line. MxlFlow is cluster-scoped.
+flows_on_node() {
+  local want="$1" name nodes
+  "${KUBECTL[@]}" get mxlflow -o \
+    'jsonpath={range .items[*]}{.metadata.name}{"|"}{range .status.locations[*]}{.nodeName}{","}{end}{"\n"}{end}' \
+  | while IFS='|' read -r name nodes; do
+      [ -n "$name" ] || continue
+      case ",${nodes}" in
+        *",${want},"*) echo "$name" ;;
+      esac
+    done
+}
+
+# location_count <node> -- how many flows list the node.
+location_count() {
+  flows_on_node "$1" | grep -c . || true
+}
+
+# location_phases <node> -- the phase each flow records for the node,
+# one per line. Empty when the node is listed by no flow.
+location_phases() {
+  local want="$1" name pairs pair
+  "${KUBECTL[@]}" get mxlflow -o \
+    'jsonpath={range .items[*]}{.metadata.name}{"|"}{range .status.locations[*]}{.nodeName}{"="}{.phase}{","}{end}{"\n"}{end}' \
+  | while IFS='|' read -r name pairs; do
+      [ -n "$name" ] || continue
+      IFS=','
+      for pair in $pairs; do
+        case "$pair" in
+          "${want}="*) echo "${pair#*=}" ;;
+        esac
+      done
+      unset IFS
+    done
+}
+
+# mirrors_sourced_from <node> -- "<name>=<phase>" per MxlFlowMirror
+# whose spec.sourceNode is the node.
+mirrors_sourced_from() {
+  local want="$1" name src phase
+  "${KUBECTL[@]}" get mxlflowmirror -A -o \
+    'jsonpath={range .items[*]}{.metadata.name}{"|"}{.spec.sourceNode}{"|"}{.status.phase}{"\n"}{end}' \
+  | while IFS='|' read -r name src phase; do
+      [ -n "$name" ] || continue
+      [ "$src" = "$want" ] && echo "${name}=${phase}"
+    done
+}
+
+# daemonset_pod_on <ds-label-value> <node> -- name of the running
+# DaemonSet pod for the component on the node, empty when none.
+daemonset_pod_on() {
+  "${KUBECTL[@]}" -n "$NAMESPACE" get pods \
+    --field-selector "spec.nodeName=$2,status.phase=Running" -o \
+    'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}' \
+  | grep "^mxl-k8s-$1-" | head -1
+}
