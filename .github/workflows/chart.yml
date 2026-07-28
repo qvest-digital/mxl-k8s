@@ -113,6 +113,25 @@ jobs:
             echo "release_tag=${release_tag}"
           } >> "$GITHUB_OUTPUT"
 
+  # A chart release PR bumps only the chart's own version; the image
+  # pins come from whatever values.yaml holds on main when it merges.
+  # Cutting the chart before a component's post-release/chart-pins
+  # bump has landed therefore packages a stale image, and nothing
+  # about the PR looks wrong while it happens. This turns that
+  # ordering rule into a gate.
+  pins:
+    runs-on: ubuntu-24.04
+    needs: meta
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Release tags are the comparison basis; the default shallow
+          # fetch carries none of them.
+          fetch-depth: 0
+
+      - name: Chart pins are not behind released images
+        run: ./hack/check-chart-pins.sh
+
   lint:
     runs-on: ubuntu-24.04
     needs: meta
