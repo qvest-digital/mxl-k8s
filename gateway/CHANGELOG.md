@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.0-rc.10](https://github.com/qvest-digital/mxl-k8s/compare/gateway/v1.0.0-rc.9...gateway/v1.0.0-rc.10) (2026-07-28)
+
+
+### Bug Fixes
+
+* **gateway:** demote a target that never receives a grain ([52b9056](https://github.com/qvest-digital/mxl-k8s/commit/52b9056708b065f21a33e7aa1e6b012903864eb6))
+* **operator:** prune MxlFlow locations for departed nodes ([#191](https://github.com/qvest-digital/mxl-k8s/issues/191)) ([52b9056](https://github.com/qvest-digital/mxl-k8s/commit/52b9056708b065f21a33e7aa1e6b012903864eb6))
+
+
+### Dependencies
+
+* **api:** bump api module to v1.0.0-rc.6 ([#197](https://github.com/qvest-digital/mxl-k8s/issues/197)) ([8026ae2](https://github.com/qvest-digital/mxl-k8s/commit/8026ae27609106fa7e4941f4e1ffad01c574be05))
+
 ## [1.0.0-rc.9](https://github.com/qvest-digital/mxl-k8s/compare/gateway/v1.0.0-rc.8...gateway/v1.0.0-rc.9) (2026-07-27)
 
 
