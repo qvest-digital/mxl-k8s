@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.6](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.5...api/v1.0.0-rc.6) (2026-07-28)
+
+
+### Miscellaneous
+
+* **main:** release gateway 1.0.0-rc.9 ([#184](https://github.com/qvest-digital/mxl-k8s/issues/184)) ([1afb362](https://github.com/qvest-digital/mxl-k8s/commit/1afb362f196511dd746d71a6d08858520537f42c))
+
 ## [1.0.0-rc.5](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.4...api/v1.0.0-rc.5) (2026-07-27)
 
 
