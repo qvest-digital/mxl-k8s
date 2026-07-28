@@ -3,6 +3,6 @@
   "agent": "1.0.0-rc.8",
   "operator": "1.0.0-rc.6",
   "gateway": "1.0.0-rc.9",
-  "shim": "1.0.0-rc.4",
+  "shim": "1.0.0-rc.5",
   "charts/mxl-k8s": "1.0.0-rc.11"
 }

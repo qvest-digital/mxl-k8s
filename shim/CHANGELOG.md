@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.0-rc.5](https://github.com/qvest-digital/mxl-k8s/compare/shim/v1.0.0-rc.4...shim/v1.0.0-rc.5) (2026-07-27)
+
+
+### Bug Fixes
+
+* **shim:** reach libc through direct syscalls, not dlsym ([#190](https://github.com/qvest-digital/mxl-k8s/issues/190)) ([1823d56](https://github.com/qvest-digital/mxl-k8s/commit/1823d56e42c7619cde719693cbb5cf90575cd4b4))
+
+
+### Miscellaneous
+
+* **main:** release gateway 1.0.0-rc.9 ([#184](https://github.com/qvest-digital/mxl-k8s/issues/184)) ([1afb362](https://github.com/qvest-digital/mxl-k8s/commit/1afb362f196511dd746d71a6d08858520537f42c))
+
 ## [1.0.0-rc.4](https://github.com/qvest-digital/mxl-k8s/compare/shim/v1.0.0-rc.3...shim/v1.0.0-rc.4) (2026-07-27)
 
 
