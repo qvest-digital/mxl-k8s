@@ -7,6 +7,7 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - nodes
   - pods
   verbs:
   - get
@@ -34,7 +35,6 @@ rules:
   - mxl.qvest-digital.com
   resources:
   - mxldomains/status
-  - mxlflows/status
   - mxlnodecapabilities/status
   verbs:
   - get
@@ -61,6 +61,7 @@ rules:
   - mxl.qvest-digital.com
   resources:
   - mxlflowmirrors/status
+  - mxlflows/status
   - mxlreceivers/status
   verbs:
   - get

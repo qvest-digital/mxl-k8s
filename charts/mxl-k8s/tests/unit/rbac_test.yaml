@@ -53,3 +53,14 @@ tests:
             apiGroups: [""]
             resources: [nodes]
             verbs: [get]
+
+  - it: operator role can watch nodes so it can prune locations of departed ones
+    template: templates/rbac-operator.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: [nodes]
+            verbs: [get, list, watch]

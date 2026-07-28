@@ -9,6 +9,11 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch]
+  # Pruning MxlFlow locations whose node has left the cluster needs
+  # to see which nodes still exist, and to hear about departures.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, list, watch]
