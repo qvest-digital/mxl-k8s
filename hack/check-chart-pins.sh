@@ -28,9 +28,20 @@ pinned_tag() {
     | head -1 | sed -E 's/.*tag: "(v[^"]+)".*/\1/'
 }
 
+# newest_version -- reads versions on stdin, prints the highest.
+#
+# sort -V orders v1.0.0-rc.1 above v1.0.0, which inverts every
+# comparison below the moment a component graduates to a stable
+# release. Mapping the prerelease separator to ~ restores semver
+# order: sort -V places ~ below an empty suffix, so v1.0.0~rc.1
+# sorts under v1.0.0.
+newest_version() {
+  sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/'
+}
+
 # released_tag <component> -- newest <component>/vX tag, by version.
 released_tag() {
-  git tag --list "$1/v*" | sed "s#^$1/##" | sort -V | tail -1
+  git tag --list "$1/v*" | sed "s#^$1/##" | newest_version
 }
 
 rc=0
@@ -56,7 +67,7 @@ for c in $COMPONENTS; do
   # Newer-than-released is not a failure: a pin bump merges before
   # the chart release that carries it, so main legitimately sits
   # ahead of the chart's own last release.
-  newest="$(printf '%s\n%s\n' "$pinned" "$released" | sort -V | tail -1)"
+  newest="$(printf '%s\n%s\n' "$pinned" "$released" | newest_version)"
   if [ "$newest" = "$pinned" ]; then
     echo "ok   ${c}: ${pinned} (ahead of released ${released})"
   else
