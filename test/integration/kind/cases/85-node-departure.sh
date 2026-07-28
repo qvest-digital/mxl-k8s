@@ -27,47 +27,6 @@ need "$RUNTIME"
 PRUNE_TIMEOUT_SECS="${PRUNE_TIMEOUT_SECS:-90}"
 REJOIN_TIMEOUT_SECS="${REJOIN_TIMEOUT_SECS:-180}"
 
-# flows_on_node <node> -- names of MxlFlows carrying a location for
-# the node, one per line. MxlFlow is cluster-scoped.
-#
-# The filter that reads naturally here,
-# .items[?(@.status.locations[*].nodeName=='x')], cannot be used:
-# kubectl's jsonpath engine rejects a comparison whose left side
-# expands to more than one element ("can only compare one element at
-# a time"), and any flow with a second location does exactly that.
-# Emitting the node list per flow and matching in shell sidesteps it.
-#
-# stderr is deliberately not discarded. A jsonpath or connection
-# error must not read as "this node carries no locations".
-flows_on_node() {
-  local want="$1" name nodes
-  "${KUBECTL[@]}" get mxlflow -o \
-    'jsonpath={range .items[*]}{.metadata.name}{"|"}{range .status.locations[*]}{.nodeName}{","}{end}{"\n"}{end}' \
-  | while IFS='|' read -r name nodes; do
-      [ -n "$name" ] || continue
-      case ",${nodes}" in
-        *",${want},"*) echo "$name" ;;
-      esac
-    done
-}
-
-# location_count <node> -- how many flows still list the node.
-location_count() {
-  flows_on_node "$1" | grep -c . || true
-}
-
-# mirrors_sourced_from <node> -- "<name>=<phase>" per mirror whose
-# spec.sourceNode is the node. Same range-and-match shape as above.
-mirrors_sourced_from() {
-  local want="$1" name src phase
-  "${KUBECTL[@]}" get mxlflowmirror -A -o \
-    'jsonpath={range .items[*]}{.metadata.name}{"|"}{.spec.sourceNode}{"|"}{.status.phase}{"\n"}{end}' \
-  | while IFS='|' read -r name src phase; do
-      [ -n "$name" ] || continue
-      [ "$src" = "$want" ] && echo "${name}=${phase}"
-    done
-}
-
 victim=""
 restore_done=0
 
