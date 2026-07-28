@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.0-rc.9](https://github.com/qvest-digital/mxl-k8s/compare/agent/v1.0.0-rc.8...agent/v1.0.0-rc.9) (2026-07-28)
+
+
+### Dependencies
+
+* **api:** bump api module to v1.0.0-rc.6 ([#197](https://github.com/qvest-digital/mxl-k8s/issues/197)) ([8026ae2](https://github.com/qvest-digital/mxl-k8s/commit/8026ae27609106fa7e4941f4e1ffad01c574be05))
+
+
+### Miscellaneous
+
+* **main:** release gateway 1.0.0-rc.9 ([#184](https://github.com/qvest-digital/mxl-k8s/issues/184)) ([1afb362](https://github.com/qvest-digital/mxl-k8s/commit/1afb362f196511dd746d71a6d08858520537f42c))
+
 ## [1.0.0-rc.8](https://github.com/qvest-digital/mxl-k8s/compare/agent/v1.0.0-rc.7...agent/v1.0.0-rc.8) (2026-07-27)
 
 
