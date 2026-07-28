@@ -13,10 +13,8 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -186,9 +184,80 @@ func TestNodeDeletedOnly_AcceptsDeletesOnly(t *testing.T) {
 	assert.False(t, p.Generic(event.GenericEvent{Object: node("n1")}))
 }
 
-var _ = (*Reconciler)(nil).Reconcile
+// notReadyNode is a node the kubelet has stopped heartbeating for.
+// The object survives; only its Ready condition flips.
+func notReadyNode(name string) *corev1.Node {
+	n := node(name)
+	n.Status.Conditions = []corev1.NodeCondition{{
+		Type:   corev1.NodeReady,
+		Status: corev1.ConditionFalse,
+	}}
+	return n
+}
 
-var (
-	_ = client.IgnoreNotFound
-	_ reconcile.Request
-)
+// Cordon is a scheduling signal, not a liveness one. The node keeps
+// running every pod it already had, and DaemonSet pods tolerate
+// node.kubernetes.io/unschedulable, so the agent on a cordoned node
+// still publishes and the gateway still serves. Pruning here would
+// delete a location that is entirely live.
+func TestReconcile_CordonedNodeLocation_IsKept(t *testing.T) {
+	scheme := newScheme(t)
+	cordoned := node("n1")
+	cordoned.Spec.Unschedulable = true
+	flow := newFlow(mxlv1alpha1.MxlFlowLocation{
+		NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationOrigin,
+	})
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(flow.DeepCopy(), cordoned).
+		Build()
+
+	r := &Reconciler{Client: c, Scheme: scheme}
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: flow.Name},
+	})
+	require.NoError(t, err)
+
+	var after mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: flow.Name}, &after))
+	assert.Equal(t, flow.Status, after.Status,
+		"a cordoned node still runs its agent and its flow; only scheduling "+
+			"of new pods is blocked")
+}
+
+// A NotReady node is deliberately not treated as departed either.
+// The node may come back, the entry is still the absent agent's to
+// own, and the origin Lease going stale is what already keeps
+// consumers off it. Pruning on unreadiness would churn the list on
+// every transient kubelet hiccup.
+//
+// The consequence is that a permanently unreachable node whose Node
+// object is never removed keeps its locations forever. On clusters
+// where a cloud controller or autoscaler deletes the object that
+// resolves itself; where nothing does, it needs an operator to
+// remove the node.
+func TestReconcile_NotReadyNodeLocation_IsKept(t *testing.T) {
+	scheme := newScheme(t)
+	flow := newFlow(mxlv1alpha1.MxlFlowLocation{
+		NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationOrigin,
+	})
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(flow.DeepCopy(), notReadyNode("n1")).
+		Build()
+
+	r := &Reconciler{Client: c, Scheme: scheme}
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: flow.Name},
+	})
+	require.NoError(t, err)
+
+	var after mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: flow.Name}, &after))
+	assert.Equal(t, flow.Status, after.Status,
+		"absence of the Node object is the departure signal, not unreadiness")
+}
