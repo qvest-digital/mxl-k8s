@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.0.0-rc.12](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.11...charts/mxl-k8s/v1.0.0-rc.12) (2026-07-28)
+
+
+### Bug Fixes
+
+* **gateway:** demote a target that never receives a grain ([52b9056](https://github.com/qvest-digital/mxl-k8s/commit/52b9056708b065f21a33e7aa1e6b012903864eb6))
+* **operator:** prune MxlFlow locations for departed nodes ([#191](https://github.com/qvest-digital/mxl-k8s/issues/191)) ([52b9056](https://github.com/qvest-digital/mxl-k8s/commit/52b9056708b065f21a33e7aa1e6b012903864eb6))
+
+
+### Dependencies
+
+* **chart:** update mxl-k8s module images ([#198](https://github.com/qvest-digital/mxl-k8s/issues/198)) ([2705800](https://github.com/qvest-digital/mxl-k8s/commit/270580035a6e8776309f54e8847378918b7d6599))
+* **chart:** update mxl-k8s module images ([#199](https://github.com/qvest-digital/mxl-k8s/issues/199)) ([51f6014](https://github.com/qvest-digital/mxl-k8s/commit/51f60145002bd4b3340b48bd89746c2c98353e7e))
+* **chart:** update mxl-k8s module images ([#201](https://github.com/qvest-digital/mxl-k8s/issues/201)) ([2ada193](https://github.com/qvest-digital/mxl-k8s/commit/2ada1937443eaf11d4b0f0df48adff68f279ef09))
+
 ## [1.0.0-rc.11](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.10...charts/mxl-k8s/v1.0.0-rc.11) (2026-07-27)
 
 
