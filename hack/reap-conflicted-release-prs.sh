@@ -20,8 +20,13 @@
 # Runs before the release-please step so the same run recreates what
 # it closes. Only PRs release-please itself labels are considered,
 # and only on an unambiguous CONFLICTING -- never on UNKNOWN, which
-# is what GitHub reports while it recomputes mergeability after a
-# push.
+# is what GitHub reports while it recomputes mergeability.
+#
+# That recompute is the reason for the polling below. On a push
+# trigger this runs seconds after the merge that invalidated the
+# siblings, and GitHub answers UNKNOWN for every one of them: without
+# waiting, the run reaps nothing and the conflict survives until
+# someone dispatches the workflow by hand.
 #
 # bash 3.2 compatible: no associative arrays, no mapfile.
 
@@ -29,6 +34,9 @@ set -uo pipefail
 
 LABEL="${LABEL:-autorelease: pending}"
 DRY_RUN="${DRY_RUN:-false}"
+# Per-PR budget for GitHub to settle on a mergeable state.
+SETTLE_TRIES="${SETTLE_TRIES:-10}"
+SETTLE_SLEEP="${SETTLE_SLEEP:-6}"
 
 command -v gh >/dev/null 2>&1 || { echo "gh not on PATH" >&2; exit 1; }
 
@@ -44,9 +52,19 @@ reaped=0
 for n in $numbers; do
   # Queried per PR rather than in the list call: mergeable is
   # computed lazily, and asking for it one at a time gives GitHub the
-  # chance to have settled on a real answer.
-  state="$(gh pr view "$n" --json mergeable --jq .mergeable 2>/dev/null)"
+  # chance to have settled on a real answer. Retried because "lazily"
+  # can mean tens of seconds after a push.
   title="$(gh pr view "$n" --json title --jq .title 2>/dev/null)"
+  state=""
+  try=0
+  while [ "$try" -lt "$SETTLE_TRIES" ]; do
+    state="$(gh pr view "$n" --json mergeable --jq .mergeable 2>/dev/null)"
+    case "$state" in
+      CONFLICTING|MERGEABLE) break ;;
+    esac
+    try=$((try + 1))
+    [ "$try" -lt "$SETTLE_TRIES" ] && sleep "$SETTLE_SLEEP"
+  done
 
   case "$state" in
     CONFLICTING)
@@ -68,10 +86,10 @@ for n in $numbers; do
       echo "ok      #${n}: ${title}"
       ;;
     *)
-      # UNKNOWN, or an empty response. Doing nothing is correct: a
-      # PR closed on a transient unknown would churn the release for
-      # no reason.
-      echo "skip    #${n} (mergeable=${state:-?}): ${title}"
+      # Still UNKNOWN after the budget, or an empty response. Doing
+      # nothing is correct: a PR closed on an unknown would churn the
+      # release for no reason. The next run gets another go.
+      echo "skip    #${n} (mergeable=${state:-?} after ${SETTLE_TRIES} tries): ${title}"
       ;;
   esac
 done
