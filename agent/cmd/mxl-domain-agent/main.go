@@ -144,6 +144,7 @@ func run(args []string) error {
 				setupLog.Error(err, "intent socket exited")
 			}
 		}()
+		go intentDispatcher.RunMirrorRescan(ctx, 0)
 	}
 
 	setupLog.Info("agent started",
