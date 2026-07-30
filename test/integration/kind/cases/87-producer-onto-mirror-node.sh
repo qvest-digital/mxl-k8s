@@ -35,6 +35,57 @@ SURVIVAL_SETTLE_SECS="${SURVIVAL_SETTLE_SECS:-10}"
 
 pinned=0
 
+# pin_writer <node> -- recreate the demo writer bound to a node.
+# nodeName bypasses the scheduler, which is what makes both the setup
+# and the collision deterministic rather than a matter of which worker
+# the scheduler happens to pick.
+#
+# awk rather than a sed newline substitution: GNU sed accepts \n in
+# the replacement, BSD sed does not, and the suite has to read the
+# same on either.
+pin_writer() {
+  local node="$1" manifest
+  manifest="$(mktemp)"
+  awk -v node="$node" '
+    /^spec:$/ && !done { print; print "  nodeName: " node; done = 1; next }
+    { print }
+  ' "$WRITER_MANIFEST" > "$manifest"
+  grep -q "nodeName: ${node}" "$manifest" || {
+    rm -f "$manifest"
+    fail "could not pin the writer manifest to ${node}"
+  }
+
+  "${KUBECTL[@]}" -n "$NAMESPACE" delete "pod/${WRITER_POD}" \
+      --grace-period=0 --force --ignore-not-found >/dev/null \
+    || { rm -f "$manifest"; fail "delete pod/${WRITER_POD} failed"; }
+  pinned=1
+  "${KUBECTL[@]}" -n "$NAMESPACE" apply -f "$manifest" >/dev/null \
+    || { rm -f "$manifest"; fail "apply writer pinned to ${node} failed"; }
+  rm -f "$manifest"
+
+  "${KUBECTL[@]}" -n "$NAMESPACE" wait --for=condition=Ready \
+      "pod/${WRITER_POD}" --timeout="${ROLLOUT_TIMEOUT_SECS}s" \
+    || fail "${WRITER_POD} did not become Ready on ${node}"
+
+  local landed
+  landed=$("${KUBECTL[@]}" -n "$NAMESPACE" get "pod/${WRITER_POD}" \
+            -o jsonpath='{.spec.nodeName}')
+  [ "$landed" = "$node" ] || fail "writer landed on ${landed}, expected ${node}"
+}
+
+# wait_target_phase <flow> <node> <phase> <timeout>
+wait_target_phase() {
+  local flow="$1" node="$2" want="$3" timeout="$4" deadline seen
+  deadline=$(( $(date +%s) + timeout ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    seen="$(phase_for "$flow" "$node")"
+    [ "$seen" = "$want" ] && { echo "$seen"; return 0; }
+    sleep 3
+  done
+  echo "$seen"
+  return 1
+}
+
 # Put the writer back where the manifest wants it. A writer left
 # pinned to the consumer's node would strand every later case with a
 # flow that never needs a mirror.
@@ -92,53 +143,33 @@ flow=$("${KUBECTL[@]}" -n "$NAMESPACE" get "mxlfm/${mirror}" \
         -o jsonpath='{.spec.flowID}')
 target=$("${KUBECTL[@]}" -n "$NAMESPACE" get "mxlfm/${mirror}" \
           -o jsonpath='{.spec.targetNode}')
-source_node=$("${KUBECTL[@]}" -n "$NAMESPACE" get "mxlfm/${mirror}" \
-          -o jsonpath='{.spec.sourceNode}')
-[ -n "$flow" ] && [ -n "$target" ] && [ -n "$source_node" ] \
-  || fail "mxlfm/${mirror} is missing flowID, targetNode or sourceNode"
+[ -n "$flow" ] && [ -n "$target" ] \
+  || fail "mxlfm/${mirror} is missing flowID or targetNode"
 
-[ "$target" != "$source_node" ] \
-  || fail "mxlfm/${mirror} already sources from its own target; nothing to relocate onto"
+# Normalise the starting position rather than inherit it. By this
+# point in the suite the writer has been rescheduled and two nodes
+# have been cycled, so the mirror's target may already hold the
+# producer. Park the writer away from the target and wait for the
+# mirror to be the only thing feeding that node's copy.
+home=""
+for node in $("${KUBECTL[@]}" get nodes \
+    -l '!node-role.kubernetes.io/control-plane' \
+    -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}'); do
+  [ "$node" != "$target" ] && { home="$node"; break; }
+done
+[ -n "$home" ] || fail "no worker other than ${target}; the relocation has nowhere to start from"
 
-before_target="$(phase_for "$flow" "$target")"
 echo "  mirror=${mirror} flow=${flow}"
-echo "  source=${source_node} target=${target} target.phase=${before_target:-<none>}"
+echo "  target=${target} parking the producer on ${home} first"
 
-[ "$before_target" = "Ready" ] \
-  || fail "expected the mirror target to record Ready before the producer moves, got '${before_target:-<none>}'"
+pin_writer "$home"
+before_target="$(wait_target_phase "$flow" "$target" Ready "$MIRROR_TIMEOUT_SECS")" \
+  || fail "${target} records '${before_target:-<none>}' for ${flow}, expected Ready with the producer parked on ${home}"
+echo "  ${target} records Ready, fed only by the mirror"
 
-# Pin the writer onto the mirror's target node. nodeName bypasses the
-# scheduler, which is what makes the collision deterministic rather
-# than a matter of which worker the scheduler happens to pick.
-#
-# awk rather than a sed newline substitution: GNU sed accepts \n in
-# the replacement, BSD sed does not, and the suite has to read the
-# same on either.
-pinned_manifest="$(mktemp)"
-awk -v node="$target" '
-  /^spec:$/ && !done { print; print "  nodeName: " node; done = 1; next }
-  { print }
-' "$WRITER_MANIFEST" > "$pinned_manifest"
-grep -q "nodeName: ${target}" "$pinned_manifest" \
-  || fail "could not pin the writer manifest to ${target}"
-
-"${KUBECTL[@]}" -n "$NAMESPACE" delete "pod/${WRITER_POD}" \
-    --grace-period=0 --force --ignore-not-found >/dev/null \
-  || fail "delete pod/${WRITER_POD} failed"
-pinned=1
-
-"${KUBECTL[@]}" -n "$NAMESPACE" apply -f "$pinned_manifest" >/dev/null \
-  || fail "apply writer pinned to ${target} failed"
-rm -f "$pinned_manifest"
-
-"${KUBECTL[@]}" -n "$NAMESPACE" wait --for=condition=Ready \
-    "pod/${WRITER_POD}" --timeout="${ROLLOUT_TIMEOUT_SECS}s" \
-  || fail "${WRITER_POD} did not become Ready on ${target}"
-
-landed=$("${KUBECTL[@]}" -n "$NAMESPACE" get "pod/${WRITER_POD}" \
-          -o jsonpath='{.spec.nodeName}')
-[ "$landed" = "$target" ] \
-  || fail "writer landed on ${landed}, expected ${target}"
+# Now the collision: move the producer onto the node its own mirror
+# targets.
+pin_writer "$target"
 echo "  writer pinned onto ${target}, the node already mirroring ${flow}"
 
 # The attach notification is the only signal for this transition, so
