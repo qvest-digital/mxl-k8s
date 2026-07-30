@@ -415,10 +415,27 @@ func (d *Dispatcher) ReconcileMirrors(ctx context.Context) error {
 			origins[m.Spec.FlowID] = res
 		}
 
-		// No usable origin, or one that is already this node: neither
-		// yields an address this mirror could carry. The Degraded
-		// status names the problem either way.
-		if !res.Found || res.Node == d.NodeName {
+		// No usable origin to move to. Leaving the mirror pointed at
+		// its last known source keeps the consumer's copy and the
+		// Degraded status that names the problem.
+		if !res.Found {
+			continue
+		}
+
+		// The origin is now this node, so the mirror would address a
+		// transfer from the node to itself. Removing it is safe while
+		// the local producer holds the flow: libmxl deletes a flow on
+		// release only when the departing writer can take an exclusive
+		// flock, which the producer's own shared lock denies.
+		if res.Node == d.NodeName {
+			if err := d.Client.Delete(ctx, m); err != nil && !apierrors.IsNotFound(err) {
+				l.Error(err, "delete self-targeted mirror",
+					"flowID", m.Spec.FlowID, "mirror", m.Namespace+"/"+m.Name)
+				errs = append(errs, err)
+				continue
+			}
+			l.Info("deleted mirror whose origin moved onto this node",
+				"flowID", m.Spec.FlowID, "mirror", m.Namespace+"/"+m.Name)
 			continue
 		}
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -81,11 +82,12 @@ func TestReconcileMirrors_RepointsAfterOriginMove(t *testing.T) {
 			"target gateway waiting on a source that will never publish again")
 }
 
-// Deleting is never this pass's business: the target gateway's
-// teardown closes the FlowWriter, and closing it removes the on-disk
-// flow definition the consumer reads. A source==target address is not
-// worth that risk, so the mirror is left for the intent GC.
-func TestReconcileMirrors_LeavesMirrorWhenOriginLandsLocally(t *testing.T) {
+// A mirror from a node to itself describes no transfer and holds the
+// one name a consumer on this node can use. Removing it is safe while
+// the local producer holds the flow: libmxl deletes a flow on release
+// only when the departing writer can take an exclusive flock, and the
+// producer's own shared lock denies that.
+func TestReconcileMirrors_DeletesMirrorWhenOriginLandsLocally(t *testing.T) {
 	scheme := newScheme(t)
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -103,11 +105,11 @@ func TestReconcileMirrors_LeavesMirrorWhenOriginLandsLocally(t *testing.T) {
 	require.NoError(t, d.ReconcileMirrors(context.Background()))
 
 	var live mxlv1alpha1.MxlFlowMirror
-	require.NoError(t, c.Get(context.Background(),
-		types.NamespacedName{Namespace: "ns", Name: MirrorName(flowID, "n-target")}, &live))
-	assert.Equal(t, "n-old", live.Spec.SourceNode,
-		"source==target addresses no transfer, so the mirror is left alone "+
-			"rather than torn down under a consumer still reading the flow")
+	err := c.Get(context.Background(),
+		types.NamespacedName{Namespace: "ns", Name: MirrorName(flowID, "n-target")}, &live)
+	assert.True(t, apierrors.IsNotFound(err),
+		"a producer that moved onto the target node makes the mirror "+
+			"self-referential; got err=%v", err)
 }
 
 // patchMirrorIfDrifted owns spec.sourceNode for receiver-authored
