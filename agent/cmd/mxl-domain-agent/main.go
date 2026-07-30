@@ -134,6 +134,7 @@ func run(args []string) error {
 			Provider:           mxlv1alpha1.MxlFabricsProvider(cfg.Provider),
 			MaterializeTimeout: cfg.MaterializeTimeout,
 			Lease:              leaseMgr,
+			Origin:             flowPub,
 		}
 		intentServer := &intentsock.Server{
 			SocketPath: cfg.IntentSocketPath,

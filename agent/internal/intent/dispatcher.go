@@ -89,6 +89,20 @@ type Dispatcher struct {
 	// tests built around. The dispatcher only consults the checker;
 	// the operator owns the OriginFresh condition writeback.
 	Lease LeaseChecker
+
+	// Origin records this node as a flow's origin when a local
+	// producer attaches to a flow that already existed. Nil makes
+	// NotifyProducerAttached a no-op, which is what a dispatcher
+	// wired without a publisher wants.
+	Origin OriginClaimer
+}
+
+// OriginClaimer is the slice of the flowpublisher.Publisher surface
+// NotifyProducerAttached needs. Kept as an interface so the intent
+// package does not depend on the publisher, matching how LeaseChecker
+// keeps the Lease manager out.
+type OriginClaimer interface {
+	ClaimOrigin(ctx context.Context, flowID string) error
 }
 
 // Materialize ensures that the flow referenced by path is, or will
@@ -278,6 +292,44 @@ func (d *Dispatcher) repointMirror(ctx context.Context, mirror *mxlv1alpha1.MxlF
 		"sourceNode", sourceNode,
 		"provider", provider)
 	return nil
+}
+
+// NotifyProducerAttached records that a local process opened a flow
+// that already existed on this node for writing, which makes this
+// node the flow's origin.
+//
+// Without it the node stays labelled Ready forever. A producer
+// rescheduled onto a node that already mirrors the same flow finds
+// the directory in place, so libmxl opens it instead of creating it
+// and no rename reaches the agent's fanotify watch. Once the
+// previous origin is pruned the flow has no Origin location
+// anywhere, which resolveSourceNode cannot answer from -- so no
+// mirror can be repointed and no new consumer can materialize it.
+// Nothing in the cluster recovers from that on its own.
+//
+// The claim is safe precisely because the evidence is positive. A
+// reader opens read-only, and the gateway that fills a mirror links
+// libmxl directly rather than through the shim, so neither reaches
+// this path. Inferring the same thing from the absence of a viable
+// mirror does not work: every node holding a mirror stranded by a
+// reclaimed source would look identical to a real producer and claim
+// a false Origin.
+func (d *Dispatcher) NotifyProducerAttached(ctx context.Context, pid int32, path string) error {
+	flowID, ok := FlowIDFromPath(d.DomainPath, path)
+	if !ok {
+		return fmt.Errorf("%q is not under %s", path, d.DomainPath)
+	}
+	if d.Origin == nil {
+		return nil
+	}
+
+	l := log.FromContext(ctx).WithName("intent").WithValues("flowID", flowID, "pid", pid)
+	if pod, err := d.Resolver.PodForPID(ctx, pid); err == nil {
+		l = l.WithValues("pod", pod.GetNamespace()+"/"+pod.GetName())
+	}
+	l.V(1).Info("producer attached to existing flow")
+
+	return d.Origin.ClaimOrigin(ctx, flowID)
 }
 
 // RunMirrorRescan re-resolves the origin behind every mirror this

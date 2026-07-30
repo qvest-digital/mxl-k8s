@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/qvest-digital/mxl-k8s/agent/internal/podlookup"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -256,4 +257,70 @@ func TestRunMirrorRescan_StopsOnContextCancel(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("RunMirrorRescan did not return after context cancel")
 	}
+}
+
+type fakeOriginClaimer struct {
+	claimed []string
+	err     error
+}
+
+func (f *fakeOriginClaimer) ClaimOrigin(_ context.Context, flowID string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.claimed = append(f.claimed, flowID)
+	return nil
+}
+
+// A producer that finds its flow directory already in place raises no
+// rename, so this notification is the only way the node learns it
+// gained a producer.
+func TestNotifyProducerAttached_ClaimsOrigin(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	origin := &fakeOriginClaimer{}
+	d := &Dispatcher{
+		Client:     c,
+		Resolver:   &podlookup.Resolver{Client: c, NodeName: "n-target"},
+		DomainPath: "/run/mxl/domain",
+		NodeName:   "n-target",
+		Origin:     origin,
+	}
+
+	err := d.NotifyProducerAttached(context.Background(), 4242,
+		"/run/mxl/domain/"+flowID+".mxl-flow/data")
+	require.NoError(t, err)
+	assert.Equal(t, []string{flowID}, origin.claimed)
+}
+
+// A path outside the domain is a shim bug, not a producer.
+func TestNotifyProducerAttached_RejectsForeignPath(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	origin := &fakeOriginClaimer{}
+	d := &Dispatcher{
+		Client:     c,
+		Resolver:   &podlookup.Resolver{Client: c, NodeName: "n-target"},
+		DomainPath: "/run/mxl/domain",
+		NodeName:   "n-target",
+		Origin:     origin,
+	}
+
+	err := d.NotifyProducerAttached(context.Background(), 4242,
+		"/etc/passwd")
+	require.Error(t, err)
+	assert.Empty(t, origin.claimed)
+}
+
+// A dispatcher wired without a publisher must not panic on the
+// notification.
+func TestNotifyProducerAttached_NoClaimerIsNoOp(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	d := &Dispatcher{
+		Client:     c,
+		Resolver:   &podlookup.Resolver{Client: c, NodeName: "n-target"},
+		DomainPath: "/run/mxl/domain",
+		NodeName:   "n-target",
+	}
+
+	require.NoError(t, d.NotifyProducerAttached(context.Background(), 1,
+		"/run/mxl/domain/"+flowID+".mxl-flow/data"))
 }

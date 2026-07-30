@@ -147,6 +147,52 @@ func (p *Publisher) isMirrorTarget(ctx context.Context, flowID string) (bool, er
 	return false, nil
 }
 
+// ClaimOrigin records this node as the flow's Origin and starts
+// renewing the Lease that says so. Idempotent: a location already
+// reading Origin is left untouched, which matters because the caller
+// fires once per producer attach and the shim's de-duplication is
+// best effort.
+//
+// This is the one path that promotes a location the agent itself
+// published as Ready. isMirrorTarget classifies a local copy by
+// asking whether a mirror targets this node, which cannot separate a
+// directory a mirror is filling from one a local producer has taken
+// over -- both look identical from the API. A producer opening a
+// pre-existing flow for writing is the missing evidence, and it
+// arrives here from the shim rather than being inferred.
+func (p *Publisher) ClaimOrigin(ctx context.Context, flowID string) error {
+	l := log.FromContext(ctx).WithName("flowpublisher")
+
+	var flow mxlv1alpha1.MxlFlow
+	if err := p.Client.Get(ctx, types.NamespacedName{Name: flowID}, &flow); err != nil {
+		if apierrors.IsNotFound(err) {
+			// No MxlFlow yet: the directory this producer attached to
+			// is on disk, so the fanotify pass will publish it and the
+			// next attach notification finds it.
+			return nil
+		}
+		return fmt.Errorf("get MxlFlow %s: %w", flowID, err)
+	}
+	for _, loc := range flow.Status.Locations {
+		if loc.NodeName == p.NodeName && loc.Phase == mxlv1alpha1.MxlFlowLocationOrigin {
+			return nil
+		}
+	}
+
+	now := metav1.Now()
+	if err := p.upsertLocation(ctx, flowID, mxlv1alpha1.MxlFlowLocationOrigin, &now); err != nil {
+		return err
+	}
+	l.Info("claimed Origin for locally attached producer", "flowID", flowID)
+
+	if p.Lease != nil {
+		if err := p.Lease.Renew(ctx, flowID); err != nil {
+			l.Error(err, "renew origin lease after claim", "flowID", flowID)
+		}
+	}
+	return nil
+}
+
 // PublishVanished updates the MxlFlow status to mark this node's
 // location as Stale. The MxlFlow itself is left in place -- other
 // nodes may still hold a mirror.
