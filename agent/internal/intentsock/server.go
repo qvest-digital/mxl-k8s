@@ -19,6 +19,10 @@
 //
 //	{"ok":false,"error":"<reason>"}\n
 //
+// A request carrying "event":"attached" is a notification rather
+// than a request: a local producer opened a flow that already
+// existed on this node. The shim does not read the response.
+//
 // The peer's PID is taken from SO_PEERCRED on the UDS, so callers
 // don't need to (and can't trustworthily) declare their own PID.
 package intentsock
@@ -51,6 +55,15 @@ type MaterializeDispatcher interface {
 	Materialize(ctx context.Context, pid int32, path string) error
 }
 
+// ProducerObserver is the optional other half of the dispatcher
+// contract, satisfied by *intent.Dispatcher. A Dispatcher that does
+// not implement it makes the server ignore attach notifications,
+// which keeps the socket usable with a dispatcher that only cares
+// about materialization.
+type ProducerObserver interface {
+	NotifyProducerAttached(ctx context.Context, pid int32, path string) error
+}
+
 // Server listens on a UDS and dispatches requests to the intent
 // dispatcher.
 type Server struct {
@@ -64,8 +77,19 @@ type Server struct {
 	PeerPIDFn func(net.Conn) (int32, error)
 }
 
+// eventAttached marks a notification rather than a request: a local
+// process opened a flow that already existed on this node for
+// writing. The shim sends it without waiting for the reply, so the
+// handler must not treat the response write as meaningful.
+const eventAttached = "attached"
+
 type request struct {
 	Path string `json:"path"`
+
+	// Event distinguishes the notification above from a
+	// materialization request. Empty means materialize, which is what
+	// every shim built before the field existed sends.
+	Event string `json:"event,omitempty"`
 }
 
 type response struct {
@@ -148,6 +172,22 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	}
 	if req.Path == "" {
 		writeResponse(conn, response{Error: "empty path"})
+		return
+	}
+
+	if req.Event == eventAttached {
+		obs, ok := s.Dispatcher.(ProducerObserver)
+		if !ok {
+			writeResponse(conn, response{OK: true})
+			return
+		}
+		if err := obs.NotifyProducerAttached(ctx, pid, req.Path); err != nil {
+			l.V(1).Info("producer attach notification failed",
+				"pid", pid, "path", req.Path, "err", err.Error())
+			writeResponse(conn, response{Error: err.Error()})
+			return
+		}
+		writeResponse(conn, response{OK: true})
 		return
 	}
 

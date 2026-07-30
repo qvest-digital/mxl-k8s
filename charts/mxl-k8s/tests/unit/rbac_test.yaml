@@ -43,6 +43,17 @@ tests:
             resources: [pods]
             verbs: [get, list, watch]
 
+  - it: agent role can delete mirrors so it can drop one whose origin moved onto its node
+    template: templates/rbac-agent.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [mxl.qvest-digital.com]
+            resources: [mxlflowmirrors]
+            verbs: [get, list, watch, create, update, patch, delete]
+
   - it: gateway role can get nodes so it can tell a reclaimed node from a live one
     template: templates/rbac-gateway.yaml
     documentIndex: 0

@@ -12,9 +12,13 @@ rules:
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxldomains/status, mxlflows/status]
     verbs: [get, update, patch]
+  # delete is narrowed in ReconcileMirrors to a mirror this agent
+  # authored whose origin has moved onto its own node, where source
+  # and target would name the same node. The grant itself is not
+  # narrowed; RBAC cannot express that condition.
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxlflowmirrors]
-    verbs: [get, list, watch, create, update, patch]
+    verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxlnodecapabilities]
     verbs: [get, list, watch]

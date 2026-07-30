@@ -29,6 +29,14 @@
  *
  * Outside the narrow flow_def.json path the hooks fall straight
  * through to the kernel.
+ *
+ * The hooks also report the reverse case. A successful open of a
+ * path under <uuid>.mxl-flow with write intent and without O_CREAT
+ * means a local producer attached to a flow that already existed,
+ * which libmxl reaches via openFlow(..., READ_WRITE) and which
+ * raises no filesystem event the agent can watch. The shim sends
+ * `{"path":"<absolute path>","event":"attached"}\n` and does not
+ * wait for the reply, so the producer's open is never delayed.
  */
 
 #define _GNU_SOURCE
@@ -100,10 +108,12 @@ static bool is_flow_path(const char *path)
 	return false;
 }
 
-/* Talk to the agent over the UDS. Returns 0 on success (the agent
- * confirmed the flow is, or will be, available), -1 on any failure
- * including timeout. */
-static int request_materialization(const char *path)
+/* Send one line-delimited JSON request to the agent. When
+ * want_reply is false the caller is not blocked on an answer: the
+ * request is written and the connection dropped. Returns 0 when the
+ * agent answered {"ok":true}, or when want_reply is false and the
+ * write succeeded; -1 on any failure including timeout. */
+static int agent_send(const char *req, int n, bool want_reply)
 {
 	const char *sock_path = getenv(SOCK_ENV);
 	if (!sock_path || !*sock_path) sock_path = DEFAULT_SOCK_PATH;
@@ -125,13 +135,6 @@ static int request_materialization(const char *path)
 		return -1;
 	}
 
-	char req[PATH_MAX + 32];
-	int n = snprintf(req, sizeof(req), "{\"path\":\"%s\"}\n", path);
-	if (n < 0 || (size_t)n >= sizeof(req)) {
-		close(fd);
-		return -1;
-	}
-
 	ssize_t written = 0;
 	while (written < n) {
 		ssize_t w = write(fd, req + written, n - written);
@@ -141,6 +144,11 @@ static int request_materialization(const char *path)
 			return -1;
 		}
 		written += w;
+	}
+
+	if (!want_reply) {
+		close(fd);
+		return 0;
 	}
 
 	char resp[1024];
@@ -164,6 +172,107 @@ static int request_materialization(const char *path)
 	return (strstr(resp, "\"ok\":true") != NULL) ? 0 : -1;
 }
 
+/* Talk to the agent over the UDS. Returns 0 on success (the agent
+ * confirmed the flow is, or will be, available), -1 on any failure
+ * including timeout. */
+static int request_materialization(const char *path)
+{
+	char req[PATH_MAX + 32];
+	int n = snprintf(req, sizeof(req), "{\"path\":\"%s\"}\n", path);
+	if (n < 0 || (size_t)n >= sizeof(req)) return -1;
+	return agent_send(req, n, true);
+}
+
+/* Copy the <id>.mxl-flow component of path into out. Returns false
+ * when path carries no such component. */
+static bool flow_component(const char *path, char *out, size_t outlen)
+{
+	size_t sfx = strlen(FLOW_SUFFIX);
+	const char *p = path;
+	while (*p) {
+		while (*p == '/') p++;
+		if (!*p) break;
+		const char *start = p;
+		while (*p && *p != '/') p++;
+		size_t complen = (size_t)(p - start);
+		if (complen > sfx && memcmp(p - sfx, FLOW_SUFFIX, sfx) == 0) {
+			if (complen >= outlen) return false;
+			memcpy(out, start, complen);
+			out[complen] = '\0';
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Flows already announced by this process. Opening an existing flow
+ * for writing touches the flow data file and then every grain file
+ * in the ring -- a hundred or more on a long-history flow -- and all
+ * of them sit under the same <id>.mxl-flow directory. Announcing
+ * each one would turn one event into a hundred.
+ *
+ * Deliberately racy: two threads attaching to the same flow at once
+ * can both announce it. The agent's handler is idempotent, so a
+ * duplicate costs one extra round trip and nothing else, which is
+ * cheaper than carrying a lock on a path that runs at flow-open
+ * frequency. The table is a ring; overflow re-announces, it does not
+ * corrupt. */
+#define SEEN_MAX 64
+#define SEEN_ENTRY_MAX 80
+static char seen_flows[SEEN_MAX][SEEN_ENTRY_MAX];
+static unsigned seen_next;
+
+static bool already_announced(const char *flow)
+{
+	for (unsigned i = 0; i < SEEN_MAX; i++) {
+		if (seen_flows[i][0] == '\0') continue;
+		if (strcmp(seen_flows[i], flow) == 0) return true;
+	}
+	unsigned slot = seen_next++ % SEEN_MAX;
+	size_t n = strlen(flow);
+	if (n < SEEN_ENTRY_MAX) memcpy(seen_flows[slot], flow, n + 1);
+	return false;
+}
+
+/* Tell the agent a local process just attached to a flow that
+ * already existed on this node.
+ *
+ * libmxl builds a new flow in a temporary directory and renames it
+ * into place, so a producer that creates its flow raises a rename
+ * the agent's fanotify watch already sees. A producer that finds the
+ * directory in place raises nothing at all: mxlCreateFlowWriter
+ * falls through to openFlow(..., READ_WRITE) and the agent never
+ * learns the node gained a producer. That is the gap this closes,
+ * and it is the only positive evidence available that a local
+ * process -- rather than a mirror the gateway is filling -- owns the
+ * flow.
+ *
+ * Best effort by construction: the caller's open has already
+ * succeeded, so a failure here must not change what it returns. */
+static void notify_attached(const char *path)
+{
+	char flow[SEEN_ENTRY_MAX];
+	if (!flow_component(path, flow, sizeof(flow))) return;
+	if (already_announced(flow)) return;
+
+	char req[PATH_MAX + 64];
+	int n = snprintf(req, sizeof(req),
+		"{\"path\":\"%s\",\"event\":\"attached\"}\n", path);
+	if (n < 0 || (size_t)n >= sizeof(req)) return;
+	(void)agent_send(req, n, false);
+}
+
+/* True when flags describe attaching to something that already
+ * exists, with the intent to write it. O_CREAT is excluded because
+ * libmxl only passes it while building a flow in its temporary
+ * directory, which the rename already reports. */
+static bool is_write_attach(int flags)
+{
+	if (flags & O_CREAT) return false;
+	int acc = flags & O_ACCMODE;
+	return acc == O_RDWR || acc == O_WRONLY;
+}
+
 int openat(int dirfd, const char *pathname, int flags, ...)
 {
 	mode_t mode = 0;
@@ -176,7 +285,15 @@ int openat(int dirfd, const char *pathname, int flags, ...)
 	}
 
 	int fd = sys_openat(dirfd, pathname, flags, mode);
-	if (fd >= 0 || errno != ENOENT) return fd;
+	if (fd >= 0) {
+		if (is_write_attach(flags) && is_flow_path(pathname)) {
+			int saved = errno;
+			notify_attached(pathname);
+			errno = saved;
+		}
+		return fd;
+	}
+	if (errno != ENOENT) return fd;
 
 	/* Only intervene for absolute flow_def.json paths. The shim is
 	 * intentionally narrow so unrelated opens (libc, libpthread,
@@ -211,7 +328,15 @@ int open(const char *pathname, int flags, ...)
 	}
 
 	int fd = sys_openat(AT_FDCWD, pathname, flags, mode);
-	if (fd >= 0 || errno != ENOENT) return fd;
+	if (fd >= 0) {
+		if (is_write_attach(flags) && is_flow_path(pathname)) {
+			int saved = errno;
+			notify_attached(pathname);
+			errno = saved;
+		}
+		return fd;
+	}
+	if (errno != ENOENT) return fd;
 
 	if (!is_flow_path(pathname)) {
 		errno = ENOENT;

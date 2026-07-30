@@ -134,6 +134,7 @@ func run(args []string) error {
 			Provider:           mxlv1alpha1.MxlFabricsProvider(cfg.Provider),
 			MaterializeTimeout: cfg.MaterializeTimeout,
 			Lease:              leaseMgr,
+			Origin:             flowPub,
 		}
 		intentServer := &intentsock.Server{
 			SocketPath: cfg.IntentSocketPath,
@@ -144,6 +145,7 @@ func run(args []string) error {
 				setupLog.Error(err, "intent socket exited")
 			}
 		}()
+		go intentDispatcher.RunMirrorRescan(ctx, 0)
 	}
 
 	setupLog.Info("agent started",
