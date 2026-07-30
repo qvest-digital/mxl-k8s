@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.0-rc.10](https://github.com/qvest-digital/mxl-k8s/compare/agent/v1.0.0-rc.9...agent/v1.0.0-rc.10) (2026-07-30)
+
+
+### Bug Fixes
+
+* **agent:** follow the flow origin when it moves between nodes ([#206](https://github.com/qvest-digital/mxl-k8s/issues/206)) ([4c3cc00](https://github.com/qvest-digital/mxl-k8s/commit/4c3cc008197e74576799cd63204f4dace87afa20))
+* **shim:** report a producer attaching to a pre-existing flow ([4c3cc00](https://github.com/qvest-digital/mxl-k8s/commit/4c3cc008197e74576799cd63204f4dace87afa20))
+
 ## [1.0.0-rc.9](https://github.com/qvest-digital/mxl-k8s/compare/agent/v1.0.0-rc.8...agent/v1.0.0-rc.9) (2026-07-28)
 
 
