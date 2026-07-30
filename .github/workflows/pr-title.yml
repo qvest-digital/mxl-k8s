@@ -1,0 +1,56 @@
+name: pr-title
+
+# A squash merge takes its subject from the pull request title, and
+# release-please decides from that subject whether a component releases and at
+# which version. A title it cannot parse releases nothing and reports nothing.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  conventional-title:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # The types are release-please's own: one outside changelog-sections
+      # reaches no changelog section.
+      - name: Read the types from the release-please config
+        id: vocabulary
+        run: |
+          set -euo pipefail
+          {
+            echo 'types<<VOCABULARY'
+            jq -r '.["changelog-sections"][].type' .github/release-please-config.json
+            echo 'VOCABULARY'
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: ${{ steps.vocabulary.outputs.types }}
+          # A scope names the module changed and routes nothing: release-please
+          # attributes a commit to a package by the paths it touches.
+          requireScope: false
+          subjectPattern: ^(?![A-Z]).+[^.]$
+          subjectPatternError: >-
+            "{subject}" starts upper case or ends in a period.
+          # Squashing a single-commit pull request falls back to that commit's
+          # subject while squash_merge_commit_title is COMMIT_OR_PR_TITLE, and
+          # repository settings are not version controlled.
+          validateSingleCommit: true
+
+      # The title becomes the subject line, which wraps at 72.
+      - name: Check the subject length
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if [ "${#TITLE}" -gt 72 ]; then
+            echo "::error::The title is ${#TITLE} characters, the limit is 72."
+            exit 1
+          fi
