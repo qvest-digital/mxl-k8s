@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 88-origin-lease-gate.sh -- only a flow's Origin renews its Lease.
+# 56-origin-lease-gate.sh -- only a flow's Origin renews its Lease.
 #
 # The Lease is what lets a consumer reject an Origin whose producer
 # died: resolveSourceNode skips an Origin location whose Lease has
@@ -11,7 +11,9 @@
 #
 # The assertion is over whatever the suite has already built, so the
 # case costs one API round trip per location and adds no cluster
-# churn.
+# churn. It runs while the demo is converged: the cases that cycle
+# nodes take the producer's bare Pod with them, and a run with no
+# producer left has no Origin to assert against.
 #
 # bash 3.2 compatible: no associative arrays, no mapfile.
 

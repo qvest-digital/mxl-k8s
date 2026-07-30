@@ -46,7 +46,7 @@ Tunables (all optional, environment variables):
 | `CLAIM_TIMEOUT_SECS` | `90` | Case 55 wait for the relocated producer's Origin claim |
 | `SELF_MIRROR_TIMEOUT_SECS` | `90` | Case 55 wait for the self-targeted mirror to go |
 | `SURVIVAL_SETTLE_SECS` | `10` | Case 55 settle window before asserting the flow outlived the teardown |
-| `LEASES_NAMESPACE` | `$MXL_NAMESPACE` | Namespace case 88 reads origin Leases from |
+| `LEASES_NAMESPACE` | `$MXL_NAMESPACE` | Namespace case 56 reads origin Leases from |
 | `KIND_DIAG_DIR` | `$PWD/kind-diagnostics` | Where failure diagnostics land |
 | `CASE_GLOB` | `cases/*.sh` | Case selection glob |
 
