@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 87-producer-onto-mirror-node.sh -- a producer lands on the node
+# 55-producer-onto-mirror-node.sh -- a producer lands on the node
 # that already mirrors its flow.
 #
 # This is the one relocation that leaves no trace for the agent to
@@ -17,6 +17,11 @@
 # target node, and asserts the two halves of the recovery: the shim
 # reports the attach so the agent claims Origin, and the mirror that
 # now describes a transfer from the node to itself is removed.
+#
+# It runs before the cases that evict the consumer and cycle nodes.
+# Those leave the demo in a state this one would have to rebuild
+# before it could take anything away, and rebuilding it is not what
+# is under test here.
 #
 # bash 3.2 compatible: no associative arrays, no mapfile.
 
@@ -227,3 +232,11 @@ still="$(phase_for "$flow" "$target")"
 echo "  ${flow} still Origin on ${target} after mirror teardown"
 
 restore_writer
+
+# Leave the demo converged. The mirror was removed on purpose, so the
+# consumer has to re-materialize one now that the producer has moved
+# back off its node, and the cases that follow assume it is there.
+wait_phase mxlfm '{range .items[*]}{.metadata.name}={.status.phase};{end}' \
+    '^([a-z0-9-]+=Ready;)+$' "$MIRROR_TIMEOUT_SECS" >/dev/null \
+  || fail "no MxlFlowMirror returned to Ready after the producer moved back off ${target}"
+echo "  mirror re-materialized after the producer moved back off ${target}"
