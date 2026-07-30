@@ -45,8 +45,11 @@ jobs:
           # repository settings are not version controlled.
           validateSingleCommit: true
 
-      # The title becomes the subject line, which wraps at 72.
+      # The title becomes the subject line, which wraps at 72. An update bot
+      # writes the dependency, both versions and the directory into its title
+      # and has no shorter form to fall back to.
       - name: Check the subject length
+        if: github.event.pull_request.user.type != 'Bot'
         env:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
