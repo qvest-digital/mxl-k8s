@@ -27,6 +27,8 @@ set -uo pipefail
 
 WRITER_POD="${WRITER_POD:-mxl-tcp-demo-writer}"
 WRITER_MANIFEST="${WRITER_MANIFEST:-${PWD}/examples/tcp-demo/10-writer.yaml}"
+READER_POD="${READER_POD:-mxl-tcp-demo-reader}"
+READER_MANIFEST="${READER_MANIFEST:-${PWD}/examples/tcp-demo/21-reader.yaml}"
 CLAIM_TIMEOUT_SECS="${CLAIM_TIMEOUT_SECS:-90}"
 SELF_MIRROR_TIMEOUT_SECS="${SELF_MIRROR_TIMEOUT_SECS:-90}"
 SURVIVAL_SETTLE_SECS="${SURVIVAL_SETTLE_SECS:-10}"
@@ -64,8 +66,26 @@ phase_for() {
   echo ""
 }
 
+# Establish the precondition rather than inherit it. The cases that
+# run before this one evict the consumer and cycle nodes, and the
+# reader is a bare Pod, so it does not come back on its own and the
+# intent GC takes its mirror with it. Re-applying here keeps the case
+# runnable on its own and in any suite order.
 mirror=$("${KUBECTL[@]}" -n "$NAMESPACE" get mxlfm \
           -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -z "$mirror" ]; then
+  echo "  no mirror present; restoring ${READER_POD} to create one"
+  "${KUBECTL[@]}" -n "$NAMESPACE" apply -f "$READER_MANIFEST" >/dev/null \
+    || fail "re-apply ${READER_MANIFEST} failed"
+  "${KUBECTL[@]}" -n "$NAMESPACE" wait --for=condition=Ready \
+      "pod/${READER_POD}" --timeout="${ROLLOUT_TIMEOUT_SECS}s" \
+    || fail "${READER_POD} did not become Ready"
+  wait_phase mxlfm '{range .items[*]}{.metadata.name}={.status.phase};{end}' \
+      '^([a-z0-9-]+=Ready;)+$' "$MIRROR_TIMEOUT_SECS" >/dev/null \
+    || fail "no MxlFlowMirror reached Ready after restoring ${READER_POD}"
+  mirror=$("${KUBECTL[@]}" -n "$NAMESPACE" get mxlfm \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+fi
 [ -n "$mirror" ] || fail "no MxlFlowMirror found in namespace ${NAMESPACE}"
 
 flow=$("${KUBECTL[@]}" -n "$NAMESPACE" get "mxlfm/${mirror}" \
