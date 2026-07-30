@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.0-rc.13](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.12...charts/mxl-k8s/v1.0.0-rc.13) (2026-07-30)
+
+
+### Bug Fixes
+
+* **agent:** follow the flow origin when it moves between nodes ([#206](https://github.com/qvest-digital/mxl-k8s/issues/206)) ([4c3cc00](https://github.com/qvest-digital/mxl-k8s/commit/4c3cc008197e74576799cd63204f4dace87afa20))
+* **shim:** report a producer attaching to a pre-existing flow ([4c3cc00](https://github.com/qvest-digital/mxl-k8s/commit/4c3cc008197e74576799cd63204f4dace87afa20))
+
 ## [1.0.0-rc.12](https://github.com/qvest-digital/mxl-k8s/compare/charts/mxl-k8s/v1.0.0-rc.11...charts/mxl-k8s/v1.0.0-rc.12) (2026-07-28)
 
 
