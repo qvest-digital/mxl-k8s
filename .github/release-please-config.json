@@ -21,7 +21,6 @@
     },
     ".": {
       "release-type": "simple",
-      "component": "mxl-k8s",
       "include-component-in-tag": false,
       "exclude-paths": [
         ".github",
