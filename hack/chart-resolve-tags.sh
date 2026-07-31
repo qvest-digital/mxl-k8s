@@ -9,14 +9,14 @@
 # The single argument is either an explicit mode (dev | release) or a
 # chart version string, in which case the mode is auto-detected:
 #   - "0.0.0-dev*"  -> dev      (track main HEAD; rewrite tags to "dev")
-#   - anything else -> release  (keep the committed per-component pins)
+#   - anything else -> release  (leave the tags empty)
 #
-# Release builds ship the pins committed in values.yaml as-is. Renovate
-# keeps those current: a bump opens a deps(chart) PR that release-please
-# turns into a chart release, so the committed pins are already correct
-# at package time and nothing is resolved. Only the dev channel rewrites
-# the tags, to "dev", so the 0.0.0-dev chart tracks the :dev images
-# built on every merge to main.
+# Release builds ship no per-component pin at all. operator, agent and
+# gateway are released under the chart's own version, so an empty tag
+# resolves to "v<appVersion>" in mxlk8s.image and there is nothing to
+# keep in step. Only the dev channel rewrites the tags, to "dev", so
+# the 0.0.0-dev chart tracks the :dev images built on every merge to
+# main rather than a version that was never released.
 #
 # In dev mode the script writes in place; after running locally,
 # `git checkout -- charts/mxl-k8s/values.yaml` reverts.
@@ -29,6 +29,7 @@ set -euo pipefail
 
 arg="${1:?usage: $0 <dev|release|<chart-version>>}"
 values=charts/mxl-k8s/values.yaml
+chart=charts/mxl-k8s/Chart.yaml
 components=(operator agent gateway)
 
 case "$arg" in
@@ -43,11 +44,18 @@ if [ "$mode" = dev ]; then
   done
 fi
 
+# The same fallback mxlk8s.image applies: an empty tag resolves to the
+# chart appVersion prefixed with "v".
+app_version=$(yq '.appVersion' "$chart")
+
 echo "## Bundled component versions"
 echo ""
 echo "| Component | Image tag |"
 echo "| --- | --- |"
 for c in "${components[@]}"; do
   t=$(yq ".${c}.image.tag" "$values")
+  if [ -z "$t" ] || [ "$t" = "null" ]; then
+    t="v${app_version}"
+  fi
   echo "| ${c} | \`${t}\` |"
 done

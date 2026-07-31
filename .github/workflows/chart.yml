@@ -10,8 +10,8 @@ on:
   push:
     branches: [main]
   # release-please.yml calls this workflow as a reusable workflow
-  # when a charts/mxl-k8s release tag has just been cut, gated on
-  # the per-component release_created output. Pre-PAT a
+  # when the repository release tag has just been cut, gated on the
+  # root package's release_created output. Pre-PAT a
   # release:published listener was not an option either: release-
   # please-action created the release with GITHUB_TOKEN and events
   # produced by GITHUB_TOKEN do not start downstream runs. With
@@ -22,13 +22,13 @@ on:
   workflow_call:
     inputs:
       release_tag:
-        description: "charts/mxl-k8s release tag to package (e.g. charts/mxl-k8s/v1.0.0-rc.2)"
+        description: "Repository release tag to package (e.g. v1.0.0-rc.14)"
         type: string
         required: true
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "charts/mxl-k8s release tag to package (e.g. charts/mxl-k8s/v1.0.0-rc.2). Leave empty for a dev build of HEAD."
+        description: "Repository release tag to package (e.g. v1.0.0-rc.14). Leave empty for a dev build of HEAD."
         type: string
         required: false
         default: ""
@@ -64,8 +64,8 @@ env:
 
 jobs:
   # Decides whether this diff concerns the chart at all. Gating meta on
-  # the result is enough to cascade: pins, lint and render all need it,
-  # and a skipped dependency skips them too.
+  # the result is enough to cascade: lint and render both need it, and
+  # a skipped dependency skips them too.
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
@@ -83,9 +83,9 @@ jobs:
               - 'charts/mxl-k8s/**'
               - 'config/crd/**'
               - '.github/workflows/chart.yml'
-              # The pins job runs this script; without it here a change
-              # to the gate itself never reaches the gate.
-              - 'hack/check-chart-pins.sh'
+              # package-push runs this script; without it here a
+              # change to the resolver never reaches a chart build.
+              - 'hack/chart-resolve-tags.sh'
 
       - id: decide
         env:
@@ -129,16 +129,17 @@ jobs:
           release_tag=""
 
           if [ -n "${INPUT_RELEASE_TAG:-}" ]; then
-            # Called for a tagged release. Accept only chart tags;
-            # anything else is a caller mistake worth failing on.
+            # Called for a tagged release. Accept only the
+            # repository release tag; anything else is a caller
+            # mistake worth failing on.
             case "$INPUT_RELEASE_TAG" in
-              charts/mxl-k8s/v*.*.*)
-                version="${INPUT_RELEASE_TAG##*/v}"
+              v*.*.*)
+                version="${INPUT_RELEASE_TAG#v}"
                 release_tag="$INPUT_RELEASE_TAG"
                 publish=true
                 ;;
               *)
-                echo "::error::release_tag '${INPUT_RELEASE_TAG}' is not a charts/mxl-k8s tag"
+                echo "::error::release_tag '${INPUT_RELEASE_TAG}' is not a v<X.Y.Z> tag"
                 exit 1
                 ;;
             esac
@@ -154,25 +155,6 @@ jobs:
             echo "version=${version}"
             echo "release_tag=${release_tag}"
           } >> "$GITHUB_OUTPUT"
-
-  # A chart release PR bumps only the chart's own version; the image
-  # pins come from whatever values.yaml holds on main when it merges.
-  # Cutting the chart before a component's post-release/chart-pins
-  # bump has landed therefore packages a stale image, and nothing
-  # about the PR looks wrong while it happens. This turns that
-  # ordering rule into a gate.
-  pins:
-    runs-on: ubuntu-24.04
-    needs: meta
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          # Release tags are the comparison basis; the default shallow
-          # fetch carries none of them.
-          fetch-depth: 0
-
-      - name: Chart pins are not behind released images
-        run: ./hack/check-chart-pins.sh
 
   lint:
     runs-on: ubuntu-24.04
@@ -303,10 +285,10 @@ jobs:
       # hack/chart-resolve-tags.sh emits the bundled-component table and,
       # for the floating dev build (0.0.0-dev*), rewrites each
       # <component>.image.tag to "dev" so the dev chart tracks main HEAD
-      # images. Release builds keep the per-component pins committed in
-      # values.yaml (Renovate keeps those current), so the diff below is
-      # empty for a release and confirms it ships exactly those pins. The
-      # table is saved for the publish-bundled-component-table step.
+      # images. Release builds leave the tags empty and let mxlk8s.image
+      # resolve them from the chart appVersion, so the diff below is
+      # empty for a release. The table is saved for the
+      # publish-bundled-component-table step.
       - name: Emit bundled-component table (dev build pins :dev)
         env:
           VERSION: ${{ needs.meta.outputs.version }}
@@ -358,7 +340,7 @@ jobs:
   # rule on this name always gets a report. Requiring pins directly
   # instead would block any diff that never starts the chart jobs.
   chart-summary:
-    needs: [changes, meta, pins, lint, render, package-push]
+    needs: [changes, meta, lint, render, package-push]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2

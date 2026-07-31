@@ -63,18 +63,26 @@ app.kubernetes.io/version: {{ include "mxlk8s.appVersion" .Context.Chart | quote
 {{/*
 Resolve the image reference for one component. Digest beats tag. An
 explicit image.tag is used verbatim so digests, "pre", "latest", or
-externally-mirrored tags pass through unchanged. With neither tag nor
-digest set, rendering fails: every component pins one or the other.
+externally-mirrored tags pass through unchanged. With neither set, the
+tag falls back to the chart appVersion prefixed with "v".
 
-Call as: include "mxlk8s.image" (dict "global" .Values.global "image" .Values.operator.image)
+operator, agent, gateway and shim are one release-please package
+together with this chart, so a chart at version X always bundles the
+images published as vX. Deriving the default from appVersion rather
+than carrying a pin per component is what keeps the two from drifting:
+there is no second place to update, and no window in which the chart
+names an image the release did not build.
+
+Call as: include "mxlk8s.image" (dict "Context" . "image" .Values.operator.image)
 */}}
 {{- define "mxlk8s.image" -}}
-{{- $registry := .global.image.registry -}}
+{{- $registry := .Context.Values.global.image.registry -}}
 {{- $repo := .image.repository -}}
 {{- if .image.digest -}}
 {{- printf "%s/%s@%s" $registry $repo .image.digest -}}
 {{- else -}}
-{{- $tag := required "set <component>.image.tag or .image.digest" .image.tag -}}
+{{- $default := printf "v%s" (required "chart appVersion is empty; set <component>.image.tag or .image.digest" .Context.Chart.AppVersion) -}}
+{{- $tag := default $default .image.tag -}}
 {{- printf "%s/%s:%s" $registry $repo $tag -}}
 {{- end -}}
 {{- end -}}

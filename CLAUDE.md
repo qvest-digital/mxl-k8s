@@ -124,11 +124,13 @@ gets a changelog entry and how the version bumps. Two consequences:
    server-side apply on subresources
    ```
 
-   That single squash commit produces three release-relevant
-   entries: the `feat(operator)` (driving the minor bump), the
-   `fix(gateway)` (driving a patch bump on gateway), and a
-   `BREAKING CHANGE` footer (driving a major bump on operator).
-   Use `BREAKING CHANGE:` or `BREAKING-CHANGE:` (release-please
+   That single squash commit produces three changelog entries.
+   The bump is decided per release-please package, not per
+   scope: which package a line lands in follows the paths the
+   commit touched, and the strongest bump across a package's
+   lines wins. A commit touching only `api/` therefore bumps
+   both packages -- api compiles into all three binaries. Use
+   `BREAKING CHANGE:` or `BREAKING-CHANGE:` (release-please
    accepts both) and `Release-As: X.Y.Z` for explicit overrides.
 
 ### Working in a worktree
@@ -209,12 +211,43 @@ the work that produced it. The same rules apply to PR descriptions.
 
 ## Versioning and tags
 
-- Each module is released independently. `release-please` is configured
-  for five packages; tags take the form `<module>/vMAJOR.MINOR.PATCH`
-  (for example `api/v0.1.0`, `agent/v0.1.0`).
+`release-please` is configured for two packages, and they share one
+release pull request (`separate-pull-requests: false`):
+
+| Package | Covers | Tag | Changelog |
+| --- | --- | --- | --- |
+| `api` | `api/` | `api/vX.Y.Z` | `api/CHANGELOG.md` |
+| `.` | operator, agent, gateway, shim, chart | `vX.Y.Z` | `CHANGELOG.md` |
+
+- The bundle version is the chart version. `charts/mxl-k8s/Chart.yaml`
+  carries it twice: `version` (the chart) and `appVersion` (the module
+  images the chart bundles). Both are written by release-please.
+- The four images publish under that one version, so
+  `ghcr.io/qvest-digital/mxl-k8s/agent:vX.Y.Z` and the chart at `X.Y.Z`
+  always belong together. `<component>.image.tag` in `values.yaml` is
+  empty and resolves to `v<appVersion>`; there is no pin to bump.
+- `api` keeps its own version because it is the only module meant to be
+  imported from outside this repository. The `require` lines in
+  `agent/go.mod`, `operator/go.mod` and `gateway/go.mod` carry a
+  `// x-release-please-version` annotation and are rewritten inside the
+  api release PR, so the pin and the tag land in the same commit. No
+  `go.sum` change follows: api is resolved through a local `replace`,
+  so it has no sum entry. `hack/check-api-pins.sh` gates the invariant.
 - The Go module proxy resolves `github.com/qvest-digital/mxl-k8s/api@v0.1.0`
-  against the `api/v0.1.0` tag — don't move tag prefixes by hand.
-- Don't hand-tag or hand-edit `CHANGELOG.md` — let the workflow do it.
+  against the `api/v0.1.0` tag -- don't move tag prefixes by hand.
+- Don't hand-tag or hand-edit `CHANGELOG.md` -- let the workflow do it.
+  The frozen `agent/`, `operator/`, `gateway/`, `shim/` and
+  `charts/mxl-k8s/` changelogs are history up to `1.0.0-rc.13`; entries
+  from `1.0.0-rc.14` on land in the repository `CHANGELOG.md`.
+- The root package excludes `.github`, `docs`, `examples`, `hack`,
+  `kind-diagnostics` and `test`: nothing under them ships in an image
+  or the chart. A commit confined to those paths cuts no release. Every
+  other path does, including `api/` -- an api change is compiled into
+  all three binaries, so it has to reach a new image.
+- Nothing opens a pull request after a release. The pins that used to
+  need one (api requires, chart image tags) are written by
+  release-please or derived at render time, which is what makes the
+  train work on a repository without auto-merge.
 
 ## Build
 

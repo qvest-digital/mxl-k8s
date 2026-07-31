@@ -4,8 +4,7 @@ on:
   push:
     branches: [main]
   # Manual escape hatch: re-run the release-please pass without
-  # waiting for a new push to main. Useful when a release PR fell
-  # out of sync with main and needs to be regenerated.
+  # waiting for a new push to main.
   workflow_dispatch: {}
 
 permissions:
@@ -16,44 +15,40 @@ concurrency:
   group: release-please
 
 jobs:
-  # Every merge to main opens (or updates) a per-component PR
-  # proposing the next tag for that component. Whether the tag is
-  # a prerelease (1.0.0-rc.N) or a stable release (1.0.0) is
+  # Two release-please packages share one grouped release PR:
+  #
+  #   api  -> tag api/vX.Y.Z, changelog api/CHANGELOG.md
+  #   .    -> tag vX.Y.Z,     changelog CHANGELOG.md
+  #
+  # The root package covers operator, agent, gateway, shim and the
+  # chart, which therefore all ship under one version. Whether a tag
+  # is a prerelease (1.0.0-rc.N) or a stable release (1.0.0) is
   # controlled per package by the `prerelease` flag in
-  # .github/release-please-config.json. All packages start with
-  # the top-level `prerelease: true` default; graduating a
-  # component is a one-line edit (`"prerelease": false` on its
-  # package entry) and is the only configuration change needed to
-  # cut a stable release.
+  # .github/release-please-config.json; graduating a package is a
+  # one-line edit there.
+  #
+  # `separate-pull-requests: false` is what keeps the manifest from
+  # conflicting with itself. With one PR per package, every branch
+  # carried its own snapshot of .github/release-please-manifest.json,
+  # and release-please rewrites a branch only when that package's
+  # pending release changes -- never when main moves under it. A
+  # sibling release landing therefore left the others unmergeable,
+  # and neither workflow_dispatch (which regenerates stale contents,
+  # not a stale base) nor GitHub's "Update branch" (which refuses on
+  # conflict) recovered them. One branch that release-please owns end
+  # to end has no sibling to conflict with.
   release-please:
     runs-on: ubuntu-24.04
     outputs:
-      chart_released:    ${{ steps.rp.outputs['charts/mxl-k8s--release_created'] }}
-      chart_tag:         ${{ steps.rp.outputs['charts/mxl-k8s--tag_name'] }}
-      operator_released: ${{ steps.rp.outputs['operator--release_created'] }}
-      operator_tag:      ${{ steps.rp.outputs['operator--tag_name'] }}
-      agent_released:    ${{ steps.rp.outputs['agent--release_created'] }}
-      agent_tag:         ${{ steps.rp.outputs['agent--tag_name'] }}
-      gateway_released:  ${{ steps.rp.outputs['gateway--release_created'] }}
-      gateway_tag:       ${{ steps.rp.outputs['gateway--tag_name'] }}
-      shim_released:     ${{ steps.rp.outputs['shim--release_created'] }}
-      shim_tag:          ${{ steps.rp.outputs['shim--tag_name'] }}
-      api_released:      ${{ steps.rp.outputs['api--release_created'] }}
-      api_tag:           ${{ steps.rp.outputs['api--tag_name'] }}
+      # The root package's outputs carry no prefix: the action emits
+      # `<path>--<key>` for every package except path ".", which gets
+      # the bare key.
+      bundle_released: ${{ steps.rp.outputs.release_created }}
+      bundle_tag:      ${{ steps.rp.outputs.tag_name }}
+      api_released:    ${{ steps.rp.outputs['api--release_created'] }}
+      api_tag:         ${{ steps.rp.outputs['api--tag_name'] }}
     steps:
       - uses: actions/checkout@v7
-
-      # Runs before release-please so the same invocation recreates
-      # whatever it closes. release-please rewrites a component's
-      # branch when that component's pending release changes, not
-      # when main moves under it, so a release PR whose neighbouring
-      # manifest keys have since moved is stuck: workflow_dispatch
-      # regenerates stale contents, not a stale base, and "Update
-      # branch" refuses on conflict.
-      - name: Close release PRs that conflict with main
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-        run: ./hack/reap-conflicted-release-prs.sh
 
       - id: rp
         uses: googleapis/release-please-action@v5
@@ -62,355 +57,35 @@ jobs:
           config-file: .github/release-please-config.json
           manifest-file: .github/release-please-manifest.json
 
-  # Once a charts/mxl-k8s tag is cut (prerelease or stable),
-  # package and push the chart with per-component image tags
-  # pinned. Driven via workflow_call so the per-component
-  # release_created output gates the call explicitly. Pre-PAT
-  # this was also forced (release events created by GITHUB_TOKEN
-  # do not start downstream runs); release-please-action is now
-  # authenticated through RELEASE_PLEASE_TOKEN so that
-  # restriction no longer applies, but explicit gating is
-  # preferable to a tag-prefix filter on release:published.
+  # Once the bundle tag is cut, publish the four module images under
+  # that one version and package the chart that vendors them. Both
+  # are driven via workflow_call so the release_created output gates
+  # the call explicitly rather than through a tag-prefix filter on
+  # release:published. workflow_dispatch on either workflow covers
+  # manual recovery.
+  #
+  # Nothing runs after an api-only release: its artefact is the Go
+  # module tag, which the module proxy resolves from the tag alone.
+  # The consumer `require` lines are rewritten inside the release PR
+  # by the extra-files entries on the api package, so there is no
+  # post-release bump left to open.
+  publish-images:
+    needs: [release-please]
+    if: needs.release-please.outputs.bundle_released == 'true'
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+    uses: ./.github/workflows/images.yml
+    with:
+      release_tag: ${{ needs.release-please.outputs.bundle_tag }}
+
   package-chart:
     needs: [release-please]
-    if: needs.release-please.outputs.chart_released == 'true'
+    if: needs.release-please.outputs.bundle_released == 'true'
     permissions:
       contents: write
       packages: write
     uses: ./.github/workflows/chart.yml
     with:
-      release_tag: ${{ needs.release-please.outputs.chart_tag }}
-
-  # Per-component image publishes. Same workflow_call-driven
-  # path as the chart above, for the same explicit-gating
-  # reason. Each job is gated on its component's release_created
-  # output so an unrelated release cycle costs nothing.
-  publish-operator-image:
-    needs: [release-please]
-    if: needs.release-please.outputs.operator_released == 'true'
-    permissions:
-      contents: read
-      packages: write
-      pull-requests: read
-    uses: ./.github/workflows/images.yml
-    with:
-      release_tag: ${{ needs.release-please.outputs.operator_tag }}
-
-  publish-agent-image:
-    needs: [release-please]
-    if: needs.release-please.outputs.agent_released == 'true'
-    permissions:
-      contents: read
-      packages: write
-      pull-requests: read
-    uses: ./.github/workflows/images.yml
-    with:
-      release_tag: ${{ needs.release-please.outputs.agent_tag }}
-
-  publish-gateway-image:
-    needs: [release-please]
-    if: needs.release-please.outputs.gateway_released == 'true'
-    permissions:
-      contents: read
-      packages: write
-      pull-requests: read
-    uses: ./.github/workflows/images.yml
-    with:
-      release_tag: ${{ needs.release-please.outputs.gateway_tag }}
-
-  publish-shim-image:
-    needs: [release-please]
-    if: needs.release-please.outputs.shim_released == 'true'
-    permissions:
-      contents: read
-      packages: write
-      pull-requests: read
-    uses: ./.github/workflows/images.yml
-    with:
-      release_tag: ${{ needs.release-please.outputs.shim_tag }}
-
-  # Intra-repo version pins do not update themselves: release-please
-  # has no Go workspace plugin, and the Mend-hosted Renovate app picks
-  # such bumps up only on its own scan cadence (hours to days, plus Go
-  # module proxy indexing lag for gomod). The two jobs below close the
-  # loop in the same run that cut the release.
-  #
-  # Version resolution order matters. The release-please job acts on
-  # live repository state, not on the checked-out commit: it can cut
-  # a release for a release PR that merged while this run was already
-  # in progress. The checkout then predates the release and its
-  # manifest does not carry the new version yet, so a manifest-only
-  # sync sees no drift and opens no PR (observed with the operator
-  # 1.0.0-rc.5 release, cut in the run of the preceding push). The
-  # per-component tag outputs are therefore authoritative for
-  # whatever was released in this run; the manifest at the
-  # checked-out commit covers everything else. The intra-repo rules
-  # in renovate.json stay as a backstop; a later Renovate scan finds
-  # the pins current and does nothing.
-  #
-  # A workflow_dispatch run executes both jobs regardless of the
-  # release outputs. The manifest sync makes that safe: with pins
-  # already current there is no diff and no PR is opened, and with
-  # stale pins the run catches up releases cut while these jobs did
-  # not yet exist or whose run was missed.
-  #
-  # Both jobs open their PR with the PAT for the same reason the rest
-  # of this file uses it: pushes and PRs made with the default
-  # GITHUB_TOKEN do not start workflow runs, which would leave the
-  # bump PR without CI. Auto-merge requires "Allow auto-merge" in the
-  # repository settings; the step degrades to a warning when it is
-  # off and the PR waits for a manual merge. CI gates the merge
-  # either way.
-
-  # After an api release: point the api require of agent, operator,
-  # and gateway at the released version. go mod edit + tidy resolve
-  # api through each module's local replace directive, so the freshly
-  # cut tag does not need to be visible on proxy.golang.org yet. The
-  # PR merges as deps(api) and release-please folds the dependency
-  # move into each consumer's next release.
-  #
-  # No go work sync, and the PR is scoped to the three consumer
-  # directories: the workspace resolves api through go.work, so a
-  # consumer require bump cannot change the workspace selection or
-  # go.work.sum, and sync would write workspace-level raises into
-  # api/go.mod -- a path change that would immediately propose the
-  # next api release.
-  bump-go-consumers:
-    needs: [release-please]
-    if: >-
-      needs.release-please.outputs.api_released == 'true' ||
-      github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.26'
-          check-latest: true
-
-      - name: Sync api requires
-        id: sync
-        env:
-          API_RELEASED: ${{ needs.release-please.outputs.api_released }}
-          API_TAG: ${{ needs.release-please.outputs.api_tag }}
-        run: |
-          set -eu
-          if [ "${API_RELEASED}" = "true" ] && [ -n "${API_TAG}" ]; then
-            version="${API_TAG#api/v}"
-          else
-            version=$(jq -re .api .github/release-please-manifest.json)
-          fi
-          for m in agent operator gateway; do
-            (cd "$m" \
-              && go mod edit -require="github.com/qvest-digital/mxl-k8s/api@v${version}" \
-              && go mod tidy)
-          done
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-
-      - id: pr
-        uses: peter-evans/create-pull-request@v8
-        with:
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          branch: post-release/api-consumers
-          delete-branch: true
-          add-paths: |
-            agent
-            operator
-            gateway
-          commit-message: "deps(api): bump api module to v${{ steps.sync.outputs.version }}"
-          title: "deps(api): bump api module to v${{ steps.sync.outputs.version }}"
-          body: >-
-            Aligns the api require of agent, operator, and gateway with
-            the version recorded in .github/release-please-manifest.json.
-            Opened by the bump-go-consumers job in release-please.yml.
-
-      - name: Enable auto-merge
-        if: steps.pr.outputs['pull-request-number'] != ''
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          PR: ${{ steps.pr.outputs['pull-request-number'] }}
-        run: gh pr merge --auto --squash "$PR"
-
-  # After an operator, agent, or gateway release: re-pin the chart's
-  # bundled module images. values.schema.json and README.md embed
-  # values.yaml defaults, so they are regenerated here with the same
-  # tool pins chart-autofix.yml uses -- the PR must be drift-free at
-  # creation because auto-merge does not wait for a chart-autofix
-  # push. The PR merges as deps(chart) and release-please turns it
-  # into the next chart release.
-  bump-chart-pins:
-    needs: [release-please]
-    if: >-
-      needs.release-please.outputs.operator_released == 'true' ||
-      needs.release-please.outputs.agent_released == 'true' ||
-      needs.release-please.outputs.gateway_released == 'true' ||
-      github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    env:
-      # Keep in lock-step with the generator pins in chart.yml and
-      # chart-autofix.yml. Same depNames, so Renovate bumps all
-      # copies together.
-      # renovate: datasource=github-releases depName=dadav/helm-schema versioning=semver
-      HELM_SCHEMA_VERSION: "0.23.4"
-      # renovate: datasource=go depName=github.com/norwoodj/helm-docs versioning=semver
-      HELM_DOCS_VERSION: v1.14.2
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.26'
-          check-latest: true
-
-      - name: Sync image pins
-        id: sync
-        env:
-          OPERATOR_RELEASED: ${{ needs.release-please.outputs.operator_released }}
-          OPERATOR_TAG: ${{ needs.release-please.outputs.operator_tag }}
-          AGENT_RELEASED: ${{ needs.release-please.outputs.agent_released }}
-          AGENT_TAG: ${{ needs.release-please.outputs.agent_tag }}
-          GATEWAY_RELEASED: ${{ needs.release-please.outputs.gateway_released }}
-          GATEWAY_TAG: ${{ needs.release-please.outputs.gateway_tag }}
-        run: |
-          set -eu
-          released_version() {
-            case "$1" in
-              operator) rel="${OPERATOR_RELEASED}" tag="${OPERATOR_TAG}" ;;
-              agent)    rel="${AGENT_RELEASED}"    tag="${AGENT_TAG}" ;;
-              gateway)  rel="${GATEWAY_RELEASED}"  tag="${GATEWAY_TAG}" ;;
-            esac
-            if [ "${rel}" = "true" ] && [ -n "${tag}" ]; then
-              echo "${tag#"$1"/v}"
-            else
-              jq -re --arg c "$1" '.[$c]' .github/release-please-manifest.json
-            fi
-          }
-          pins=""
-          for c in operator agent gateway; do
-            version=$(released_version "$c")
-            marker="# renovate: datasource=docker depName=ghcr.io/qvest-digital/mxl-k8s/${c} versioning=semver"
-            sed -E -i "s|(tag: )\"[^\"]*\"( ${marker})$|\1\"v${version}\"\2|" charts/mxl-k8s/values.yaml
-            grep -qF "tag: \"v${version}\" ${marker}" charts/mxl-k8s/values.yaml
-            pins="${pins}${pins:+, }${c} v${version}"
-          done
-          echo "pins=${pins}" >> "$GITHUB_OUTPUT"
-
-      - name: Install helm-schema and helm-docs
-        run: |
-          go install github.com/dadav/helm-schema/cmd/helm-schema@${HELM_SCHEMA_VERSION}
-          go install github.com/norwoodj/helm-docs/cmd/helm-docs@${HELM_DOCS_VERSION}
-
-      - name: Regenerate chart artefacts
-        run: make chart-schema chart-docs
-
-      - id: pr
-        uses: peter-evans/create-pull-request@v8
-        with:
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          branch: post-release/chart-pins
-          delete-branch: true
-          add-paths: charts/mxl-k8s
-          commit-message: "deps(chart): update mxl-k8s module images"
-          title: "deps(chart): update mxl-k8s module images"
-          body: >-
-            ${{ steps.sync.outputs.pins }}.
-            Aligns the chart-bundled module image pins with the versions
-            recorded in .github/release-please-manifest.json. Opened by
-            the bump-chart-pins job in release-please.yml.
-
-      - name: Enable auto-merge
-        if: steps.pr.outputs['pull-request-number'] != ''
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          PR: ${{ steps.pr.outputs['pull-request-number'] }}
-        run: gh pr merge --auto --squash "$PR"
-
-  # While a charts/mxl-k8s release PR is open, keep a sticky comment
-  # on it listing the module image tags values.yaml pins on main --
-  # the images the chart vendors if the PR merges as-is. The release
-  # PR branch only moves when the release-please job above rebases it
-  # onto main, so refreshing after every pass keeps the comment in
-  # step with the PR head. A note is appended for every pin that lags
-  # the latest release, i.e. while a post-release/chart-pins PR has
-  # not merged yet. The default token is enough here: a comment does
-  # not need to start workflow runs.
-  comment-chart-release-pins:
-    needs: [release-please]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      pull-requests: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Upsert vendored-images comment
-        env:
-          OPERATOR_RELEASED: ${{ needs.release-please.outputs.operator_released }}
-          OPERATOR_TAG: ${{ needs.release-please.outputs.operator_tag }}
-          AGENT_RELEASED: ${{ needs.release-please.outputs.agent_released }}
-          AGENT_TAG: ${{ needs.release-please.outputs.agent_tag }}
-          GATEWAY_RELEASED: ${{ needs.release-please.outputs.gateway_released }}
-          GATEWAY_TAG: ${{ needs.release-please.outputs.gateway_tag }}
-        run: |
-          set -eu
-          pr=$(gh pr list \
-            --head "release-please--branches--main--components--charts/mxl-k8s" \
-            --json number --jq '.[0].number // empty')
-          if [ -z "$pr" ]; then
-            echo "No open chart release PR."
-            exit 0
-          fi
-          released_version() {
-            case "$1" in
-              operator) rel="${OPERATOR_RELEASED}" tag="${OPERATOR_TAG}" ;;
-              agent)    rel="${AGENT_RELEASED}"    tag="${AGENT_TAG}" ;;
-              gateway)  rel="${GATEWAY_RELEASED}"  tag="${GATEWAY_TAG}" ;;
-            esac
-            if [ "${rel}" = "true" ] && [ -n "${tag}" ]; then
-              echo "${tag#"$1"/v}"
-            else
-              jq -re --arg c "$1" '.[$c]' .github/release-please-manifest.json
-            fi
-          }
-          marker="<!-- chart-vendored-images -->"
-          body=$(mktemp)
-          notes=""
-          {
-            echo "$marker"
-            echo "Module images vendored by this chart release:"
-            echo
-            echo "| Image | Tag |"
-            echo "| --- | --- |"
-            for c in operator agent gateway; do
-              pin=$(sed -nE "s|.*tag: \"([^\"]+)\" # renovate: datasource=docker depName=ghcr\.io/qvest-digital/mxl-k8s/${c} versioning=semver.*|\1|p" charts/mxl-k8s/values.yaml)
-              : "${pin:?no pin found for ${c} in values.yaml}"
-              echo "| ghcr.io/qvest-digital/mxl-k8s/${c} | ${pin} |"
-              released="v$(released_version "$c")"
-              if [ "${pin}" != "${released}" ]; then
-                notes=$(printf '%s\n- %s is pinned at %s while %s is the latest release; the pin lands via a post-release/chart-pins PR.' "${notes}" "${c}" "${pin}" "${released}")
-              fi
-            done
-            [ -z "$notes" ] || printf '%s\n' "$notes"
-          } > "$body"
-          existing=$(gh api "repos/${GH_REPO}/issues/${pr}/comments" --paginate \
-            | jq -r --arg m "$marker" '.[] | select(.body | startswith($m)) | .id' \
-            | head -n1)
-          if [ -n "$existing" ]; then
-            gh api -X PATCH "repos/${GH_REPO}/issues/comments/${existing}" \
-              -F body=@"$body" > /dev/null
-            echo "Updated comment ${existing} on PR #${pr}."
-          else
-            gh pr comment "$pr" --body-file "$body"
-          fi
+      release_tag: ${{ needs.release-please.outputs.bundle_tag }}

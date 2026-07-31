@@ -38,6 +38,7 @@ jobs:
       generated:    ${{ steps.f.outputs.generated }}
       pure_go:      ${{ steps.f.outputs.pure_go }}
       workflow:     ${{ steps.f.outputs.workflow }}
+      api_pins:     ${{ steps.f.outputs.api_pins }}
       test_modules: ${{ steps.m.outputs.test_modules }}
     steps:
       - uses: actions/checkout@v7
@@ -57,6 +58,12 @@ jobs:
             generated: ['api/**', 'operator/**', 'Makefile']
             pure_go:   ['api/**', 'operator/**', 'agent/**', 'go.work*']
             workflow:  ['.github/workflows/ci.yml']
+            api_pins:
+              - 'agent/go.mod'
+              - 'operator/go.mod'
+              - 'gateway/go.mod'
+              - '.github/release-please-manifest.json'
+              - 'hack/check-api-pins.sh'
       - id: m
         # Build the JSON matrix of pure-Go modules whose tests need
         # to re-run. A workflow-file change expands the set to
@@ -144,6 +151,22 @@ jobs:
 
       - name: go build
         run: cd gateway && go build ./...
+
+  # The api require of agent, operator and gateway is rewritten inside
+  # the release pull request, by the extra-files entries on the api
+  # release-please package. Nothing in a build reads it -- the local
+  # replace directive resolves api from the filesystem -- so a stale
+  # pin ships in a release without any test noticing. This is the
+  # gate that notices.
+  api-pins:
+    needs: changes
+    if: needs.changes.outputs.api_pins == 'true' || needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v7
+      - name: Consumer api pins name the released version
+        run: ./hack/check-api-pins.sh
 
   manifests-check:
     needs: changes
@@ -316,7 +339,7 @@ jobs:
   # conditional job individually and would block PRs that legitimately
   # skipped one (skipped checks count as "not satisfied" otherwise).
   ci-summary:
-    needs: [changes, lint, gateway, manifests-check, test, test-gateway, report]
+    needs: [changes, lint, gateway, api-pins, manifests-check, test, test-gateway, report]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
