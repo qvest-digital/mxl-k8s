@@ -1,5 +1,9 @@
 # Changelog
 
+Frozen at 1.0.0-rc.13. operator, agent, gateway, shim and the
+chart now release together under one repository version; entries
+from 1.0.0-rc.14 on are in the repository CHANGELOG.md.
+
 ## [1.0.0-rc.10](https://github.com/qvest-digital/mxl-k8s/compare/agent/v1.0.0-rc.9...agent/v1.0.0-rc.10) (2026-07-30)
 
 

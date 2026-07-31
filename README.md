@@ -105,8 +105,9 @@ For cluster operators:
 - Container images publish to
   `ghcr.io/qvest-digital/mxl-k8s/<component>` for every PR,
   every push to `main` (`:dev` plus `:sha-<short>`), and every
-  per-component release tag (`:vX.Y.Z` plus `:latest` or
-  `:pre`).
+  release tag (`:vX.Y.Z` plus `:latest` or `:pre`). operator,
+  agent, gateway, shim and the chart share one version, so `vX.Y.Z`
+  names the same release across all of them.
 
 ## Install via Helm
 
@@ -116,7 +117,7 @@ Helm chart at
 
 ```sh
 helm install mxl oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
-  --version 1.0.0-rc.2 \
+  --version 1.0.0-rc.13 \
   --namespace mxl-system --create-namespace
 ```
 

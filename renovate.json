@@ -9,16 +9,6 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Pin the chart-bundled module images (operator, agent, gateway) to their ghcr releases via inline markers in values.yaml",
-      "managerFilePatterns": [
-        "/^charts/mxl-k8s/values\\.yaml$/"
-      ],
-      "matchStrings": [
-        "tag: \"(?<currentValue>[^\"]+)\"\\s+#\\s*renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?"
-      ]
-    },
-    {
-      "customType": "regex",
       "description": "Track CI/build tool versions pinned in workflow env blocks and the Makefile via inline `# renovate:` markers (helm, helm-unittest, helm-schema, helm-docs, kubeconform, yq, gotestsum, controller-tools, mockery). The marker sits on the line directly above the value; the value line may be a workflow `KEY: value` or a Makefile `KEY ?= value`.",
       "managerFilePatterns": [
         "/^\\.github/workflows/chart\\.yml$/",
@@ -36,27 +26,41 @@
   "packageRules": [
     {
       "description": "Group third-party Go module bumps into one PR; deps(gomod) so release-please folds a dependency move into each affected module's next release",
-      "matchManagers": ["gomod"],
+      "matchManagers": [
+        "gomod"
+      ],
       "groupName": "Go modules",
       "semanticCommitType": "deps",
-      "semanticCommitScope": "gomod"
+      "semanticCommitScope": "gomod",
+      "matchPackageNames": [
+        "!github.com/qvest-digital/mxl-k8s/api",
+        "*"
+      ]
     },
     {
       "description": "go-mxl's CI publishes throwaway tags such as v1.0.0-rc.9.test226 that outsort the real rc.N prereleases only because they carry an extra semver prerelease identifier (rc.9.test226 > rc.9). Reject any version with a .test segment so only real releases and rc prereleases are tracked",
-      "matchManagers": ["gomod"],
-      "matchPackageNames": ["github.com/qvest-digital/go-mxl"],
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "github.com/qvest-digital/go-mxl"
+      ],
       "allowedVersions": "!/\\.test/"
     },
     {
       "description": "Group GitHub Actions bumps into one PR",
-      "matchManagers": ["github-actions"],
+      "matchManagers": [
+        "github-actions"
+      ],
       "groupName": "GitHub Actions",
       "semanticCommitType": "deps",
       "semanticCommitScope": "actions"
     },
     {
       "description": "CI/build tool versions tracked via inline markers in workflows and the Makefile. Third-party, so the default stability delay applies; these files are not under a release-please package path, so the bump does not cut a release.",
-      "matchManagers": ["custom.regex"],
+      "matchManagers": [
+        "custom.regex"
+      ],
       "matchFileNames": [
         ".github/workflows/*.yml",
         "Makefile"
@@ -66,35 +70,14 @@
       "semanticCommitScope": "tools"
     },
     {
-      "description": "operator/agent/gateway are tracked by the custom regex manager below with their full ghcr path. Renovate's built-in helm-values manager also detects them from values.yaml, but only as the bare repository (operator/agent/gateway) because the registry lives under global.image.registry; that docker lookup returns no-result and warns on the dependency dashboard. Disable the helm-values copies; busybox and bitnami/kubectl keep their working helm-values detection.",
-      "matchManagers": ["helm-values"],
-      "matchPackageNames": ["operator", "agent", "gateway"],
-      "enabled": false
-    },
-    {
-      "description": "Chart-bundled module images are intra-repo and not stability-gated, so a new module (pre)release re-pins the chart immediately via a deps(chart) PR that release-please turns into a chart release",
-      "matchManagers": ["custom.regex"],
-      "matchDatasources": ["docker"],
-      "matchPackageNames": [
-        "ghcr.io/qvest-digital/mxl-k8s/operator",
-        "ghcr.io/qvest-digital/mxl-k8s/agent",
-        "ghcr.io/qvest-digital/mxl-k8s/gateway"
+      "description": "The api require of agent, operator and gateway is written by release-please (extra-files on the api package) inside the release pull request. A Renovate bump would race that and reintroduce the post-release PR this repo no longer opens.",
+      "matchManagers": [
+        "gomod"
       ],
-      "groupName": "mxl-k8s module images",
-      "minimumReleaseAge": "0 days",
-      "schedule": ["at any time"],
-      "semanticCommitType": "deps",
-      "semanticCommitScope": "chart"
-    },
-    {
-      "description": "The intra-repo api module require is not stability-gated; its bumps flow immediately in their own PR",
-      "matchManagers": ["gomod"],
-      "matchPackageNames": ["github.com/qvest-digital/mxl-k8s/api"],
-      "groupName": "mxl-k8s api module",
-      "minimumReleaseAge": "0 days",
-      "schedule": ["at any time"],
-      "semanticCommitType": "deps",
-      "semanticCommitScope": "api"
+      "matchPackageNames": [
+        "github.com/qvest-digital/mxl-k8s/api"
+      ],
+      "enabled": false
     }
   ]
 }

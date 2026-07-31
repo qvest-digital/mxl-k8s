@@ -3,8 +3,14 @@ name: mxl-k8s
 description: Kubernetes control plane for MXL (Media eXchange Layer). Installs
   the operator, per-node agent and gateway, CRDs, and RBAC.
 type: application
-version: 1.0.0-rc.13
-appVersion: 0.0.0
+# Both versions are written by release-please through the generic
+# updater, which replaces the version on any line carrying the
+# annotation and leaves the rest of the file alone. appVersion tracks
+# version because operator, agent, gateway, shim and this chart are one
+# release-please package: appVersion names the module image tags the
+# chart bundles. See .github/release-please-config.json.
+version: 1.0.0-rc.13 # x-release-please-version
+appVersion: 1.0.0-rc.13 # x-release-please-version
 kubeVersion: ">=1.28-0"
 keywords:
   - mxl
