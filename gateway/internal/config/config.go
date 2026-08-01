@@ -57,6 +57,11 @@ type Config struct {
 	// MxlFlowMirror freshness expectation.
 	DegradedAfter time.Duration
 
+	// ReaderStallAfter is how long the source-side reconciler lets a
+	// reader report an unchanged head index, having never transferred
+	// a grain, before SourceProgress reports ReaderNotAdvancing.
+	ReaderStallAfter time.Duration
+
 	// KubeAPIQPS is the sustained request rate the Kubernetes API
 	// client allows before throttling. The per-mirror status flushers
 	// publish roughly one PATCH per second per flowing mirror, so the
@@ -98,6 +103,8 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"How often to refresh MxlNodeCapabilities status.")
 	fs.DurationVar(&c.DegradedAfter, "degraded-after", 10*time.Second,
 		"Grain-commit inactivity after which the target gateway demotes a mirror to Degraded.")
+	fs.DurationVar(&c.ReaderStallAfter, "reader-stall-after", 20*time.Second,
+		"Head-index inactivity after which the source gateway reports a reader that has never transferred a grain as not advancing.")
 	fs.Float64Var(&c.KubeAPIQPS, "kube-api-qps", 50,
 		"Sustained Kubernetes API request rate allowed before client-side throttling.")
 	fs.IntVar(&c.KubeAPIBurst, "kube-api-burst", 100,

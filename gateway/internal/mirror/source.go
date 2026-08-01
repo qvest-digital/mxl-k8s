@@ -94,6 +94,12 @@ type SourceReconciler struct {
 	// when the observed state has transitioned. Defaults to 1s.
 	FlushInterval time.Duration
 
+	// ReaderStallAfter is how long a reader may report an unchanged
+	// head index, having never transferred a grain, before
+	// SourceProgress reports ReaderNotAdvancing. Defaults to
+	// defaultReaderStallAfter.
+	ReaderStallAfter time.Duration
+
 	// opener is the seam onto the cgo-dependent libmxl-fabrics
 	// Initiator setup path. SetupWithManager binds it to a
 	// libmxlOpener built from Handles + NodeName + BindAddress;
@@ -133,6 +139,13 @@ type sourceEntry struct {
 	// Used by the flusher to publish SourceProgress with reason
 	// ReaderAgedOut on the transition.
 	agedOutAt atomic.Pointer[time.Time]
+
+	// lastHead is the most recent head index the transfer loop probed
+	// off the FlowReader; headAdvancedAt is when that value last
+	// changed. The flusher reads both to tell a wedged reader from one
+	// still waiting on its first grain.
+	lastHead       atomic.Uint64
+	headAdvancedAt atomic.Pointer[time.Time]
 
 	// addTargetAttempts mirrors r.attempts for this key into the
 	// flusher's view. lastError records the most recent reconcile
@@ -351,6 +364,14 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if originAt != nil {
 		t := *originAt
 		entry.lastObservedOriginAt.Store(&t)
+	}
+	// Carry the published lastSentAt onto the fresh entry: a rebuilt
+	// entry has no transfers of its own, and an omitted field is one
+	// SSA releases and the apiserver strips, erasing the timestamp the
+	// target's stuck-handshake watchdog discriminates on.
+	if mirror.Status.LastSentAt != nil {
+		t := mirror.Status.LastSentAt.Time
+		entry.lastSentAt.Store(&t)
 	}
 
 	r.mu.Lock()
@@ -640,12 +661,18 @@ const (
 	mirrorResyncLag int64 = 2
 )
 
+// defaultReaderStallAfter is the head-index inactivity window behind
+// ReasonReaderNotAdvancing. Matches defaultStuckHandshakeAfter so both
+// sides of a mirror describe a wedge over the same period.
+const defaultReaderStallAfter = 20 * time.Second
+
 // progressTracker is the subset of sourceEntry the transfer loop
 // updates. Defined as an interface so tests can inject a stub
 // without constructing a full sourceEntry.
 type progressTracker interface {
 	recordTransfer(idx uint64, at time.Time)
 	recordAgedOut(at time.Time)
+	recordHead(head uint64, at time.Time)
 }
 
 func (e *sourceEntry) recordTransfer(idx uint64, at time.Time) {
@@ -657,6 +684,18 @@ func (e *sourceEntry) recordTransfer(idx uint64, at time.Time) {
 func (e *sourceEntry) recordAgedOut(at time.Time) {
 	t := at
 	e.agedOutAt.Store(&t)
+}
+
+// recordHead stamps headAdvancedAt only on a changed head, so the
+// timestamp measures how long the reader has stood still rather than
+// how long ago the loop last polled it.
+func (e *sourceEntry) recordHead(head uint64, at time.Time) {
+	if e.headAdvancedAt.Load() != nil && e.lastHead.Load() == head {
+		return
+	}
+	e.lastHead.Store(head)
+	t := at
+	e.headAdvancedAt.Store(&t)
 }
 
 // runTransferLoop pumps grains that appear on the source flow into
@@ -692,6 +731,9 @@ func runTransferLoop(
 		return
 	}
 	lastSent := int64(head0)
+	if tracker != nil {
+		tracker.recordHead(head0, time.Now())
+	}
 
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -707,6 +749,9 @@ func runTransferLoop(
 		if err != nil {
 			l.Error(err, "Runtime")
 			continue
+		}
+		if tracker != nil {
+			tracker.recordHead(head, time.Now())
 		}
 
 		// A mirror can only transfer grains the producer still holds in
@@ -1021,7 +1066,7 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 			return
 		case <-t.C:
 		}
-		state := observedState(entry)
+		state := observedState(entry, r.readerStallAfter())
 		if !first && sourceStateEqual(state, last) {
 			continue
 		}
@@ -1033,6 +1078,15 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		last = state
 		first = false
 	}
+}
+
+// readerStallAfter returns the configured reader-stall window,
+// falling back to defaultReaderStallAfter when unset.
+func (r *SourceReconciler) readerStallAfter() time.Duration {
+	if r.ReaderStallAfter > 0 {
+		return r.ReaderStallAfter
+	}
+	return defaultReaderStallAfter
 }
 
 // sourceStateEqual reports whether two sourceProgressState values
@@ -1061,7 +1115,7 @@ func sourceStateEqual(a, b sourceProgressState) bool {
 // propagated into every state so the target-side watchdog gets a
 // freshness signal regardless of which condition is currently being
 // published.
-func observedState(entry *sourceEntry) sourceProgressState {
+func observedState(entry *sourceEntry, stallAfter time.Duration) sourceProgressState {
 	var sent *time.Time
 	if p := entry.lastSentAt.Load(); p != nil {
 		t := *p
@@ -1094,6 +1148,19 @@ func observedState(entry *sourceEntry) sourceProgressState {
 			status:     metav1.ConditionTrue,
 			reason:     mxlv1alpha1.ReasonRecovered,
 			message:    "grain progress observed",
+			lastSentAt: sent,
+		}
+	}
+	// Nothing transferred and the head has not moved: the loop's inner
+	// range never runs, so it emits no error and no aged-out skip, and
+	// the target reads the mirror as an idle producer and declines to
+	// recover. Reporting True here describes that wedge as healthy.
+	if at := entry.headAdvancedAt.Load(); at != nil && time.Since(*at) > stallAfter {
+		return sourceProgressState{
+			status: metav1.ConditionFalse,
+			reason: mxlv1alpha1.ReasonReaderNotAdvancing,
+			message: fmt.Sprintf("reader head stuck at %d for over %s",
+				entry.lastHead.Load(), stallAfter),
 			lastSentAt: sent,
 		}
 	}
