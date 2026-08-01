@@ -112,11 +112,12 @@ func run(args []string) error {
 		return fmt.Errorf("setup target reconciler: %w", err)
 	}
 	if err := (&mirror.SourceReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		NodeName:    cfg.NodeName,
-		BindAddress: cfg.BindAddress,
-		Handles:     handles,
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		NodeName:         cfg.NodeName,
+		BindAddress:      cfg.BindAddress,
+		Handles:          handles,
+		ReaderStallAfter: cfg.ReaderStallAfter,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup source reconciler: %w", err)
 	}

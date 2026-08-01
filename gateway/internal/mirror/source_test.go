@@ -300,6 +300,7 @@ type recordingTracker struct {
 	mu        sync.Mutex
 	transfers []uint64
 	agedOuts  int
+	heads     []uint64
 }
 
 func (rt *recordingTracker) recordTransfer(idx uint64, _ time.Time) {
@@ -312,6 +313,20 @@ func (rt *recordingTracker) recordAgedOut(_ time.Time) {
 	rt.mu.Lock()
 	rt.agedOuts++
 	rt.mu.Unlock()
+}
+
+func (rt *recordingTracker) recordHead(head uint64, _ time.Time) {
+	rt.mu.Lock()
+	rt.heads = append(rt.heads, head)
+	rt.mu.Unlock()
+}
+
+func (rt *recordingTracker) headSnapshot() []uint64 {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	out := make([]uint64, len(rt.heads))
+	copy(out, rt.heads)
+	return out
 }
 
 func (rt *recordingTracker) snapshot() ([]uint64, int) {

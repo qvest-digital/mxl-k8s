@@ -52,6 +52,11 @@ const (
 	// grains.
 	ReasonReaderAgedOut = "ReaderAgedOut"
 
+	// ReasonReaderNotAdvancing marks a mirror whose source-side flow
+	// reader has never transferred a grain and whose head index has
+	// not moved since the reader opened.
+	ReasonReaderNotAdvancing = "ReaderNotAdvancing"
+
 	// ReasonProviderUnresolved marks a mirror the gateway refused to
 	// set up because spec.provider is still auto. libmxl-fabrics no
 	// longer resolves auto itself (v1.1.0-beta-1 dropped it), so the
