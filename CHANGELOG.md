@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.0-rc.16](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.15...v1.0.0-rc.16) (2026-08-04)
+
+
+### Features
+
+* **operator:** collect flows no node holds and no mirror needs ([6edad0b](https://github.com/qvest-digital/mxl-k8s/commit/6edad0be3a8a54d4793ce00fd425314e3be2fd34))
+
+
+### Bug Fixes
+
+* **gateway:** keep a flow a local producer has taken over ([#222](https://github.com/qvest-digital/mxl-k8s/issues/222)) ([1a6472f](https://github.com/qvest-digital/mxl-k8s/commit/1a6472ff12742c8049a04741503b13cc795dbe61)), closes [#219](https://github.com/qvest-digital/mxl-k8s/issues/219)
+* **gateway:** reopen a source reader whose head stops advancing ([6edad0b](https://github.com/qvest-digital/mxl-k8s/commit/6edad0be3a8a54d4793ce00fd425314e3be2fd34))
+* **shim:** report a producer attach only on the flow data file ([#220](https://github.com/qvest-digital/mxl-k8s/issues/220)) ([6edad0b](https://github.com/qvest-digital/mxl-k8s/commit/6edad0be3a8a54d4793ce00fd425314e3be2fd34))
+
+
+### Dependencies
+
+* **gateway:** move onto go-mxl 1.0.0-rc.12 ([#223](https://github.com/qvest-digital/mxl-k8s/issues/223)) ([a38481c](https://github.com/qvest-digital/mxl-k8s/commit/a38481cdae96c27ceb88ff547431d81aab9aae6f))
+
 ## [1.0.0-rc.15](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.14...v1.0.0-rc.15) (2026-08-01)
 
 
