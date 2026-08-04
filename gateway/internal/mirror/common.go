@@ -69,3 +69,50 @@ func providerForSetup(m *mxlv1alpha1.MxlFlowMirror) (fabrics.Provider, error) {
 	}
 	return mapProvider(m.Spec.Provider), nil
 }
+
+// errNoInterface reports that no local fabric interface can carry a
+// transfer for the requested provider.
+var errNoInterface = errors.New("no usable fabric interface")
+
+// resolveInterface asks libmxl-fabrics what this host offers and
+// returns the entry a setup should be given.
+//
+// A setup handed a config with no address leaves interface resolution
+// to fi_getinfo, which answers ENODATA on a fabric that needs a
+// concrete source address, and the setup fails with nothing naming the
+// cause. Enumerating first is how libmxl-fabrics expects the question
+// to be answered: the entry it returns carries the provider's own
+// address and capabilities, including the maxMessageSize a caller
+// cannot otherwise learn.
+//
+// bindAddress narrows the search to one address when set, and is left
+// out of the query otherwise so every address of the provider is
+// considered. Service is not taken from the entry: the endpoint's port
+// is the caller's to choose, and an empty one means ephemeral.
+func resolveInterface(fi interfaceLister, provider fabrics.Provider, bindAddress string) (fabrics.InterfaceConfig, error) {
+	query := &fabrics.InterfaceConfig{Provider: provider}
+	if bindAddress != "" {
+		query.Address.Node = bindAddress
+	}
+
+	ifaces, err := fi.Interfaces(query)
+	if err != nil {
+		return fabrics.InterfaceConfig{}, fmt.Errorf("query fabric interfaces: %w", err)
+	}
+
+	// Remote write is the only transfer mode libmxl-fabrics implements,
+	// and a setup that cannot do it is refused further down anyway.
+	iface, ok := fabrics.SelectInterface(ifaces, fabrics.InterfaceCapRemoteWrite)
+	if !ok {
+		return fabrics.InterfaceConfig{}, fmt.Errorf("%w for provider %s on %q: %d candidate(s)",
+			errNoInterface, provider, bindAddress, len(ifaces))
+	}
+	iface.Address.Service = ""
+	return iface, nil
+}
+
+// interfaceLister is the slice of fabrics.Instance resolveInterface
+// needs, so tests can drive it without a libmxl-fabrics instance.
+type interfaceLister interface {
+	Interfaces(query *fabrics.InterfaceConfig) ([]fabrics.InterfaceConfig, error)
+}
