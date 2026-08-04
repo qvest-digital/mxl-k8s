@@ -18,8 +18,13 @@ rules:
     resources: [leases]
     verbs: [get, list, watch]
   - apiGroups: [mxl.qvest-digital.com]
-    resources: [mxldomains, mxlflows, mxlnodecapabilities]
+    resources: [mxldomains, mxlnodecapabilities]
     verbs: [get, list, watch]
+  # delete collects a flow once no node holds a copy of it and no
+  # mirror needs its definition.
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxlflows]
+    verbs: [delete, get, list, watch]
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxldomains/status, mxlnodecapabilities/status]
     verbs: [get]

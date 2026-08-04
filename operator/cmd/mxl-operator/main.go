@@ -66,7 +66,11 @@ func main() {
 		setup func(ctrl.Manager) error
 	}{
 		{"MxlDomain", (&domain.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
-		{"MxlFlow", (&flow.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+		{"MxlFlow", (&flow.Reconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+			Lease:  &leasecheck.Checker{Client: mgr.GetClient()},
+		}).SetupWithManager},
 		{"MxlFlowMirror", (&mirror.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
 		{"MxlReceiver", (&receiver.Reconciler{
 			Client:    mgr.GetClient(),
