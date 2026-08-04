@@ -274,7 +274,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		if !controllerutil.ContainsFinalizer(&mirror, TargetFinalizerName) {
 			return ctrl.Result{}, nil
 		}
-		r.closeEntry(req.NamespacedName)
+		r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Spec.FlowID))
 		controllerutil.RemoveFinalizer(&mirror, TargetFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
 			if apierrors.IsConflict(err) {
@@ -372,7 +372,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// Concurrent reconcile produced a stray entry; close the new
 		// one and reuse the existing.
 		r.mu.Unlock()
-		closeTargetHandles(entry)
+		closeTargetHandles(entry, keepFlow)
 		return ctrl.Result{}, nil
 	}
 	r.targets[req.NamespacedName] = entry
@@ -381,7 +381,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if err := r.applyTargetStatus(ctx, &mirror, mxlv1alpha1.MxlFlowMirrorReady, &entry.infoStr, nil, nil); err != nil {
 		// Status update lost; close the entry so the next pass can
 		// retry cleanly.
-		r.closeEntry(req.NamespacedName)
+		r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Spec.FlowID))
 		return ctrl.Result{}, fmt.Errorf("update status: %w", err)
 	}
 
@@ -695,7 +695,7 @@ func commitArrivedSamples(writer *mxl.Writer, head uint64, count int) error {
 	return nil
 }
 
-func (r *TargetReconciler) closeEntry(key types.NamespacedName) {
+func (r *TargetReconciler) closeEntry(key types.NamespacedName, disp flowDisposition) {
 	r.mu.Lock()
 	entry := r.targets[key]
 	delete(r.targets, key)
@@ -703,7 +703,32 @@ func (r *TargetReconciler) closeEntry(key types.NamespacedName) {
 	if entry == nil {
 		return
 	}
-	closeTargetHandles(entry)
+	closeTargetHandles(entry, disp)
+}
+
+// localFlowDisposition decides what a teardown should do with the
+// local flow. A flow whose published Origin location names this node
+// belongs to a local producer: the mirror filled that directory until
+// the producer took it over, and offering it for deletion would take
+// the producer's flow with it.
+//
+// A lookup failure answers keepFlow. Reclaiming a mirror copy late
+// costs disk on one node until the next teardown; removing a live
+// producer's flow costs the flow.
+func (r *TargetReconciler) localFlowDisposition(ctx context.Context, flowID string) flowDisposition {
+	var flow mxlv1alpha1.MxlFlow
+	if err := r.Get(ctx, types.NamespacedName{Name: flowID}, &flow); err != nil {
+		if apierrors.IsNotFound(err) {
+			return dropFlow
+		}
+		return keepFlow
+	}
+	for _, loc := range flow.Status.Locations {
+		if loc.NodeName == r.NodeName && loc.Phase == mxlv1alpha1.MxlFlowLocationOrigin {
+			return keepFlow
+		}
+	}
+	return dropFlow
 }
 
 // dispatchRecovery routes the stuck-handshake watchdog's spawn
@@ -832,7 +857,23 @@ func (r *TargetReconciler) fetchMirror(ctx context.Context, key types.Namespaced
 	return &mirror, nil
 }
 
-func closeTargetHandles(e *targetEntry) {
+// flowDisposition says what should happen to the local flow when a
+// target entry's writer is given up.
+type flowDisposition bool
+
+const (
+	// dropFlow offers the flow for deletion. libmxl removes it when
+	// this writer turns out to be its last holder, which is what
+	// reclaims a mirror's copy once nothing needs it.
+	dropFlow flowDisposition = false
+	// keepFlow gives the writer up and leaves the flow in place. Used
+	// wherever something other than this entry owns the flow: another
+	// entry on this node, or a local producer that has taken over the
+	// flow the mirror was filling.
+	keepFlow flowDisposition = true
+)
+
+func closeTargetHandles(e *targetEntry, disp flowDisposition) {
 	if e.flusherCancel != nil {
 		e.flusherCancel()
 	}
@@ -852,7 +893,11 @@ func closeTargetHandles(e *targetEntry) {
 		_ = e.target.Close()
 	}
 	if e.writer != nil {
-		_ = e.writer.Close()
+		if disp == keepFlow {
+			_ = e.writer.Detach()
+		} else {
+			_ = e.writer.Close()
+		}
 	}
 }
 
