@@ -63,6 +63,22 @@ var errAddTargetFailed = errors.New("AddTarget failed")
 // TODO(go-mxl): swap to typed sentinel when wrapper exposes one.
 const readerAgedOutMarker = "out of range (too late)"
 
+// maxReaderRebuilds bounds the number of consecutive reader reopens
+// the stall watchdog performs for one mirror. Past the cap the
+// gateway keeps the entry in place and publishes
+// ReasonReaderRebuildCapReached, so a flow whose producer is
+// genuinely gone stops costing a reopen every stall window. The
+// counter is cleared as soon as a grain transfers, so it counts
+// consecutive failed reopens rather than lifetime ones.
+const maxReaderRebuilds = 5
+
+// ReasonReaderRebuildCapReached marks a mirror whose source-side
+// reader stayed wedged across maxReaderRebuilds consecutive reopens.
+// Distinct from ReasonReaderNotAdvancing: that one is the
+// recoverable observation, this one says the gateway has stopped
+// reopening the reader.
+const ReasonReaderRebuildCapReached = "ReaderRebuildCapReached"
+
 // SourceReconciler reconciles MxlFlowMirror resources from the
 // sending side. See the package doc.
 type SourceReconciler struct {
@@ -108,9 +124,20 @@ type SourceReconciler struct {
 	// later caller could redirect.
 	opener initiatorOpener
 
+	// rebuildFn is the seam the reader-stall watchdog uses to spawn
+	// its reopen. Production leaves it nil and the flusher invokes
+	// rebuildWedgedReader directly; tests inject a recorder so they
+	// can assert the watchdog fired without driving a real libmxl
+	// reader. Mirrors the target reconciler's recoverFn.
+	rebuildFn func(key types.NamespacedName)
+
 	mu       sync.Mutex
 	sources  map[types.NamespacedName]*sourceEntry
 	attempts map[types.NamespacedName]uint32
+	// rebuilds counts consecutive reader reopens per mirror. It
+	// outlives the sourceEntry the watchdog tears down, which is the
+	// point: the budget has to survive the reopen it is bounding.
+	rebuilds map[types.NamespacedName]uint32
 }
 
 // sourceEntry holds the live libmxl + fabrics handles and the
@@ -167,6 +194,11 @@ type sourceEntry struct {
 	// published into r.sources under r.mu -- safe to read from
 	// Reconcile without its own synchronization, same as infoStr.
 	openedAt time.Time
+
+	// rebuilding is set by the reader-stall watchdog before it hands
+	// the entry to the reopen goroutine, so a second flusher tick
+	// cannot spawn a competing rebuild for the same entry.
+	rebuilding atomic.Bool
 
 	// cancel stops the per-flow transfer goroutine; done is closed
 	// when the goroutine returns.
@@ -1067,6 +1099,47 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		case <-t.C:
 		}
 		state := observedState(entry, r.readerStallAfter())
+
+		// A reader whose head never moves is the one wedge neither
+		// side of the mirror resolves on its own. The target's
+		// stuck-handshake watchdog is gated on status.lastSentAt
+		// postdating its own fabric open, and a reader that has
+		// transferred nothing never advances lastSentAt, so the
+		// target reads the mirror as an idle producer and declines to
+		// rebuild. Reporting the wedge and waiting for the other side
+		// leaves the mirror Degraded indefinitely; reopening the
+		// reader here is what ends it.
+		if state.reason == mxlv1alpha1.ReasonReaderNotAdvancing {
+			switch {
+			case r.readerRebuildsExhausted(key):
+				state.reason = ReasonReaderRebuildCapReached
+				state.message = fmt.Sprintf(
+					"reader head stuck at %d across %d reopens",
+					entry.lastHead.Load(), maxReaderRebuilds)
+			case entry.rebuilding.CompareAndSwap(false, true):
+				attempt := r.bumpReaderRebuilds(key)
+				if err := r.publishSourceProgress(ctx, key, state); err != nil {
+					ctrl.Log.WithName("source-flush").Error(err, "publish",
+						"mirror", key, "reason", state.reason)
+				}
+				ctrl.Log.WithName("source-flush").Info(
+					"reader head stuck; reopening reader",
+					"mirror", key, "attempt", attempt)
+				// Returning first is what makes the reopen safe:
+				// closeSourceHandles waits on flusherDone, and this
+				// goroutine is the one that closes it.
+				go r.dispatchReaderRebuild(key)
+				return
+			default:
+				// A reopen is already in flight for this entry.
+				continue
+			}
+		}
+		if state.status == metav1.ConditionTrue &&
+			state.reason == mxlv1alpha1.ReasonRecovered {
+			r.clearReaderRebuilds(key)
+		}
+
 		if !first && sourceStateEqual(state, last) {
 			continue
 		}
@@ -1077,6 +1150,61 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		}
 		last = state
 		first = false
+	}
+}
+
+// bumpReaderRebuilds records one more consecutive reopen for key and
+// returns the new count.
+func (r *SourceReconciler) bumpReaderRebuilds(key types.NamespacedName) uint32 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.rebuilds == nil {
+		r.rebuilds = make(map[types.NamespacedName]uint32)
+	}
+	r.rebuilds[key]++
+	return r.rebuilds[key]
+}
+
+// readerRebuildsExhausted reports whether key has used its reopen
+// budget.
+func (r *SourceReconciler) readerRebuildsExhausted(key types.NamespacedName) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.rebuilds[key] >= maxReaderRebuilds
+}
+
+// clearReaderRebuilds returns key's full reopen budget. Called once
+// grains flow again, so a mirror that wedges later is not judged on
+// a stall it already recovered from.
+func (r *SourceReconciler) clearReaderRebuilds(key types.NamespacedName) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.rebuilds, key)
+}
+
+func (r *SourceReconciler) dispatchReaderRebuild(key types.NamespacedName) {
+	if r.rebuildFn != nil {
+		r.rebuildFn(key)
+		return
+	}
+	r.rebuildWedgedReader(context.Background(), key)
+}
+
+// rebuildWedgedReader drops the wedged reader and initiator and runs
+// one reconcile to open fresh ones.
+//
+// Reconcile does the reopen rather than this function: it already
+// owns provider resolution, the AddTarget attempt counter and the
+// flusher handoff, and a second open path here would be a copy of
+// all three that could drift. Driving it directly instead of waiting
+// for a watch keeps the recovery self-contained -- the events that
+// would otherwise wake the reconciler (origin Lease renewals, MxlFlow
+// status writes) all stop precisely when the producer is in trouble.
+func (r *SourceReconciler) rebuildWedgedReader(ctx context.Context, key types.NamespacedName) {
+	r.closeEntry(key)
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		ctrl.Log.WithName("source-flush").Error(err, "reopen source reader",
+			"mirror", key)
 	}
 }
 
@@ -1196,6 +1324,9 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if r.attempts == nil {
 		r.attempts = make(map[types.NamespacedName]uint32)
+	}
+	if r.rebuilds == nil {
+		r.rebuilds = make(map[types.NamespacedName]uint32)
 	}
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()

@@ -201,3 +201,143 @@ func TestReconcile_PreservesLastSentAtAcrossReopen(t *testing.T) {
 		"the next publish must still carry lastSentAt so SSA does not strip it")
 	assert.True(t, state.lastSentAt.Equal(sentAt.Time))
 }
+
+func TestRunFlusher_ReopensWedgedReader(t *testing.T) {
+	// The wedge neither side resolves alone: the target's watchdog is
+	// gated on status.lastSentAt postdating its own fabric open, and a
+	// reader that has transferred nothing never advances lastSentAt,
+	// so the target treats the mirror as an idle producer. Publishing
+	// ReaderNotAdvancing and waiting leaves it Degraded forever.
+	scheme := newSourceTestScheme(t)
+	mirror := mirrorWithFinalizer("m1", "ns1", "node-a", "flow-1", "info-1")
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	rebuilt := make(chan types.NamespacedName, 4)
+	r := &SourceReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		NodeName: "node-a",
+		sources:  map[types.NamespacedName]*sourceEntry{},
+		attempts: map[types.NamespacedName]uint32{},
+		rebuilds: map[types.NamespacedName]uint32{},
+		rebuildFn: func(key types.NamespacedName) {
+			rebuilt <- key
+		},
+	}
+
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	entry := stalledEntry(42, ptrTime(time.Now().Add(-time.Minute)), 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go r.runFlusher(ctx, done, key, entry, time.Millisecond)
+
+	select {
+	case got := <-rebuilt:
+		assert.Equal(t, key, got)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a wedged reader must be reopened, not just reported")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the flusher must return before the reopen tears the entry down")
+	}
+
+	assert.Equal(t, uint32(1), r.rebuilds[key],
+		"the reopen must consume exactly one unit of budget")
+
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &got))
+	require.Len(t, got.Status.Conditions, 1)
+	assert.Equal(t, mxlv1alpha1.ReasonReaderNotAdvancing, got.Status.Conditions[0].Reason,
+		"the wedge stays visible on status while the reopen runs")
+}
+
+func TestRunFlusher_StopsReopeningAtCap(t *testing.T) {
+	// A flow whose producer is genuinely gone would otherwise cost a
+	// reopen every stall window for as long as the mirror exists.
+	scheme := newSourceTestScheme(t)
+	mirror := mirrorWithFinalizer("m1", "ns1", "node-a", "flow-1", "info-1")
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	r := &SourceReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		NodeName: "node-a",
+		sources:  map[types.NamespacedName]*sourceEntry{},
+		attempts: map[types.NamespacedName]uint32{},
+		rebuilds: map[types.NamespacedName]uint32{key: maxReaderRebuilds},
+		rebuildFn: func(types.NamespacedName) {
+			t.Error("no reopen may be spawned once the budget is spent")
+		},
+	}
+
+	entry := stalledEntry(42, ptrTime(time.Now().Add(-time.Minute)), 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go r.runFlusher(ctx, done, key, entry, time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		var got mxlv1alpha1.MxlFlowMirror
+		if err := c.Get(context.Background(), key, &got); err != nil {
+			return false
+		}
+		return len(got.Status.Conditions) == 1 &&
+			got.Status.Conditions[0].Reason == ReasonReaderRebuildCapReached
+	}, 5*time.Second, 10*time.Millisecond)
+
+	cancel()
+	<-done
+}
+
+func TestRunFlusher_ClearsRebuildBudgetOnProgress(t *testing.T) {
+	// The cap counts consecutive failed reopens. A mirror that
+	// recovered and wedges again later must get a full budget rather
+	// than inherit the spent one.
+	scheme := newSourceTestScheme(t)
+	mirror := mirrorWithFinalizer("m1", "ns1", "node-a", "flow-1", "info-1")
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	r := &SourceReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		NodeName: "node-a",
+		sources:  map[types.NamespacedName]*sourceEntry{},
+		attempts: map[types.NamespacedName]uint32{},
+		rebuilds: map[types.NamespacedName]uint32{key: 3},
+	}
+
+	entry := stalledEntry(42, ptrTime(time.Now()), 5)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go r.runFlusher(ctx, done, key, entry, time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		_, still := r.rebuilds[key]
+		return !still
+	}, 5*time.Second, 10*time.Millisecond)
+
+	cancel()
+	<-done
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
