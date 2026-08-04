@@ -30,13 +30,15 @@
  * Outside the narrow flow_def.json path the hooks fall straight
  * through to the kernel.
  *
- * The hooks also report the reverse case. A successful open of a
- * path under <uuid>.mxl-flow with write intent and without O_CREAT
- * means a local producer attached to a flow that already existed,
- * which libmxl reaches via openFlow(..., READ_WRITE) and which
- * raises no filesystem event the agent can watch. The shim sends
+ * The hooks also report the reverse case. A successful open of
+ * <uuid>.mxl-flow/data with write intent and without O_CREAT means
+ * a local producer attached to a flow that already existed, which
+ * libmxl reaches via openFlow(..., READ_WRITE) and which raises no
+ * filesystem event the agent can watch. The shim sends
  * `{"path":"<absolute path>","event":"attached"}\n` and does not
  * wait for the reply, so the producer's open is never delayed.
+ * Only that one file discriminates: a FlowReader opens it read-only
+ * but takes the access file in the same directory O_RDWR.
  */
 
 #define _GNU_SOURCE
@@ -58,6 +60,7 @@
 #define DEFAULT_SOCK_PATH "/run/mxl/agent.sock"
 #define SOCK_ENV "MXL_INTENT_SOCK"
 #define FLOW_SUFFIX ".mxl-flow"
+#define FLOW_DATA_NAME "data"
 
 static int sys_openat(int dirfd, const char *pathname, int flags, mode_t mode)
 {
@@ -106,6 +109,36 @@ static bool is_flow_path(const char *path)
 		}
 	}
 	return false;
+}
+
+/* Return true when path names the shared-memory segment of a flow
+ * directory, i.e. <id>.mxl-flow/data. That file is the one a write
+ * attach has to be judged on: libmxl opens it O_RDWR only for a
+ * FlowWriter, and O_RDONLY for a FlowReader. Every other entry
+ * under the directory is opened O_RDWR by readers too -- the
+ * access file carries each reader's last-read timestamp -- so a
+ * directory-level match cannot tell a producer from a consumer.
+ *
+ * The grain segments are named data.<n> under a grains/
+ * subdirectory, so requiring the last component to be exactly
+ * "data" directly below the flow directory excludes them as well.
+ * No filesystem access -- pure string inspection. */
+static bool is_flow_data_path(const char *path)
+{
+	if (!path || path[0] != '/') return false;
+
+	const char *slash = strrchr(path, '/');
+	if (!slash || strcmp(slash + 1, FLOW_DATA_NAME) != 0) return false;
+
+	/* Walk back over the parent component and require it to end in
+	 * the flow-directory suffix. */
+	size_t sfx = strlen(FLOW_SUFFIX);
+	const char *end = slash;
+	while (end > path && end[-1] == '/') end--;
+	const char *start = end;
+	while (start > path && start[-1] != '/') start--;
+	size_t complen = (size_t)(end - start);
+	return complen > sfx && memcmp(end - sfx, FLOW_SUFFIX, sfx) == 0;
 }
 
 /* Send one line-delimited JSON request to the agent. When
@@ -286,7 +319,7 @@ int openat(int dirfd, const char *pathname, int flags, ...)
 
 	int fd = sys_openat(dirfd, pathname, flags, mode);
 	if (fd >= 0) {
-		if (is_write_attach(flags) && is_flow_path(pathname)) {
+		if (is_write_attach(flags) && is_flow_data_path(pathname)) {
 			int saved = errno;
 			notify_attached(pathname);
 			errno = saved;
@@ -329,7 +362,7 @@ int open(const char *pathname, int flags, ...)
 
 	int fd = sys_openat(AT_FDCWD, pathname, flags, mode);
 	if (fd >= 0) {
-		if (is_write_attach(flags) && is_flow_path(pathname)) {
+		if (is_write_attach(flags) && is_flow_data_path(pathname)) {
 			int saved = errno;
 			notify_attached(pathname);
 			errno = saved;
