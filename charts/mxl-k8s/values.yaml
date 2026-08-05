@@ -369,10 +369,34 @@ gateway:
     bindAddress: $(POD_IP)
     # @schema
     # items:
-    #   enum: ["tcp", "verbs", "efa", "shm", "auto"]
+    #   enum: ["tcp", "verbs", "efa", "shm", "any", "auto"]
     # @schema
+    # -- Upper bound on the libmxl-fabrics providers a gateway may
+    # advertise and use. Each node publishes this list intersected
+    # with what libmxl-fabrics finds on it, so `any` advertises the
+    # hardware that is present and nothing else. Narrow it to keep a
+    # provider out of consideration on every node.
     providers:
-      - tcp
+      - any
+    # -- CIDRs the fabric interfaces must fall inside. Empty
+    # considers every address libmxl-fabrics reports, which on a node
+    # with several NICs includes the ones carrying ST 2110 essence,
+    # cluster traffic, or out-of-band management. Set this to the
+    # subnet of the MXL fabric to keep mirrors off them. Applies to
+    # both what a node advertises and what a mirror binds.
+    fabricCidr: []
+    # -- Device names the fabric interfaces must match, as the
+    # provider names them (the kernel netdev name for tcp, the NIC
+    # name libfabric reports otherwise). Empty considers every
+    # device. Useful where the fabric shares a subnet with other
+    # traffic.
+    fabricDevice: []
+    # -- Minimum link speed a fabric interface must report, as a
+    # quantity in bits per second (for example 25G). Empty imposes no
+    # floor. An interface whose provider reports no link speed is
+    # rejected when this is set, which includes interfaces with no
+    # physical NIC behind them.
+    fabricMinLinkSpeed: ""
     resyncPeriod: 30s
     # -- Grain-commit inactivity after which the target gateway
     # demotes a mirror to Degraded. Same threshold gates the

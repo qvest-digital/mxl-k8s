@@ -22,6 +22,7 @@ import (
 	"github.com/qvest-digital/go-mxl/mxl"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
 )
 
@@ -92,6 +93,11 @@ type TargetReconciler struct {
 	// Target Setup. Empty means "bind all interfaces" per
 	// libmxl-fabrics semantics.
 	BindAddress string
+
+	// Selector narrows the interfaces a setup may bind to the fabric
+	// this node is allowed to carry MXL traffic on. The capability
+	// publisher applies the same one.
+	Selector fabric.Selector
 
 	// Handles owns the long-lived mxl + fabrics instances.
 	Handles *instance.Handles
@@ -442,7 +448,7 @@ func (r *TargetReconciler) openFabricSide(writer *mxl.Writer, provider fabrics.P
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("NewTarget: %w", err)
 	}
-	iface, err := resolveInterface(fabInst, provider, r.BindAddress)
+	iface, err := resolveInterface(fabInst, r.Selector, provider, r.BindAddress)
 	if err != nil {
 		_ = target.Close()
 		return nil, nil, "", err

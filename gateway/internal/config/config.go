@@ -3,11 +3,16 @@ package config
 import (
 	"flag"
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	"github.com/qvest-digital/go-mxl/fabrics"
+
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
 )
 
 // Config holds the gateway's runtime configuration.
@@ -26,11 +31,26 @@ type Config struct {
 	// interfaces; for in-cluster use this is typically $POD_IP.
 	BindAddress string
 
-	// Providers is the set of libmxl-fabrics providers this gateway is
-	// configured to support. Real per-provider probing happens at the
-	// first flow setup; the gateway publishes this list to
-	// MxlNodeCapabilities at boot.
+	// Providers is the upper bound on the libmxl-fabrics providers
+	// this gateway may advertise and use. What it actually advertises
+	// is the intersection of this list with what libmxl-fabrics
+	// enumerates on the node, so a provider named here whose hardware
+	// is absent is published with a zero device count rather than
+	// claimed. Naming fabrics.ProviderAny imposes no bound.
 	Providers []fabrics.Provider
+
+	// FabricCIDRs restricts the interfaces this gateway may advertise
+	// and bind to those whose address falls inside one of these
+	// prefixes. Empty imposes no restriction.
+	FabricCIDRs []netip.Prefix
+
+	// FabricDevices restricts those interfaces to the devices named
+	// here, as the provider names them. Empty imposes no restriction.
+	FabricDevices []string
+
+	// FabricMinLinkSpeed rejects interfaces below this link speed in
+	// bits per second. Zero imposes no restriction.
+	FabricMinLinkSpeed uint64
 
 	// Kubeconfig is an optional kubeconfig path; empty uses in-cluster.
 	Kubeconfig string
@@ -80,15 +100,29 @@ type Config struct {
 // FromFlags populates a Config from command-line flags.
 func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	c := &Config{}
-	var providers string
+	var providers, fabricCIDRs, fabricDevices, fabricMinLinkSpeed string
 	fs.StringVar(&c.NodeName, "node-name", os.Getenv("NODE_NAME"),
 		"Kubernetes node name (defaults to $NODE_NAME).")
 	fs.StringVar(&c.DomainPath, "domain-path", os.Getenv("MXL_DOMAIN"),
 		"Absolute path to the MXL domain directory the gateway operates on.")
 	fs.StringVar(&c.BindAddress, "bind-address", os.Getenv("POD_IP"),
 		"Local address libmxl-fabrics endpoints bind to (defaults to $POD_IP, empty for all interfaces).")
-	fs.StringVar(&providers, "providers", "tcp",
-		"Comma-separated libmxl-fabrics providers to advertise (any,tcp,verbs,efa,shm; auto is an alias for any).")
+	fs.StringVar(&providers, "providers", "any",
+		"Comma-separated upper bound on the libmxl-fabrics providers to advertise and use "+
+			"(any,tcp,verbs,efa,shm; auto is an alias for any). What the node advertises is "+
+			"this list intersected with what libmxl-fabrics finds on it.")
+	fs.StringVar(&fabricCIDRs, "fabric-cidr", "",
+		"Comma-separated CIDRs the fabric interfaces must fall inside. Empty considers every "+
+			"address libmxl-fabrics reports. Set this on a node whose other NICs carry traffic "+
+			"MXL must stay off, such as an ST 2110 or management network.")
+	fs.StringVar(&fabricDevices, "fabric-device", "",
+		"Comma-separated device names the fabric interfaces must match, as the provider names "+
+			"them (the kernel netdev name for tcp). Empty considers every device.")
+	fs.StringVar(&fabricMinLinkSpeed, "fabric-min-link-speed", "",
+		"Minimum link speed a fabric interface must report, as a quantity in bits per second "+
+			"(for example 25G). Empty imposes no floor. An interface whose provider reports no "+
+			"link speed is rejected when this is set, which includes most interfaces with no "+
+			"physical NIC behind them.")
 	fs.StringVar(&c.Kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"),
 		"Path to a kubeconfig file. Empty uses the in-cluster config.")
 	fs.StringVar(&c.ProbeAddr, "health-probe-bind-address", ":8081",
@@ -132,10 +166,55 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		c.Providers = append(c.Providers, p)
 	}
 
+	for _, cidr := range splitList(fabricCIDRs) {
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("--fabric-cidr: %w", err)
+		}
+		c.FabricCIDRs = append(c.FabricCIDRs, prefix)
+	}
+	c.FabricDevices = splitList(fabricDevices)
+
+	if fabricMinLinkSpeed != "" {
+		q, err := resource.ParseQuantity(fabricMinLinkSpeed)
+		if err != nil {
+			return nil, fmt.Errorf("--fabric-min-link-speed: %w", err)
+		}
+		bits, ok := q.AsInt64()
+		if !ok || bits < 0 {
+			return nil, fmt.Errorf("--fabric-min-link-speed must be a non-negative whole number of bits per second, got %q", fabricMinLinkSpeed)
+		}
+		c.FabricMinLinkSpeed = uint64(bits)
+	}
+
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// splitList parses a comma-separated flag value, dropping empty
+// entries so a trailing comma or an empty flag yields no entries.
+func splitList(value string) []string {
+	var out []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// Selector is the fabric interface selection this configuration
+// describes. The capability publisher and the mirror setup path both
+// take it, which is what keeps a node from advertising an interface it
+// would refuse to bind.
+func (c *Config) Selector() fabric.Selector {
+	return fabric.Selector{
+		CIDRs:        c.FabricCIDRs,
+		Devices:      c.FabricDevices,
+		MinLinkSpeed: c.FabricMinLinkSpeed,
+	}
 }
 
 // Validate checks required fields.

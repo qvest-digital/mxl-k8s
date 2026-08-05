@@ -101,11 +101,16 @@ func run(args []string) error {
 		}()
 	}
 
+	// One selector for the whole process: the reconcilers bind what
+	// the publisher advertises, and nothing else.
+	selector := cfg.Selector()
+
 	if err := (&mirror.TargetReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 		NodeName:      cfg.NodeName,
 		BindAddress:   cfg.BindAddress,
+		Selector:      selector,
 		Handles:       handles,
 		DegradedAfter: cfg.DegradedAfter,
 	}).SetupWithManager(mgr); err != nil {
@@ -116,6 +121,7 @@ func run(args []string) error {
 		Scheme:           mgr.GetScheme(),
 		NodeName:         cfg.NodeName,
 		BindAddress:      cfg.BindAddress,
+		Selector:         selector,
 		Handles:          handles,
 		ReaderStallAfter: cfg.ReaderStallAfter,
 	}).SetupWithManager(mgr); err != nil {
@@ -127,9 +133,12 @@ func run(args []string) error {
 	// once the cache has synced.
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		pub := &capabilities.Publisher{
-			Client:    mgr.GetClient(),
-			NodeName:  cfg.NodeName,
-			Providers: cfg.Providers,
+			Client:      mgr.GetClient(),
+			NodeName:    cfg.NodeName,
+			Providers:   cfg.Providers,
+			Lister:      handles.Fabrics(),
+			Selector:    selector,
+			BindAddress: cfg.BindAddress,
 		}
 		if err := pub.EnsureExists(ctx); err != nil {
 			return err
@@ -152,6 +161,9 @@ func run(args []string) error {
 		"domainPath", cfg.DomainPath,
 		"bindAddress", cfg.BindAddress,
 		"providers", providerNames(cfg.Providers),
+		"fabricCIDRs", cfg.FabricCIDRs,
+		"fabricDevices", cfg.FabricDevices,
+		"fabricMinLinkSpeed", cfg.FabricMinLinkSpeed,
 		"probeAddr", cfg.ProbeAddr,
 		"pprofAddr", cfg.PprofAddr,
 		"resyncPeriod", cfg.ResyncPeriod)

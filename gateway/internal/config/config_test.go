@@ -48,9 +48,64 @@ func TestFromFlags_DefaultsAndProvidersCSV(t *testing.T) {
 			"flushers at a handful of flowing mirrors; the default must "+
 			"stay well above that")
 	assert.Equal(t, 100, c.KubeAPIBurst)
-	require.Equal(t, []fabrics.Provider{fabrics.ProviderTCP}, c.Providers,
-		"default provider list must be exactly [tcp]; --providers tcp is the only "+
-			"setup that works out of the box without RDMA hardware on every node")
+	require.Equal(t, []fabrics.Provider{fabrics.ProviderAny}, c.Providers,
+		"the flag is an upper bound on a probed list, not the list itself; "+
+			"defaulting it to one provider would hide the hardware on every "+
+			"node that has more, which is the whole mixed-hardware case")
+	assert.Empty(t, c.FabricCIDRs,
+		"an unset fabric considers every address libmxl-fabrics reports; "+
+			"narrowing by default would exclude single-NIC nodes entirely")
+	assert.Empty(t, c.FabricDevices)
+	assert.Zero(t, c.FabricMinLinkSpeed)
+}
+
+func TestFromFlags_FabricSelection(t *testing.T) {
+	t.Setenv("NODE_NAME", "n1")
+	t.Setenv("MXL_DOMAIN", "/d")
+	t.Setenv("POD_IP", "")
+	t.Setenv("KUBECONFIG", "")
+
+	c, err := FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), []string{
+		"--fabric-cidr=10.20.53.0/24, fd00::/64",
+		"--fabric-device=mlx5_0, eth2",
+		"--fabric-min-link-speed=25G",
+	})
+	require.NoError(t, err)
+
+	require.Len(t, c.FabricCIDRs, 2)
+	assert.Equal(t, "10.20.53.0/24", c.FabricCIDRs[0].String())
+	assert.Equal(t, "fd00::/64", c.FabricCIDRs[1].String())
+	assert.Equal(t, []string{"mlx5_0", "eth2"}, c.FabricDevices)
+	assert.Equal(t, uint64(25_000_000_000), c.FabricMinLinkSpeed,
+		"libfabric reports link speed in bits per second, so a quantity "+
+			"suffix has to resolve to the same unit")
+
+	sel := c.Selector()
+	assert.Equal(t, c.FabricCIDRs, sel.CIDRs)
+	assert.Equal(t, c.FabricDevices, sel.Devices)
+	assert.Equal(t, c.FabricMinLinkSpeed, sel.MinLinkSpeed)
+}
+
+func TestFromFlags_RejectsAnUnparseableFabric(t *testing.T) {
+	t.Setenv("NODE_NAME", "n1")
+	t.Setenv("MXL_DOMAIN", "/d")
+	t.Setenv("POD_IP", "")
+	t.Setenv("KUBECONFIG", "")
+
+	// A bare address rather than a prefix is the likely typo, and
+	// silently ignoring it would leave the fabric wide open on a node
+	// whose operator believes it is narrowed.
+	_, err := FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), []string{
+		"--fabric-cidr=10.20.53.13",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--fabric-cidr")
+
+	_, err = FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), []string{
+		"--fabric-min-link-speed=fast",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--fabric-min-link-speed")
 }
 
 func TestFromFlags_MultipleProviders(t *testing.T) {

@@ -25,6 +25,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
+
 	"github.com/qvest-digital/go-mxl/fabrics"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -89,26 +91,45 @@ var errNoInterface = errors.New("no usable fabric interface")
 // out of the query otherwise so every address of the provider is
 // considered. Service is not taken from the entry: the endpoint's port
 // is the caller's to choose, and an empty one means ephemeral.
-func resolveInterface(fi interfaceLister, provider fabrics.Provider, bindAddress string) (fabrics.InterfaceConfig, error) {
+//
+// The selector then drops what this node may not carry MXL traffic on.
+// It is the same selector the capability publisher applies, so a
+// mirror is only ever set up on an interface the node advertised, and
+// libfabric's own preference order chooses among what survives. Left
+// unfiltered, a host whose fabric is one of several NICs would hand a
+// setup whichever address the enumeration happened to return first,
+// including loopback, an ST 2110 essence NIC, or the management port.
+func resolveInterface(fi interfaceLister, sel fabric.Selector, provider fabrics.Provider, bindAddress string) (fabrics.InterfaceConfig, error) {
 	query := &fabrics.InterfaceConfig{Provider: provider}
 	if bindAddress != "" {
 		query.Address.Node = bindAddress
 	}
 
-	ifaces, err := fi.Interfaces(query)
+	found, err := fi.Interfaces(query)
 	if err != nil {
 		return fabrics.InterfaceConfig{}, fmt.Errorf("query fabric interfaces: %w", err)
 	}
+	ifaces, rejected := sel.Select(found)
 
 	// Remote write is the only transfer mode libmxl-fabrics implements,
 	// and a setup that cannot do it is refused further down anyway.
 	iface, ok := fabrics.SelectInterface(ifaces, fabrics.InterfaceCapRemoteWrite)
 	if !ok {
-		return fabrics.InterfaceConfig{}, fmt.Errorf("%w for provider %s on %q: %d candidate(s)",
-			errNoInterface, provider, bindAddress, len(ifaces))
+		return fabrics.InterfaceConfig{}, fmt.Errorf("%w for provider %s on %q: %d of %d candidate(s) excluded%s",
+			errNoInterface, provider, bindAddress, len(rejected), len(found), firstRejection(rejected))
 	}
 	iface.Address.Service = ""
 	return iface, nil
+}
+
+// firstRejection renders one excluded interface for the error a failed
+// resolve returns, so the reason reaches the mirror's condition rather
+// than only the gateway log.
+func firstRejection(rejected []fabric.Rejection) string {
+	if len(rejected) == 0 {
+		return ""
+	}
+	return ", first: " + rejected[0].String()
 }
 
 // interfaceLister is the slice of fabrics.Instance resolveInterface

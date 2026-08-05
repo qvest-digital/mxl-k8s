@@ -28,6 +28,7 @@ import (
 	"github.com/qvest-digital/go-mxl/mxl"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
 )
 
@@ -96,6 +97,11 @@ type SourceReconciler struct {
 	// BindAddress is the libmxl-fabrics endpoint node passed to the
 	// Initiator Setup. Empty means "bind all interfaces".
 	BindAddress string
+
+	// Selector narrows the interfaces a setup may bind to the fabric
+	// this node is allowed to carry MXL traffic on. The capability
+	// publisher applies the same one.
+	Selector fabric.Selector
 
 	// Handles owns the long-lived mxl + fabrics instances.
 	Handles *instance.Handles
@@ -546,6 +552,7 @@ type libmxlOpener struct {
 	Handles          *instance.Handles
 	NodeName         string
 	BindAddress      string
+	Selector         fabric.Selector
 	ProgressInterval time.Duration
 }
 
@@ -568,7 +575,7 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 		_ = reader.Close()
 		return nil, fmt.Errorf("NewInitiator: %w", err)
 	}
-	iface, err := resolveInterface(fabInst, provider, o.BindAddress)
+	iface, err := resolveInterface(fabInst, o.Selector, provider, o.BindAddress)
 	if err != nil {
 		_ = initiator.Close()
 		_ = reader.Close()
@@ -1339,6 +1346,7 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			Handles:          r.Handles,
 			NodeName:         r.NodeName,
 			BindAddress:      r.BindAddress,
+			Selector:         r.Selector,
 			ProgressInterval: r.ProgressInterval,
 		}
 	}

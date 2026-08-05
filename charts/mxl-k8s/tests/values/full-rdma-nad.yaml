@@ -13,6 +13,10 @@ gateway:
     # suppresses the POD_IP fallback; libfabric then picks the
     # in-pod RDMA netdev.
     bindAddress: ""
+    # With no bind address narrowing the enumeration, every
+    # interface the pod can see is a candidate. Naming the fabric
+    # subnet is what keeps a mirror off the others.
+    fabricCidr: ["10.20.53.0/24"]
   rdma:
     enabled: true
     resourceName: rdma/hca_shared_devices

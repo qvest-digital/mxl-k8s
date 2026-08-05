@@ -1,10 +1,12 @@
 # RDMA prerequisites
 
-The mxl-fabrics-gateway claims `verbs` or `efa` providers based on
-what's passed to `--providers`. The code path through
-libmxl-fabrics is the same; the host plumbing is what differs.
-This document collects the prerequisites that have to be in place
-on the worker nodes for either provider to actually work.
+The mxl-fabrics-gateway advertises `verbs` or `efa` when
+libmxl-fabrics finds a device for them on the node and
+`--providers` admits them. The code path through libmxl-fabrics is
+the same; the host plumbing is what differs. This document
+collects the prerequisites that have to be in place on the worker
+nodes for either provider to actually work, and how to tell the
+gateway which of a node's NICs the fabric is.
 
 ## verbs (RoCEv2 / InfiniBand)
 
@@ -163,9 +165,13 @@ host setup is AWS-specific.
 - `securityContext.capabilities.add: ["IPC_LOCK", "SYS_RESOURCE"]`,
   same reason as verbs.
 - Bind-mount `/dev/infiniband` from the host.
-- `--providers=efa` on the gateway DaemonSet.
+- Nothing on the gateway DaemonSet: the default `--providers=any`
+  advertises efa on the nodes that have an adapter and leaves it
+  off the ones that do not. Set `--providers` only to keep efa out
+  of consideration where the hardware supports it.
 - `MxlFlowMirror.spec.provider: efa` (or
-  `MxlReceiver.spec.provider: efa`).
+  `MxlReceiver.spec.provider: efa`) to pin a mirror rather than
+  letting `selection.Resolve` pick from what both nodes report.
 - Multus is *not* the right tool for EFA pods -- EFA is exposed
   via the host's network namespace. `hostNetwork: true` on the
   gateway DaemonSet (as in the rdma-demo example) keeps the
@@ -173,23 +179,114 @@ host setup is AWS-specific.
 
 ## How the gateway exposes capabilities
 
-At startup the gateway publishes one `MxlNodeCapabilities` per
-node listing the providers it was configured with. Today this is
-trust-the-config; the gateway does *not* yet probe libfabric to
-verify the underlying NIC and driver actually support the claimed
-provider. A misconfiguration (e.g. `--providers=verbs` on a node
-without InfiniBand) surfaces at the first `MxlFlowMirror` Setup
-rather than at boot.
+The gateway publishes one `MxlNodeCapabilities` per node from a
+libmxl-fabrics interface enumeration (`mxlFabricsGetInterfaces`),
+refreshed on every `--resync-period` tick for as long as it runs,
+so a link that goes down or a driver that loads late is picked up
+without a restart.
 
-Real per-provider probing (a synthetic flow created at startup
-to exercise each declared provider) is a deliberate follow-up,
-not present in this release.
+Each provider entry carries the devices found for it:
+
+```console
+$ kubectl get mxlnodecapabilities node-a -o yaml
+status:
+  conditions:
+    - type: Probed
+      status: "True"
+      reason: ProbeComplete
+      message: libmxl-fabrics reports 4 provider(s) on this node
+  providers:
+    - name: efa
+      deviceCount: 0
+    - name: verbs
+      deviceCount: 1
+      interfaces:
+        - address: 10.20.53.13
+          device: mlx5_0
+          linkState: up
+          linkSpeedBitsPerSecond: 100000000000
+          maxMessageSize: 1073741824
+          pciAddress: "0000:41:00.1"
+    - name: tcp
+      deviceCount: 1
+      interfaces:
+        - address: 10.20.53.13
+          device: eth0
+```
+
+`deviceCount: 0` means libmxl-fabrics knows the provider but found
+no usable device here. A provider missing from the list entirely
+was excluded by `--providers`. `selection.Resolve` reads the
+difference: a provider with no device is dropped from the
+intersection instead of being preferred, which is what lets one
+DaemonSet serve a cluster where only some nodes carry an EFA
+adapter or an HCA.
+
+The `Probed` condition is what makes `deviceCount` readable. A
+gateway that reports no probe published a configured list where
+every count is zero whether or not the provider works, so
+consumers keep treating those entries as available. During a
+rolling upgrade both shapes are present in the cluster at once.
+
+`version` is unset on every entry: libmxl-fabrics exposes no
+per-provider version through its C API.
+
+Which fields under `interfaces` are populated depends on the
+provider and the hardware. The libmxl-fabrics header describes the
+underlying attributes as best-effort, and an interface with no
+physical NIC behind it (loopback, a veth pair, a container's
+`eth0`) reports a device name but no link state, link speed, or
+PCI address.
+
+## Scoping the fabric on a multi-NIC node
+
+A node in a broadcast plant carries NICs with different jobs: ST
+2110 essence, the MXL fabric, cluster traffic, out-of-band
+management. libfabric enumerates all of them, including loopback,
+and nothing it reports says which is which. That is site policy,
+not a property of the hardware, so the fabric has to be declared.
+
+Three flags narrow it, and all three apply to both what a node
+advertises and what a mirror binds, so a node never promises an
+interface a setup would refuse:
+
+| Flag | Chart value | Effect |
+| --- | --- | --- |
+| `--fabric-cidr` | `gateway.flags.fabricCidr` | Keeps only interfaces whose address is inside one of the given prefixes. |
+| `--fabric-device` | `gateway.flags.fabricDevice` | Keeps only the named devices, as the provider names them (the kernel netdev name for tcp). |
+| `--fabric-min-link-speed` | `gateway.flags.fabricMinLinkSpeed` | Rejects interfaces below a link speed, given in bits per second (`25G`). |
+
+Loopback is always excluded: every mirror the gateway sets up
+spans two nodes, and a peer handed `127.0.0.1` in a `TargetInfo`
+dials itself. An interface whose link the provider reports as
+`down` is always excluded too.
+
+Two rules reject an interface whose detail is missing rather than
+admitting it. `--fabric-device` needs a device name to match, and
+`--fabric-min-link-speed` needs a speed to compare; an interface
+that reports neither cannot be shown to satisfy either. Since most
+interfaces with no physical NIC report no speed at all, a link
+speed floor excludes them as a side effect.
+
+`--bind-address` still narrows the enumeration to a single address
+when set, and is the simplest scoping there is on a node whose
+fabric address is known and stable. The flags above are what a
+node needs when it is not: with `bindAddress: ""`, which the
+NAD-attached pattern below requires, every interface the pod can
+see is otherwise a candidate.
+
+A node that ends up advertising nothing logs the count of excluded
+interfaces and the first exclusion with its reason; the full list
+appears with `gateway.flags.zapLogLevel: debug`.
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 | --- | --- |
 | `MxlFlowMirror` stuck in `Materializing` | Gateway can't `fi_getinfo` the provider on the local NIC. Check `/dev/infiniband` is mounted and the host module is loaded. |
+| Mirror fails with `no usable fabric interface` | Every candidate was excluded. The error names the first exclusion and its reason; check the fabric flags against `kubectl get mxlnodecapabilities <node> -o yaml`. |
+| A node advertises `deviceCount: 0` for a provider whose hardware is installed | libmxl-fabrics did not enumerate a usable device. Check the host module and `/dev/infiniband` first, then whether the fabric flags exclude the interface it would have used. |
+| Every mirror sits on tcp after an upgrade | Nodes whose gateway has not rolled yet report no `Probed` condition. Check `kubectl get mxlnodecapabilities` for the ones still on the old shape. |
 | `RDMA_CM_EVENT_REJECTED` in gateway logs | Both ends agree on the provider but the wire-side handshake fails. For RoCEv2 this is almost always PFC/DSCP misconfiguration on the switches. |
 | Throughput far below NIC line rate | PFC pauses too aggressive or wrong traffic class. Use `mlnx_qos`, `ethtool -S` counters. |
 | `cannot allocate memory` from libmxl-fabrics | `RLIMIT_MEMLOCK` too low. Bump the host default or rely on the gateway's `SYS_RESOURCE` cap. |
