@@ -12,8 +12,15 @@ set -euo pipefail
 # shellcheck source=../lib.sh
 . "$KIND_TEST_LIB"
 
-nodes=$("${KUBECTL[@]}" get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
-[ -n "$nodes" ] || fail "cluster reports no nodes"
+# Scoped to the nodes running a gateway, not to every node: the
+# publisher is the gateway, and the DaemonSet carries no toleration for
+# the control-plane taint, so a control-plane node has no
+# MxlNodeCapabilities to assert anything about.
+nodes=$("${KUBECTL[@]}" -n "$NAMESPACE" get pods \
+  -l app.kubernetes.io/name=mxl-k8s-gateway \
+  --field-selector=status.phase=Running \
+  -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u)
+[ -n "$nodes" ] || fail "no Running gateway pod found; nothing publishes MxlNodeCapabilities"
 
 failed=0
 for node in $nodes; do
