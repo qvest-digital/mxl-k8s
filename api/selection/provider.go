@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+
 	"github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -28,10 +30,11 @@ var crossNodePreference = []v1alpha1.MxlFabricsProvider{
 }
 
 // ErrCapabilitiesUnknown reports that at least one node advertises no
-// cross-node provider yet (the gateway probe has not populated its
-// MxlNodeCapabilities, or runs a beta that cannot enumerate them).
-// Resolve returns ProviderTCP alongside it so the mirror still comes up
-// on the provider every host supports.
+// usable cross-node provider: its gateway has not published an
+// MxlNodeCapabilities yet, or it probed and found no device for any
+// provider that can bridge two nodes. Resolve returns ProviderTCP
+// alongside it so the mirror still comes up on the provider every host
+// supports.
 var ErrCapabilitiesUnknown = errors.New("node capabilities not recorded")
 
 // ErrNoCommonProvider reports that both nodes advertised cross-node
@@ -54,9 +57,10 @@ var ErrNoCommonProvider = errors.New("source and target share no cross-node prov
 // callers can log the fallback while still stamping the returned
 // provider onto the mirror.
 //
-// The inputs are MxlNodeCapabilitiesStatus today. When dmf-mxl/mxl#564
-// lands they gain per-interface capability detail; the signature stays
-// the same and only this function's internals deepen to weigh it.
+// A provider a node probed and found no device for is excluded rather
+// than preferred, so the intersection is drawn from what the two nodes
+// can actually do. See providerSet for why that reading is conditional
+// on the node reporting a probe at all.
 func Resolve(source, target v1alpha1.MxlNodeCapabilitiesStatus) (v1alpha1.MxlFabricsProvider, error) {
 	src := providerSet(source)
 	tgt := providerSet(target)
@@ -77,12 +81,22 @@ func Resolve(source, target v1alpha1.MxlNodeCapabilitiesStatus) (v1alpha1.MxlFab
 // providerSet collects the cross-node-relevant providers a node
 // advertises. Entries outside crossNodePreference (shm, auto, or an
 // unknown future name) are dropped so they never influence selection.
-// DeviceCount is intentionally ignored: the beta gateway probe reports
-// zero even for a working provider, so gating on it would strand every
-// mirror on the tcp fallback.
+//
+// DeviceCount decides membership only when the node reports a probe.
+// A gateway that enumerated its providers reports zero for one whose
+// hardware is absent, and selecting it would fail at setup on that
+// node. A gateway that reports no probe published its configured
+// list, where zero is the value every entry carries whether or not
+// the provider works, so reading it there would strand every mirror
+// in the cluster on the tcp fallback for as long as one un-upgraded
+// gateway remains.
 func providerSet(status v1alpha1.MxlNodeCapabilitiesStatus) map[v1alpha1.MxlFabricsProvider]struct{} {
+	probed := meta.IsStatusConditionTrue(status.Conditions, v1alpha1.ConditionTypeProbed)
 	out := make(map[v1alpha1.MxlFabricsProvider]struct{}, len(status.Providers))
 	for _, pc := range status.Providers {
+		if probed && pc.DeviceCount <= 0 {
+			continue
+		}
 		for _, known := range crossNodePreference {
 			if pc.Name == known {
 				out[pc.Name] = struct{}{}

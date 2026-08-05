@@ -28,7 +28,7 @@ spec:
       openAPIV3Schema:
         description: |-
           MxlNodeCapabilities reports a node's libmxl-fabrics capabilities as
-          probed by the local gateway at startup.
+          probed by the local gateway, refreshed for as long as it runs.
         properties:
           apiVersion:
             description: |-
@@ -60,12 +60,13 @@ spec:
             type: object
           status:
             description: |-
-              MxlNodeCapabilitiesStatus reports what the gateway found at
-              startup.
+              MxlNodeCapabilitiesStatus reports what the gateway found on the
+              node it runs on.
             properties:
               conditions:
-                description: Conditions describes the current state of the gateway
-                  probe.
+                description: |-
+                  Conditions describes the current state of the gateway probe.
+                  See ConditionTypeProbed.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -130,8 +131,12 @@ spec:
                 type: string
               providers:
                 description: |-
-                  Providers lists libmxl-fabrics providers the gateway probed
-                  successfully on this node.
+                  Providers lists libmxl-fabrics providers the gateway probed on
+                  this node, restricted to the providers it is configured to
+                  consider. A provider appears here with deviceCount zero when
+                  libmxl-fabrics knows it but found nothing usable, so absence
+                  means "the gateway was told not to consider it" and zero means
+                  "the hardware is not there".
                 items:
                   description: |-
                     MxlFabricsProviderCapability reports what one libmxl-fabrics
@@ -142,8 +147,72 @@ spec:
                         DeviceCount is the number of devices the provider can use on
                         this node (NICs, EFA adapters, etc.). Zero means the provider
                         is supported by libmxl-fabrics but has nothing usable here.
+
+                        Devices are counted by the name the provider reports, falling
+                        back to the address where it reports none, so one device that
+                        enumerates once per address family or endpoint type counts
+                        once. Only interfaces the gateway is willing to bind are
+                        counted; see Interfaces.
                       format: int32
                       type: integer
+                    interfaces:
+                      description: |-
+                        Interfaces lists the local fabric interfaces this provider
+                        offers that pass the gateway's fabric selection, which is the
+                        same set a mirror on this node can be set up on. Empty on a
+                        gateway that reports no probe.
+                      items:
+                        description: |-
+                          MxlFabricInterface reports one local fabric interface a provider
+                          offers, as returned by the libmxl-fabrics interface enumeration.
+                        properties:
+                          address:
+                            description: |-
+                              Address is the node address the interface binds to, as the
+                              provider reports it. Unique within a provider's interface list.
+                            type: string
+                          device:
+                            description: |-
+                              Device names the underlying device. For the tcp provider this
+                              is the kernel netdev name; other providers report whatever the
+                              libfabric NIC descriptor carries. Empty when the provider
+                              reports no device.
+                            type: string
+                          linkSpeedBitsPerSecond:
+                            description: |-
+                              LinkSpeedBitsPerSecond is the link speed the provider reports.
+                              Zero means it reported none.
+                            format: int64
+                            type: integer
+                          linkState:
+                            description: |-
+                              LinkState is the interface link state the provider reports:
+                              up, down, or unknown. Empty when the provider reports no link
+                              attributes, which is the common case for interfaces backed by
+                              no physical NIC.
+                            enum:
+                            - up
+                            - down
+                            - unknown
+                            type: string
+                          maxMessageSize:
+                            description: MaxMessageSize is the largest message the
+                              interface accepts.
+                            format: int64
+                            type: integer
+                          pciAddress:
+                            description: |-
+                              PCIAddress is the interface's PCI address in
+                              domain:bus:device.function form. Empty when the provider
+                              reports no PCI bus attributes.
+                            type: string
+                        required:
+                        - address
+                        type: object
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - address
+                      x-kubernetes-list-type: map
                     name:
                       description: Name is the libmxl-fabrics provider name.
                       enum:
@@ -157,6 +226,8 @@ spec:
                       description: |-
                         Version is the underlying libfabric provider version string,
                         as reported by the provider when libmxl-fabrics initializes it.
+                        Unset: libmxl-fabrics exposes no per-provider version through
+                        its C API, so the gateway has nothing to fill it from.
                       type: string
                   required:
                   - name

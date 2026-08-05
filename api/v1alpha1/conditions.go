@@ -19,6 +19,16 @@ const (
 	// an MxlFlow is within its renewal window. Owned by the
 	// operator and written to MxlFlow status.
 	ConditionTypeOriginFresh = "OriginFresh"
+
+	// ConditionTypeProbed reports whether status.providers on an
+	// MxlNodeCapabilities came from a libmxl-fabrics interface
+	// enumeration. Owned by the gateway capability publisher.
+	//
+	// It is what makes deviceCount readable. A gateway that only
+	// echoed its configured provider list left the field at zero for
+	// providers that worked, so a consumer cannot tell "measured
+	// none" from "never measured" without this.
+	ConditionTypeProbed = "Probed"
 )
 
 // Condition reason constants for MxlFlowMirror and MxlFlow status.
@@ -72,4 +82,14 @@ const (
 	// ReasonRecovered marks a condition that previously reported a
 	// fault and has since returned to a healthy state.
 	ReasonRecovered = "Recovered"
+
+	// ReasonProbeComplete marks an MxlNodeCapabilities whose
+	// providers were enumerated from libmxl-fabrics.
+	ReasonProbeComplete = "ProbeComplete"
+
+	// ReasonProbeFailed marks an MxlNodeCapabilities whose provider
+	// enumeration returned an error. The previously published
+	// providers are left in place rather than cleared, so a
+	// transient failure does not strand every mirror on the node.
+	ReasonProbeFailed = "ProbeFailed"
 )
