@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.19](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.18...v1.0.0-rc.19) (2026-08-06)
+
+
+### Miscellaneous
+
+* stop committing the graphify knowledge graph ([#230](https://github.com/qvest-digital/mxl-k8s/issues/230)) ([ec5f564](https://github.com/qvest-digital/mxl-k8s/commit/ec5f5648510b414e4d36282c9b908ea1be90ec10))
+
 ## [1.0.0-rc.18](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.17...v1.0.0-rc.18) (2026-08-06)
 
 
