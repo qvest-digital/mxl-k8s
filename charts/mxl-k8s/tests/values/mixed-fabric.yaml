@@ -1,0 +1,47 @@
+# A cluster whose nodes do not all carry the same fabric hardware: one
+# gateway DaemonSet per node class, keyed on the value of a single
+# label so no node can match two of them.
+#
+# The classes differ only in which device plugin advertises the
+# resource and which taint the node carries. On-prem RDMA has exactly
+# the problem a cloud fabric has -- some nodes have a capable NIC and
+# the rest do not -- so verbs and efa appear here as equals, and
+# nothing in the chart privileges either.
+#
+# Everything the chart already knows about a fabric (providers, the
+# capabilities, the EFA resource name) comes from the chart defaults.
+# What a site has to supply is what the chart cannot know: which label
+# marks the node, which plugin advertises the device, and which taint
+# the node group carries.
+gateway:
+  variants:
+    verbs:
+      enabled: true
+      nodeSelector:
+        mxl.qvest-digital.com/fabric: verbs
+      flags:
+        bindAddress: ""
+        fabricCidr: ["192.168.100.0/24"]
+      rdma:
+        resourceName: devic.es/rdma
+
+    efa:
+      enabled: true
+      nodeSelector:
+        mxl.qvest-digital.com/fabric: efa
+      tolerations:
+        - key: vpc.amazonaws.com/efa
+          operator: Exists
+          effect: NoSchedule
+
+    # Nodes carrying no fabric label at all. Absence is not something
+    # a nodeSelector can express, so this class needs affinity.
+    tcp:
+      enabled: true
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: mxl.qvest-digital.com/fabric
+                    operator: DoesNotExist

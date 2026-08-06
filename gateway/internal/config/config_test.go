@@ -121,8 +121,11 @@ func TestFromFlags_MultipleProviders(t *testing.T) {
 	assert.Equal(t,
 		[]fabrics.Provider{fabrics.ProviderTCP, fabrics.ProviderVerbs, fabrics.ProviderSHM},
 		c.Providers,
-		"the CSV parser must trim whitespace and preserve order; the gateway uses "+
-			"the slice order to bias selection inside libmxl-fabrics")
+		"the CSV parser must trim whitespace and preserve order. Order carries "+
+			"no meaning of its own: the list is an upper bound tested by "+
+			"membership, and the advertised order follows the probe's own "+
+			"preference. Preserving it keeps the flag legible against what an "+
+			"operator wrote")
 }
 
 func TestFromFlags_ProviderSentinelAliases(t *testing.T) {

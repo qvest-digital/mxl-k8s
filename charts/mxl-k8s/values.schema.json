@@ -1108,7 +1108,7 @@
           "properties": {
             "enabled": {
               "default": "false",
-              "description": "Add the capabilities and mounts the verbs/efa providers need.",
+              "description": "Add the capabilities the verbs/efa providers need (IPC_LOCK, SYS_RESOURCE; libmxl pins shm pages).",
               "required": [],
               "title": "enabled"
             },
@@ -1126,9 +1126,25 @@
               "required": [],
               "title": "infinibandHostPath"
             },
+            "infinibandHostPathType": {
+              "default": "Directory",
+              "description": "hostPath type for the InfiniBand mount. `Directory` holds the pod in ContainerCreating on a node where the path is absent, which is a deliberate failure on a DaemonSet that is only meant to run on RDMA-capable nodes, and a hang on one that is not.",
+              "enum": [
+                "Directory",
+                "DirectoryOrCreate"
+              ],
+              "required": [],
+              "title": "infinibandHostPathType"
+            },
+            "mountInfiniband": {
+              "default": "true",
+              "description": "Bind-mount the host's InfiniBand device directory into the gateway. Only consulted when rdma.enabled is set. A bind mount alone does not pass the cgroup-v2 device controller, so a node whose devices come from a device plugin wants this off and `resourceName` set instead.",
+              "required": [],
+              "title": "mountInfiniband"
+            },
             "resourceName": {
               "default": "",
-              "description": "Extended-resource name advertised by a Kubernetes device plugin (for example `rdma/hca_shared_devices` from k8s-rdma-shared-dev-plugin). When non-empty, the gateway container gets `\u003cresourceName\u003e: 1` on both requests and limits. Empty disables the request.",
+              "description": "Extended-resource name advertised by a Kubernetes device plugin. `devic.es/rdma` from generic-device-plugin and `rdma/hca_shared_devices` from k8s-rdma-shared-dev-plugin cover on-prem verbs; `vpc.amazonaws.com/efa` from aws-efa-k8s-device-plugin covers EFA; a site may advertise something else entirely. When non-empty, the gateway container gets `\u003cresourceName\u003e: 1` on both requests and limits. Empty disables the request.  The request is what grants the container its cgroup device permissions, and it also makes the pod unschedulable on any node not advertising the resource -- which is why a cluster with mixed hardware needs `gateway.variants` rather than one DaemonSet.",
               "required": [],
               "title": "resourceName"
             }
@@ -1293,6 +1309,184 @@
           ],
           "title": "updateStrategy",
           "type": "object"
+        },
+        "variants": {
+          "additionalProperties": {
+            "type": "object"
+          },
+          "description": "Render the gateway DaemonSet once per enabled entry instead of once, for a cluster whose nodes do not all carry the same fabric hardware. With nothing enabled -- the default -- exactly one DaemonSet renders from the values above, which is what a uniform cluster wants.  Keys name the variant and suffix the DaemonSet name, so they have to be DNS-1123 labels. Entries beyond the three below are allowed; each may override any key under `gateway`, with maps merging key by key against the values above and lists replacing wholesale.  Placement is deliberately unset on every entry. Which label marks a node's fabric is a site's choice, and a default here would not be replaced by a downstream override but merged with it, leaving a nodeSelector that demands both labels and matches no node.  Enabling two or more entries means declaring their placement, and the placements have to be complementary: two gateways on one node open the same MXL domain, reconcile the same mirrors, and write the same MxlNodeCapabilities, which is named after the node. Helm cannot read node labels, so it rejects only the combinations that guarantee overlap. Keying every variant on a distinct value of one label is what makes overlap impossible; a class defined by the absence of that label needs `affinity` with `DoesNotExist`, which a nodeSelector cannot express. See docs/RDMA.md.",
+          "properties": {
+            "efa": {
+              "description": " resource name cluster-wide, so that one is filled in. EFA node groups are conventionally tainted with the same key, which a variant selecting them has to tolerate.",
+              "properties": {
+                "enabled": {
+                  "default": false,
+                  "title": "enabled",
+                  "type": "boolean"
+                },
+                "flags": {
+                  "properties": {
+                    "providers": {
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "string"
+                          }
+                        ],
+                        "required": []
+                      },
+                      "title": "providers",
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "providers"
+                  ],
+                  "title": "flags",
+                  "type": "object"
+                },
+                "rdma": {
+                  "properties": {
+                    "enabled": {
+                      "default": true,
+                      "title": "enabled",
+                      "type": "boolean"
+                    },
+                    "mountInfiniband": {
+                      "default": false,
+                      "title": "mountInfiniband",
+                      "type": "boolean"
+                    },
+                    "resourceName": {
+                      "default": "vpc.amazonaws.com/efa",
+                      "title": "resourceName",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "enabled",
+                    "mountInfiniband",
+                    "resourceName"
+                  ],
+                  "title": "rdma",
+                  "type": "object"
+                }
+              },
+              "required": [
+                "enabled",
+                "flags",
+                "rdma"
+              ],
+              "title": "efa"
+            },
+            "tcp": {
+              "description": " schedules anywhere its placement allows.",
+              "properties": {
+                "enabled": {
+                  "default": false,
+                  "title": "enabled",
+                  "type": "boolean"
+                },
+                "flags": {
+                  "properties": {
+                    "providers": {
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          }
+                        ],
+                        "required": []
+                      },
+                      "title": "providers",
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "providers"
+                  ],
+                  "title": "flags",
+                  "type": "object"
+                }
+              },
+              "required": [
+                "enabled",
+                "flags"
+              ],
+              "title": "tcp"
+            },
+            "verbs": {
+              "description": " plugin advertises the device is a site's choice (`devic.es/rdma` from generic-device-plugin, `rdma/hca_shared_devices` from k8s-rdma-shared-dev-plugin).",
+              "properties": {
+                "enabled": {
+                  "default": false,
+                  "title": "enabled",
+                  "type": "boolean"
+                },
+                "flags": {
+                  "properties": {
+                    "providers": {
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "string"
+                          }
+                        ],
+                        "required": []
+                      },
+                      "title": "providers",
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "providers"
+                  ],
+                  "title": "flags",
+                  "type": "object"
+                },
+                "rdma": {
+                  "properties": {
+                    "enabled": {
+                      "default": true,
+                      "title": "enabled",
+                      "type": "boolean"
+                    },
+                    "mountInfiniband": {
+                      "default": false,
+                      "title": "mountInfiniband",
+                      "type": "boolean"
+                    },
+                    "resourceName": {
+                      "default": "",
+                      "title": "resourceName",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "enabled",
+                    "mountInfiniband",
+                    "resourceName"
+                  ],
+                  "title": "rdma",
+                  "type": "object"
+                }
+              },
+              "required": [
+                "enabled",
+                "flags",
+                "rdma"
+              ],
+              "title": "verbs"
+            }
+          },
+          "required": [],
+          "title": "variants"
         }
       },
       "required": [

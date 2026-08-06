@@ -8,7 +8,17 @@ Enabled components:
   - agent    (DaemonSet, hostPath {{ .Values.agent.hostPath.run }})
 {{- end }}
 {{- if .Values.gateway.enabled }}
+{{- $enabled := dict }}
+{{- range $name, $variant := (.Values.gateway.variants | default dict) }}
+{{- if $variant.enabled }}{{ $_ := set $enabled $name $variant }}{{ end }}
+{{- end }}
+{{- if eq (len $enabled) 0 }}
   - gateway  (DaemonSet, hostNetwork, providers={{ .Values.gateway.flags.providers | join "," }})
+{{- else }}
+{{- range $name, $variant := $enabled }}
+  - gateway  ({{ include "mxlk8s.gateway.name" (dict "Context" $ "variant" $name) }}, providers={{ (mergeOverwrite (deepCopy $.Values.gateway.flags) ($variant.flags | default dict)).providers | join "," }})
+{{- end }}
+{{- end }}
 {{- end }}
 
 CRDs are installed from the chart's crds/ directory. Helm does not
