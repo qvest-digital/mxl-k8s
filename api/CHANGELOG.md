@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.0-rc.8](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.7...api/v1.0.0-rc.8) (2026-08-06)
+
+
+### Features
+
+* **api:** gate provider selection on probed device counts ([8cc2965](https://github.com/qvest-digital/mxl-k8s/commit/8cc29658f1c9fe5f76c16582a8b0ae2754a1f214))
+* **gateway:** publish probed providers and scope the fabric ([#227](https://github.com/qvest-digital/mxl-k8s/issues/227)) ([8cc2965](https://github.com/qvest-digital/mxl-k8s/commit/8cc29658f1c9fe5f76c16582a8b0ae2754a1f214))
+
+
+### Dependencies
+
+* **gateway:** move onto go-mxl 1.0.0-rc.14 ([8cc2965](https://github.com/qvest-digital/mxl-k8s/commit/8cc29658f1c9fe5f76c16582a8b0ae2754a1f214))
+
 ## [1.0.0-rc.7](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.6...api/v1.0.0-rc.7) (2026-08-01)
 
 
