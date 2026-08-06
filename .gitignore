@@ -43,7 +43,5 @@ kind-diagnostics/
 !.omc/skills/
 !.omc/skills/**
 
-# Graphify local-only outputs (the rest of graphify-out/ is committed)
-graphify-out/manifest.json
-graphify-out/cost.json
-graphify-out/.graphify_root
+# Graphify output, rebuilt from the tree it describes
+graphify-out/
