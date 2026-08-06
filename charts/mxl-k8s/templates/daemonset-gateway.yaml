@@ -1,88 +1,112 @@
-{{- if .Values.gateway.enabled }}
+{{- /*
+The gateway renders once per entry in .Values.gateway.variants, or
+once from .Values.gateway itself when that list is empty.
+
+A DaemonSet carries one pod template, and a pod that requests an
+extended resource is unschedulable on every node that does not
+advertise it. Access to an RDMA device goes through exactly such a
+request -- vpc.amazonaws.com/efa, rdma/hca_shared_devices, or whatever
+the site's device plugin advertises -- because the plugin's Allocate
+response is what grants the container its cgroup device permissions.
+Kubernetes has no conditional resource request, so a cluster whose
+nodes do not all carry the same fabric hardware needs one DaemonSet
+per node class, with selectors that do not overlap.
+
+Each variant merges over .Values.gateway: maps merge key by key, lists
+replace wholesale. Everything the node class does not change -- image,
+probes, update strategy, service account -- stays shared.
+*/ -}}
+{{- define "mxlk8s.gateway.daemonset" -}}
+{{- $ctx := .Context -}}
+{{- $g := .gateway -}}
+{{- $variant := .variant -}}
 {{- /*
 Build the effective capability list for the gateway container.
 rdma.enabled implies IPC_LOCK + SYS_RESOURCE (libmxl pins shm pages).
-Users may add more via .Values.gateway.containerSecurityContext.capabilities.add.
+Users may add more via containerSecurityContext.capabilities.add.
 */ -}}
 {{- $caps := list -}}
-{{- if .Values.gateway.rdma.enabled -}}
+{{- if $g.rdma.enabled -}}
   {{- $caps = append $caps "IPC_LOCK" -}}
   {{- $caps = append $caps "SYS_RESOURCE" -}}
 {{- end -}}
-{{- range .Values.gateway.containerSecurityContext.capabilities.add -}}
+{{- range $g.containerSecurityContext.capabilities.add -}}
   {{- $caps = append $caps . -}}
 {{- end -}}
 {{- $caps = uniq $caps -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ .Chart.Name }}-gateway
-  namespace: {{ include "mxlk8s.namespace" . }}
+  name: {{ include "mxlk8s.gateway.name" (dict "Context" $ctx "variant" $variant) }}
+  namespace: {{ include "mxlk8s.namespace" $ctx }}
   labels:
-    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "gateway") | nindent 4 }}
-  {{- with .Values.global.commonAnnotations }}
+    {{- include "mxlk8s.componentLabels" (dict "Context" $ctx "component" "gateway") | nindent 4 }}
+    {{- with $variant }}{{ include "mxlk8s.gateway.variantLabel" . | nindent 4 }}{{- end }}
+  {{- with $ctx.Values.global.commonAnnotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
   selector:
     matchLabels:
-      {{- include "mxlk8s.selectorLabels" (dict "Context" . "component" "gateway") | nindent 6 }}
+      {{- include "mxlk8s.selectorLabels" (dict "Context" $ctx "component" "gateway") | nindent 6 }}
+      {{- with $variant }}{{ include "mxlk8s.gateway.variantLabel" . | nindent 6 }}{{- end }}
   updateStrategy:
-    {{- toYaml .Values.gateway.updateStrategy | nindent 4 }}
+    {{- toYaml $g.updateStrategy | nindent 4 }}
   template:
     metadata:
       labels:
-        {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "gateway") | nindent 8 }}
-        {{- with .Values.gateway.podLabels }}
+        {{- include "mxlk8s.componentLabels" (dict "Context" $ctx "component" "gateway") | nindent 8 }}
+        {{- with $variant }}{{ include "mxlk8s.gateway.variantLabel" . | nindent 8 }}{{- end }}
+        {{- with $g.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.gateway.podAnnotations }}
+      {{- with $g.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      serviceAccountName: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "gateway" "values" .Values.gateway) }}
-      hostNetwork: {{ .Values.gateway.hostNetwork }}
-      dnsPolicy: {{ .Values.gateway.dnsPolicy }}
-      {{- with .Values.global.image.pullSecrets }}
+      serviceAccountName: {{ include "mxlk8s.serviceAccountName" (dict "Context" $ctx "component" "gateway" "values" $ctx.Values.gateway) }}
+      hostNetwork: {{ $g.hostNetwork }}
+      dnsPolicy: {{ $g.dnsPolicy }}
+      {{- with $ctx.Values.global.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.gateway.priorityClassName }}
+      {{- with $g.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
-      {{- with .Values.gateway.podSecurityContext }}
+      {{- with $g.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.gateway.nodeSelector }}
+      {{- with $g.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.gateway.tolerations }}
+      {{- with $g.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.gateway.affinity }}
+      {{- with $g.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.gateway.topologySpreadConstraints }}
+      {{- with $g.topologySpreadConstraints }}
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.gateway.initContainers }}
+      {{- with $g.initContainers }}
       initContainers:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
         - name: gateway
-          image: {{ include "mxlk8s.image" (dict "Context" . "image" .Values.gateway.image) }}
-          imagePullPolicy: {{ include "mxlk8s.imagePullPolicy" (dict "global" .Values.global "image" .Values.gateway.image) }}
+          image: {{ include "mxlk8s.image" (dict "Context" $ctx "image" $g.image) }}
+          imagePullPolicy: {{ include "mxlk8s.imagePullPolicy" (dict "global" $ctx.Values.global "image" $g.image) }}
           args:
-            {{- include "mxlk8s.flags.render" (dict "flags" .Values.gateway.flags) | nindent 12 }}
-            {{- with .Values.gateway.args }}
+            {{- include "mxlk8s.flags.render" (dict "flags" $g.flags) | nindent 12 }}
+            {{- with $g.args }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
@@ -94,11 +118,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            {{- with .Values.gateway.extraEnv }}
+            {{- with $g.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-            {{- if .Values.gateway.rdma.enabled }}
-            {{- with .Values.gateway.rdma.extraEnv }}
+            {{- if $g.rdma.enabled }}
+            {{- with $g.rdma.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
             {{- end }}
@@ -107,21 +131,21 @@ spec:
               containerPort: 8081
             - name: metrics
               containerPort: 8080
-          {{- with .Values.gateway.livenessProbe }}
+          {{- with $g.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- with .Values.gateway.readinessProbe }}
+          {{- with $g.readinessProbe }}
           readinessProbe:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           securityContext:
-            allowPrivilegeEscalation: {{ .Values.gateway.containerSecurityContext.allowPrivilegeEscalation }}
-            runAsNonRoot: {{ .Values.gateway.containerSecurityContext.runAsNonRoot }}
-            readOnlyRootFilesystem: {{ .Values.gateway.containerSecurityContext.readOnlyRootFilesystem }}
+            allowPrivilegeEscalation: {{ $g.containerSecurityContext.allowPrivilegeEscalation }}
+            runAsNonRoot: {{ $g.containerSecurityContext.runAsNonRoot }}
+            readOnlyRootFilesystem: {{ $g.containerSecurityContext.readOnlyRootFilesystem }}
             capabilities:
               drop:
-                {{- toYaml .Values.gateway.containerSecurityContext.capabilities.drop | nindent 16 }}
+                {{- toYaml $g.containerSecurityContext.capabilities.drop | nindent 16 }}
               {{- if gt (len $caps) 0 }}
               add:
                 {{- range $caps }}
@@ -129,8 +153,8 @@ spec:
                 {{- end }}
               {{- end }}
           resources:
-            {{- $resources := deepCopy .Values.gateway.resources -}}
-            {{- with .Values.gateway.rdma.resourceName -}}
+            {{- $resources := deepCopy $g.resources -}}
+            {{- with $g.rdma.resourceName -}}
               {{- $requests := default (dict) $resources.requests -}}
               {{- $limits   := default (dict) $resources.limits -}}
               {{- $_ := set $resources "requests" (merge $requests (dict . 1)) -}}
@@ -139,29 +163,53 @@ spec:
             {{- toYaml $resources | nindent 12 }}
           volumeMounts:
             - name: mxl-domain
-              mountPath: {{ .Values.gateway.hostPath.domain }}
-            {{- if .Values.gateway.rdma.enabled }}
+              mountPath: {{ $g.hostPath.domain }}
+            {{- if and $g.rdma.enabled $g.rdma.mountInfiniband }}
             - name: infiniband
-              mountPath: {{ .Values.gateway.rdma.infinibandHostPath }}
+              mountPath: {{ $g.rdma.infinibandHostPath }}
             {{- end }}
-            {{- with .Values.gateway.extraVolumeMounts }}
+            {{- with $g.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-        {{- with .Values.gateway.extraContainers }}
+        {{- with $g.extraContainers }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
       volumes:
         - name: mxl-domain
           hostPath:
-            path: {{ .Values.gateway.hostPath.domain }}
-            type: {{ .Values.gateway.hostPath.type }}
-        {{- if .Values.gateway.rdma.enabled }}
+            path: {{ $g.hostPath.domain }}
+            type: {{ $g.hostPath.type }}
+        {{- if and $g.rdma.enabled $g.rdma.mountInfiniband }}
         - name: infiniband
           hostPath:
-            path: {{ .Values.gateway.rdma.infinibandHostPath }}
-            type: Directory
+            path: {{ $g.rdma.infinibandHostPath }}
+            type: {{ $g.rdma.infinibandHostPathType }}
         {{- end }}
-        {{- with .Values.gateway.extraVolumes }}
+        {{- with $g.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+{{- end -}}
+
+{{- if .Values.gateway.enabled }}
+{{- $variants := .Values.gateway.variants | default dict }}
+{{- include "mxlk8s.gateway.validateVariants" $variants }}
+{{- /*
+The base every variant merges over. variants is dropped from it so a
+variant does not carry a copy of its siblings.
+*/ -}}
+{{- $base := omit .Values.gateway "variants" }}
+{{- $enabled := dict }}
+{{- range $name, $variant := $variants }}
+  {{- if $variant.enabled }}
+    {{- $_ := set $enabled $name $variant }}
+  {{- end }}
+{{- end }}
+{{- if eq (len $enabled) 0 }}
+{{- include "mxlk8s.gateway.daemonset" (dict "Context" . "gateway" $base "variant" "") }}
+{{- else }}
+{{- range $name, $variant := $enabled }}
+---
+{{ include "mxlk8s.gateway.daemonset" (dict "Context" $ "gateway" (mergeOverwrite (deepCopy $base) (omit $variant "enabled")) "variant" $name) }}
+{{- end }}
+{{- end }}
 {{- end }}

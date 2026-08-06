@@ -279,6 +279,172 @@ A node that ends up advertising nothing logs the count of excluded
 interfaces and the first exclusion with its reason; the full list
 appears with `gateway.flags.zapLogLevel: debug`.
 
+## Clusters whose nodes differ
+
+Everything above assumes every node can do the same thing. When they
+cannot -- some nodes carry an HCA or an EFA adapter and the rest do
+not -- one gateway DaemonSet cannot serve them all, and the reason
+is not about MXL at all.
+
+This is not a cloud problem. An on-prem cluster where only some nodes
+have RDMA-capable NICs has exactly the same shape as an AWS cluster
+where only some instances carry an EFA adapter; the provider and the
+device plugin differ, nothing else does.
+
+Access to a fabric device goes through an extended resource that a
+device plugin advertises -- `devic.es/rdma` from
+generic-device-plugin, `rdma/hca_shared_devices` from
+k8s-rdma-shared-dev-plugin, `vpc.amazonaws.com/efa` from
+aws-efa-k8s-device-plugin, or whatever a site's plugin is configured
+to expose. The request is not bookkeeping. The plugin's `Allocate`
+response is what injects the device nodes and the cgroup permissions
+that let the container open them, which is why a bind mount of
+`/dev/infiniband` on its own does not grant access under the cgroup-v2
+device controller.
+
+A pod requesting a resource no node advertises is unschedulable, and
+a DaemonSet carries exactly one pod template. So the request cannot be
+made conditional:
+
+- Request it, and the gateway never schedules on the nodes without
+  the hardware.
+- Do not request it, and the gateway cannot open the device on the
+  nodes that have it.
+
+Kubernetes has no conditional resource request. Dynamic Resource
+Allocation is where that is heading, but it needs driver support this
+chart cannot assume. The available answer is one DaemonSet per node
+class, which is what `gateway.variants` renders.
+
+### Placing the variants
+
+Label the nodes by which fabric they carry, and enable the variant
+matching each value. Keying on the value rather than on the presence
+of a label means one mechanism covers every fabric a cluster has, in
+any combination:
+
+```yaml
+gateway:
+  variants:
+    verbs:
+      enabled: true
+      nodeSelector:
+        mxl.qvest-digital.com/fabric: verbs
+      rdma:
+        resourceName: devic.es/rdma
+    efa:
+      enabled: true
+      nodeSelector:
+        mxl.qvest-digital.com/fabric: efa
+      tolerations:
+        - key: vpc.amazonaws.com/efa
+          operator: Exists
+          effect: NoSchedule
+    tcp:
+      enabled: true
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: mxl.qvest-digital.com/fabric
+                    operator: DoesNotExist
+```
+
+That is the whole override. The provider list, the capabilities, and
+the EFA resource name come from the chart's own defaults for each
+variant; what a site supplies is what the chart cannot know -- which
+label marks the node, which plugin advertises the device, and which
+taint the node group carries.
+
+A cluster with only one fabric enables two variants rather than
+three, and a variant key beyond the three shipped is allowed. The
+shape does not change.
+
+Each entry may override any key under `gateway`; maps merge key by
+key with the shared values, lists replace wholesale. What the node
+class does not change -- image, probes, update strategy, service
+account, and the single metrics Service, which keeps selecting every
+variant -- stays shared.
+
+**Exactly one gateway per node.** Two gateways on one node open the
+same MXL domain, reconcile the same mirrors, and write the same
+`MxlNodeCapabilities`, which is named after the node. Nothing detects
+this at runtime today, so the selectors have to be complementary by
+construction. Deriving every variant from distinct values of one
+label key is what makes overlap impossible; a class defined by the
+*absence* of that label needs `nodeAffinity` with `DoesNotExist`,
+which a `nodeSelector` cannot express.
+
+Helm cannot read node labels, so it rejects only the combinations
+that guarantee overlap: an enabled variant with neither `nodeSelector`
+nor `affinity` alongside another, and two enabled variants placed
+identically. Everything else is on the operator.
+
+It also rejects a variant given a placement that nobody enabled,
+because that shape fails quietly: the chart falls back to the single
+unplaced DaemonSet, which comes up healthy on every node while
+silently omitting the device request the placed nodes needed. Staging
+a variant alongside an enabled one is fine; leaving every one of them
+off is what gets caught.
+
+With no variant enabled -- the default -- exactly one DaemonSet
+renders from the `gateway` values, unchanged, which is what a uniform
+cluster wants. Enabling the first variant renames the workload, so the
+old DaemonSet is replaced rather than patched: a DaemonSet's
+`spec.selector` is immutable and every variant carries its own.
+
+### Which provider each class advertises
+
+`--providers` is an upper bound, and the probe decides the rest, so a
+variant does not have to name its hardware. `providers: [any]` on the
+RDMA class advertises whatever libmxl-fabrics finds on each node,
+which keeps the values honest if the node group's adapters change.
+Naming a provider is for keeping one *out* of consideration.
+
+The tcp class is the exception worth being explicit about: it exists
+because those nodes have no fabric device, so `providers: [tcp]`
+states that and stops a probe from advertising something the class
+was never given access to.
+
+### Taints
+
+Node groups provisioned for RDMA are often tainted, so that unrelated
+workloads do not consume the hardware. AWS's EFA node groups
+conventionally carry `vpc.amazonaws.com/efa`; an on-prem cluster may
+taint its RDMA nodes with anything. A variant selecting such a class
+needs the matching toleration next to its resource request, or it
+will not schedule at all:
+
+```yaml
+    efa:
+      enabled: true
+      nodeSelector:
+        mxl.qvest-digital.com/fabric: efa
+      tolerations:
+        - key: vpc.amazonaws.com/efa
+          operator: Exists
+          effect: NoSchedule
+```
+
+`charts/mxl-k8s/tests/values/mixed-fabric.yaml` is a rendered fixture
+covering a verbs class, an EFA class, and a tcp catch-all together.
+
+### The hostPath mount
+
+`rdma.enabled` adds `IPC_LOCK` and `SYS_RESOURCE`, which libmxl needs
+to pin shm pages, and is independent of how the device is reached.
+`rdma.mountInfiniband` controls the `/dev/infiniband` bind mount
+separately, because a node whose devices come from a device plugin
+wants the capabilities without the mount.
+
+Where the mount is used, `rdma.infinibandHostPathType` picks between
+`Directory`, which holds the pod in `ContainerCreating` while the path
+is absent, and `DirectoryOrCreate`, which creates it. On a DaemonSet
+placed only on RDMA-capable nodes the first is a useful assertion; on
+one that also lands elsewhere it is a hang, which is another reason
+those nodes belong in their own variant.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -287,6 +453,10 @@ appears with `gateway.flags.zapLogLevel: debug`.
 | Mirror fails with `no usable fabric interface` | Every candidate was excluded. The error names the first exclusion and its reason; check the fabric flags against `kubectl get mxlnodecapabilities <node> -o yaml`. |
 | A node advertises `deviceCount: 0` for a provider whose hardware is installed | libmxl-fabrics did not enumerate a usable device. Check the host module and `/dev/infiniband` first, then whether the fabric flags exclude the interface it would have used. |
 | Every mirror sits on tcp after an upgrade | Nodes whose gateway has not rolled yet report no `Probed` condition. Check `kubectl get mxlnodecapabilities` for the ones still on the old shape. |
+| Gateway pods Pending with `Insufficient <resource>` | The DaemonSet requests a device-plugin resource on nodes that do not advertise it. Split those nodes into their own `gateway.variants` entry. |
+| Gateway pods stuck in `ContainerCreating` | The `/dev/infiniband` hostPath is absent and `rdma.infinibandHostPathType` is `Directory`. Either place the DaemonSet only on RDMA-capable nodes or set `rdma.mountInfiniband: false` and reach the device through a device plugin. |
+| Gateway opens the device only when privileged | The container is reaching `/dev/infiniband` through the bind mount alone, which does not pass the cgroup-v2 device controller. Request the resource the site's device plugin advertises via `rdma.resourceName`. |
+| Two gateway pods on one node | Two `gateway.variants` entries match the same node. Their selectors have to be complementary; both pods open the same domain and overwrite each other's `MxlNodeCapabilities`. |
 | `RDMA_CM_EVENT_REJECTED` in gateway logs | Both ends agree on the provider but the wire-side handshake fails. For RoCEv2 this is almost always PFC/DSCP misconfiguration on the switches. |
 | Throughput far below NIC line rate | PFC pauses too aggressive or wrong traffic class. Use `mlnx_qos`, `ethtool -S` counters. |
 | `cannot allocate memory` from libmxl-fabrics | `RLIMIT_MEMLOCK` too low. Bump the host default or rely on the gateway's `SYS_RESOURCE` cap. |

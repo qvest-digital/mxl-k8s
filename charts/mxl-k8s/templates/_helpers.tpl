@@ -148,3 +148,94 @@ chart's namespace.name override; falls back to .Release.Namespace.
 {{- define "mxlk8s.namespace" -}}
 {{- if .Values.namespace.name -}}{{ .Values.namespace.name }}{{- else -}}{{ .Release.Namespace }}{{- end -}}
 {{- end -}}
+
+{{/*
+Name of one gateway DaemonSet. An empty variant yields the historical
+name, so an install that adopts variants creates newly-named workloads
+beside the old one rather than patching a DaemonSet's immutable
+spec.selector.
+Call as: include "mxlk8s.gateway.name" (dict "Context" . "variant" "rdma")
+*/}}
+{{- define "mxlk8s.gateway.name" -}}
+{{- if .variant -}}
+{{- printf "%s-gateway-%s" .Context.Chart.Name .variant | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-gateway" .Context.Chart.Name -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Selector label distinguishing one gateway variant from another. Two
+DaemonSets whose spec.selector matched the same pods would each try to
+own them, so every variant carries this and the unvariegated case
+carries nothing at all.
+
+Deliberately absent from mxlk8s.selectorLabels: the gateway Service and
+ServiceMonitor select on those, and must keep matching every variant so
+metrics stay aggregated across the node classes.
+Call as: include "mxlk8s.gateway.variantLabel" "rdma"
+*/}}
+{{- define "mxlk8s.gateway.variantLabel" -}}
+mxl.qvest-digital.com/gateway-variant: {{ . }}
+{{- end -}}
+
+{{/*
+Reject variant lists that cannot hold the one-gateway-per-node
+invariant. Nothing at render time can read node labels, so overlap is
+not decidable here; what is decidable is a list that guarantees it.
+
+Two gateways on one node open the same MXL domain, reconcile the same
+mirrors, and write the same MxlNodeCapabilities, which is named after
+the node.
+Call as: include "mxlk8s.gateway.validateVariants" .Values.gateway.variants
+*/}}
+{{- define "mxlk8s.gateway.validateVariants" -}}
+{{- $variants := . | default dict -}}
+{{- $docs := include "mxlk8s.gateway.variantDocs" . -}}
+{{- $enabled := dict -}}
+{{- $placed := dict -}}
+{{- range $name, $variant := $variants -}}
+  {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $name) -}}
+    {{- fail (printf "gateway.variants: %q is not a DNS-1123 label; a variant key names a DaemonSet and labels its pods. See %s" $name $docs) -}}
+  {{- end -}}
+  {{- if $variant.enabled -}}
+    {{- $_ := set $enabled $name $variant -}}
+  {{- else if or $variant.nodeSelector $variant.affinity $variant.tolerations -}}
+    {{- $_ := set $placed $name $variant -}}
+  {{- end -}}
+{{- end -}}
+{{- /*
+Placement on a variant nobody enabled is the shape a forgotten
+`enabled: true` leaves behind, and it fails quietly: the chart falls
+back to the single unplaced DaemonSet, which comes up healthy on every
+node and silently omits the device request the placed nodes needed.
+The variants the chart ships carry no placement, so an untouched
+install cannot reach this.
+*/ -}}
+{{- if and (eq (len $enabled) 0) (gt (len $placed) 0) -}}
+  {{- fail (printf "gateway.variants: %s %s placement but no variant is enabled, so one gateway renders on every node with none of it applied. Set `enabled: true` on the variants this cluster needs. See %s" (keys $placed | sortAlpha | join ", ") (ternary "carry" "carries" (gt (len $placed) 1)) $docs) -}}
+{{- end -}}
+{{- if gt (len $enabled) 1 -}}
+  {{- $placements := dict -}}
+  {{- range $name, $variant := $enabled -}}
+    {{- $placement := printf "%v|%v" ($variant.nodeSelector | default dict) ($variant.affinity | default dict) -}}
+    {{- if eq $placement "map[]|map[]" -}}
+      {{- fail (printf "gateway.variants: %q sets neither nodeSelector nor affinity, so it lands on every node and overlaps its siblings. See %s" $name $docs) -}}
+    {{- end -}}
+    {{- if hasKey $placements $placement -}}
+      {{- fail (printf "gateway.variants: %q places pods identically to %q; complementary placement is what keeps one gateway per node. See %s" $name (get $placements $placement) $docs) -}}
+    {{- end -}}
+    {{- $_ := set $placements $placement $name -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Where a failed variant validation sends the reader. Pinned to main
+rather than to the installed chart's tag: a chart rendered from a
+working tree has no tag to resolve, and a link that 404s is worse than
+one pointing at docs slightly ahead of the release.
+*/}}
+{{- define "mxlk8s.gateway.variantDocs" -}}
+https://github.com/qvest-digital/mxl-k8s/blob/main/docs/RDMA.md#clusters-whose-nodes-differ
+{{- end -}}

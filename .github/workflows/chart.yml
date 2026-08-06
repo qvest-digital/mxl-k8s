@@ -229,7 +229,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        values: [minimal-tcp, full-rdma, all-disabled, crds-only, custom-registry]
+        values: [minimal-tcp, full-rdma, all-disabled, crds-only, custom-registry, mixed-fabric]
     steps:
       - uses: actions/checkout@v7
 
