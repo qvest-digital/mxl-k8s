@@ -71,6 +71,10 @@ type Config struct {
 	// MxlNodeCapabilities status.
 	ResyncPeriod time.Duration
 
+	// ProbePeriod is the shortest interval between two libmxl-fabrics
+	// enumerations. The status still refreshes on ResyncPeriod.
+	ProbePeriod time.Duration
+
 	// DegradedAfter is the inactivity window the target-side
 	// reconciler uses to demote a Ready mirror to Degraded and to
 	// invalidate its Reconcile fast-path. Matches the operator-side
@@ -135,6 +139,11 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 			"kubectl port-forward to reach it.")
 	fs.DurationVar(&c.ResyncPeriod, "resync-period", 30*time.Second,
 		"How often to refresh MxlNodeCapabilities status.")
+	fs.DurationVar(&c.ProbePeriod, "probe-period", 5*time.Minute,
+		"Shortest interval between two libmxl-fabrics interface enumerations. The status "+
+			"still refreshes every --resync-period from the last result. Each enumeration "+
+			"sweeps every provider libfabric was built with and warns about those it finds "+
+			"no device for.")
 	fs.DurationVar(&c.DegradedAfter, "degraded-after", 10*time.Second,
 		"Grain-commit inactivity after which the target gateway demotes a mirror to Degraded.")
 	fs.DurationVar(&c.ReaderStallAfter, "reader-stall-after", 20*time.Second,
@@ -230,6 +239,9 @@ func (c *Config) Validate() error {
 	}
 	if len(c.Providers) == 0 {
 		return fmt.Errorf("--providers must list at least one provider")
+	}
+	if c.ProbePeriod < 0 {
+		return fmt.Errorf("--probe-period must not be negative, got %v", c.ProbePeriod)
 	}
 	if c.KubeAPIQPS <= 0 {
 		return fmt.Errorf("--kube-api-qps must be positive, got %v", c.KubeAPIQPS)

@@ -101,6 +101,20 @@ stale_ready="$(mirrors_sourced_from "$victim" | grep -c '=Ready$' || true)"
   || fail "${stale_ready} mirror(s) still report Ready with sourceNode=${victim}"
 echo "  no mirror reports Ready with sourceNode=${victim}"
 
+# The capabilities resource is owned by its Node, so it is collected
+# with it. Nothing else deletes one, and a cluster that recycles
+# capacity would otherwise keep a resource per node that ever existed.
+deadline=$(( $(date +%s) + PRUNE_TIMEOUT_SECS ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  "${KUBECTL[@]}" get mxlnodecapabilities "$victim" >/dev/null 2>&1 || break
+  sleep 3
+done
+if "${KUBECTL[@]}" get mxlnodecapabilities "$victim" >/dev/null 2>&1; then
+  "${KUBECTL[@]}" get mxlnodecapabilities "$victim" -o yaml >&2
+  fail "MxlNodeCapabilities/${victim} outlived its Node"
+fi
+echo "  MxlNodeCapabilities/${victim} collected with the node"
+
 restore_node
 
 deadline=$(( $(date +%s) + REJOIN_TIMEOUT_SECS ))
@@ -110,4 +124,22 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
 done
 "${KUBECTL[@]}" get node "$victim" >/dev/null 2>&1 \
   || fail "${victim} never came back; later cases would run a worker short"
+
+# The rejoined node registers a new UID. The gateway has to own the
+# recreated resource by that one: a reference to the departed Node
+# would have it collected again as dangling.
+node_uid="$("${KUBECTL[@]}" get node "$victim" -o 'jsonpath={.metadata.uid}')"
+deadline=$(( $(date +%s) + REJOIN_TIMEOUT_SECS ))
+owner_uid=""
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  owner_uid="$("${KUBECTL[@]}" get mxlnodecapabilities "$victim" \
+    -o 'jsonpath={.metadata.ownerReferences[0].uid}' 2>/dev/null || true)"
+  [ -n "$owner_uid" ] && break
+  sleep 3
+done
+[ -n "$owner_uid" ] \
+  || fail "MxlNodeCapabilities/${victim} was not recreated after the rejoin"
+[ "$owner_uid" = "$node_uid" ] \
+  || fail "MxlNodeCapabilities/${victim} is owned by ${owner_uid}, not the rejoined Node ${node_uid}"
+echo "  MxlNodeCapabilities/${victim} recreated, owned by the rejoined Node"
 

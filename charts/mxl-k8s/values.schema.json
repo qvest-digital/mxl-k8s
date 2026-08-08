@@ -837,6 +837,12 @@
               "required": [],
               "title": "pprofBindAddress"
             },
+            "probePeriod": {
+              "default": "5m",
+              "description": "Shortest interval between two libmxl-fabrics interface enumerations. Status still refreshes every resyncPeriod from the last result. Each enumeration sweeps every provider libfabric was built with and warns about those it finds no device for.",
+              "required": [],
+              "title": "probePeriod"
+            },
             "providers": {
               "description": "Upper bound on the libmxl-fabrics providers a gateway may advertise and use. Each node publishes this list intersected with what libmxl-fabrics finds on it, so `any` advertises the hardware that is present and nothing else. Narrow it to keep a provider out of consideration on every node.",
               "items": {

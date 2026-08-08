@@ -60,6 +60,35 @@ for node in $nodes; do
     esac
   done
   echo "   interfaces: $(echo "$addresses" | tr '\n' ' ')"
+
+  # Owned by its Node, which is the only thing that deletes one.
+  owner_uid="$("${KUBECTL[@]}" get "mxlnodecapabilities/${node}" \
+    -o 'jsonpath={.metadata.ownerReferences[0].uid}' 2>/dev/null || true)"
+  node_uid="$("${KUBECTL[@]}" get "node/${node}" -o 'jsonpath={.metadata.uid}' 2>/dev/null || true)"
+  if [ -z "$owner_uid" ] || [ "$owner_uid" != "$node_uid" ]; then
+    echo "   owner uid '${owner_uid:-unset}', Node uid '${node_uid:-unset}'" >&2
+    failed=1
+    continue
+  fi
+  echo "   owned by its Node"
+
+  # --providers is any here, so a provider with no hardware is
+  # published with a zero count rather than omitted. selection.Resolve
+  # reads the difference: zero means absent hardware, missing means
+  # never considered.
+  efa_count="$("${KUBECTL[@]}" get "mxlnodecapabilities/${node}" \
+    -o 'jsonpath={.status.providers[?(@.name=="efa")].deviceCount}' 2>/dev/null || true)"
+  efa_listed="$("${KUBECTL[@]}" get "mxlnodecapabilities/${node}" \
+    -o 'jsonpath={.status.providers[*].name}' 2>/dev/null || true)"
+  case " $efa_listed " in
+    *" efa "*) ;;
+    *) echo "   efa not listed although --providers admits it" >&2; failed=1; continue ;;
+  esac
+  if [ -n "$efa_count" ] && [ "$efa_count" -ne 0 ]; then
+    echo "   efa deviceCount=${efa_count} on a cluster with no adapter" >&2
+    failed=1
+  fi
+  echo "   efa listed with no devices"
 done
 
 [ "$failed" -eq 0 ] || fail "node capabilities are not a usable probe on one or more nodes"

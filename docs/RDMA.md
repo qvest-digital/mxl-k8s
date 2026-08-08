@@ -181,9 +181,13 @@ host setup is AWS-specific.
 
 The gateway publishes one `MxlNodeCapabilities` per node from a
 libmxl-fabrics interface enumeration (`mxlFabricsGetInterfaces`),
-refreshed on every `--resync-period` tick for as long as it runs,
 so a link that goes down or a driver that loads late is picked up
-without a restart.
+without a restart. The status refreshes every `--resync-period`; the
+enumeration behind it runs at most every `--probe-period`, because
+each sweep covers every provider libfabric was built with and warns
+about those it finds no device for.
+
+The resource is owned by its Node, so it is collected with the node.
 
 Each provider entry carries the devices found for it:
 
