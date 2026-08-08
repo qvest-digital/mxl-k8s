@@ -25,7 +25,6 @@ rules:
   - mxl.qvest-digital.com
   resources:
   - mxldomains
-  - mxlnodecapabilities
   verbs:
   - get
   - list
@@ -70,6 +69,7 @@ rules:
   - mxl.qvest-digital.com
   resources:
   - mxlflows
+  - mxlnodecapabilities
   verbs:
   - delete
   - get

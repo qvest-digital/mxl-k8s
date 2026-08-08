@@ -18,8 +18,13 @@ rules:
     resources: [leases]
     verbs: [get, list, watch]
   - apiGroups: [mxl.qvest-digital.com]
-    resources: [mxldomains, mxlnodecapabilities]
+    resources: [mxldomains]
     verbs: [get, list, watch]
+  # delete removes the capabilities of a node that has left, for the
+  # ones carrying no owner reference to be collected by.
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxlnodecapabilities]
+    verbs: [delete, get, list, watch]
   # delete collects a flow once no node holds a copy of it and no
   # mirror needs its definition.
   - apiGroups: [mxl.qvest-digital.com]
