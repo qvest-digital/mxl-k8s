@@ -398,6 +398,11 @@ gateway:
     # physical NIC behind them.
     fabricMinLinkSpeed: ""
     resyncPeriod: 30s
+    # -- Shortest interval between two libmxl-fabrics interface
+    # enumerations. Status still refreshes every resyncPeriod from the
+    # last result. Each enumeration sweeps every provider libfabric was
+    # built with and warns about those it finds no device for.
+    probePeriod: 5m
     # -- Grain-commit inactivity after which the target gateway
     # demotes a mirror to Degraded. Same threshold gates the
     # Reconcile fast-path so a stale Ready status falls through to

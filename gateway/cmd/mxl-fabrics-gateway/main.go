@@ -134,11 +134,13 @@ func run(args []string) error {
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		pub := &capabilities.Publisher{
 			Client:      mgr.GetClient(),
+			APIReader:   mgr.GetAPIReader(),
 			NodeName:    cfg.NodeName,
 			Providers:   cfg.Providers,
 			Lister:      handles.Fabrics(),
 			Selector:    selector,
 			BindAddress: cfg.BindAddress,
+			ProbePeriod: cfg.ProbePeriod,
 		}
 		if err := pub.EnsureExists(ctx); err != nil {
 			return err
@@ -166,7 +168,8 @@ func run(args []string) error {
 		"fabricMinLinkSpeed", cfg.FabricMinLinkSpeed,
 		"probeAddr", cfg.ProbeAddr,
 		"pprofAddr", cfg.PprofAddr,
-		"resyncPeriod", cfg.ResyncPeriod)
+		"resyncPeriod", cfg.ResyncPeriod,
+		"probePeriod", cfg.ProbePeriod)
 
 	return mgr.Start(ctrl.SetupSignalHandler())
 }

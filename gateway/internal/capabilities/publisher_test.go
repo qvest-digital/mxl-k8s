@@ -18,6 +18,8 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/qvest-digital/go-mxl/fabrics"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -78,11 +80,17 @@ func newClient(t *testing.T, objs ...*mxlv1alpha1.MxlNodeCapabilities) *fake.Cli
 	t.Helper()
 	b := fake.NewClientBuilder().
 		WithScheme(newScheme(t)).
-		WithStatusSubresource(&mxlv1alpha1.MxlNodeCapabilities{})
+		WithStatusSubresource(&mxlv1alpha1.MxlNodeCapabilities{}).
+		WithObjects(testNode())
 	for _, o := range objs {
 		b = b.WithObjects(o)
 	}
 	return b
+}
+
+// testNode is the Node an MxlNodeCapabilities is owned by.
+func testNode() *corev1.Node {
+	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1", UID: "node-uid-1"}}
 }
 
 func getCR(t *testing.T, p *Publisher) mxlv1alpha1.MxlNodeCapabilities {
@@ -103,7 +111,7 @@ func providerByName(caps []mxlv1alpha1.MxlFabricsProviderCapability, name mxlv1a
 }
 
 func TestEnsureExists_CreatesOnce(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(testNode()).Build()
 
 	p := &Publisher{Client: c, NodeName: "n1", Providers: []fabrics.Provider{fabrics.ProviderTCP}}
 	require.NoError(t, p.EnsureExists(context.Background()))
@@ -358,7 +366,7 @@ func TestRefresh_NarrowsTheQueryToTheBindAddress(t *testing.T) {
 }
 
 func TestRefresh_ErrorsWhenCRMissing(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(testNode()).Build()
 	p := &Publisher{Client: c, NodeName: "n1", Providers: []fabrics.Provider{fabrics.ProviderTCP}}
 
 	require.Error(t, p.Refresh(context.Background()))
@@ -413,4 +421,166 @@ func TestRunRefreshLoop_ReprobesOnEveryTick(t *testing.T) {
 	assert.Greater(t, l.call, 1,
 		"probing once at boot would leave a stale advertisement behind every "+
 			"link and driver change for the life of the pod")
+}
+
+// Without an owner nothing ever deletes one, so a cluster accumulates
+// a resource per node that ever existed.
+func TestEnsureExists_OwnedByItsNode(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(testNode()).Build()
+	p := &Publisher{Client: c, NodeName: "n1", Providers: []fabrics.Provider{fabrics.ProviderTCP}}
+	require.NoError(t, p.EnsureExists(context.Background()))
+
+	got := getCR(t, p)
+	require.Len(t, got.OwnerReferences, 1)
+	ref := got.OwnerReferences[0]
+	assert.Equal(t, "Node", ref.Kind)
+	assert.Equal(t, "n1", ref.Name)
+	assert.Equal(t, types.UID("node-uid-1"), ref.UID,
+		"a reference whose UID does not match the live node is treated as "+
+			"dangling and the dependent is collected immediately")
+	require.NotNil(t, ref.BlockOwnerDeletion)
+	assert.False(t, *ref.BlockOwnerDeletion,
+		"a gateway that cannot reach the API must not be able to hold a node in Terminating")
+}
+
+// Resources created before the owner reference existed have to pick
+// it up, or they are never collected.
+func TestEnsureExists_AdoptsAnUnownedResource(t *testing.T) {
+	p := &Publisher{
+		Client:    newClient(t, existingCR()).Build(),
+		NodeName:  "n1",
+		Providers: []fabrics.Provider{fabrics.ProviderTCP},
+	}
+	require.Empty(t, getCR(t, p).OwnerReferences)
+	require.NoError(t, p.EnsureExists(context.Background()))
+
+	got := getCR(t, p)
+	require.Len(t, got.OwnerReferences, 1)
+	assert.Equal(t, types.UID("node-uid-1"), got.OwnerReferences[0].UID)
+}
+
+// A node rebuilt under the same name gets a new UID; the stale
+// reference would have the resource collected immediately.
+func TestEnsureExists_ReplacesAStaleOwnerUID(t *testing.T) {
+	stale := existingCR()
+	stale.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "v1", Kind: "Node", Name: "n1", UID: "node-uid-0",
+	}}
+	p := &Publisher{
+		Client:    newClient(t, stale).Build(),
+		NodeName:  "n1",
+		Providers: []fabrics.Provider{fabrics.ProviderTCP},
+	}
+	require.NoError(t, p.EnsureExists(context.Background()))
+
+	got := getCR(t, p)
+	require.Len(t, got.OwnerReferences, 1)
+	assert.Equal(t, types.UID("node-uid-1"), got.OwnerReferences[0].UID)
+}
+
+func TestEnsureExists_FailsWhenTheNodeIsGone(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	p := &Publisher{Client: c, NodeName: "n1", Providers: []fabrics.Provider{fabrics.ProviderTCP}}
+	require.Error(t, p.EnsureExists(context.Background()))
+}
+
+// Each enumeration sweeps every provider libfabric was built with and
+// warns about those it finds no device for, so the sweep is bounded
+// independently of the status refresh.
+func TestRefresh_ReusesTheProbeWithinTheProbePeriod(t *testing.T) {
+	l := &fakeLister{out: []fabrics.InterfaceConfig{iface(fabrics.ProviderTCP, "10.20.53.13", "eth0")}}
+	p := &Publisher{
+		Client:      newClient(t, existingCR()).Build(),
+		NodeName:    "n1",
+		Providers:   []fabrics.Provider{fabrics.ProviderAny},
+		Lister:      l,
+		ProbePeriod: time.Hour,
+	}
+
+	for i := 0; i < 5; i++ {
+		require.NoError(t, p.Refresh(context.Background()))
+	}
+	assert.Equal(t, 1, l.call, "five refreshes must sweep the fabric once")
+
+	tcp := providerByName(getCR(t, p).Status.Providers, mxlv1alpha1.ProviderTCP)
+	require.NotNil(t, tcp)
+	assert.Equal(t, int32(1), tcp.DeviceCount,
+		"a reused probe still has to publish what it found")
+}
+
+func TestRefresh_ReprobesOnceThePeriodElapses(t *testing.T) {
+	l := &fakeLister{out: []fabrics.InterfaceConfig{iface(fabrics.ProviderTCP, "10.20.53.13", "eth0")}}
+	p := &Publisher{
+		Client:      newClient(t, existingCR()).Build(),
+		NodeName:    "n1",
+		Providers:   []fabrics.Provider{fabrics.ProviderAny},
+		Lister:      l,
+		ProbePeriod: time.Nanosecond,
+	}
+
+	require.NoError(t, p.Refresh(context.Background()))
+	time.Sleep(time.Millisecond)
+	require.NoError(t, p.Refresh(context.Background()))
+	assert.Equal(t, 2, l.call)
+}
+
+func TestRefresh_ZeroProbePeriodSweepsEveryTime(t *testing.T) {
+	l := &fakeLister{out: []fabrics.InterfaceConfig{iface(fabrics.ProviderTCP, "10.20.53.13", "eth0")}}
+	p := &Publisher{
+		Client:    newClient(t, existingCR()).Build(),
+		NodeName:  "n1",
+		Providers: []fabrics.Provider{fabrics.ProviderAny},
+		Lister:    l,
+	}
+	require.NoError(t, p.Refresh(context.Background()))
+	require.NoError(t, p.Refresh(context.Background()))
+	assert.Equal(t, 2, l.call)
+}
+
+// A cached get starts an informer, which needs list and watch on
+// nodes. The gateway's ClusterRole grants get alone.
+func TestEnsureExists_ReadsTheNodeUncached(t *testing.T) {
+	scheme := newScheme(t)
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(testNode()).Build()
+	cached := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlNodeCapabilities{}).
+		Build()
+
+	p := &Publisher{
+		Client:    cached,
+		APIReader: apiReader,
+		NodeName:  "n1",
+		Providers: []fabrics.Provider{fabrics.ProviderTCP},
+	}
+	require.NoError(t, p.EnsureExists(context.Background()))
+
+	got := getCR(t, p)
+	require.Len(t, got.OwnerReferences, 1)
+	assert.Equal(t, types.UID("node-uid-1"), got.OwnerReferences[0].UID)
+}
+
+// The owner reference gives the resource a real deletion path, and
+// EnsureExists runs only at startup, so a refresh that cannot find it
+// has to rebuild it or the node never advertises again.
+func TestRefresh_RecreatesADeletedResource(t *testing.T) {
+	l := &fakeLister{out: []fabrics.InterfaceConfig{iface(fabrics.ProviderTCP, "10.20.53.13", "eth0")}}
+	p := &Publisher{
+		Client:    newClient(t, existingCR()).Build(),
+		NodeName:  "n1",
+		Providers: []fabrics.Provider{fabrics.ProviderAny},
+		Lister:    l,
+	}
+	require.NoError(t, p.Refresh(context.Background()))
+
+	require.NoError(t, p.Client.Delete(context.Background(), &mxlv1alpha1.MxlNodeCapabilities{
+		ObjectMeta: metav1.ObjectMeta{Name: "n1"},
+	}))
+
+	require.NoError(t, p.Refresh(context.Background()))
+	got := getCR(t, p)
+	require.Len(t, got.OwnerReferences, 1)
+	tcp := providerByName(got.Status.Providers, mxlv1alpha1.ProviderTCP)
+	require.NotNil(t, tcp)
+	assert.Equal(t, int32(1), tcp.DeviceCount)
 }
