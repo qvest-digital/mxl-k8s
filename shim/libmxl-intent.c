@@ -72,15 +72,9 @@ static int sys_access(const char *pathname, int mode)
 	return (int)syscall(SYS_faccessat, AT_FDCWD, pathname, mode, 0);
 }
 
-static int sys_stat(const char *pathname, struct stat *buf)
+static int sys_statat(const char *pathname, struct stat *buf, int flags)
 {
-	return (int)syscall(SYS_newfstatat, AT_FDCWD, pathname, buf, 0);
-}
-
-static int sys_lstat(const char *pathname, struct stat *buf)
-{
-	return (int)syscall(SYS_newfstatat, AT_FDCWD, pathname, buf,
-			    AT_SYMLINK_NOFOLLOW);
+	return (int)syscall(SYS_newfstatat, AT_FDCWD, pathname, buf, flags);
 }
 
 /* Return true when path is absolute and contains a non-empty
@@ -406,14 +400,12 @@ int access(const char *pathname, int mode)
 	return sys_access(pathname, mode);
 }
 
-/* libmxl also stat()s the flow_def.json during reader setup. Same
- * rationale as the access hook. On glibc < 2.33 the consumer
- * binary reaches stat via inline __xstat and our `stat` symbol is
- * never called; the hook still exists for glibc 2.33+ consumers
- * that link to plain `stat`. */
-int stat(const char *pathname, struct stat *buf)
+/* Shared body of the stat-family hooks: probe, and on ENOENT for a
+ * flow path ask the agent and probe once more. flags is the
+ * AT_SYMLINK_NOFOLLOW of the lstat variants. */
+static int stat_hook(const char *pathname, struct stat *buf, int flags)
 {
-	int rc = sys_stat(pathname, buf);
+	int rc = sys_statat(pathname, buf, flags);
 	if (rc == 0 || errno != ENOENT) return rc;
 
 	if (!is_flow_path(pathname)) {
@@ -426,23 +418,58 @@ int stat(const char *pathname, struct stat *buf)
 		return -1;
 	}
 
-	return sys_stat(pathname, buf);
+	return sys_statat(pathname, buf, flags);
+}
+
+/* libmxl also stat()s the flow_def.json during reader setup. Same
+ * rationale as the access hook. Consumers built against glibc 2.33+
+ * call these; older ones reach the __xstat pair below instead. */
+int stat(const char *pathname, struct stat *buf)
+{
+	return stat_hook(pathname, buf, 0);
 }
 
 int lstat(const char *pathname, struct stat *buf)
 {
-	int rc = sys_lstat(pathname, buf);
-	if (rc == 0 || errno != ENOENT) return rc;
+	return stat_hook(pathname, buf, AT_SYMLINK_NOFOLLOW);
+}
 
-	if (!is_flow_path(pathname)) {
-		errno = ENOENT;
-		return -1;
-	}
+/* glibc before 2.33 exports no plain stat / lstat at all: <sys/stat.h>
+ * turns the call into __xstat(_STAT_VER, ...), so the two hooks above
+ * are dead code for such a consumer and the probe reaches the kernel
+ * unseen. A libmxl-common linked against such a glibc imports
+ * __xstat and __lxstat, and libmxl probes the flow directory before
+ * it opens flow_def.json, so without these the reader reports
+ * FLOW_NOT_FOUND before any hooked call is made and no intent is ever
+ * raised.
+ *
+ * The version argument selects the struct stat layout. Only
+ * _STAT_VER_KERNEL is in use on the 64-bit architectures
+ * libmxl-fabrics supports, and it is the same layout sys_statat
+ * already fills from the kernel, so it is not consulted. The _64
+ * variants exist because a consumer compiled with
+ * _FILE_OFFSET_BITS=64 reaches those symbol names instead; struct
+ * stat64 and struct stat share a layout there. */
+int __xstat(int ver, const char *pathname, struct stat *buf)
+{
+	(void)ver;
+	return stat_hook(pathname, buf, 0);
+}
 
-	if (request_materialization(pathname) != 0) {
-		errno = ENOENT;
-		return -1;
-	}
+int __lxstat(int ver, const char *pathname, struct stat *buf)
+{
+	(void)ver;
+	return stat_hook(pathname, buf, AT_SYMLINK_NOFOLLOW);
+}
 
-	return sys_lstat(pathname, buf);
+int __xstat64(int ver, const char *pathname, struct stat64 *buf)
+{
+	(void)ver;
+	return stat_hook(pathname, (struct stat *)buf, 0);
+}
+
+int __lxstat64(int ver, const char *pathname, struct stat64 *buf)
+{
+	(void)ver;
+	return stat_hook(pathname, (struct stat *)buf, AT_SYMLINK_NOFOLLOW);
 }
