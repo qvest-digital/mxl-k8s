@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.0.0-rc.19](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.18...v1.0.0-rc.19) (2026-08-09)
+
+
+### Features
+
+* **operator:** delete MxlNodeCapabilities of departed nodes ([#235](https://github.com/qvest-digital/mxl-k8s/issues/235)) ([b0090e1](https://github.com/qvest-digital/mxl-k8s/commit/b0090e1779d9b724c45e242d0c1179b334879661))
+
+
+### Bug Fixes
+
+* **gateway:** own MxlNodeCapabilities by node, rate-limit the probe ([#233](https://github.com/qvest-digital/mxl-k8s/issues/233)) ([7d6d098](https://github.com/qvest-digital/mxl-k8s/commit/7d6d09839a3e50e869cdf57752ca3f37b2024f97))
+
+
+### Miscellaneous
+
+* stop committing the graphify knowledge graph ([#230](https://github.com/qvest-digital/mxl-k8s/issues/230)) ([ec5f564](https://github.com/qvest-digital/mxl-k8s/commit/ec5f5648510b414e4d36282c9b908ea1be90ec10))
+
 ## [1.0.0-rc.18](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.17...v1.0.0-rc.18) (2026-08-06)
 
 
