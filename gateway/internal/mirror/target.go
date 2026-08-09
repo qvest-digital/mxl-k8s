@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,6 +69,34 @@ const defaultStuckHandshakeAfter = 20 * time.Second
 // the cap counts *consecutive* failed rebuilds, not lifetime ones.
 const maxStuckRebuilds uint32 = 3
 
+// maxTargetOpenAttempts is the number of consecutive openTarget
+// failures after which the mirror stops reading as Materializing.
+// Materializing is a transient state a consumer waits through, so a
+// mirror parked there is indistinguishable from one a moment away
+// from Ready: no phase change to alert on and no counter to
+// threshold. From this attempt on the target side publishes
+// Phase=Degraded, and a failure that came from the local writer also
+// gets the flow directory reclaimed (see reclaimUnusableFlowDir).
+const maxTargetOpenAttempts uint32 = 3
+
+// flowDirSuffix is the directory-name suffix libmxl gives a per-flow
+// directory under a domain (FLOW_DIRECTORY_NAME_SUFFIX). go-mxl keeps
+// its own copy unexported, so the gateway carries one; the agent
+// module holds the same constant as flowpublisher.FlowDirSuffix.
+const flowDirSuffix = ".mxl-flow"
+
+// grainDirName is the subdirectory of a flow directory holding the
+// grain segment files (GRAIN_DIRECTORY_NAME). Only ever read, and
+// only to report how much of the ring was present when a directory
+// is reclaimed.
+const grainDirName = "grains"
+
+// errOpenWriterFailed wraps a NewWriter failure so the Reconcile
+// failure path can tell "the local flow file could not be opened"
+// apart from "the libmxl-fabrics side could not be set up". Only the
+// former is answerable by reclaiming the flow directory.
+var errOpenWriterFailed = errors.New("open local writer")
+
 // ReasonStuckHandshakeCapReached marks a target-side mirror whose
 // libmxl-fabrics handshake never produced a grain commit across
 // maxStuckRebuilds consecutive watchdog-driven rebuilds. Distinct
@@ -101,6 +131,13 @@ type TargetReconciler struct {
 
 	// Handles owns the long-lived mxl + fabrics instances.
 	Handles *instance.Handles
+
+	// DomainPath is the MXL domain directory this gateway operates on,
+	// the same path Handles was opened against. Held separately from
+	// Handles because reclaimUnusableFlowDir works on the directory
+	// with the filesystem rather than through libmxl. Empty disables
+	// the reclaim.
+	DomainPath string
 
 	// FlushInterval is how often the per-mirror status flusher
 	// inspects the targetEntry trackers and publishes TargetProgress
@@ -137,8 +174,20 @@ type TargetReconciler struct {
 	// the gate that prevents double spawns.
 	recoverFn func(key types.NamespacedName)
 
+	// openTargetFn is the seam Reconcile opens the target through.
+	// Production leaves it nil and falls back to
+	// (*TargetReconciler).openTarget, which needs a real libmxl;
+	// tests inject failures so the attempt accounting and the
+	// escalation out of Materializing can be observed without one.
+	openTargetFn func(key types.NamespacedName, flowDef string, provider fabrics.Provider) (*targetEntry, error)
+
 	mu      sync.Mutex
 	targets map[types.NamespacedName]*targetEntry
+
+	// attempts counts consecutive openTarget failures per mirror.
+	// Cleared the moment a target opens, so the value is always the
+	// length of the current failure run. Guarded by mu.
+	attempts map[types.NamespacedName]uint32
 }
 
 // targetEntry holds the live libmxl handles for one target-side
@@ -346,7 +395,8 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// definition yet. Treat it like a not-yet-materialized flow:
 		// surface the reason and requeue instead of returning a bare
 		// error that leaves the mirror sitting at an empty phase.
-		r.surfaceTargetFailure(ctx, &mirror, mxlv1alpha1.ReasonFlowDefinitionEmpty,
+		r.surfaceTargetFailure(ctx, &mirror, mxlv1alpha1.MxlFlowMirrorMaterializing,
+			mxlv1alpha1.ReasonFlowDefinitionEmpty,
 			fmt.Sprintf("MxlFlow %s has empty spec.definition", mirror.Spec.FlowID))
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
@@ -356,21 +406,27 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// Never forward auto into libmxl-fabrics: surface the reason on
 		// status and stop. The agent or operator patches spec.provider to
 		// a concrete value, which wakes this reconciler through its watch.
-		r.surfaceTargetFailure(ctx, &mirror, mxlv1alpha1.ReasonProviderUnresolved, err.Error())
+		r.surfaceTargetFailure(ctx, &mirror, mxlv1alpha1.MxlFlowMirrorMaterializing,
+			mxlv1alpha1.ReasonProviderUnresolved, err.Error())
 		l.Info("refusing target setup: mirror provider is unresolved", "error", err.Error())
 		return ctrl.Result{}, nil
 	}
 
-	entry, err := r.openTarget(req.NamespacedName, string(flow.Spec.Definition.Raw), provider)
+	// Seed the in-memory attempts counter from the persisted
+	// status.targetAttemptCount so a gateway pod restart does not hand
+	// a wedged mirror a fresh budget: without this a target that has
+	// been unopenable across the bounce reads as Materializing again
+	// and the escalation to Degraded restarts from zero. Matches the
+	// source side's seeding of status.attemptCount.
+	r.mu.Lock()
+	if _, ok := r.attempts[req.NamespacedName]; !ok && mirror.Status.TargetAttemptCount > 0 {
+		r.attempts[req.NamespacedName] = uint32(mirror.Status.TargetAttemptCount)
+	}
+	r.mu.Unlock()
+
+	entry, err := r.openTargetDispatch(req.NamespacedName, string(flow.Spec.Definition.Raw), provider)
 	if err != nil {
-		// openTarget wraps NewWriter + the libmxl-fabrics Target.Setup,
-		// whose errors otherwise land only in the gateway log — the mirror
-		// is left at an empty phase, so the consumer (and cluster
-		// diagnostics, which only see the CR) get no signal for why it
-		// never went Ready. Surface the cause, then let the rate-limited
-		// requeue retry.
-		r.surfaceTargetFailure(ctx, &mirror, mxlv1alpha1.ReasonOpenTargetFailed, err.Error())
-		return ctrl.Result{}, fmt.Errorf("open target: %w", err)
+		return r.handleOpenTargetFailure(ctx, &mirror, err)
 	}
 
 	r.mu.Lock()
@@ -382,6 +438,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 	r.targets[req.NamespacedName] = entry
+	delete(r.attempts, req.NamespacedName)
 	r.mu.Unlock()
 
 	if err := r.applyTargetStatus(ctx, &mirror, mxlv1alpha1.MxlFlowMirrorReady, &entry.infoStr, nil, nil); err != nil {
@@ -416,7 +473,7 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, flowDef string, 
 
 	writer, _, err := mxlInst.NewWriter(flowDef)
 	if err != nil {
-		return nil, fmt.Errorf("NewWriter: %w", err)
+		return nil, fmt.Errorf("%w: NewWriter: %w", errOpenWriterFailed, err)
 	}
 	target, info, s, err := r.openFabricSideDispatch(writer, provider)
 	if err != nil {
@@ -433,6 +490,107 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, flowDef string, 
 	}
 	r.startProgressLoop(entry, key)
 	return entry, nil
+}
+
+// openTargetDispatch routes the open through the test seam when set,
+// falling back to the cgo openTarget in production.
+func (r *TargetReconciler) openTargetDispatch(key types.NamespacedName, flowDef string, provider fabrics.Provider) (*targetEntry, error) {
+	if r.openTargetFn != nil {
+		return r.openTargetFn(key, flowDef, provider)
+	}
+	return r.openTarget(key, flowDef, provider)
+}
+
+// handleOpenTargetFailure records the failed open, publishes the
+// reason on status, and returns a bounded-backoff requeue.
+//
+// openTarget wraps NewWriter + the libmxl-fabrics Target.Setup, whose
+// errors otherwise land only in the gateway log: the producer, the
+// consumer and the cluster diagnostics only ever observe the CR.
+// Publishing Materializing alone is not enough either - it is the
+// state a consumer waits through, so a mirror that can never open
+// looks the same as one about to succeed. Past maxTargetOpenAttempts
+// consecutive failures the phase escalates to Degraded and, for a
+// failure that came from the local writer, the flow directory is
+// reclaimed so the retry materialises a fresh one.
+func (r *TargetReconciler) handleOpenTargetFailure(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, openErr error) (ctrl.Result, error) {
+	key := client.ObjectKeyFromObject(mirror)
+	l := log.FromContext(ctx).WithValues("mxlflowmirror", key)
+
+	r.mu.Lock()
+	r.attempts[key]++
+	attempts := r.attempts[key]
+	r.mu.Unlock()
+
+	phase := mxlv1alpha1.MxlFlowMirrorMaterializing
+	if attempts >= maxTargetOpenAttempts {
+		phase = mxlv1alpha1.MxlFlowMirrorDegraded
+	}
+	r.surfaceTargetFailure(ctx, mirror, phase, mxlv1alpha1.ReasonOpenTargetFailed,
+		fmt.Sprintf("%s (attempt %d)", openErr.Error(), attempts))
+	l.Error(openErr, "open target", "attempt", attempts, "phase", string(phase))
+
+	// A writer that will not open is the one failure the gateway can
+	// act on: it wrote that directory as a mirror target, so a
+	// directory it can no longer open is its own torn output. Only
+	// reclaim once the failure has repeated, so a single transient
+	// error never costs a directory.
+	if attempts >= maxTargetOpenAttempts && errors.Is(openErr, errOpenWriterFailed) {
+		if reclaimed := r.reclaimUnusableFlowDir(ctx, mirror.Spec.FlowID); reclaimed {
+			// Materialising a fresh directory is the point of the
+			// reclaim; do not sit out the accumulated backoff first.
+			return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
+		}
+	}
+	return ctrl.Result{RequeueAfter: backoffFor(attempts)}, nil
+}
+
+// reclaimUnusableFlowDir removes the local flow directory for flowID
+// so the next openTarget materialises a complete one, and reports
+// whether it removed anything.
+//
+// A gateway restart part-way through materialising a target leaves a
+// flow directory whose grain ring is short of what its flow header
+// declares. libmxl walks to a grain segment that was never written
+// and every later open of that path fails, so retrying the open
+// against the same directory can only keep failing.
+//
+// The MxlFlow location published for this node is the gate: a flow
+// this node is Origin for belongs to a local producer, and removing
+// it would take the producer's flow with it. Only a directory this
+// gateway owns as a mirror copy is reclaimed, which is the same
+// ownership test teardown applies.
+func (r *TargetReconciler) reclaimUnusableFlowDir(ctx context.Context, flowID string) bool {
+	l := log.FromContext(ctx).WithName("target-reclaim").WithValues("flowID", flowID)
+	if r.DomainPath == "" {
+		return false
+	}
+	if r.localFlowDisposition(ctx, flowID) == keepFlow {
+		l.Info("leaving flow directory in place: not this node's mirror copy")
+		return false
+	}
+
+	dir := filepath.Join(r.DomainPath, flowID+flowDirSuffix)
+	if _, err := os.Stat(dir); err != nil {
+		if !os.IsNotExist(err) {
+			l.Error(err, "stat flow directory", "path", dir)
+		}
+		return false
+	}
+	// Report how much of the grain ring was there: the shortfall
+	// against the flow header is what distinguishes a torn directory
+	// from one that failed to open for another reason, and it is not
+	// recoverable once the directory is gone.
+	grains := -1
+	if entries, err := os.ReadDir(filepath.Join(dir, grainDirName)); err == nil {
+		grains = len(entries)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		l.Error(err, "remove flow directory", "path", dir)
+		return false
+	}
+	l.Info("reclaimed unopenable flow directory", "path", dir, "grainFiles", grains)
+	return true
 }
 
 // openFabricSide creates the fabrics.Target + TargetInfo on an
@@ -707,6 +865,7 @@ func (r *TargetReconciler) closeEntry(key types.NamespacedName, disp flowDisposi
 	r.mu.Lock()
 	entry := r.targets[key]
 	delete(r.targets, key)
+	delete(r.attempts, key)
 	r.mu.Unlock()
 	if entry == nil {
 		return
@@ -918,6 +1077,13 @@ func closeTargetHandles(e *targetEntry, disp flowDisposition) {
 // targetInfo, lastGrainAt and cond are optional; nil pointers omit
 // the corresponding key from the SSA payload so the manager does not
 // claim ownership of fields it has nothing to say about.
+//
+// targetAttemptCount is not optional: it rides on every payload
+// because SSA with a single FieldOwner releases ownership of a field
+// a later payload omits, and the apiserver then strips it. Sourcing
+// it from the live counter also keeps it honest - a write from any
+// path (flusher, recovery, teardown) reports the current failure run,
+// which is zero for as long as the target is open.
 func (r *TargetReconciler) applyTargetStatus(
 	ctx context.Context,
 	mirror *mxlv1alpha1.MxlFlowMirror,
@@ -930,9 +1096,13 @@ func (r *TargetReconciler) applyTargetStatus(
 	patch.SetGroupVersionKind(mxlv1alpha1.GroupVersion.WithKind("MxlFlowMirror"))
 	patch.SetNamespace(mirror.Namespace)
 	patch.SetName(mirror.Name)
+	r.mu.Lock()
+	attempts := r.attempts[client.ObjectKeyFromObject(mirror)]
+	r.mu.Unlock()
 	status := map[string]any{
 		"phase":              string(phase),
 		"observedGeneration": mirror.Generation,
+		"targetAttemptCount": int64(attempts),
 	}
 	if targetInfo != nil {
 		status["targetInfo"] = *targetInfo
@@ -958,19 +1128,23 @@ func (r *TargetReconciler) applyTargetStatus(
 	)
 }
 
-// surfaceTargetFailure publishes Phase=Materializing plus a
-// TargetProgress=False condition carrying the reason the target side
-// could not be established yet. Best-effort: a failed status write must
-// not mask the original error the caller returns/requeues on, so the
-// result is intentionally ignored. It exists so a target-open failure
-// shows up in MxlFlowMirror status (and `kubectl describe`) instead of
-// the mirror wedging silently at an empty phase — the producer, the
+// surfaceTargetFailure publishes phase plus a TargetProgress=False
+// condition carrying the reason the target side could not be
+// established yet. Best-effort: a failed status write must not mask
+// the original error the caller returns/requeues on, so the result is
+// intentionally ignored. It exists so a target-open failure shows up
+// in MxlFlowMirror status (and `kubectl describe`) instead of the
+// mirror wedging silently at an empty phase — the producer, the
 // consumer, and the cluster diagnostics only observe the CR, never the
 // gateway log. Only reached on the pre-Ready path (the Reconcile
 // fast-path returns earlier for a live, fresh, Ready mirror), so this
 // never demotes a healthy mirror.
-func (r *TargetReconciler) surfaceTargetFailure(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, reason, message string) {
-	_ = r.applyTargetStatus(ctx, mirror, mxlv1alpha1.MxlFlowMirrorMaterializing, nil, nil, &metav1.Condition{
+//
+// The phase is the caller's to choose: a failure that has just started
+// is still Materializing, one that has repeated past
+// maxTargetOpenAttempts is Degraded.
+func (r *TargetReconciler) surfaceTargetFailure(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, phase mxlv1alpha1.MxlFlowMirrorPhase, reason, message string) {
+	_ = r.applyTargetStatus(ctx, mirror, phase, nil, nil, &metav1.Condition{
 		Type:               mxlv1alpha1.ConditionTypeTargetProgress,
 		Status:             metav1.ConditionFalse,
 		Reason:             reason,
@@ -1365,6 +1539,9 @@ func (r *TargetReconciler) publishTargetProgress(ctx context.Context, key types.
 func (r *TargetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.targets == nil {
 		r.targets = make(map[types.NamespacedName]*targetEntry)
+	}
+	if r.attempts == nil {
+		r.attempts = make(map[types.NamespacedName]uint32)
 	}
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()

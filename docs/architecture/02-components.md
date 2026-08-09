@@ -74,15 +74,27 @@ fabric side *without* closing the `mxl.Writer`, so consumer pods'
 
 ![Gateway: TargetReconciler state, including recovery](./diagrams/02-gateway-lifecycle.drawio.svg)
 
-Two transitions in particular are easy to miss:
+Three transitions in particular are easy to miss:
 
 - **Pod restart** lands in `Materializing` again, not `Ready` -- the
   in-memory `targetEntry` map is empty after restart, the fast-path
   declines, and the slow path reopens the writer. This also rotates
   `TargetInfo`, which the source side picks up through its
   `Watches(MxlFlowMirror)`.
+- **A target that will not open** counts consecutive failures in
+  `status.targetAttemptCount` and leaves `Materializing` for
+  `Degraded` past `maxTargetOpenAttempts`
+  ([`target.go:516`](../../gateway/internal/mirror/target.go)):
+  `Materializing` is the state a consumer waits through, so a mirror
+  parked there reads as one about to go `Ready`. When the failure came
+  from the local writer, that threshold also reclaims the flow
+  directory -- a gateway restart part-way through materialising a
+  target leaves a grain ring shorter than the flow header declares,
+  and libmxl fails every later open of that path. Only a directory
+  this node is not the flow's `Origin` for is removed; an `Origin`
+  location means a local producer has taken it over.
 - **Fatal `ReadGrain`** triggers `recoverFromFatalError`
-  ([`target.go:375`](../../gateway/internal/mirror/target.go)),
+  ([`target.go:924`](../../gateway/internal/mirror/target.go)),
   which closes only the fabric triple
   (`Regions`/`Target`/`Info`). The `mxl.Writer` is intentionally
   retained -- the on-disk flow definition and any consumer

@@ -18,11 +18,14 @@ const (
 	// MxlFlowMirrorReady means the handshake is complete and grain
 	// activity has been observed within the freshness window.
 	MxlFlowMirrorReady MxlFlowMirrorPhase = "Ready"
-	// MxlFlowMirrorDegraded means the handshake is complete but no
-	// grain progress has been observed for longer than the target
-	// gateway's freshness window. The mirror may recover without
-	// operator intervention; inspect status.conditions for the
-	// reason.
+	// MxlFlowMirrorDegraded means the mirror is not moving grains and
+	// has been in that state long enough that it is no longer coming
+	// up: either the handshake completed and no grain progress has
+	// been observed for longer than the target gateway's freshness
+	// window, or the target side has failed to open across enough
+	// consecutive attempts to rule out a transient failure. The mirror
+	// may recover without operator intervention; inspect
+	// status.conditions for the reason.
 	MxlFlowMirrorDegraded MxlFlowMirrorPhase = "Degraded"
 	// MxlFlowMirrorFailed means the mirror failed permanently.
 	// Inspect status.conditions for the cause.
@@ -108,9 +111,21 @@ type MxlFlowMirrorStatus struct {
 
 	// AttemptCount is the number of consecutive failed AddTarget
 	// attempts since the last successful reconcile. Reset to zero
-	// when the source gateway succeeds.
+	// when the source gateway succeeds. Source-side only; the target
+	// side counts its own open failures in TargetAttemptCount.
 	// +optional
 	AttemptCount int32 `json:"attemptCount,omitempty"`
+
+	// TargetAttemptCount is the number of consecutive failed attempts
+	// the target gateway has made to open the local writer and the
+	// libmxl-fabrics target endpoint. Reset to zero when the target
+	// side opens.
+	//
+	// Kept separate from AttemptCount because the two gateways apply
+	// status under different field managers: a single counter would
+	// have each side's server-side apply reset the other's value.
+	// +optional
+	TargetAttemptCount int32 `json:"targetAttemptCount,omitempty"`
 }
 
 // +kubebuilder:object:root=true
