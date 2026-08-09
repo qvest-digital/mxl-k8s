@@ -112,6 +112,7 @@ func run(args []string) error {
 		BindAddress:   cfg.BindAddress,
 		Selector:      selector,
 		Handles:       handles,
+		DomainPath:    cfg.DomainPath,
 		DegradedAfter: cfg.DegradedAfter,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup target reconciler: %w", err)

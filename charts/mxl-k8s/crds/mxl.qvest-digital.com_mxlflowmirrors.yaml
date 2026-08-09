@@ -132,7 +132,8 @@ spec:
                 description: |-
                   AttemptCount is the number of consecutive failed AddTarget
                   attempts since the last successful reconcile. Reset to zero
-                  when the source gateway succeeds.
+                  when the source gateway succeeds. Source-side only; the target
+                  side counts its own open failures in TargetAttemptCount.
                 format: int32
                 type: integer
               conditions:
@@ -234,6 +235,18 @@ spec:
                 - Degraded
                 - Failed
                 type: string
+              targetAttemptCount:
+                description: |-
+                  TargetAttemptCount is the number of consecutive failed attempts
+                  the target gateway has made to open the local writer and the
+                  libmxl-fabrics target endpoint. Reset to zero when the target
+                  side opens.
+
+                  Kept separate from AttemptCount because the two gateways apply
+                  status under different field managers: a single counter would
+                  have each side's server-side apply reset the other's value.
+                format: int32
+                type: integer
               targetInfo:
                 description: |-
                   TargetInfo is the libmxl-fabrics target descriptor produced by

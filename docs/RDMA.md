@@ -453,7 +453,7 @@ those nodes belong in their own variant.
 
 | Symptom | Likely cause |
 | --- | --- |
-| `MxlFlowMirror` stuck in `Materializing` | Gateway can't `fi_getinfo` the provider on the local NIC. Check `/dev/infiniband` is mounted and the host module is loaded. |
+| `MxlFlowMirror` `Degraded` with `TargetProgress=False/OpenTargetFailed` | Gateway can't `fi_getinfo` the provider on the local NIC. Check `/dev/infiniband` is mounted and the host module is loaded. `status.targetAttemptCount` carries the length of the failure run. |
 | Mirror fails with `no usable fabric interface` | Every candidate was excluded. The error names the first exclusion and its reason; check the fabric flags against `kubectl get mxlnodecapabilities <node> -o yaml`. |
 | A node advertises `deviceCount: 0` for a provider whose hardware is installed | libmxl-fabrics did not enumerate a usable device. Check the host module and `/dev/infiniband` first, then whether the fabric flags exclude the interface it would have used. |
 | Every mirror sits on tcp after an upgrade | Nodes whose gateway has not rolled yet report no `Probed` condition. Check `kubectl get mxlnodecapabilities` for the ones still on the old shape. |
