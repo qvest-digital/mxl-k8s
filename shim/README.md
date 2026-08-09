@@ -16,6 +16,16 @@ Produces `libmxl-intent.so`. With the runtime image
 image ships the compiled `.so` at
 `/opt/mxl-intent/libmxl-intent.so`.
 
+`make` also runs `make check`, which fails when the `.so` requires a
+versioned glibc symbol newer than `GLIBC_FLOOR` (2.28, the EL8
+version). The shim is preloaded into consumer images the build never
+sees, so the build glibc is the floor of the supported consumer set:
+a `.so` above it does not load, and the loader reports the failure
+against the consumer rather than the shim. What keeps the requirement
+low is reaching libc through direct syscalls instead of `dlsym`,
+which lands at 2.34 where libdl merged into libc. Override the floor
+with `make GLIBC_FLOOR=2.17` to target something older.
+
 ## Use
 
 In a consumer pod:
