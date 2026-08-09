@@ -6,10 +6,12 @@ import (
 	"slices"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -56,6 +58,22 @@ type Publisher struct {
 	// setup narrows it, so a gateway pinned to one address does not
 	// advertise capacity it would never bind.
 	BindAddress string
+
+	// APIReader reads the owner Node. A cached read would need list
+	// and watch on nodes, which the gateway's ClusterRole does not
+	// grant.
+	APIReader client.Reader
+
+	// ProbePeriod is the shortest interval between two enumerations.
+	// Zero enumerates on every Refresh. libfabric sweeps every
+	// provider it was built with per call and warns about each one it
+	// finds no device for, so the sweep is rate-limited separately
+	// from the status refresh.
+	ProbePeriod time.Duration
+
+	// Refresh runs from a single goroutine, so these need no lock.
+	lastProbe time.Time
+	cached    []mxlv1alpha1.MxlFabricsProviderCapability
 }
 
 // Name is the metadata.name used for the gateway's
@@ -63,21 +81,88 @@ type Publisher struct {
 func (p *Publisher) Name() string { return p.NodeName }
 
 // EnsureExists creates the MxlNodeCapabilities resource if it isn't
-// present. Status is left to be populated by Refresh.
+// present, owned by the Node it describes. Status is left to be
+// populated by Refresh.
+//
+// The owner reference is the only thing that deletes one: nothing
+// else does, so without it a cluster accumulates a resource per node
+// that ever existed. Both kinds are cluster-scoped, so garbage
+// collection acts on the reference without a controller here.
 func (p *Publisher) EnsureExists(ctx context.Context) error {
 	l := log.FromContext(ctx)
+
+	owner, err := p.nodeOwnerRef(ctx)
+	if err != nil {
+		return err
+	}
+
 	obj := &mxlv1alpha1.MxlNodeCapabilities{
-		ObjectMeta: metav1.ObjectMeta{Name: p.Name()},
-		Spec:       mxlv1alpha1.MxlNodeCapabilitiesSpec{NodeName: p.NodeName},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            p.Name(),
+			OwnerReferences: []metav1.OwnerReference{owner},
+		},
+		Spec: mxlv1alpha1.MxlNodeCapabilitiesSpec{NodeName: p.NodeName},
 	}
 	if err := p.Client.Create(ctx, obj); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("create MxlNodeCapabilities: %w", err)
 		}
 		l.V(1).Info("MxlNodeCapabilities already exists", "name", p.Name())
-		return nil
+		return p.adoptExisting(ctx, owner)
 	}
 	l.Info("created MxlNodeCapabilities", "name", p.Name())
+	return nil
+}
+
+// nodeOwnerRef builds the owner reference to this gateway's Node. The
+// UID comes from the live object because garbage collection treats a
+// reference whose UID does not match as dangling and deletes the
+// dependent at once.
+func (p *Publisher) nodeOwnerRef(ctx context.Context) (metav1.OwnerReference, error) {
+	var node corev1.Node
+	if err := p.nodeReader().Get(ctx, types.NamespacedName{Name: p.NodeName}, &node); err != nil {
+		return metav1.OwnerReference{}, fmt.Errorf("get Node %q for owner reference: %w", p.NodeName, err)
+	}
+	return metav1.OwnerReference{
+		APIVersion: corev1.SchemeGroupVersion.String(),
+		Kind:       "Node",
+		Name:       node.Name,
+		UID:        node.UID,
+		// A gateway that cannot reach the API must not hold a node
+		// in Terminating.
+		BlockOwnerDeletion: ptr.To(false),
+	}, nil
+}
+
+// nodeReader falls back to the cached client when no APIReader is
+// bound, which is the case in tests.
+func (p *Publisher) nodeReader() client.Reader {
+	if p.APIReader != nil {
+		return p.APIReader
+	}
+	return p.Client
+}
+
+// adoptExisting sets the owner reference on a resource created
+// without one, and replaces a reference left by an earlier node of the
+// same name: a stale UID would have the resource collected out from
+// under the running gateway.
+func (p *Publisher) adoptExisting(ctx context.Context, owner metav1.OwnerReference) error {
+	var obj mxlv1alpha1.MxlNodeCapabilities
+	if err := p.Client.Get(ctx, types.NamespacedName{Name: p.Name()}, &obj); err != nil {
+		return fmt.Errorf("get MxlNodeCapabilities for adoption: %w", err)
+	}
+	for _, ref := range obj.OwnerReferences {
+		if ref.UID == owner.UID {
+			return nil
+		}
+	}
+	patch := client.MergeFrom(obj.DeepCopy())
+	obj.OwnerReferences = []metav1.OwnerReference{owner}
+	if err := p.Client.Patch(ctx, &obj, patch); err != nil {
+		return fmt.Errorf("adopt MxlNodeCapabilities onto Node %q: %w", p.NodeName, err)
+	}
+	log.FromContext(ctx).Info("adopted MxlNodeCapabilities onto its node", "name", p.Name())
 	return nil
 }
 
@@ -93,7 +178,18 @@ func (p *Publisher) Refresh(ctx context.Context) error {
 
 	var obj mxlv1alpha1.MxlNodeCapabilities
 	if err := p.Client.Get(ctx, types.NamespacedName{Name: p.Name()}, &obj); err != nil {
-		return fmt.Errorf("get MxlNodeCapabilities: %w", err)
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("get MxlNodeCapabilities: %w", err)
+		}
+		// EnsureExists runs once at startup, so without this a
+		// resource removed under a running gateway is never rebuilt
+		// and the node stops advertising until the pod restarts.
+		if err := p.EnsureExists(ctx); err != nil {
+			return err
+		}
+		if err := p.Client.Get(ctx, types.NamespacedName{Name: p.Name()}, &obj); err != nil {
+			return fmt.Errorf("get MxlNodeCapabilities after recreate: %w", err)
+		}
 	}
 
 	now := metav1.Now()
@@ -129,11 +225,15 @@ func (p *Publisher) Refresh(ctx context.Context) error {
 }
 
 // probe enumerates the host's fabric interfaces and folds them into
-// one capability entry per provider.
+// one capability entry per provider, reusing the previous result
+// until ProbePeriod has elapsed.
 func (p *Publisher) probe(ctx context.Context) ([]mxlv1alpha1.MxlFabricsProviderCapability, error) {
 	l := log.FromContext(ctx).WithName("capabilities")
 	if p.Lister == nil {
 		return nil, fmt.Errorf("no libmxl-fabrics interface lister configured")
+	}
+	if p.cached != nil && time.Since(p.lastProbe) < p.ProbePeriod {
+		return p.cached, nil
 	}
 
 	// ProviderAny is the enumeration's "do not filter by provider",
@@ -184,6 +284,9 @@ func (p *Publisher) probe(ctx context.Context) ([]mxlv1alpha1.MxlFabricsProvider
 			Interfaces:  describe(fabric.Dedupe(group)),
 		})
 	}
+
+	p.cached = out
+	p.lastProbe = time.Now()
 	return out, nil
 }
 
