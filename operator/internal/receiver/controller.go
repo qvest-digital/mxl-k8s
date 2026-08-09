@@ -920,34 +920,60 @@ func (r *Reconciler) removeOwnerRef(ctx context.Context, recv *mxlv1alpha1.MxlRe
 	return nil
 }
 
-// deleteIfStillEmpty deletes mirror at key only when its
-// resourceVersion still matches rv. A concurrent ensureOwnerRef from
-// any receiver that observed the empty owner list and re-added itself
-// wins; we leave the mirror alone. Conflict is logged at V(1) and
-// swallowed; IsNotFound is also swallowed. Bare-empty owner-ref
-// deletion is required because apiserver GC only fires when an owner
-// is deleted, not when ownerReferences becomes empty via Update.
+// deleteIfStillEmpty deletes mirror at key while its owner list is
+// empty, using a resourceVersion precondition so a concurrent
+// ensureOwnerRef that re-added a receiver wins.
+//
+// The precondition alone cannot decide that: it fails on any write,
+// and the mirror's own target and source controllers write status to
+// it continuously (progress, phase, LastSentAt), so a status write
+// landing between the owner-ref Update and this Delete looks
+// identical to a re-added owner. Treating that as a re-add left the
+// mirror ownerless and undeleted, and nothing collects it -- apiserver
+// GC only fires when an owner is deleted, not when ownerReferences
+// becomes empty via Update, so the object persists for the life of
+// the cluster.
+//
+// On conflict the live object decides: an owner list that is still
+// empty means the writer was not a re-add, and the delete is retried
+// against the fresh resourceVersion. Only a non-empty list is a real
+// re-add and leaves the mirror alone. IsNotFound at any point means
+// someone else finished the job.
 func (r *Reconciler) deleteIfStillEmpty(ctx context.Context, key types.NamespacedName, rv string) error {
-	mirrorRef := &mxlv1alpha1.MxlFlowMirror{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:       key.Namespace,
-			Name:            key.Name,
-			ResourceVersion: rv,
-		},
-	}
-	err := r.Delete(ctx, mirrorRef, &client.DeleteOptions{
-		Preconditions: &metav1.Preconditions{ResourceVersion: &rv},
+	l := log.FromContext(ctx)
+	return retry.OnError(retry.DefaultRetry, apierrors.IsConflict, func() error {
+		mirrorRef := &mxlv1alpha1.MxlFlowMirror{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:       key.Namespace,
+				Name:            key.Name,
+				ResourceVersion: rv,
+			},
+		}
+		err := r.Delete(ctx, mirrorRef, &client.DeleteOptions{
+			Preconditions: &metav1.Preconditions{ResourceVersion: &rv},
+		})
+		switch {
+		case err == nil, apierrors.IsNotFound(err):
+			return nil
+		case !apierrors.IsConflict(err):
+			return fmt.Errorf("delete orphaned mirror: %w", err)
+		}
+
+		var live mxlv1alpha1.MxlFlowMirror
+		if getErr := r.Get(ctx, key, &live); getErr != nil {
+			if apierrors.IsNotFound(getErr) {
+				return nil
+			}
+			return fmt.Errorf("re-read mirror after delete conflict: %w", getErr)
+		}
+		if len(live.OwnerReferences) > 0 {
+			l.V(1).Info("skipping mirror delete after concurrent owner add",
+				"mirror", key.String(), "owners", len(live.OwnerReferences))
+			return nil
+		}
+		rv = live.ResourceVersion
+		return err
 	})
-	switch {
-	case err == nil, apierrors.IsNotFound(err):
-		return nil
-	case apierrors.IsConflict(err):
-		log.FromContext(ctx).V(1).Info("skipping mirror delete after concurrent owner add",
-			"mirror", key.String())
-		return nil
-	default:
-		return fmt.Errorf("delete orphaned mirror: %w", err)
-	}
 }
 
 // listLiveReceiverUIDs returns the set of UIDs of every MxlReceiver
