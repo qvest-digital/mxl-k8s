@@ -1154,8 +1154,26 @@ func TestRemoveOwnerRef_RejectsDeleteOnConcurrentAdd(t *testing.T) {
 		WithObjects(mirror).
 		Build()
 
+	// The sibling's append has to actually land. A bare conflict is
+	// indistinguishable from any other write to the mirror, so it no
+	// longer aborts the delete on its own; the interceptor performs the
+	// add it stands in for before rejecting.
 	c := interceptor.NewClient(base, interceptor.Funcs{
-		Delete: func(ctx context.Context, _ client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+		Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			key := types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}
+			var live mxlv1alpha1.MxlFlowMirror
+			if err := cl.Get(ctx, key, &live); err != nil {
+				return err
+			}
+			if len(live.OwnerReferences) == 0 {
+				live.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: mxlv1alpha1.GroupVersion.String(),
+					Kind:       "MxlReceiver", Name: "sibling", UID: "sibling-uid",
+				}}
+				if err := cl.Update(ctx, &live); err != nil {
+					return err
+				}
+			}
 			return apierrors.NewConflict(mxlFlowMirrorGR, obj.GetName(),
 				errors.New("simulated concurrent owner add"))
 		},
@@ -1174,11 +1192,63 @@ func TestRemoveOwnerRef_RejectsDeleteOnConcurrentAdd(t *testing.T) {
 		"the precondition aborted the Delete, so the mirror must still exist; "+
 			"otherwise a sibling receiver's just-added owner ref would have lost "+
 			"its mirror out from under it")
-	assert.Empty(t, live.OwnerReferences,
-		"the receiver's own Update inside the retry loop emptied the owner ref "+
-			"list before the guarded Delete was attempted; the conflict on Delete "+
-			"is the only thing that kept the (now-ownerless) object alive, which is "+
-			"the contract a concurrent ensureOwnerRef relies on for its append to land")
+	assert.Len(t, live.OwnerReferences, 1,
+		"the sibling's owner ref is what makes this conflict a genuine re-add, "+
+			"and an owner list that came back non-empty is the only signal that "+
+			"separates it from an unrelated write")
+}
+
+// A conflict raised by a write that is not an owner add must not be read
+// as one. The mirror's own target and source controllers write status to
+// it continuously, so such a conflict is the common case, and abandoning
+// the delete on it strands the mirror: emptying ownerReferences via
+// Update leaves nothing for apiserver GC to act on.
+func TestRemoveOwnerRef_DeletesAfterConflictFromUnrelatedWrite(t *testing.T) {
+	ctx := context.Background()
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r", UID: "recv-uid"},
+	}
+	mirror := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns",
+			Name:      "m",
+			OwnerReferences: []metav1.OwnerReference{
+				{APIVersion: mxlv1alpha1.GroupVersion.String(), Kind: "MxlReceiver", Name: "r", UID: "recv-uid"},
+			},
+		},
+	}
+	base := fake.NewClientBuilder().
+		WithScheme(unitScheme(t)).
+		WithObjects(mirror).
+		Build()
+
+	// One-shot conflict standing in for a status write landing between
+	// the owner-ref Update and the guarded Delete. The owner list stays
+	// empty, so the retry has to go through against the fresh version.
+	var deletes int
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			deletes++
+			if deletes == 1 {
+				return apierrors.NewConflict(mxlFlowMirrorGR, obj.GetName(),
+					errors.New("simulated status write"))
+			}
+			return cl.Delete(ctx, obj, opts...)
+		},
+	})
+	r := &Reconciler{Client: c}
+
+	require.NoError(t, r.removeOwnerRef(ctx, recv, mirror))
+	assert.Greater(t, deletes, 1,
+		"the delete must be retried against the resourceVersion the "+
+			"conflicting write produced, not abandoned")
+
+	var live mxlv1alpha1.MxlFlowMirror
+	err := base.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "m"}, &live)
+	assert.True(t, apierrors.IsNotFound(err),
+		"an ownerless mirror has to end up deleted: native GC never collects a "+
+			"dependent whose owner list was emptied by an Update, so a delete "+
+			"skipped here leaks with no other collector behind it")
 }
 
 func TestEnsureOwnerRef_RetryOnConflict(t *testing.T) {
