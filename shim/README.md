@@ -72,6 +72,15 @@ and `lstat(2)`. libmxl probes the flow_def.json with `access` and
 left the very first `mxlCreateFlowReader` call returning
 `FLOW_NOT_FOUND` without the shim being consulted.
 
+The stat pair is exported twice. glibc from 2.33 on has plain `stat`
+and `lstat` symbols; before that `<sys/stat.h>` rewrites the call to
+`__xstat(_STAT_VER, ...)`, so a consumer built against an older
+glibc reaches `__xstat` / `__lxstat` and never the plain names. Both
+spellings are hooked, along with the `_64` variants a consumer
+compiled with `_FILE_OFFSET_BITS=64` uses. A consumer linked
+against a pre-2.33 glibc depends on this: without it its directory
+probe returns `ENOENT` unseen and no intent is ever raised.
+
 Calls that don't return `ENOENT`, and calls whose target path
 doesn't match `.../*.mxl-flow/flow_def.json`, fall straight through
 to glibc. Direct syscalls (e.g. `syscall(SYS_openat, ...)` from Go)
