@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.0-rc.9](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.8...api/v1.0.0-rc.9) (2026-08-09)
+
+
+### Features
+
+* **api:** add targetAttemptCount to MxlFlowMirror status ([61ca815](https://github.com/qvest-digital/mxl-k8s/commit/61ca81526f1f79802753a14ab4a3d7477f00c530))
+
+
+### Bug Fixes
+
+* **gateway:** escalate and recover a target that cannot open ([#238](https://github.com/qvest-digital/mxl-k8s/issues/238)) ([61ca815](https://github.com/qvest-digital/mxl-k8s/commit/61ca81526f1f79802753a14ab4a3d7477f00c530)), closes [#236](https://github.com/qvest-digital/mxl-k8s/issues/236) [#237](https://github.com/qvest-digital/mxl-k8s/issues/237)
+
 ## [1.0.0-rc.8](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.7...api/v1.0.0-rc.8) (2026-08-06)
 
 
