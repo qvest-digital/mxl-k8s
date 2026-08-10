@@ -194,7 +194,7 @@ The repo is a Go workspace with five modules:
 | `exporter` | `github.com/qvest-digital/mxl-k8s/exporter` | Per-node DaemonSet. Prometheus metrics for the flows in the node's domain. Links libmxl via [`go-mxl`][go-mxl]. |
 
 The exporter's metric set and its entry-lifetime model are ported from
-[`mxl-exporter`][mxl-exporter] by Jonas Ohland (Apache-2.0). That
+[`jonasohland/mxl-exporter`][mxl-exporter] (Apache-2.0). That
 exporter predates go-mxl's public release and read the domain's
 shared-memory layout by parsing the structures itself; here the same
 values come from go-mxl. The metric names are kept, so dashboards built
