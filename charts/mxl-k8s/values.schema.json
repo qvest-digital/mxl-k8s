@@ -863,8 +863,10 @@
           "properties": {
             "digest": {
               "default": "",
-              "title": "digest",
-              "type": "string"
+              "description": "Image digest. Wins over tag when set. @schema pattern: ^$|^sha256:[0-9a-f]{64}$ @schema",
+              "pattern": "^$|^sha256:[0-9a-f]{64}$",
+              "required": [],
+              "title": "digest"
             },
             "pullPolicy": {
               "default": "",
@@ -878,11 +880,6 @@
               "required": [],
               "title": "pullPolicy"
             },
-            "registry": {
-              "default": "",
-              "title": "registry",
-              "type": "string"
-            },
             "repository": {
               "default": "exporter",
               "title": "repository",
@@ -890,16 +887,13 @@
             },
             "tag": {
               "default": "",
-              "description": "Image tag. Empty falls back to the chart's appVersion.",
-              "pattern": "^$|^v?[0-9]+\\.[0-9]+\\.[0-9]+",
+              "description": "Image tag. Empty defaults to the chart appVersion prefixed with \"v\": the exporter image is released under the chart version. Set this or image.digest.",
               "required": [],
               "title": "tag"
             }
           },
           "required": [
-            "registry",
-            "repository",
-            "digest"
+            "repository"
           ],
           "title": "image",
           "type": "object"

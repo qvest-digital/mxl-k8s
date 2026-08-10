@@ -621,13 +621,15 @@ exporter:
       maxUnavailable: 1
     type: RollingUpdate
   image:
-    registry: ""
     repository: exporter
-    # @schema
-    # pattern: ^$|^v?[0-9]+\.[0-9]+\.[0-9]+
-    # @schema
-    # -- Image tag. Empty falls back to the chart's appVersion.
+    # -- Image tag. Empty defaults to the chart appVersion prefixed
+    # with "v": the exporter image is released under the chart version.
+    # Set this or image.digest.
     tag: ""
+    # -- Image digest. Wins over tag when set.
+    # @schema
+    # pattern: ^$|^sha256:[0-9a-f]{64}$
+    # @schema
     digest: ""
     # @schema
     # enum: ["", "Always", "IfNotPresent", "Never"]

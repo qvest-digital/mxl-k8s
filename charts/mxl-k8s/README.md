@@ -192,11 +192,10 @@ Kubernetes: `>=1.28-0`
 | exporter.flags.metricsBindAddress | string | `":8080"` |  |
 | exporter.flags.scanPeriod | string | `"5s"` | How often the domain directory is re-listed for flows that appeared or disappeared. Scrapes read the cache this maintains. |
 | exporter.hostPath | object | `{"run":"/run/mxl","type":"Directory"}` | hostPath layout. The exporter mounts the runtime root read-only; it opens libmxl flow readers and never writes into the domain. |
-| exporter.image.digest | string | `""` |  |
+| exporter.image.digest | string | `""` | Image digest. Wins over tag when set. @schema pattern: ^$|^sha256:[0-9a-f]{64}$ @schema |
 | exporter.image.pullPolicy | string | `""` |  |
-| exporter.image.registry | string | `""` |  |
 | exporter.image.repository | string | `"exporter"` |  |
-| exporter.image.tag | string | `""` | Image tag. Empty falls back to the chart's appVersion. |
+| exporter.image.tag | string | `""` | Image tag. Empty defaults to the chart appVersion prefixed with "v": the exporter image is released under the chart version. Set this or image.digest. |
 | exporter.livenessProbe.httpGet.path | string | `"/healthz"` |  |
 | exporter.livenessProbe.httpGet.port | string | `"probe"` |  |
 | exporter.livenessProbe.initialDelaySeconds | int | `5` |  |
