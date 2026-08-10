@@ -71,6 +71,7 @@ IMAGE_DOCKERFILES=(
   docker/operator.Dockerfile
   docker/agent.Dockerfile
   docker/gateway.Dockerfile
+  docker/exporter.Dockerfile
   docker/shim.Dockerfile
   docker/demo-tools.Dockerfile
 )
@@ -78,6 +79,7 @@ IMAGE_COMPONENTS=(
   operator
   agent
   gateway
+  exporter
   shim
   demo-tools
 )
@@ -201,6 +203,8 @@ helm upgrade --install mxl-k8s "${REPO_ROOT}/charts/mxl-k8s" \
   --set operator.image.tag="$TAG" \
   --set agent.image.tag="$TAG" \
   --set gateway.image.tag="$TAG" \
+  --set exporter.image.tag="$TAG" \
+  --set exporter.enabled=true \
   --wait --timeout="${ROLLOUT_TIMEOUT_SECS}s"
 
 apply_demo() {

@@ -46,10 +46,18 @@ wait_phase() {
 # port_forward_probe <pod> <port> <path>
 # Opens a kubectl port-forward to pod:port, curls /<path>, and prints
 # the HTTP status code on stdout. Returns 0 iff the code is 200.
+port_forward_probe() {
+  port_forward_fetch "$1" "$2" "$3" /dev/null
+}
+
+# port_forward_fetch <pod> <port> <path> [body-file]
+# Opens a kubectl port-forward to pod:port, GETs /<path>, writes the
+# response body to body-file when one is named, and prints the HTTP
+# status code on stdout. Returns 0 iff the code is 200.
 # Random-binds locally (`0:port`) and learns the assigned port from
 # kubectl's stdout, avoiding clashes with parallel forwards.
-port_forward_probe() {
-  local pod="$1" port="$2" path="$3"
+port_forward_fetch() {
+  local pod="$1" port="$2" path="$3" body="${4:-/dev/null}"
   local pf_log local_port code rc deadline pf_pid
   pf_log="$(mktemp)"
   "${KUBECTL[@]}" -n "$NAMESPACE" port-forward "pod/${pod}" "0:${port}" \
@@ -72,8 +80,8 @@ port_forward_probe() {
     return 1
   fi
 
-  code=$(curl -sS -o /dev/null -w '%{http_code}' \
-              --max-time 5 "http://127.0.0.1:${local_port}/${path}" || echo "000")
+  code=$(curl -sS -o "$body" -w '%{http_code}' \
+              --max-time 10 "http://127.0.0.1:${local_port}/${path}" || echo "000")
   rc=0
   [ "$code" = "200" ] || rc=1
 
@@ -113,7 +121,7 @@ collect_diagnostics() {
       mxldomains,mxlflows,mxlflowmirrors,mxlreceivers,mxlnodecapabilities \
       -o yaml \
       > "$KIND_DIAG_DIR/mxl-resources.yaml" 2>&1 || true
-  for app in mxl-k8s-operator mxl-k8s-agent mxl-k8s-gateway; do
+  for app in mxl-k8s-operator mxl-k8s-agent mxl-k8s-gateway mxl-k8s-exporter; do
     "${KUBECTL[@]}" -n "$NAMESPACE" logs \
         -l "app.kubernetes.io/name=${app}" \
         --all-containers --prefix --tail=400 \
