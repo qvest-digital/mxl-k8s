@@ -1,0 +1,69 @@
+# kube-prometheus-stack values for the KIND demo. Consumed by
+# hack/kind-up.sh via `helm upgrade --install -f`.
+#
+# Trimmed to what the MXL flow dashboard needs: a Prometheus that
+# scrapes the exporter, and a Grafana that loads the dashboard the
+# mxl-k8s chart ships. Everything else in the stack costs pods on a
+# laptop and feeds no panel on that board.
+
+# Alerting is not what this cluster is for, and the default rules are
+# written against metrics the disabled collectors below would have
+# produced.
+alertmanager:
+  enabled: false
+defaultRules:
+  create: false
+nodeExporter:
+  enabled: false
+kubeStateMetrics:
+  enabled: false
+
+# Control-plane scrape targets. A KIND control plane does not expose
+# these on the addresses the stack defaults to, so leaving them on
+# fills the targets page with failures that mean nothing here.
+kubeApiServer:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+coreDns:
+  enabled: false
+kubelet:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    # The exporter decides a flow is active by comparing the head index
+    # against the previous scrape, so the scrape interval is the
+    # resolution of every activity panel on the board.
+    scrapeInterval: 15s
+    retention: 2h
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+    # No storageSpec: the stack falls back to an emptyDir, which is
+    # what a cluster torn down with `make kind-down` wants.
+
+grafana:
+  # This cluster is reachable through kubectl port-forward and nothing
+  # else. The password is stated so `make kind-grafana` can print it.
+  adminPassword: admin
+  defaultDashboardsEnabled: false
+  service:
+    type: ClusterIP
+  # Dashboards arrive as labelled ConfigMaps. searchNamespace is left
+  # at its default, which is Grafana's own namespace, and the mxl-k8s
+  # chart is installed with dashboards.namespace pointing there.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true

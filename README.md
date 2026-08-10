@@ -162,6 +162,22 @@ The reader prints one line per grain (`idx=... size=... slices=.../...`).
 Use `make kind-status` for the converged state of the CRDs and
 pods, `make kind-down` to tear the cluster down.
 
+The cluster also brings up kube-prometheus-stack, with the exporter
+scraped and the flow dashboard loaded:
+
+```sh
+make kind-grafana
+```
+
+It prints the dashboard URL and credentials (admin / admin). The
+forward binds every interface, so the board is reachable from another
+host on the network; `KIND_GRAFANA_ADDRESS=127.0.0.1` keeps it on the
+loopback, and `KIND_GRAFANA_PORT` moves it off 3000.
+
+The writer and reader are producing grains, so the panels carry live
+data from the demo flows. `MONITORING=0 make kind-up` leaves the whole
+stack out.
+
 [`docs/KIND.md`](docs/KIND.md) walks through what each step does
 and what to look at if convergence stalls.
 

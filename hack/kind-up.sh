@@ -64,6 +64,18 @@ fi
 MIRROR_TIMEOUT_SECS="${MIRROR_TIMEOUT_SECS:-180}"
 ROLLOUT_TIMEOUT_SECS="${ROLLOUT_TIMEOUT_SECS:-300}"
 
+# Monitoring stack. On by default so `make kind-up` alone is enough to
+# look at the flow dashboard; MONITORING=0 leaves it out for a lean
+# cluster.
+MONITORING="${MONITORING:-1}"
+MONITORING_NAMESPACE="${MONITORING_NAMESPACE:-monitoring}"
+# The release name is what Prometheus selects ServiceMonitors on: the
+# chart's serviceMonitorSelector defaults to release=<this>, so the
+# exporter's ServiceMonitor is labelled to match.
+MONITORING_RELEASE="${MONITORING_RELEASE:-kube-prometheus-stack}"
+# renovate: datasource=helm depName=kube-prometheus-stack registryUrl=https://prometheus-community.github.io/helm-charts
+MONITORING_CHART_VERSION="${MONITORING_CHART_VERSION:-69.3.2}"
+
 # Parallel arrays: Dockerfile / CI component name. Kept index-aligned
 # so bash 3.2 (no associative arrays) can iterate them. The image
 # reference for each component is always ${IMAGE_REGISTRY}/<comp>:${TAG}.
@@ -192,6 +204,37 @@ if [[ "$TAG" != "dev" ]]; then
   done
 fi
 
+if [ "$MONITORING" = "1" ]; then
+  log "Installing kube-prometheus-stack"
+  # Installed before mxl-k8s: the chart renders a ServiceMonitor, and
+  # its CRD arrives with this stack.
+  helm repo add prometheus-community \
+      https://prometheus-community.github.io/helm-charts >/dev/null
+  helm repo update prometheus-community >/dev/null
+  helm upgrade --install "$MONITORING_RELEASE" \
+    prometheus-community/kube-prometheus-stack \
+    --version "$MONITORING_CHART_VERSION" \
+    --kube-context "kind-${CLUSTER_NAME}" \
+    --namespace "$MONITORING_NAMESPACE" --create-namespace \
+    -f "${REPO_ROOT}/examples/kind/monitoring-values.yaml" \
+    --wait --timeout="${ROLLOUT_TIMEOUT_SECS}s"
+fi
+
+MONITORING_SET=()
+if [ "$MONITORING" = "1" ]; then
+  MONITORING_SET=(
+    --set exporter.metrics.serviceMonitor.enabled=true
+    # The ServiceMonitor's own interval wins over the Prometheus
+    # default, and it is the resolution of every activity panel: the
+    # exporter decides a flow is active by comparing consecutive
+    # scrapes.
+    --set exporter.metrics.serviceMonitor.interval=15s
+    --set "exporter.metrics.serviceMonitor.labels.release=${MONITORING_RELEASE}"
+    --set dashboards.enabled=true
+    --set "dashboards.namespace=${MONITORING_NAMESPACE}"
+  )
+fi
+
 log "Installing the mxl-k8s Helm chart"
 # Helm 3 installs charts/mxl-k8s/crds/ on first install automatically
 # and leaves them in place on upgrades. No separate kubectl apply -k
@@ -205,6 +248,7 @@ helm upgrade --install mxl-k8s "${REPO_ROOT}/charts/mxl-k8s" \
   --set gateway.image.tag="$TAG" \
   --set exporter.image.tag="$TAG" \
   --set exporter.enabled=true \
+  ${MONITORING_SET[@]+"${MONITORING_SET[@]}"} \
   --wait --timeout="${ROLLOUT_TIMEOUT_SECS}s"
 
 apply_demo() {
@@ -276,3 +320,16 @@ KIND cluster '${CLUSTER_NAME}' is up and the demo is converged.
   Reader:    kubectl --context kind-${CLUSTER_NAME} -n mxl-system logs pod/mxl-tcp-demo-reader
   Tear down: make kind-down
 EOF
+
+if [ "$MONITORING" = "1" ]; then
+cat <<EOF
+
+  Dashboard: make kind-grafana
+             prints the URL and credentials, and binds every interface
+             so the board is reachable from another host
+
+The writer and reader are producing grains now, so the board has live
+data. Panels that compare a flow against the previous scrape need one
+scrape interval (15s) before they read anything but zero.
+EOF
+fi

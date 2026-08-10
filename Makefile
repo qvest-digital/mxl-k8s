@@ -233,6 +233,15 @@ CONTAINER_RUNTIME ?= docker
 BUILD ?= local
 # Where the integration suite writes failure diagnostics.
 KIND_DIAG_DIR ?= $(CURDIR)/kind-diagnostics
+MONITORING_RELEASE ?= kube-prometheus-stack
+# Host address `make kind-grafana` binds the forward on. 0.0.0.0 serves
+# every interface, so the board is reachable from another machine;
+# 127.0.0.1 keeps it on the loopback of the host running make.
+KIND_GRAFANA_ADDRESS ?= 0.0.0.0
+KIND_GRAFANA_PORT ?= 3000
+# Host name to print in the URL. Only cosmetic -- what the forward
+# accepts is decided by KIND_GRAFANA_ADDRESS.
+KIND_GRAFANA_HOST ?= $(shell hostname -f 2>/dev/null || hostname)
 
 .PHONY: kind-up
 kind-up:
@@ -245,6 +254,16 @@ kind-down:
 .PHONY: kind-status
 kind-status:
 	KIND_CLUSTER=$(KIND_CLUSTER) CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) bash hack/kind-status.sh
+
+.PHONY: kind-grafana
+kind-grafana:
+	@echo "Grafana on http://$(KIND_GRAFANA_HOST):$(KIND_GRAFANA_PORT)  (admin / admin)"
+	@echo "Flow dashboard: http://$(KIND_GRAFANA_HOST):$(KIND_GRAFANA_PORT)/d/mxl-flow-metrics"
+	@test "$(KIND_GRAFANA_ADDRESS)" = "127.0.0.1" || \
+	    echo "Bound on $(KIND_GRAFANA_ADDRESS): reachable from other hosts, with the default admin password. KIND_GRAFANA_ADDRESS=127.0.0.1 keeps it local."
+	kubectl --context kind-$(KIND_CLUSTER) -n monitoring port-forward \
+	    --address $(KIND_GRAFANA_ADDRESS) \
+	    svc/$(MONITORING_RELEASE)-grafana $(KIND_GRAFANA_PORT):80
 
 .PHONY: kind-test
 kind-test:
