@@ -657,6 +657,59 @@
       ],
       "title": "crds"
     },
+    "dashboards": {
+      "description": " for Grafana's dashboard sidecar to discover.",
+      "properties": {
+        "annotations": {
+          "description": "Annotations on the ConfigMaps. grafana_folder places the dashboard when the sidecar runs with folderAnnotation set.",
+          "properties": {
+            "grafana_folder": {
+              "default": "MXL",
+              "title": "grafana_folder",
+              "type": "string"
+            }
+          },
+          "required": [
+            "grafana_folder"
+          ],
+          "title": "annotations"
+        },
+        "datasourceUid": {
+          "default": "prometheus",
+          "description": "uid of the Prometheus datasource the panels query. The default is what kube-prometheus-stack names its own; a Grafana provisioned otherwise states its uid here.",
+          "required": [],
+          "title": "datasourceUid"
+        },
+        "enabled": {
+          "default": "false",
+          "description": "Ship the bundled dashboards.",
+          "required": [],
+          "title": "enabled"
+        },
+        "labels": {
+          "description": "Labels the sidecar selects on. A deployment configured with a non-empty sidecar labelValue, or selecting on a release label, sets its own here.",
+          "properties": {
+            "grafana_dashboard": {
+              "default": "1",
+              "title": "grafana_dashboard",
+              "type": "string"
+            }
+          },
+          "required": [
+            "grafana_dashboard"
+          ],
+          "title": "labels"
+        },
+        "namespace": {
+          "default": "",
+          "description": "Namespace to place the ConfigMaps in. Empty uses the release namespace. The sidecar's searchNamespace defaults to the namespace Grafana runs in, so a Grafana installed elsewhere needs either that setting widened or this pointed at it.",
+          "required": [],
+          "title": "namespace"
+        }
+      },
+      "required": [],
+      "title": "dashboards"
+    },
     "exporter": {
       "description": " serves Prometheus metrics for every flow materialized on it. A domain is shared by every pod on its node, so one DaemonSet covers the node and reports each flow once; a second reader of the same domain would only repeat it.",
       "properties": {

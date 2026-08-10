@@ -729,3 +729,27 @@ exporter:
       labels: {}
       relabelings: []
       metricRelabelings: []
+
+# Grafana dashboards for the exporter's metrics, shipped as ConfigMaps
+# for Grafana's dashboard sidecar to discover.
+dashboards:
+  # -- Ship the bundled dashboards.
+  enabled: false
+  # -- Namespace to place the ConfigMaps in. Empty uses the release
+  # namespace. The sidecar's searchNamespace defaults to the namespace
+  # Grafana runs in, so a Grafana installed elsewhere needs either that
+  # setting widened or this pointed at it.
+  namespace: ""
+  # -- Labels the sidecar selects on. A deployment configured with a
+  # non-empty sidecar labelValue, or selecting on a release label, sets
+  # its own here.
+  labels:
+    grafana_dashboard: "1"
+  # -- Annotations on the ConfigMaps. grafana_folder places the
+  # dashboard when the sidecar runs with folderAnnotation set.
+  annotations:
+    grafana_folder: MXL
+  # -- uid of the Prometheus datasource the panels query. The default
+  # is what kube-prometheus-stack names its own; a Grafana provisioned
+  # otherwise states its uid here.
+  datasourceUid: prometheus

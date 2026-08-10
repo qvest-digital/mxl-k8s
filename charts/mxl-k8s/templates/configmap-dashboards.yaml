@@ -1,0 +1,34 @@
+{{- if .Values.dashboards.enabled }}
+{{- $ns := .Values.dashboards.namespace | default (include "mxlk8s.namespace" .) }}
+{{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+{{- $name := base $path | trimSuffix ".json" }}
+---
+# Grafana's dashboard sidecar discovers ConfigMaps by label. Its
+# searchNamespace defaults to the namespace Grafana itself runs in, so a
+# Grafana outside this chart's namespace needs either that setting
+# widened or dashboards.namespace pointed at it.
+#
+# The JSON is emitted verbatim rather than through tpl: Grafana legend
+# formats are written {{ "{{" }}label{{ "}}" }}, which the template engine would try
+# to evaluate. Only the datasource uid is rewritten, by literal
+# replacement.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $.Chart.Name }}-dashboard-{{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" $ "component" "dashboards") | nindent 4 }}
+    {{- with $.Values.dashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- $annotations := merge (dict) ($.Values.dashboards.annotations | default dict) ($.Values.global.commonAnnotations | default dict) }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  {{ $name }}.json: |
+{{ $.Files.Get $path | replace "\"uid\": \"prometheus\"" (printf "\"uid\": %q" $.Values.dashboards.datasourceUid) | indent 4 }}
+{{- end }}
+{{- end }}

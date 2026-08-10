@@ -191,6 +191,15 @@ per node -- `Origin` on the node the writer runs on -- which separates a
 produced flow from a mirrored one without a media function labelling
 itself.
 
+The chart ships a Grafana dashboard over those metrics under
+`dashboards.enabled`, as a ConfigMap for Grafana's dashboard sidecar to
+discover. That sidecar's `searchNamespace` defaults to the namespace
+Grafana runs in, so a Grafana installed elsewhere needs either that
+setting widened or `dashboards.namespace` pointed at it. The discovery
+label, folder annotation and Prometheus datasource uid are values too;
+the uid defaults to the one kube-prometheus-stack gives its own
+datasource.
+
 [`docs/USAGE.md`](docs/USAGE.md) covers the prerequisites for a
 media function (container, libmxl link, capabilities) and how to
 integrate it as a producer or consumer.

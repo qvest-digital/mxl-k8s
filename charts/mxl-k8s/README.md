@@ -172,6 +172,11 @@ Kubernetes: `>=1.28-0`
 | cleanup.preDeleteDomainWipe.nodeCount | int | `1` | Effective node count for the agent DaemonSet. An under-set value yields a partial wipe; the nodecount-guard init-container fails the chart with a clear error in that case. |
 | cleanup.preDeleteDomainWipe.timeoutSeconds | int | `120` | Per-pod completion timeout. |
 | crds | object | `{"skipInstall":false}` | CRD handling. The chart installs CRDs from its crds/ directory by default. Helm only installs them on first install and never deletes or upgrades them; Flux's HelmRelease.spec.{install,upgrade}.crds governs replace semantics. Set skipInstall=true when CRDs are managed by a separate Kustomization or operator framework. |
+| dashboards.annotations | object | `{"grafana_folder":"MXL"}` | Annotations on the ConfigMaps. grafana_folder places the dashboard when the sidecar runs with folderAnnotation set. |
+| dashboards.datasourceUid | string | `"prometheus"` | uid of the Prometheus datasource the panels query. The default is what kube-prometheus-stack names its own; a Grafana provisioned otherwise states its uid here. |
+| dashboards.enabled | bool | `false` | Ship the bundled dashboards. |
+| dashboards.labels | object | `{"grafana_dashboard":"1"}` | Labels the sidecar selects on. A deployment configured with a non-empty sidecar labelValue, or selecting on a release label, sets its own here. |
+| dashboards.namespace | string | `""` | Namespace to place the ConfigMaps in. Empty uses the release namespace. The sidecar's searchNamespace defaults to the namespace Grafana runs in, so a Grafana installed elsewhere needs either that setting widened or this pointed at it. |
 | exporter.affinity | object | `{}` |  |
 | exporter.args | list | `[]` | Extra raw args appended after the rendered flags. |
 | exporter.containerSecurityContext.allowPrivilegeEscalation | bool | `false` |  |

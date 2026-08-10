@@ -1,0 +1,53 @@
+suite: dashboards
+templates:
+  - templates/configmap-dashboards.yaml
+tests:
+  - it: renders nothing by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: carries the label the sidecar selects on
+    set:
+      dashboards.enabled: true
+    asserts:
+      - equal:
+          path: metadata.labels["grafana_dashboard"]
+          value: "1"
+      - equal:
+          path: metadata.annotations["grafana_folder"]
+          value: MXL
+
+  # The sidecar's searchNamespace defaults to the namespace Grafana runs
+  # in, which is not this chart's. Without this the dashboard installs
+  # and is never discovered, with nothing reporting a problem.
+  - it: places the ConfigMap in the requested namespace
+    set:
+      dashboards.enabled: true
+      dashboards.namespace: monitoring
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: monitoring
+
+  - it: rewrites the datasource uid
+    set:
+      dashboards.enabled: true
+      dashboards.datasourceUid: my-prom
+    asserts:
+      - matchRegex:
+          path: data["mxl-flow-metrics.json"]
+          pattern: '"uid": "my-prom"'
+      - notMatchRegex:
+          path: data["mxl-flow-metrics.json"]
+          pattern: '"uid": "prometheus"'
+
+  # The board is emitted verbatim, not through tpl: Grafana legend
+  # formats share Go template syntax and would be evaluated away.
+  - it: keeps grafana legend formats intact
+    set:
+      dashboards.enabled: true
+    asserts:
+      - matchRegex:
+          path: data["mxl-flow-metrics.json"]
+          pattern: '\{\{node\}\}'
