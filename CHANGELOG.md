@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.0-rc.21](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.20...v1.0.0-rc.21) (2026-08-10)
+
+
+### Features
+
+* **chart:** ship a flow metrics dashboard behind a toggle ([63e3676](https://github.com/qvest-digital/mxl-k8s/commit/63e367668af0e1808f4e8232757979c3758bd3e2))
+* **exporter:** export MXL flow metrics once per node ([#245](https://github.com/qvest-digital/mxl-k8s/issues/245)) ([63e3676](https://github.com/qvest-digital/mxl-k8s/commit/63e367668af0e1808f4e8232757979c3758bd3e2))
+* **kind:** bring the demo up with a monitoring stack ([63e3676](https://github.com/qvest-digital/mxl-k8s/commit/63e367668af0e1808f4e8232757979c3758bd3e2))
+
+
+### Bug Fixes
+
+* **operator:** keep the orphaned-mirror delete from being abandoned ([#243](https://github.com/qvest-digital/mxl-k8s/issues/243)) ([ad0a960](https://github.com/qvest-digital/mxl-k8s/commit/ad0a960201676d13e8d83d267be4ae2612d01b3a))
+
+
+### Build System
+
+* **shim:** fail the build above the supported glibc floor ([#241](https://github.com/qvest-digital/mxl-k8s/issues/241)) ([9a85e6f](https://github.com/qvest-digital/mxl-k8s/commit/9a85e6f390fc30640b57864ea971460fdecbe684))
+
 ## [1.0.0-rc.20](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.19...v1.0.0-rc.20) (2026-08-09)
 
 
