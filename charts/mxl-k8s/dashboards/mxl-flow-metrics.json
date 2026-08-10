@@ -1,0 +1,1393 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "graphTooltip": 1,
+  "links": [],
+  "title": "MXL Flow Metrics",
+  "uid": "mxl-flow-metrics",
+  "tags": [
+    "mxl",
+    "flows",
+    "operator-managed"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "node",
+        "label": "Node",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(mxl_flow_active, node)",
+        "query": {
+          "query": "label_values(mxl_flow_active, node)",
+          "refId": "StandardVariableQuery"
+        },
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": [],
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "hide": 0
+      },
+      {
+        "name": "flow",
+        "label": "Flow",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(mxl_flow_active, flow_id)",
+        "query": {
+          "query": "label_values(mxl_flow_active, flow_id)",
+          "refId": "StandardVariableQuery"
+        },
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": [],
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 100,
+      "title": "Status & Health",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 1,
+      "title": "Active Flows",
+      "description": "Whether a flow is currently being written. The exporter compares the head index at each scrape against the previous one: advanced means data is flowing (ACTIVE), unchanged means the flow is frozen (STALLED). A flow can be present and stalled at once, which is what a writer that died while its flow directory survived looks like.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "STALLED",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "ACTIVE",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(mxl_flow_active{node=~\"$node\",flow_id=~\"$flow\"}, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "legendFormat": "{{node}} / {{flow_short}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Flows Present",
+      "description": "Whether the flow directory (*.mxl-flow) still exists in the node's domain. PRESENT means the directory is there, MISSING that it is gone. A departed flow keeps its series, at 0, until --flow-lifetime expires, so a short outage stays visible in the time range instead of leaving a gap. Present says nothing about data flowing; Active Flows does.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "MISSING",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "PRESENT",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(mxl_flow_present{node=~\"$node\",flow_id=~\"$flow\"}, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "legendFormat": "{{node}} / {{flow_short}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Flows per Domain",
+      "description": "Flows the exporter found in the node's domain. A domain is a directory holding one or more *.mxl-flow subdirectories, shared by every pod on the node, so this counts the node's flows rather than any one workload's.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "colorMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "mxl_domain_num_flows{node=~\"$node\"}",
+          "legendFormat": "{{node}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Domain Shared Memory Used",
+      "description": "Combined on-disk size of the domain's flow data. A flow reserves its full ring buffer when it is created and releases it when it is torn down, so the value is flat while a flow runs rather than growing with uptime.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "colorMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "mxl_domain_size_bytes{node=~\"$node\"}",
+          "legendFormat": "{{node}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Domain Filesystem Available",
+      "description": "Free space on the filesystem backing the domain. On a tmpfs-backed domain this is RAM. At zero no further flow can be created and running flows can fail, so the useful reading is the headroom rather than the absolute number.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "colorMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 10485760
+              },
+              {
+                "color": "green",
+                "value": 52428800
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "mxl_domain_fs_space_available_bytes{node=~\"$node\"}",
+          "legendFormat": "{{node}}"
+        }
+      ]
+    },
+    {
+      "id": 101,
+      "title": "End-to-End Flow Status",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 17,
+      "title": "Producer Flows Active",
+      "description": "Flows being written on the node that holds their origin. mxl_flow_location_info carries phase Origin exactly on the node the writer runs on, so joining the domain metrics against it on (flow_id, node) counts producers without a workload having to label itself. Spans every node rather than the Node filter above, because end-to-end health is a property of the system.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "colorMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count((mxl_flow_active == 1) and on(flow_id, node) (mxl_flow_location_info{phase=\"Origin\"})) or vector(0)",
+          "legendFormat": "Producer"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "title": "Consumer Flows Active",
+      "description": "Flows arriving into a node's domain from the fabric, counted where mxl_flow_location_info reports phase Ready or Mirroring. This measures arrival into the local domain, not what a reader does with it afterwards. Below Producer Flows Active means at least one flow is not reaching its consumer.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "colorMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count((mxl_flow_active == 1) and on(flow_id, node) (mxl_flow_location_info{phase=~\"Ready|Mirroring\"})) or vector(0)",
+          "legendFormat": "Consumer"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "title": "End-to-End Active",
+      "description": "Flows active at their origin and also materialised Ready on some node. The gap against the producer and consumer counts is where a flow is live on one side only. Spans every node, because end-to-end health is measured system-wide.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(((mxl_flow_active == 1) and on(flow_id, node) (mxl_flow_location_info{phase=\"Origin\"})) and on(flow_id) (mxl_flow_location_info{phase=\"Ready\"})) or vector(0)",
+          "legendFormat": "E2E"
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "title": "Flow State History",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 15,
+      "title": "Active Timeline",
+      "description": "ACTIVE/STALLED state of every flow over the selected range. Where the Active Flows stat shows the current value, this shows when a flow stopped and how long it stayed stopped.",
+      "type": "state-timeline",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "rowHeight": 0.9,
+        "showValue": "auto",
+        "alignValue": "left",
+        "mergeValues": true,
+        "tooltip": {
+          "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 0,
+            "fillOpacity": 70
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "STALLED",
+                  "color": "red"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "ACTIVE",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(mxl_flow_active{node=~\"$node\",flow_id=~\"$flow\"}, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "legendFormat": "{{node}} / {{flow_short}}"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "Present Timeline",
+      "description": "PRESENT/MISSING state of every flow over the selected range. A flow whose directory is gone keeps its series until --flow-lifetime expires, so a restart reads as a bounded gap rather than a series that disappears.",
+      "type": "state-timeline",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "rowHeight": 0.9,
+        "showValue": "auto",
+        "alignValue": "left",
+        "mergeValues": true,
+        "tooltip": {
+          "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 0,
+            "fillOpacity": 70
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "MISSING",
+                  "color": "red"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "PRESENT",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(mxl_flow_present{node=~\"$node\",flow_id=~\"$flow\"}, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "legendFormat": "{{node}} / {{flow_short}}"
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "title": "Latency",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 5,
+      "title": "Video Flow Latency (ms)",
+      "description": "How far a discrete flow's head index sits behind where the MXL clock puts it, converted to milliseconds through the flow's own grain rate. One grain of lag is normal, and the grain duration is the unit to read this in. Only active flows are shown.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 500
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace((mxl_flow_latency_grains{node=~\"$node\",flow_id=~\"$flow\"} / mxl_flow_rate_num{node=~\"$node\",flow_id=~\"$flow\"} * mxl_flow_rate_den{node=~\"$node\",flow_id=~\"$flow\"} * 1000) * on(flow_id, domain, node) group_left(flow_data_type) (mxl_flow_metadata{flow_data_type=~\"[Vv]ideo\"}) * on(flow_id, domain, node) group_left() (mxl_flow_active == 1), \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "legendFormat": "{{node}} / {{flow_short}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Audio Flow Latency (ms)",
+      "description": "How far a continuous flow's head index sits behind where the MXL clock puts it, converted to milliseconds through the flow's own grain rate. Only active flows are shown.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace((mxl_flow_latency_grains{node=~\"$node\",flow_id=~\"$flow\"} / mxl_flow_rate_num{node=~\"$node\",flow_id=~\"$flow\"} * mxl_flow_rate_den{node=~\"$node\",flow_id=~\"$flow\"} * 1000) * on(flow_id, domain, node) group_left(flow_data_type) (mxl_flow_metadata{flow_data_type=~\"[Aa]udio\"}) * on(flow_id, domain, node) group_left() (mxl_flow_active == 1), \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "legendFormat": "{{node}} / {{flow_short}}"
+        }
+      ]
+    },
+    {
+      "id": 104,
+      "title": "Frame Rate",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 11,
+      "title": "Video Head Index Rate (frames/s)",
+      "description": "Grains per second written to a discrete flow, as a one-minute rate over the head index. A stable value at the flow's declared grain rate is the healthy reading. Separate from audio because a sample rate and a frame rate on one axis flatten the frame rate to a line at zero.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(rate(mxl_flow_head_index_grains{node=~\"$node\",flow_id=~\"$flow\"}[1m]) * on(flow_id, domain, node) group_left() (mxl_flow_metadata{flow_data_type=~\"[Vv]ideo\"}), \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "legendFormat": "{{node}} / {{flow_short}}"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Audio Head Index Rate (samples/s)",
+      "description": "Samples per second written to a continuous flow, as a one-minute rate over the head index. Zero means the writer stopped.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(rate(mxl_flow_head_index_grains{node=~\"$node\",flow_id=~\"$flow\"}[1m]) * on(flow_id, domain, node) group_left() (mxl_flow_metadata{flow_data_type=~\"[Aa]udio\"}), \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "legendFormat": "{{node}} / {{flow_short}}"
+        }
+      ]
+    },
+    {
+      "id": 105,
+      "title": "Stream Throughput",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 20,
+      "title": "Video Stream Throughput (B/s)",
+      "description": "Approximate payload rate, as grains per second times payload slice size. Known limitation: mxl_flow_payload_slice_size_bytes reports one slice, not a whole grain, so a multi-slice discrete flow reads low by its slices-per-grain factor. libmxl exposes no slices-per-grain value, and deriving one from the frame height in the query would break at any other resolution.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace((rate(mxl_flow_head_index_grains{node=~\"$node\",flow_id=~\"$flow\"}[1m]) * ignoring(payload_buffer_index) mxl_flow_payload_slice_size_bytes{node=~\"$node\",flow_id=~\"$flow\",payload_buffer_index=\"0\"}) * on(flow_id, domain, node) group_left() (mxl_flow_metadata{flow_data_type=~\"[Vv]ideo\"}), \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "legendFormat": "{{node}} / {{flow_short}}"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "Audio Stream Throughput (B/s)",
+      "description": "Approximate payload rate for continuous flows, on the same basis as the discrete panel and subject to the same slice-size limitation. Orders of magnitude below video, so it is shown separately rather than flattened by a shared axis.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace((rate(mxl_flow_head_index_grains{node=~\"$node\",flow_id=~\"$flow\"}[1m]) * ignoring(payload_buffer_index) mxl_flow_payload_slice_size_bytes{node=~\"$node\",flow_id=~\"$flow\",payload_buffer_index=\"0\"}) * on(flow_id, domain, node) group_left() (mxl_flow_metadata{flow_data_type=~\"[Aa]udio\"}), \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "legendFormat": "{{node}} / {{flow_short}}"
+        }
+      ]
+    },
+    {
+      "id": 106,
+      "title": "Liveness",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 7,
+      "title": "Last Write Age (ms)",
+      "description": "Time since the last write to the flow, measured on the MXL clock at scrape time. A running flow holds this at about one grain duration. The exporter computes the age itself: subtracting the scrape-time timestamp from the query evaluation clock instead reports roughly half a scrape interval.",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 45
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(mxl_flow_last_write_age_seconds{node=~\"$node\",flow_id=~\"$flow\"} * 1000, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "legendFormat": "{{node}} / {{flow_short}}"
+        }
+      ]
+    },
+    {
+      "id": 107,
+      "title": "Buffer & Memory Configuration",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 53
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 13,
+      "title": "Ring Buffer Depth (ms)",
+      "description": "How much content a flow's ring buffer holds, as grain count times grain duration. This is the lag a reader may accumulate before the writer overwrites grains it has not read yet. Fixed when the flow is created.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 54
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(mxl_flow_ring_buffer_size_grains{node=~\"$node\",flow_id=~\"$flow\"} / mxl_flow_rate_num{node=~\"$node\",flow_id=~\"$flow\"} * mxl_flow_rate_den{node=~\"$node\",flow_id=~\"$flow\"} * 1000, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "legendFormat": "{{node}} / {{flow_short}}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Payload Slice Size",
+      "description": "Size of one payload buffer slice for the flow's first plane, in bytes. Together with the ring buffer depth it gives the flow's memory footprint. Fixed when the flow is created.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 54
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(mxl_flow_payload_slice_size_bytes{node=~\"$node\",flow_id=~\"$flow\",payload_buffer_index=\"0\"}, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "legendFormat": "{{node}} / {{flow_short}}"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "title": "Audio Channels",
+      "description": "Channel count of a continuous flow. Only continuous flows carry this, so the panel is empty when the Node filter selects nodes holding discrete flows only.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 54
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(mxl_flow_channels_total{node=~\"$node\",flow_id=~\"$flow\"}, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "legendFormat": "{{node}} / {{flow_short}}"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "title": "Domain Filesystem Utilization",
+      "description": "Used share of the filesystem backing the domain, as used / (used + available). Flows reserve their buffers up front, so the value is flat while they run rather than growing with uptime. At 100% no further flow can be created, which makes this the panel to read before changing a buffer size.",
+      "type": "gauge",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 54
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "mxl_domain_size_bytes{node=~\"$node\"} / ignoring(fs_path) (mxl_domain_size_bytes{node=~\"$node\"} + ignoring(fs_path) mxl_domain_fs_space_available_bytes{node=~\"$node\"}) * 100",
+          "legendFormat": "{{node}}"
+        }
+      ]
+    },
+    {
+      "id": 108,
+      "title": "Flow Metadata",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 58
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 8,
+      "title": "Flow Metadata",
+      "description": "Static properties of every flow the exporter found, taken from the flow_def.json written when the flow was created and from the flow header. Covers flow id, data type, media type, colorspace, label, description and group hint.",
+      "type": "table",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 59
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "role"
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "instant": true,
+          "format": "table",
+          "expr": "label_replace(mxl_flow_metadata{node=~\"$node\",flow_id=~\"$flow\"}, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "legendFormat": ""
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "container": true,
+              "endpoint": true,
+              "instance": true,
+              "job": true,
+              "namespace": true,
+              "pod": true,
+              "service": true
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 38,
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser"
+}

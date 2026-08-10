@@ -16,7 +16,8 @@
       "extra-files": [
         { "type": "generic", "path": "/agent/go.mod" },
         { "type": "generic", "path": "/operator/go.mod" },
-        { "type": "generic", "path": "/gateway/go.mod" }
+        { "type": "generic", "path": "/gateway/go.mod" },
+        { "type": "generic", "path": "/exporter/go.mod" }
       ]
     },
     ".": {

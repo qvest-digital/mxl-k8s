@@ -657,6 +657,591 @@
       ],
       "title": "crds"
     },
+    "dashboards": {
+      "description": " for Grafana's dashboard sidecar to discover.",
+      "properties": {
+        "annotations": {
+          "description": "Annotations on the ConfigMaps. grafana_folder places the dashboard when the sidecar runs with folderAnnotation set.",
+          "properties": {
+            "grafana_folder": {
+              "default": "MXL",
+              "title": "grafana_folder",
+              "type": "string"
+            }
+          },
+          "required": [
+            "grafana_folder"
+          ],
+          "title": "annotations"
+        },
+        "datasourceUid": {
+          "default": "prometheus",
+          "description": "uid of the Prometheus datasource the panels query. The default is what kube-prometheus-stack names its own; a Grafana provisioned otherwise states its uid here.",
+          "required": [],
+          "title": "datasourceUid"
+        },
+        "enabled": {
+          "default": "false",
+          "description": "Ship the bundled dashboards.",
+          "required": [],
+          "title": "enabled"
+        },
+        "labels": {
+          "description": "Labels the sidecar selects on. A deployment configured with a non-empty sidecar labelValue, or selecting on a release label, sets its own here.",
+          "properties": {
+            "grafana_dashboard": {
+              "default": "1",
+              "title": "grafana_dashboard",
+              "type": "string"
+            }
+          },
+          "required": [
+            "grafana_dashboard"
+          ],
+          "title": "labels"
+        },
+        "namespace": {
+          "default": "",
+          "description": "Namespace to place the ConfigMaps in. Empty uses the release namespace. The sidecar's searchNamespace defaults to the namespace Grafana runs in, so a Grafana installed elsewhere needs either that setting widened or this pointed at it.",
+          "required": [],
+          "title": "namespace"
+        }
+      },
+      "required": [],
+      "title": "dashboards"
+    },
+    "exporter": {
+      "description": " serves Prometheus metrics for every flow materialized on it. A domain is shared by every pod on its node, so one DaemonSet covers the node and reports each flow once; a second reader of the same domain would only repeat it.",
+      "properties": {
+        "affinity": {
+          "required": [],
+          "title": "affinity",
+          "type": "object"
+        },
+        "args": {
+          "description": "Extra raw args appended after the rendered flags.",
+          "items": {
+            "required": []
+          },
+          "required": [],
+          "title": "args"
+        },
+        "containerSecurityContext": {
+          "properties": {
+            "allowPrivilegeEscalation": {
+              "default": false,
+              "title": "allowPrivilegeEscalation",
+              "type": "boolean"
+            },
+            "capabilities": {
+              "properties": {
+                "drop": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "required": []
+                  },
+                  "title": "drop",
+                  "type": "array"
+                }
+              },
+              "required": [
+                "drop"
+              ],
+              "title": "capabilities",
+              "type": "object"
+            },
+            "readOnlyRootFilesystem": {
+              "default": true,
+              "title": "readOnlyRootFilesystem",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "allowPrivilegeEscalation",
+            "readOnlyRootFilesystem",
+            "capabilities"
+          ],
+          "title": "containerSecurityContext",
+          "type": "object"
+        },
+        "enabled": {
+          "default": "false",
+          "description": "Deploy the exporter DaemonSet.",
+          "required": [],
+          "title": "enabled"
+        },
+        "extraEnv": {
+          "items": {
+            "required": []
+          },
+          "title": "extraEnv",
+          "type": "array"
+        },
+        "extraVolumeMounts": {
+          "items": {
+            "required": []
+          },
+          "title": "extraVolumeMounts",
+          "type": "array"
+        },
+        "extraVolumes": {
+          "items": {
+            "required": []
+          },
+          "title": "extraVolumes",
+          "type": "array"
+        },
+        "flags": {
+          "description": "key=value.",
+          "properties": {
+            "domainPath": {
+              "default": "/run/mxl/domain",
+              "description": "Absolute path of the MXL domain directory to report on. Must resolve to the same domain the agent watches, below hostPath.run.",
+              "required": [],
+              "title": "domainPath"
+            },
+            "flowLifetime": {
+              "default": "24h",
+              "description": "How long a departed flow keeps being exported with mxl_flow_present at 0, so a flow that ends between two scrapes leaves a record rather than a gap.",
+              "required": [],
+              "title": "flowLifetime"
+            },
+            "healthProbeBindAddress": {
+              "default": ":8081",
+              "description": " pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$ @schema",
+              "pattern": "^:[0-9]+$|^[0-9.]+:[0-9]+$",
+              "required": [],
+              "title": "healthProbeBindAddress"
+            },
+            "metricsBindAddress": {
+              "default": ":8080",
+              "description": " pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$ @schema",
+              "pattern": "^:[0-9]+$|^[0-9.]+:[0-9]+$",
+              "required": [],
+              "title": "metricsBindAddress"
+            },
+            "scanPeriod": {
+              "default": "5s",
+              "description": "How often the domain directory is re-listed for flows that appeared or disappeared. Scrapes read the cache this maintains.",
+              "required": [],
+              "title": "scanPeriod"
+            }
+          },
+          "required": [],
+          "title": "flags"
+        },
+        "hostPath": {
+          "description": "hostPath layout. The exporter mounts the runtime root read-only; it opens libmxl flow readers and never writes into the domain.",
+          "properties": {
+            "run": {
+              "default": "/run/mxl",
+              "title": "run",
+              "type": "string"
+            },
+            "type": {
+              "default": "Directory",
+              "description": " enum: [\"\", \"DirectoryOrCreate\", \"Directory\"] @schema",
+              "enum": [
+                "",
+                "DirectoryOrCreate",
+                "Directory"
+              ],
+              "required": [],
+              "title": "type"
+            }
+          },
+          "required": [
+            "run"
+          ],
+          "title": "hostPath"
+        },
+        "image": {
+          "properties": {
+            "digest": {
+              "default": "",
+              "description": "Image digest. Wins over tag when set. @schema pattern: ^$|^sha256:[0-9a-f]{64}$ @schema",
+              "pattern": "^$|^sha256:[0-9a-f]{64}$",
+              "required": [],
+              "title": "digest"
+            },
+            "pullPolicy": {
+              "default": "",
+              "description": " enum: [\"\", \"Always\", \"IfNotPresent\", \"Never\"] @schema",
+              "enum": [
+                "",
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ],
+              "required": [],
+              "title": "pullPolicy"
+            },
+            "repository": {
+              "default": "exporter",
+              "title": "repository",
+              "type": "string"
+            },
+            "tag": {
+              "default": "",
+              "description": "Image tag. Empty defaults to the chart appVersion prefixed with \"v\": the exporter image is released under the chart version. Set this or image.digest.",
+              "required": [],
+              "title": "tag"
+            }
+          },
+          "required": [
+            "repository"
+          ],
+          "title": "image",
+          "type": "object"
+        },
+        "livenessProbe": {
+          "properties": {
+            "httpGet": {
+              "properties": {
+                "path": {
+                  "default": "/healthz",
+                  "title": "path",
+                  "type": "string"
+                },
+                "port": {
+                  "default": "probe",
+                  "title": "port",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "port"
+              ],
+              "title": "httpGet",
+              "type": "object"
+            },
+            "initialDelaySeconds": {
+              "default": 5,
+              "title": "initialDelaySeconds",
+              "type": "integer"
+            },
+            "periodSeconds": {
+              "default": 20,
+              "title": "periodSeconds",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "httpGet",
+            "initialDelaySeconds",
+            "periodSeconds"
+          ],
+          "title": "livenessProbe",
+          "type": "object"
+        },
+        "metrics": {
+          "properties": {
+            "service": {
+              "properties": {
+                "enabled": {
+                  "default": true,
+                  "title": "enabled",
+                  "type": "boolean"
+                },
+                "port": {
+                  "default": "8080",
+                  "description": " minimum: 1 maximum: 65535 @schema",
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "required": [],
+                  "title": "port"
+                },
+                "type": {
+                  "default": "ClusterIP",
+                  "description": " enum: [\"ClusterIP\", \"NodePort\", \"LoadBalancer\"] @schema",
+                  "enum": [
+                    "ClusterIP",
+                    "NodePort",
+                    "LoadBalancer"
+                  ],
+                  "required": [],
+                  "title": "type"
+                }
+              },
+              "required": [
+                "enabled"
+              ],
+              "title": "service",
+              "type": "object"
+            },
+            "serviceMonitor": {
+              "properties": {
+                "enabled": {
+                  "default": "false",
+                  "description": "Create a ServiceMonitor. Requires the monitoring.coreos.com CRDs to be installed cluster-wide.",
+                  "required": [],
+                  "title": "enabled"
+                },
+                "interval": {
+                  "default": "30s",
+                  "title": "interval",
+                  "type": "string"
+                },
+                "labels": {
+                  "required": [],
+                  "title": "labels",
+                  "type": "object"
+                },
+                "metricRelabelings": {
+                  "items": {
+                    "required": []
+                  },
+                  "title": "metricRelabelings",
+                  "type": "array"
+                },
+                "relabelings": {
+                  "items": {
+                    "required": []
+                  },
+                  "title": "relabelings",
+                  "type": "array"
+                },
+                "scrapeTimeout": {
+                  "default": "10s",
+                  "title": "scrapeTimeout",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "interval",
+                "scrapeTimeout",
+                "labels",
+                "relabelings",
+                "metricRelabelings"
+              ],
+              "title": "serviceMonitor",
+              "type": "object"
+            }
+          },
+          "required": [
+            "service",
+            "serviceMonitor"
+          ],
+          "title": "metrics",
+          "type": "object"
+        },
+        "nodeSelector": {
+          "required": [],
+          "title": "nodeSelector",
+          "type": "object"
+        },
+        "podAnnotations": {
+          "required": [],
+          "title": "podAnnotations",
+          "type": "object"
+        },
+        "podLabels": {
+          "required": [],
+          "title": "podLabels",
+          "type": "object"
+        },
+        "podSecurityContext": {
+          "required": [],
+          "title": "podSecurityContext",
+          "type": "object"
+        },
+        "priorityClassName": {
+          "default": "",
+          "title": "priorityClassName",
+          "type": "string"
+        },
+        "readinessProbe": {
+          "properties": {
+            "httpGet": {
+              "properties": {
+                "path": {
+                  "default": "/readyz",
+                  "title": "path",
+                  "type": "string"
+                },
+                "port": {
+                  "default": "probe",
+                  "title": "port",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "port"
+              ],
+              "title": "httpGet",
+              "type": "object"
+            },
+            "initialDelaySeconds": {
+              "default": 2,
+              "title": "initialDelaySeconds",
+              "type": "integer"
+            },
+            "periodSeconds": {
+              "default": 10,
+              "title": "periodSeconds",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "httpGet",
+            "initialDelaySeconds",
+            "periodSeconds"
+          ],
+          "title": "readinessProbe",
+          "type": "object"
+        },
+        "resources": {
+          "properties": {
+            "limits": {
+              "required": [],
+              "title": "limits",
+              "type": "object"
+            },
+            "requests": {
+              "properties": {
+                "cpu": {
+                  "default": "25m",
+                  "title": "cpu",
+                  "type": "string"
+                },
+                "memory": {
+                  "default": "64Mi",
+                  "title": "memory",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cpu",
+                "memory"
+              ],
+              "title": "requests",
+              "type": "object"
+            }
+          },
+          "required": [
+            "requests",
+            "limits"
+          ],
+          "title": "resources",
+          "type": "object"
+        },
+        "serviceAccount": {
+          "properties": {
+            "annotations": {
+              "required": [],
+              "title": "annotations",
+              "type": "object"
+            },
+            "automountServiceAccountToken": {
+              "default": true,
+              "title": "automountServiceAccountToken",
+              "type": "boolean"
+            },
+            "create": {
+              "default": true,
+              "title": "create",
+              "type": "boolean"
+            },
+            "labels": {
+              "required": [],
+              "title": "labels",
+              "type": "object"
+            },
+            "name": {
+              "default": "",
+              "description": "ServiceAccount name. Empty falls back to the generated name.",
+              "required": [],
+              "title": "name"
+            }
+          },
+          "required": [
+            "create",
+            "annotations",
+            "labels",
+            "automountServiceAccountToken"
+          ],
+          "title": "serviceAccount",
+          "type": "object"
+        },
+        "tolerations": {
+          "items": {
+            "required": []
+          },
+          "title": "tolerations",
+          "type": "array"
+        },
+        "topology": {
+          "properties": {
+            "enabled": {
+              "default": "true",
+              "description": "Publish mxl_flow_location_info from the MxlFlow CRs. That is what names the producing node (phase Origin), so dashboards do not need media functions to label themselves. Disabling it drops the metric and the exporter's only API access.",
+              "required": [],
+              "title": "enabled"
+            }
+          },
+          "required": [],
+          "title": "topology",
+          "type": "object"
+        },
+        "updateStrategy": {
+          "properties": {
+            "rollingUpdate": {
+              "properties": {
+                "maxUnavailable": {
+                  "default": 1,
+                  "title": "maxUnavailable",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "maxUnavailable"
+              ],
+              "title": "rollingUpdate",
+              "type": "object"
+            },
+            "type": {
+              "default": "RollingUpdate",
+              "title": "type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "rollingUpdate",
+            "type"
+          ],
+          "title": "updateStrategy",
+          "type": "object"
+        }
+      },
+      "required": [
+        "updateStrategy",
+        "image",
+        "topology",
+        "serviceAccount",
+        "podAnnotations",
+        "podLabels",
+        "priorityClassName",
+        "nodeSelector",
+        "tolerations",
+        "affinity",
+        "extraEnv",
+        "extraVolumes",
+        "extraVolumeMounts",
+        "resources",
+        "podSecurityContext",
+        "containerSecurityContext",
+        "livenessProbe",
+        "readinessProbe",
+        "metrics"
+      ],
+      "title": "exporter"
+    },
     "gateway": {
       "description": "Gateway: per-node DaemonSet that owns libmxl-fabrics handles and moves grains across the wire. Runs with hostNetwork so the fabric endpoint binds the node interface.",
       "properties": {

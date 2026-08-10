@@ -2,14 +2,15 @@
 # check-api-pins.sh -- fail when a consuming module's api require
 # does not name the api version release-please last released.
 #
-# agent, operator and gateway resolve api through a local replace
+# agent, operator, gateway and exporter resolve api through a local
+# replace
 # directive, so the require line never affects a build inside this
 # repository and a stale pin compiles and tests green. It is what
 # `go get github.com/qvest-digital/mxl-k8s/agent@vX` resolves for a
 # consumer outside the repository, and what the module's own release
 # publishes as its dependency set.
 #
-# release-please rewrites the three require lines inside the api
+# release-please rewrites the four require lines inside the api
 # release pull request (extra-files on the api package, driven by the
 # `// x-release-please-version` annotation on each line), so the pin
 # and the tag land in the same commit. This gate is the backstop for
@@ -22,7 +23,7 @@
 set -eu
 
 MANIFEST="${MANIFEST:-.github/release-please-manifest.json}"
-MODULES="${MODULES:-agent operator gateway}"
+MODULES="${MODULES:-agent operator gateway exporter}"
 API_MODULE="github.com/qvest-digital/mxl-k8s/api"
 ANNOTATION="x-release-please-version"
 

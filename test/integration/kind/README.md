@@ -47,6 +47,12 @@ Tunables (all optional, environment variables):
 | `SELF_MIRROR_TIMEOUT_SECS` | `90` | Case 55 wait for the self-targeted mirror to go |
 | `SURVIVAL_SETTLE_SECS` | `10` | Case 55 settle window before asserting the flow outlived the teardown |
 | `LEASES_NAMESPACE` | `$MXL_NAMESPACE` | Namespace case 56 reads origin Leases from |
+| `EXPORTER_WINDOW_SECS` | `6` | Case 47 head-index sample window |
+| `EXPORTER_DISCOVER_TIMEOUT_SECS` | `60` | Case 47 wait for the exporter to list the demo flow |
+| `EXPORTER_METRICS_PORT` | `8080` | Case 47 exporter metrics container port |
+| `MONITORING_NAMESPACE` | `monitoring` | Namespace case 48 reads Prometheus and Grafana from |
+| `SCRAPE_TIMEOUT_SECS` | `90` | Case 48 wait for the first exporter samples to reach Prometheus |
+| `GRAFANA_AUTH` | `admin:admin` | Case 48 Grafana API credentials |
 | `KIND_DIAG_DIR` | `$PWD/kind-diagnostics` | Where failure diagnostics land |
 | `CASE_GLOB` | `cases/*.sh` | Case selection glob |
 
