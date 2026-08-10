@@ -203,7 +203,7 @@ jobs:
           # The images the repository version covers. demo-tools is
           # excluded on purpose: it carries no Go module and ships
           # only on the :dev / :sha-<short> channel.
-          declare -a released=(operator agent gateway shim)
+          declare -a released=(operator agent gateway exporter shim)
 
           if [ -n "${INPUT_RELEASE_TAG:-}" ]; then
             push=true
@@ -216,8 +216,8 @@ jobs:
             esac
             # One tag covers every released image: the root
             # release-please package spans operator, agent, gateway,
-            # shim and the chart, so they all publish the same
-            # version. Selecting them here overrides the diff filter,
+            # exporter, shim and the chart, so they all publish the
+            # same version. Selecting them here overrides the diff filter,
             # which is meaningless for a workflow_call.
             for k in "${!wanted[@]}"; do wanted[$k]=false; done
             for k in "${released[@]}"; do wanted[$k]=true; done
