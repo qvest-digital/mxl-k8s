@@ -50,17 +50,25 @@ port_forward_probe() {
   port_forward_fetch "$1" "$2" "$3" /dev/null
 }
 
-# port_forward_fetch <pod> <port> <path> [body-file]
+# port_forward_fetch <pod> <port> <path> [body-file] [curl-arg...]
 # Opens a kubectl port-forward to pod:port, GETs /<path>, writes the
 # response body to body-file when one is named, and prints the HTTP
-# status code on stdout. Returns 0 iff the code is 200.
+# status code on stdout. Returns 0 iff the code is 200. Any further
+# arguments are passed to curl, which is how a caller sends
+# credentials. Set PF_NAMESPACE to address a pod outside $NAMESPACE.
 # Random-binds locally (`0:port`) and learns the assigned port from
 # kubectl's stdout, avoiding clashes with parallel forwards.
 port_forward_fetch() {
   local pod="$1" port="$2" path="$3" body="${4:-/dev/null}"
+  local ns="${PF_NAMESPACE:-$NAMESPACE}"
   local pf_log local_port code rc deadline pf_pid
+  local extra=()
+  if [ "$#" -gt 4 ]; then
+    shift 4
+    extra=("$@")
+  fi
   pf_log="$(mktemp)"
-  "${KUBECTL[@]}" -n "$NAMESPACE" port-forward "pod/${pod}" "0:${port}" \
+  "${KUBECTL[@]}" -n "$ns" port-forward "pod/${pod}" "0:${port}" \
       > "$pf_log" 2>&1 &
   pf_pid=$!
 
@@ -80,7 +88,7 @@ port_forward_fetch() {
     return 1
   fi
 
-  code=$(curl -sS -o "$body" -w '%{http_code}' \
+  code=$(curl -sS ${extra[@]+"${extra[@]}"} -o "$body" -w '%{http_code}' \
               --max-time 10 "http://127.0.0.1:${local_port}/${path}" || echo "000")
   rc=0
   [ "$code" = "200" ] || rc=1
@@ -97,7 +105,7 @@ port_forward_fetch() {
 # non-zero. Used by cases that need to address a concrete pod.
 resolve_pod() {
   local label="$1" pod
-  pod=$("${KUBECTL[@]}" -n "$NAMESPACE" get pods \
+  pod=$("${KUBECTL[@]}" -n "${PF_NAMESPACE:-$NAMESPACE}" get pods \
           -l "app.kubernetes.io/name=${label}" \
           --field-selector=status.phase=Running \
           -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)

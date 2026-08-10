@@ -88,19 +88,30 @@ writer_exp=$(daemonset_pod_on exporter "$writer_node")
 [ -n "$writer_exp" ] || fail "no exporter pod running on ${writer_node}"
 echo "-> exporter on the writer node: ${writer_exp}"
 
-# The exporter re-lists the domain on a timer, so a flow created just
-# before this case runs may not be in the first scrape.
+# Wait for the flow to be both present and moving before measuring
+# anything. The exporter re-lists the domain on a timer, so a flow
+# created just before this case runs may not be in the first scrape;
+# and a writer that has only just started leaves its flow directory in
+# place before it produces, so present alone would let the head-index
+# window below open against a stalled flow.
+#
+# Activity needs two collections to be decidable at all, which this
+# loop supplies by scraping repeatedly.
 deadline=$(( $(date +%s) + DISCOVER_TIMEOUT_SECS ))
 present=""
+active=""
 while [ "$(date +%s)" -lt "$deadline" ]; do
   scrape "$writer_exp" "$WORK_DIR/first.txt"
   present=$(metric_value "$WORK_DIR/first.txt" mxl_flow_present "$VIDEO_FLOW")
-  [ "$present" = "1" ] && break
+  active=$(metric_value "$WORK_DIR/first.txt" mxl_flow_active "$VIDEO_FLOW")
+  [ "$present" = "1" ] && [ "$active" = "1" ] && break
   sleep 3
 done
 [ "$present" = "1" ] \
   || fail "mxl_flow_present for ${VIDEO_FLOW} never reached 1 on ${writer_node} within ${DISCOVER_TIMEOUT_SECS}s"
-echo "   mxl_flow_present: 1"
+[ "$active" = "1" ] \
+  || fail "mxl_flow_active for ${VIDEO_FLOW} never reached 1 on ${writer_node} within ${DISCOVER_TIMEOUT_SECS}s; the writer is present but not producing"
+echo "   mxl_flow_present: 1, mxl_flow_active: 1"
 
 # Every series carries the node the exporter runs on. Without it two
 # nodes' samples for one flow would be indistinguishable.
@@ -146,10 +157,10 @@ advanced=$(awk -v a="$first_head" -v b="$last_head" 'BEGIN { print (b+0 > a+0) ?
   || fail "head index did not advance over ${SAMPLE_WINDOW_SECS}s: first=${first_head} last=${last_head}"
 echo "   head index advanced: ${first_head} -> ${last_head}"
 
-active=$(metric_value "$WORK_DIR/second.txt" mxl_flow_active "$VIDEO_FLOW")
-[ "$active" = "1" ] \
-  || fail "mxl_flow_active for ${VIDEO_FLOW} is '${active}' on the second scrape, expected 1"
-echo "   mxl_flow_active: 1"
+still_active=$(metric_value "$WORK_DIR/second.txt" mxl_flow_active "$VIDEO_FLOW")
+[ "$still_active" = "1" ] \
+  || fail "mxl_flow_active for ${VIDEO_FLOW} fell to '${still_active}' across the window, expected it to stay 1"
+echo "   mxl_flow_active: still 1"
 
 # The MXL clock is the exporter's own, so the age has to be a small
 # positive number rather than a wall-clock difference against a scrape
