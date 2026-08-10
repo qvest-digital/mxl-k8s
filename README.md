@@ -106,8 +106,8 @@ For cluster operators:
   `ghcr.io/qvest-digital/mxl-k8s/<component>` for every PR,
   every push to `main` (`:dev` plus `:sha-<short>`), and every
   release tag (`:vX.Y.Z` plus `:latest` or `:pre`). operator,
-  agent, gateway, shim and the chart share one version, so `vX.Y.Z`
-  names the same release across all of them.
+  agent, gateway, exporter, shim and the chart share one version, so
+  `vX.Y.Z` names the same release across all of them.
 
 ## Install via Helm
 
@@ -167,7 +167,7 @@ and what to look at if convergence stalls.
 
 ## Repository layout
 
-The repo is a Go workspace with four modules:
+The repo is a Go workspace with five modules:
 
 | Module | Path | Purpose |
 | --- | --- | --- |
@@ -175,6 +175,21 @@ The repo is a Go workspace with four modules:
 | `operator` | `github.com/qvest-digital/mxl-k8s/operator` | Cluster operator that reconciles the CRDs. |
 | `agent` | `github.com/qvest-digital/mxl-k8s/agent` | Per-node DaemonSet. Pure Go; watches the domain via `fanotify`, does not link libmxl. |
 | `gateway` | `github.com/qvest-digital/mxl-k8s/gateway` | Per-node DaemonSet. Links libmxl + libmxl-fabrics via [`go-mxl`][go-mxl]. |
+| `exporter` | `github.com/qvest-digital/mxl-k8s/exporter` | Per-node DaemonSet. Prometheus metrics for the flows in the node's domain. Links libmxl via [`go-mxl`][go-mxl]. |
+
+The exporter's metric set and its entry-lifetime model are ported from
+[`mxl-exporter`][mxl-exporter] by Jonas Ohland (Apache-2.0). That
+exporter predates go-mxl's public release and read the domain's
+shared-memory layout by parsing the structures itself; here the same
+values come from go-mxl. The metric names are kept, so dashboards built
+against it keep working.
+
+Its series carry `node` and `flow_id`, not `pod`. A domain is shared by
+every pod on its node, so one exporter per node reports each flow once.
+`mxl_flow_location_info`, read from the `MxlFlow` CRs, gives the phase
+per node -- `Origin` on the node the writer runs on -- which separates a
+produced flow from a mirrored one without a media function labelling
+itself.
 
 [`docs/USAGE.md`](docs/USAGE.md) covers the prerequisites for a
 media function (container, libmxl link, capabilities) and how to
@@ -186,3 +201,4 @@ and the cgo lane for `gateway`.
 [mxl]: https://github.com/dmf-mxl/mxl
 [go-mxl]: https://github.com/qvest-digital/go-mxl
 [kind]: https://kind.sigs.k8s.io/
+[mxl-exporter]: https://github.com/jonasohland/mxl-exporter

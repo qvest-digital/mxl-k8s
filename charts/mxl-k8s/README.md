@@ -172,6 +172,60 @@ Kubernetes: `>=1.28-0`
 | cleanup.preDeleteDomainWipe.nodeCount | int | `1` | Effective node count for the agent DaemonSet. An under-set value yields a partial wipe; the nodecount-guard init-container fails the chart with a clear error in that case. |
 | cleanup.preDeleteDomainWipe.timeoutSeconds | int | `120` | Per-pod completion timeout. |
 | crds | object | `{"skipInstall":false}` | CRD handling. The chart installs CRDs from its crds/ directory by default. Helm only installs them on first install and never deletes or upgrades them; Flux's HelmRelease.spec.{install,upgrade}.crds governs replace semantics. Set skipInstall=true when CRDs are managed by a separate Kustomization or operator framework. |
+| exporter.affinity | object | `{}` |  |
+| exporter.args | list | `[]` | Extra raw args appended after the rendered flags. |
+| exporter.containerSecurityContext.allowPrivilegeEscalation | bool | `false` |  |
+| exporter.containerSecurityContext.capabilities.drop[0] | string | `"ALL"` |  |
+| exporter.containerSecurityContext.readOnlyRootFilesystem | bool | `true` |  |
+| exporter.enabled | bool | `false` | Deploy the exporter DaemonSet. |
+| exporter.extraEnv | list | `[]` |  |
+| exporter.extraVolumeMounts | list | `[]` |  |
+| exporter.extraVolumes | list | `[]` |  |
+| exporter.flags.domainPath | string | `"/run/mxl/domain"` | Absolute path of the MXL domain directory to report on. Must resolve to the same domain the agent watches, below hostPath.run. |
+| exporter.flags.flowLifetime | string | `"24h"` | How long a departed flow keeps being exported with mxl_flow_present at 0, so a flow that ends between two scrapes leaves a record rather than a gap. |
+| exporter.flags.healthProbeBindAddress | string | `":8081"` |  |
+| exporter.flags.metricsBindAddress | string | `":8080"` |  |
+| exporter.flags.scanPeriod | string | `"5s"` | How often the domain directory is re-listed for flows that appeared or disappeared. Scrapes read the cache this maintains. |
+| exporter.hostPath | object | `{"run":"/run/mxl","type":"Directory"}` | hostPath layout. The exporter mounts the runtime root read-only; it opens libmxl flow readers and never writes into the domain. |
+| exporter.image.digest | string | `""` |  |
+| exporter.image.pullPolicy | string | `""` |  |
+| exporter.image.registry | string | `""` |  |
+| exporter.image.repository | string | `"exporter"` |  |
+| exporter.image.tag | string | `""` | Image tag. Empty falls back to the chart's appVersion. |
+| exporter.livenessProbe.httpGet.path | string | `"/healthz"` |  |
+| exporter.livenessProbe.httpGet.port | string | `"probe"` |  |
+| exporter.livenessProbe.initialDelaySeconds | int | `5` |  |
+| exporter.livenessProbe.periodSeconds | int | `20` |  |
+| exporter.metrics.service.enabled | bool | `true` |  |
+| exporter.metrics.service.port | int | `8080` |  |
+| exporter.metrics.service.type | string | `"ClusterIP"` |  |
+| exporter.metrics.serviceMonitor.enabled | bool | `false` | Create a ServiceMonitor. Requires the monitoring.coreos.com CRDs to be installed cluster-wide. |
+| exporter.metrics.serviceMonitor.interval | string | `"30s"` |  |
+| exporter.metrics.serviceMonitor.labels | object | `{}` |  |
+| exporter.metrics.serviceMonitor.metricRelabelings | list | `[]` |  |
+| exporter.metrics.serviceMonitor.relabelings | list | `[]` |  |
+| exporter.metrics.serviceMonitor.scrapeTimeout | string | `"10s"` |  |
+| exporter.nodeSelector | object | `{}` |  |
+| exporter.podAnnotations | object | `{}` |  |
+| exporter.podLabels | object | `{}` |  |
+| exporter.podSecurityContext | object | `{}` |  |
+| exporter.priorityClassName | string | `""` |  |
+| exporter.readinessProbe.httpGet.path | string | `"/readyz"` |  |
+| exporter.readinessProbe.httpGet.port | string | `"probe"` |  |
+| exporter.readinessProbe.initialDelaySeconds | int | `2` |  |
+| exporter.readinessProbe.periodSeconds | int | `10` |  |
+| exporter.resources.limits | object | `{}` |  |
+| exporter.resources.requests.cpu | string | `"25m"` |  |
+| exporter.resources.requests.memory | string | `"64Mi"` |  |
+| exporter.serviceAccount.annotations | object | `{}` |  |
+| exporter.serviceAccount.automountServiceAccountToken | bool | `true` |  |
+| exporter.serviceAccount.create | bool | `true` |  |
+| exporter.serviceAccount.labels | object | `{}` |  |
+| exporter.serviceAccount.name | string | `""` | ServiceAccount name. Empty falls back to the generated name. |
+| exporter.tolerations | list | `[]` |  |
+| exporter.topology.enabled | bool | `true` | Publish mxl_flow_location_info from the MxlFlow CRs. That is what names the producing node (phase Origin), so dashboards do not need media functions to label themselves. Disabling it drops the metric and the exporter's only API access. |
+| exporter.updateStrategy.rollingUpdate.maxUnavailable | int | `1` |  |
+| exporter.updateStrategy.type | string | `"RollingUpdate"` |  |
 | gateway | object | `{"affinity":{},"args":[],"containerSecurityContext":{"allowPrivilegeEscalation":false,"capabilities":{"add":[],"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsNonRoot":false},"dnsPolicy":"ClusterFirstWithHostNet","enabled":true,"extraContainers":[],"extraEnv":[],"extraVolumeMounts":[],"extraVolumes":[],"flags":{"bindAddress":"$(POD_IP)","degradedAfter":"10s","domainPath":"/run/mxl/domain","fabricCidr":[],"fabricDevice":[],"fabricMinLinkSpeed":"","healthProbeBindAddress":":8081","metricsBindAddress":":8080","pprofBindAddress":"","probePeriod":"5m","providers":["any"],"resyncPeriod":"30s","zapLogLevel":"info"},"hostNetwork":true,"hostPath":{"domain":"/run/mxl/domain","type":"DirectoryOrCreate"},"image":{"digest":"","pullPolicy":"","repository":"gateway","tag":""},"initContainers":[],"livenessProbe":{"httpGet":{"path":"/healthz","port":"probe"},"initialDelaySeconds":5},"metrics":{"service":{"enabled":true,"port":8080,"type":"ClusterIP"},"serviceMonitor":{"enabled":false,"interval":"30s","labels":{},"metricRelabelings":[],"relabelings":[],"scrapeTimeout":"10s"}},"nodeSelector":{},"podAnnotations":{},"podLabels":{},"podSecurityContext":{},"priorityClassName":"","rdma":{"enabled":false,"extraEnv":[],"infinibandHostPath":"/dev/infiniband","infinibandHostPathType":"Directory","mountInfiniband":true,"resourceName":""},"readinessProbe":{"httpGet":{"path":"/readyz","port":"probe"},"initialDelaySeconds":2},"resources":{"limits":{},"requests":{"cpu":"100m","memory":"128Mi"}},"serviceAccount":{"annotations":{},"automountServiceAccountToken":true,"create":true,"labels":{},"name":""},"tolerations":[],"topologySpreadConstraints":[],"updateStrategy":{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"},"variants":{"efa":{"enabled":false,"flags":{"providers":["tcp","efa"]},"rdma":{"enabled":true,"mountInfiniband":false,"resourceName":"vpc.amazonaws.com/efa"}},"tcp":{"enabled":false,"flags":{"providers":["tcp"]}},"verbs":{"enabled":false,"flags":{"providers":["tcp","verbs"]},"rdma":{"enabled":true,"mountInfiniband":false,"resourceName":""}}}}` | Gateway: per-node DaemonSet that owns libmxl-fabrics handles and moves grains across the wire. Runs with hostNetwork so the fabric endpoint binds the node interface. |
 | gateway.containerSecurityContext.capabilities.add | list | `[]` | Additional caps beyond what rdma.enabled implies. |
 | gateway.flags.bindAddress | string | `"$(POD_IP)"` | Bind address for libmxl-fabrics endpoints. Default uses the downward-API POD_IP so each gateway binds its node IP. An explicit empty string ("") emits `--bind-address=` (bare equals), which suppresses the POD_IP fallback so libfabric picks the interface; useful when the gateway runs on a Multus-attached NAD and the RDMA fabric is a secondary netdev. |

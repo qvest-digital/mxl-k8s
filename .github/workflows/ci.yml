@@ -35,6 +35,7 @@ jobs:
       operator:     ${{ steps.f.outputs.operator }}
       agent:        ${{ steps.f.outputs.agent }}
       gateway:      ${{ steps.f.outputs.gateway }}
+      exporter:     ${{ steps.f.outputs.exporter }}
       generated:    ${{ steps.f.outputs.generated }}
       pure_go:      ${{ steps.f.outputs.pure_go }}
       workflow:     ${{ steps.f.outputs.workflow }}
@@ -55,6 +56,7 @@ jobs:
             operator:  ['operator/**', 'api/**', 'go.work*']
             agent:     ['agent/**', 'api/**', 'go.work*']
             gateway:   ['gateway/**', 'api/**', 'go.work*']
+            exporter:  ['exporter/**', 'api/**', 'go.work*']
             generated: ['api/**', 'operator/**', 'Makefile']
             pure_go:   ['api/**', 'operator/**', 'agent/**', 'go.work*']
             workflow:  ['.github/workflows/ci.yml']
@@ -62,6 +64,7 @@ jobs:
               - 'agent/go.mod'
               - 'operator/go.mod'
               - 'gateway/go.mod'
+              - 'exporter/go.mod'
               - '.github/release-please-manifest.json'
               - 'hack/check-api-pins.sh'
       - id: m
@@ -151,6 +154,41 @@ jobs:
 
       - name: go build
         run: cd gateway && go build ./...
+
+  # exporter is the second cgo lane. It links libmxl through go-mxl to
+  # read flow headers, so it builds in the same image as gateway. It
+  # does not link libmxl-fabrics.
+  exporter:
+    needs: changes
+    if: needs.changes.outputs.exporter == 'true' || needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.12
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Mark workspace as a safe git directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: gofmt
+        run: |
+          cd exporter
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "Files need gofmt:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: cd exporter && go vet ./...
+
+      - name: go build
+        run: cd exporter && go build ./...
+
+      - name: go test
+        run: cd exporter && go test ./...
 
   # The api require of agent, operator and gateway is rewritten inside
   # the release pull request, by the extra-files entries on the api
@@ -339,7 +377,7 @@ jobs:
   # conditional job individually and would block PRs that legitimately
   # skipped one (skipped checks count as "not satisfied" otherwise).
   ci-summary:
-    needs: [changes, lint, gateway, api-pins, manifests-check, test, test-gateway, report]
+    needs: [changes, lint, gateway, exporter, api-pins, manifests-check, test, test-gateway, report]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2

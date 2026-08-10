@@ -1,0 +1,72 @@
+suite: exporter
+templates:
+  - templates/daemonset-exporter.yaml
+  - templates/rbac-exporter.yaml
+tests:
+  # Off by default: the exporter is observability, and a chart bump
+  # must not start a DaemonSet on every node of a cluster that did not
+  # ask for one.
+  - it: renders nothing by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: mounts the runtime root read-only
+    set:
+      exporter.enabled: true
+    template: templates/daemonset-exporter.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].readOnly
+          value: true
+      - equal:
+          path: spec.template.spec.volumes[0].hostPath.path
+          value: /run/mxl
+
+  # NODE_NAME labels every series. Two nodes publishing the same flow
+  # are indistinguishable without it.
+  - it: passes the node name through the downward API
+    set:
+      exporter.enabled: true
+    template: templates/daemonset-exporter.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env[0].name
+          value: NODE_NAME
+      - equal:
+          path: spec.template.spec.containers[0].env[0].valueFrom.fieldRef.fieldPath
+          value: spec.nodeName
+
+  - it: grants read-only access to MxlFlow when topology is on
+    set:
+      exporter.enabled: true
+    template: templates/rbac-exporter.yaml
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: rules[0].resources
+          value: [mxlflows]
+      - equal:
+          path: rules[0].verbs
+          value: [get, list, watch]
+
+  # Turning topology off has to drop the API access with it, not just
+  # the flag: a role granted but unused is a role nobody notices.
+  - it: grants no API access when topology is off
+    set:
+      exporter.enabled: true
+      exporter.topology.enabled: false
+    template: templates/rbac-exporter.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders the topology flag from the same value as the role
+    set:
+      exporter.enabled: true
+      exporter.topology.enabled: false
+    template: templates/daemonset-exporter.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --topology=false

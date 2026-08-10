@@ -61,6 +61,7 @@ jobs:
       operator:   ${{ steps.f.outputs.operator }}
       agent:      ${{ steps.f.outputs.agent }}
       gateway:    ${{ steps.f.outputs.gateway }}
+      exporter:   ${{ steps.f.outputs.exporter }}
       shim:       ${{ steps.f.outputs.shim }}
       demo_tools: ${{ steps.f.outputs.demo_tools }}
       workflow:   ${{ steps.f.outputs.workflow }}
@@ -75,6 +76,7 @@ jobs:
             operator:   ['docker/operator.Dockerfile', 'operator/**', 'api/**', 'go.work*']
             agent:      ['docker/agent.Dockerfile', 'agent/**', 'api/**', 'go.work*']
             gateway:    ['docker/gateway.Dockerfile', 'gateway/**', 'api/**', 'go.work*']
+            exporter:   ['docker/exporter.Dockerfile', 'exporter/**', 'api/**', 'go.work*']
             shim:       ['docker/shim.Dockerfile', 'shim/**']
             demo_tools: ['docker/demo-tools.Dockerfile']
             workflow:   ['.github/workflows/images.yml']
@@ -143,6 +145,7 @@ jobs:
       CHANGED_OPERATOR:   ${{ needs.changes.outputs.operator   || 'true' }}
       CHANGED_AGENT:      ${{ needs.changes.outputs.agent      || 'true' }}
       CHANGED_GATEWAY:    ${{ needs.changes.outputs.gateway    || 'true' }}
+      CHANGED_EXPORTER:   ${{ needs.changes.outputs.exporter   || 'true' }}
       CHANGED_SHIM:       ${{ needs.changes.outputs.shim       || 'true' }}
       CHANGED_DEMO_TOOLS: ${{ needs.changes.outputs.demo_tools || 'true' }}
       CHANGED_WORKFLOW:   ${{ needs.changes.outputs.workflow   || 'false' }}
@@ -164,6 +167,7 @@ jobs:
             "operator|docker/operator.Dockerfile"
             "agent|docker/agent.Dockerfile"
             "gateway|docker/gateway.Dockerfile"
+            "exporter|docker/exporter.Dockerfile"
             "shim|docker/shim.Dockerfile"
             "demo-tools|docker/demo-tools.Dockerfile"
           )
@@ -175,6 +179,7 @@ jobs:
             [operator]="$CHANGED_OPERATOR"
             [agent]="$CHANGED_AGENT"
             [gateway]="$CHANGED_GATEWAY"
+            [exporter]="$CHANGED_EXPORTER"
             [shim]="$CHANGED_SHIM"
             [demo-tools]="$CHANGED_DEMO_TOOLS"
           )

@@ -1,0 +1,19 @@
+{{- if and .Values.exporter.enabled .Values.exporter.metrics.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}-exporter-metrics
+  namespace: {{ include "mxlk8s.namespace" . }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "exporter") | nindent 4 }}
+spec:
+  type: {{ .Values.exporter.metrics.service.type }}
+  clusterIP: None
+  selector:
+    {{- include "mxlk8s.selectorLabels" (dict "Context" . "component" "exporter") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.exporter.metrics.service.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

@@ -607,3 +607,125 @@ gateway:
       enabled: false
       flags:
         providers: [tcp]
+
+# Per-node flow metrics exporter. Reads the node's MXL domain and
+# serves Prometheus metrics for every flow materialized on it. A domain
+# is shared by every pod on its node, so one DaemonSet covers the node
+# and reports each flow once; a second reader of the same domain would
+# only repeat it.
+exporter:
+  # -- Deploy the exporter DaemonSet.
+  enabled: false
+  updateStrategy:
+    rollingUpdate:
+      maxUnavailable: 1
+    type: RollingUpdate
+  image:
+    registry: ""
+    repository: exporter
+    # @schema
+    # pattern: ^$|^v?[0-9]+\.[0-9]+\.[0-9]+
+    # @schema
+    # -- Image tag. Empty falls back to the chart's appVersion.
+    tag: ""
+    digest: ""
+    # @schema
+    # enum: ["", "Always", "IfNotPresent", "Never"]
+    # @schema
+    pullPolicy: ""
+  # -- Extra raw args appended after the rendered flags.
+  args: []
+  # -- Structured CLI flags. Rendered by a helper as --key=value.
+  flags:
+    # @schema
+    # pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$
+    # @schema
+    metricsBindAddress: ":8080"
+    # @schema
+    # pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$
+    # @schema
+    healthProbeBindAddress: ":8081"
+    # -- Absolute path of the MXL domain directory to report on. Must
+    # resolve to the same domain the agent watches, below hostPath.run.
+    domainPath: /run/mxl/domain
+    # -- How often the domain directory is re-listed for flows that
+    # appeared or disappeared. Scrapes read the cache this maintains.
+    scanPeriod: 5s
+    # -- How long a departed flow keeps being exported with
+    # mxl_flow_present at 0, so a flow that ends between two scrapes
+    # leaves a record rather than a gap.
+    flowLifetime: 24h
+  # -- hostPath layout. The exporter mounts the runtime root read-only;
+  # it opens libmxl flow readers and never writes into the domain.
+  hostPath:
+    run: /run/mxl
+    # @schema
+    # enum: ["", "DirectoryOrCreate", "Directory"]
+    # @schema
+    type: Directory
+  topology:
+    # -- Publish mxl_flow_location_info from the MxlFlow CRs. That is
+    # what names the producing node (phase Origin), so dashboards do
+    # not need media functions to label themselves. Disabling it drops
+    # the metric and the exporter's only API access.
+    enabled: true
+  serviceAccount:
+    create: true
+    # -- ServiceAccount name. Empty falls back to the generated name.
+    name: ""
+    annotations: {}
+    labels: {}
+    automountServiceAccountToken: true
+  podAnnotations: {}
+  podLabels: {}
+  priorityClassName: ""
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits: {}
+  podSecurityContext: {}
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: probe
+    initialDelaySeconds: 5
+    periodSeconds: 20
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: probe
+    initialDelaySeconds: 2
+    periodSeconds: 10
+  metrics:
+    service:
+      enabled: true
+      # @schema
+      # enum: ["ClusterIP", "NodePort", "LoadBalancer"]
+      # @schema
+      type: ClusterIP
+      # @schema
+      # minimum: 1
+      # maximum: 65535
+      # @schema
+      port: 8080
+    serviceMonitor:
+      # -- Create a ServiceMonitor. Requires the monitoring.coreos.com
+      # CRDs to be installed cluster-wide.
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      labels: {}
+      relabelings: []
+      metricRelabelings: []
