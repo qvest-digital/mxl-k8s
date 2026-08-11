@@ -280,6 +280,17 @@ type targetEntry struct {
 	fabricOpenedAt      atomic.Pointer[time.Time]
 	commitsAtFabricOpen atomic.Uint64
 
+	// bytes counts payload committed to the local flow for this
+	// mirror, read by the throughput collector at scrape time. A
+	// counter rather than a rate: the scrape interval is the
+	// collector's business, not the progress loop's.
+	bytes atomic.Uint64
+
+	// flowID labels that counter alongside provider. Set once when the
+	// entry is published and never changed, so the collector reads it
+	// without the entry's atomics.
+	flowID string
+
 	// recoveryAttempts counts consecutive watchdog-spawned recovery
 	// invocations that did not result in a fresh commit. recordCommit
 	// resets it to zero on the first commit after each fabric open,
@@ -488,6 +499,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		closeTargetHandles(entry, keepFlow)
 		return ctrl.Result{}, nil
 	}
+	entry.flowID = mirror.Spec.FlowID
 	r.targets[req.NamespacedName] = entry
 	delete(r.attempts, req.NamespacedName)
 	r.mu.Unlock()
@@ -738,12 +750,18 @@ func (r *TargetReconciler) startProgressLoop(entry *targetEntry, key types.Names
 	if writer.Config().Common.Format == mxl.FormatAudio {
 		readFn := target.ReadSamplesNonBlocking
 		commitFn := func(head uint64, count int) error {
-			return commitArrivedSamples(writer, head, count)
+			n, err := commitArrivedSamples(writer, head, count)
+			entry.bytes.Add(n)
+			return err
 		}
 		go runTargetSampleProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)
 	} else {
 		readFn := target.ReadGrainNonBlocking
-		commitFn := func(idx uint64) error { return commitArrivedGrain(writer, idx) }
+		commitFn := func(idx uint64) error {
+			n, err := commitArrivedGrain(writer, idx)
+			entry.bytes.Add(n)
+			return err
+		}
 		go runTargetProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)
 	}
 }
@@ -848,15 +866,17 @@ func runTargetProgressLoop(
 // initiator's RDMA write. OpenGrain returns a writable handle aliasing
 // the ring slot -- we leave the slot bytes untouched and Commit so the
 // flow metadata catches up.
-func commitArrivedGrain(writer *mxl.Writer, idx uint64) error {
+// The returned byte count is the grain payload libmxl declares for the
+// flow, which the write access already carries.
+func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, error) {
 	ga, err := writer.OpenGrain(idx)
 	if err != nil {
-		return fmt.Errorf("OpenGrain(%d): %w", idx, err)
+		return 0, fmt.Errorf("OpenGrain(%d): %w", idx, err)
 	}
 	if err := ga.Commit(ga.TotalSlices, 0); err != nil {
-		return fmt.Errorf("Commit(%d): %w", idx, err)
+		return 0, fmt.Errorf("Commit(%d): %w", idx, err)
 	}
-	return nil
+	return uint64(ga.GrainSize), nil
 }
 
 // runTargetSampleProgressLoop drives a libmxl-fabrics Target for a
@@ -917,15 +937,23 @@ func runTargetSampleProgressLoop(
 // initiator's RDMA write. OpenSamples returns a writable view aliasing
 // the ring; we leave the bytes untouched and Commit so the flow
 // metadata catches up, mirroring commitArrivedGrain.
-func commitArrivedSamples(writer *mxl.Writer, head uint64, count int) error {
+// The returned byte count is the committed run across all channels.
+// libmxl publishes no per-sample width, but the write access carries
+// the stride between two channels' ring buffers, which is the word
+// size times the buffer length the flow config states.
+func commitArrivedSamples(writer *mxl.Writer, head uint64, count int) (uint64, error) {
 	sa, err := writer.OpenSamples(head, count)
 	if err != nil {
-		return fmt.Errorf("OpenSamples(%d,%d): %w", head, count, err)
+		return 0, fmt.Errorf("OpenSamples(%d,%d): %w", head, count, err)
 	}
 	if err := sa.Commit(); err != nil {
-		return fmt.Errorf("CommitSamples(%d,%d): %w", head, count, err)
+		return 0, fmt.Errorf("CommitSamples(%d,%d): %w", head, count, err)
 	}
-	return nil
+	bufferLength := uint64(writer.Config().Continuous.BufferLength)
+	if bufferLength == 0 {
+		return 0, nil
+	}
+	return uint64(count) * (sa.Stride / bufferLength) * sa.ChannelCount, nil
 }
 
 func (r *TargetReconciler) closeEntry(key types.NamespacedName, disp flowDisposition) {
