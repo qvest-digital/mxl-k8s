@@ -33,8 +33,7 @@
       "semanticCommitType": "deps",
       "semanticCommitScope": "gomod",
       "matchPackageNames": [
-        "!github.com/qvest-digital/mxl-k8s/api",
-        "*"
+        "!github.com/qvest-digital/mxl-k8s/api"
       ]
     },
     {
