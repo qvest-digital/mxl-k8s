@@ -131,7 +131,7 @@ jobs:
     if: needs.changes.outputs.gateway == 'true' || needs.changes.outputs.workflow == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.12
+      image: ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -163,7 +163,7 @@ jobs:
     if: needs.changes.outputs.exporter == 'true' || needs.changes.outputs.workflow == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.12
+      image: ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -308,7 +308,7 @@ jobs:
     if: needs.changes.outputs.gateway == 'true' || needs.changes.outputs.workflow == 'true'
     runs-on: ubuntu-24.04
     container:
-      image: ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.12
+      image: ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.15
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7

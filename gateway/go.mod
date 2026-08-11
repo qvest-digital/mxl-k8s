@@ -3,7 +3,7 @@ module github.com/qvest-digital/mxl-k8s/gateway
 go 1.26.0
 
 require (
-	github.com/qvest-digital/go-mxl v1.0.0-rc.14
+	github.com/qvest-digital/go-mxl v1.0.0-rc.15
 	github.com/qvest-digital/mxl-k8s/api v1.0.0-rc.9 // x-release-please-version
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/goleak v1.3.0
@@ -13,7 +13,10 @@ require (
 	sigs.k8s.io/controller-runtime v0.24.1
 )
 
-require k8s.io/utils v0.0.0-20260707023825-cf1189d6abe3
+require (
+	github.com/go-logr/logr v1.4.3
+	k8s.io/utils v0.0.0-20260707023825-cf1189d6abe3
+)
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -23,7 +26,6 @@ require (
 	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
-	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/zapr v1.3.0 // indirect
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
 	github.com/go-openapi/jsonreference v0.20.2 // indirect

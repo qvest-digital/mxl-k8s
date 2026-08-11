@@ -28,6 +28,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
+	"github.com/qvest-digital/go-mxl/mxl"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -136,4 +137,75 @@ func firstRejection(rejected []fabric.Rejection) string {
 // needs, so tests can drive it without a libmxl-fabrics instance.
 type interfaceLister interface {
 	Interfaces(query *fabrics.InterfaceConfig) ([]fabrics.InterfaceConfig, error)
+}
+
+// fabricFailure is what a libmxl-fabrics error means for the loop that
+// received it. libmxl reports both halves of its API through one
+// mxlStatus enum, and until go-mxl named the fabrics half every one of
+// these arrived as an opaque integer: the loops logged
+// "unrecognized status 1025" at error level once per iteration and
+// carried on, so a signal-interrupted poll and a dead endpoint were
+// indistinguishable in the log and identical in behaviour.
+type fabricFailure int
+
+const (
+	// fabricIdle is the not-ready answer every non-blocking call gives
+	// when it has nothing to report. Not a failure.
+	fabricIdle fabricFailure = iota
+
+	// fabricTransient is a call that was disturbed rather than broken.
+	// MXL_ERR_INTERRUPTED is the common one: libfabric returns EINTR
+	// from its poll when a signal lands, and Go's async preemption
+	// makes that routine. The handles are still good; call again.
+	fabricTransient
+
+	// fabricEndpointLost means the libmxl-fabrics side is no longer
+	// usable and has to be rebuilt. Retrying the same handles cannot
+	// recover it.
+	fabricEndpointLost
+
+	// fabricPermanent is a call the gateway got wrong, or an operation
+	// this build of libmxl-fabrics does not offer. Rebuilding changes
+	// nothing; the mirror needs a human or a different configuration.
+	fabricPermanent
+)
+
+func (f fabricFailure) String() string {
+	switch f {
+	case fabricIdle:
+		return "idle"
+	case fabricTransient:
+		return "transient"
+	case fabricEndpointLost:
+		return "endpoint-lost"
+	case fabricPermanent:
+		return "permanent"
+	}
+	return "unclassified"
+}
+
+// classifyFabricError maps an error from a libmxl-fabrics call onto
+// the action its caller should take.
+//
+// An error this function does not recognise is reported as
+// fabricEndpointLost rather than assumed harmless: an unknown failure
+// that is actually fatal, treated as transient, is the wedge that
+// leaves a mirror logging into the void forever, whereas an unknown
+// failure that is actually harmless, treated as fatal, costs one
+// rebuild. The asymmetry decides the default.
+func classifyFabricError(err error) fabricFailure {
+	switch {
+	case err == nil:
+		return fabricIdle
+	case errors.Is(err, fabrics.ErrNotReady):
+		return fabricIdle
+	case errors.Is(err, mxl.ErrInterrupted), errors.Is(err, mxl.ErrTimeout):
+		return fabricTransient
+	case errors.Is(err, mxl.ErrInvalidArg),
+		errors.Is(err, mxl.ErrUnsupportedOperation),
+		errors.Is(err, mxl.ErrStrLen),
+		errors.Is(err, mxl.ErrPermissionDenied):
+		return fabricPermanent
+	}
+	return fabricEndpointLost
 }

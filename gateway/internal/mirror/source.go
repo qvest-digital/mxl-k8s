@@ -24,6 +24,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/go-logr/logr"
+
 	"github.com/qvest-digital/go-mxl/fabrics"
 	"github.com/qvest-digital/go-mxl/mxl"
 
@@ -861,8 +863,8 @@ func runTransferLoop(
 			lastSent = idx
 		}
 
-		if err := makeProgress(); err != nil && !errors.Is(err, fabrics.ErrNotReady) {
-			l.Error(err, "MakeProgress")
+		if err := makeProgress(); err != nil {
+			logProgressFailure(l, err)
 		}
 	}
 }
@@ -958,8 +960,8 @@ func runSampleTransferLoop(
 			}
 		}
 
-		if err := makeProgress(); err != nil && !errors.Is(err, fabrics.ErrNotReady) {
-			l.Error(err, "MakeProgress")
+		if err := makeProgress(); err != nil {
+			logProgressFailure(l, err)
 		}
 	}
 }
@@ -1228,12 +1230,18 @@ func (r *SourceReconciler) readerStallAfter() time.Duration {
 }
 
 // sourceStateEqual reports whether two sourceProgressState values
-// would publish identical SSA payloads. lastSentAt is compared by
-// value rather than pointer identity: observedState allocates a
-// fresh *time.Time on every tick (copying the atomic-loaded value),
-// so a struct-level == on the two states would always disagree once
-// lastSentAt is set, defeating the dedupe and turning a single
-// successful transfer into a status write every flusher tick.
+// would publish a status an observer could tell apart. lastSentAt is
+// compared by value rather than pointer identity: observedState
+// allocates a fresh *time.Time on every tick (copying the
+// atomic-loaded value), so a struct-level == on the two states would
+// always disagree once lastSentAt is set, defeating the dedupe and
+// turning a single successful transfer into a status write every
+// flusher tick.
+//
+// The comparison is quantised for the same reason the target side
+// quantises its commit timestamp: at 50 grains a second the exact
+// value is never the same twice, and publishing it turns a healthy
+// mirror into a permanent etcd write stream.
 func sourceStateEqual(a, b sourceProgressState) bool {
 	if a.status != b.status || a.reason != b.reason ||
 		a.message != b.message || a.attempts != b.attempts {
@@ -1242,7 +1250,7 @@ func sourceStateEqual(a, b sourceProgressState) bool {
 	if (a.lastSentAt == nil) != (b.lastSentAt == nil) {
 		return false
 	}
-	if a.lastSentAt != nil && !a.lastSentAt.Equal(*b.lastSentAt) {
+	if a.lastSentAt != nil && !sameQuantum(*a.lastSentAt, *b.lastSentAt) {
 		return false
 	}
 	return true
@@ -1454,4 +1462,27 @@ func (r *SourceReconciler) flowToMirrors(ctx context.Context, obj client.Object)
 		}
 	}
 	return out
+}
+
+// logProgressFailure renders a MakeProgress failure at a level that
+// matches what it means. Every one of these used to be an error with a
+// stacktrace, including MXL_ERR_INTERRUPTED, which a signal-disturbed
+// poll returns as a matter of course under Go's async preemption: a
+// rolling restart produced hundreds of identical stacktraces that said
+// nothing, which is how a real endpoint failure came to look like
+// ordinary retry noise.
+//
+// The classification is logged alongside the error so an operator can
+// tell the two apart without reading libmxl's headers.
+func logProgressFailure(l logr.Logger, err error) {
+	kind := classifyFabricError(err)
+	switch kind {
+	case fabricIdle:
+		return
+	case fabricTransient:
+		l.V(1).Info("MakeProgress disturbed, retrying",
+			"error", err.Error(), "class", kind.String())
+	default:
+		l.Error(err, "MakeProgress", "class", kind.String())
+	}
 }

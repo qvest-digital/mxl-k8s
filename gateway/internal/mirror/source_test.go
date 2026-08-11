@@ -1060,13 +1060,31 @@ func TestSourceStateEqual_DereferencesLastSentAtPointers(t *testing.T) {
 			"flusher would publish status on every tick after the first "+
 			"transfer and burn through the apiserver write budget")
 
-	// Different wall-clock values are not equal.
-	later := now.Add(time.Millisecond)
+	// A timestamp that moved less than one quantum is still equal: at
+	// grain rate the value differs on every tick, and publishing each
+	// one is the write stream this dedupe exists to prevent.
+	nudged := now.Add(time.Millisecond)
+	b.lastSentAt = &nudged
+	assert.True(t, sourceStateEqual(a, b),
+		"a sub-quantum move must not defeat the dedupe; a millisecond of "+
+			"freshness is not something any observer of this status can act "+
+			"on, and republishing it costs an etcd write and a cluster-wide "+
+			"watch fan-out")
+
+	// A move of a full quantum or more is published: the target-side
+	// stuck-handshake watchdog discriminates on this field, so the
+	// freshness has to keep reaching it well inside its own window.
+	later := now.Add(statusQuantum)
 	b.lastSentAt = &later
 	assert.False(t, sourceStateEqual(a, b),
-		"a fresh lastSentAt timestamp must defeat the dedupe so the next "+
-			"SSA payload carries the new value; the target-side watchdog "+
-			"relies on the freshness of this field")
+		"a lastSentAt that advanced by a full quantum must defeat the "+
+			"dedupe so the next SSA payload carries it; the target-side "+
+			"watchdog reads this field to tell a wedged source from an "+
+			"idle one")
+	assert.Less(t, statusQuantum, defaultStuckHandshakeAfter,
+		"the publish quantum has to stay well inside the stuck-handshake "+
+			"window, or the watchdog would trip on a timestamp that is "+
+			"merely waiting to be published")
 
 	// nil/non-nil asymmetry is not equal.
 	b.lastSentAt = nil
