@@ -54,6 +54,12 @@ type Observation struct {
 	// wall time, so the two are comparable.
 	WriteAge time.Duration
 
+	// HaveWriteAge reports whether WriteAge carries a reading. Only a
+	// discrete flow stamps the field it derives from, so a continuous
+	// flow leaves it unset rather than reporting an age measured from
+	// a timestamp nothing advances.
+	HaveWriteAge bool
+
 	// Def is the parsed flow_def.json, nil when it could not be read
 	// or parsed.
 	Def *FlowDef
@@ -231,6 +237,38 @@ func activityWindow(cfg mxl.CommonFlowConfig) time.Duration {
 	return minActivityWindow
 }
 
+// continuousActiveLag is how far a continuous flow's head may sit
+// behind the clock and still count as active, in samples.
+//
+// A continuous flow cannot be judged by LastWriteTime the way a
+// discrete one is: PosixDiscreteFlowWriter stamps that field on every
+// commit and PosixContinuousFlowWriter::commit never touches it, so on
+// a continuous flow it holds whatever FlowManager wrote at creation.
+// Any window measured against it expires once and reports every audio
+// flow stalled from then on, however healthy the writer.
+//
+// The head index is what the continuous writer does maintain. libmxl
+// sizes bufferLength at twice the history duration (Instance.cpp:
+// historyDuration * sampleRate / 500e6), so half of it is the span a
+// reader can still reach; a head further behind than that has nothing
+// left for anyone to read, which is the same "no usable data" the
+// discrete window reports. Deriving the bound from the flow's own ring
+// keeps it correct across sample rates and history durations, and
+// leaves room for the offset a producer's own buffering introduces,
+// which is a property of the producer rather than of its health.
+func continuousActiveLag(cfg mxl.FlowConfig) int64 {
+	if n := cfg.Continuous.BufferLength; n > 0 {
+		return int64(n / 2)
+	}
+	// A flow that declares no ring leaves only its cadence to go on:
+	// the same window the discrete path uses, expressed in samples.
+	rate := cfg.Common.GrainRate
+	if rate.Num <= 0 || rate.Den <= 0 {
+		return 0
+	}
+	return int64(activityWindow(cfg.Common)) * rate.Num / (int64(time.Second) * rate.Den)
+}
+
 // Observe samples every tracked flow. It holds no state across calls:
 // every value is read from the flow header, so calling it twice in a
 // row answers the same thing twice.
@@ -261,12 +299,18 @@ func (d *Domain) Observe() []Observation {
 				obs.Info = info
 
 				rate := info.Config.Common.GrainRate
-				if rate.Den != 0 && rate.Num != 0 {
+				haveRate := rate.Den != 0 && rate.Num != 0
+				if haveRate {
 					obs.LatencyGrains = int64(mxl.TimestampToIndex(rate, now)) - int64(info.Runtime.HeadIndex)
 				}
-				if lw := info.Runtime.LastWriteTime; lw != 0 && now > lw {
-					obs.WriteAge = time.Duration(now-lw) * time.Nanosecond
-					active = obs.WriteAge < activityWindow(info.Config.Common)
+				if info.Config.Common.Format.IsDiscrete() {
+					if lw := info.Runtime.LastWriteTime; lw != 0 && now > lw {
+						obs.WriteAge = time.Duration(now-lw) * time.Nanosecond
+						obs.HaveWriteAge = true
+						active = obs.WriteAge < activityWindow(info.Config.Common)
+					}
+				} else if haveRate {
+					active = obs.LatencyGrains < continuousActiveLag(info.Config)
 				}
 			}
 		}
