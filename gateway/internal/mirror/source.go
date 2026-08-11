@@ -179,10 +179,12 @@ type sourceEntry struct {
 	// collector's business, not the transfer loop's.
 	bytes atomic.Uint64
 
-	// flowID and provider label that counter. Immutable for the life
-	// of the entry, so the collector reads them without the entry's
-	// atomics.
+	// flowID, peerNode and provider label that counter. Immutable for
+	// the life of the entry, so the collector reads them without the
+	// entry's atomics. peerNode is what keeps the label set unique
+	// when one node mirrors the same flow to several targets.
 	flowID   string
+	peerNode string
 	provider fabrics.Provider
 
 	// agedOutAt records the wall-clock of the most recent
@@ -422,6 +424,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, fmt.Errorf("open initiator: %w", err)
 	}
 	entry.openedAt = time.Now()
+	entry.peerNode = mirror.Spec.TargetNode
 	if originAt != nil {
 		t := *originAt
 		entry.lastObservedOriginAt.Store(&t)
