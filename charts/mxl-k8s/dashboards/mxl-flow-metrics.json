@@ -91,7 +91,7 @@
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 6,
+        "w": 12,
         "x": 0,
         "y": 1
       },
@@ -143,8 +143,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace(mxl_flow_active{node=~\"$node\",flow_id=~\"$flow\"}, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
-          "legendFormat": "{{node}} / {{flow_short}}"
+          "expr": "mxl_flow_active{node=~\"$node\",flow_id=~\"$flow\"}",
+          "legendFormat": "{{node}} / {{flow_id}}"
         }
       ]
     },
@@ -155,8 +155,8 @@
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 6,
+        "w": 12,
+        "x": 12,
         "y": 1
       },
       "datasource": {
@@ -207,8 +207,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace(mxl_flow_present{node=~\"$node\",flow_id=~\"$flow\"}, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
-          "legendFormat": "{{node}} / {{flow_short}}"
+          "expr": "mxl_flow_present{node=~\"$node\",flow_id=~\"$flow\"}",
+          "legendFormat": "{{node}} / {{flow_id}}"
         }
       ]
     },
@@ -219,9 +219,9 @@
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 12,
-        "y": 1
+        "w": 8,
+        "x": 0,
+        "y": 5
       },
       "datasource": {
         "type": "prometheus",
@@ -268,9 +268,9 @@
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 1
+        "w": 8,
+        "x": 8,
+        "y": 5
       },
       "datasource": {
         "type": "prometheus",
@@ -314,9 +314,9 @@
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 1
+        "w": 8,
+        "x": 16,
+        "y": 5
       },
       "datasource": {
         "type": "prometheus",
@@ -369,7 +369,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 9
       },
       "collapsed": false,
       "panels": []
@@ -383,7 +383,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 6
+        "y": 10
       },
       "datasource": {
         "type": "prometheus",
@@ -434,7 +434,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 6
+        "y": 10
       },
       "datasource": {
         "type": "prometheus",
@@ -485,7 +485,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 6
+        "y": 10
       },
       "datasource": {
         "type": "prometheus",
@@ -535,7 +535,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 10
+        "y": 14
       },
       "collapsed": false,
       "panels": []
@@ -547,9 +547,9 @@
       "type": "state-timeline",
       "gridPos": {
         "h": 6,
-        "w": 12,
+        "w": 24,
         "x": 0,
-        "y": 11
+        "y": 15
       },
       "datasource": {
         "type": "prometheus",
@@ -613,8 +613,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace(mxl_flow_active{node=~\"$node\",flow_id=~\"$flow\"}, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
-          "legendFormat": "{{node}} / {{flow_short}}"
+          "expr": "mxl_flow_active{node=~\"$node\",flow_id=~\"$flow\"}",
+          "legendFormat": "{{node}} / {{flow_id}}"
         }
       ]
     },
@@ -625,9 +625,9 @@
       "type": "state-timeline",
       "gridPos": {
         "h": 6,
-        "w": 12,
-        "x": 12,
-        "y": 11
+        "w": 24,
+        "x": 0,
+        "y": 21
       },
       "datasource": {
         "type": "prometheus",
@@ -691,8 +691,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace(mxl_flow_present{node=~\"$node\",flow_id=~\"$flow\"}, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
-          "legendFormat": "{{node}} / {{flow_short}}"
+          "expr": "mxl_flow_present{node=~\"$node\",flow_id=~\"$flow\"}",
+          "legendFormat": "{{node}} / {{flow_id}}"
         }
       ]
     },
@@ -704,7 +704,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 17
+        "y": 27
       },
       "collapsed": false,
       "panels": []
@@ -718,7 +718,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 18
+        "y": 28
       },
       "datasource": {
         "type": "prometheus",
@@ -758,8 +758,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace((mxl_flow_latency_grains{node=~\"$node\",flow_id=~\"$flow\"} / mxl_flow_rate_num{node=~\"$node\",flow_id=~\"$flow\"} * mxl_flow_rate_den{node=~\"$node\",flow_id=~\"$flow\"} * 1000) * on(flow_id, domain, node) group_left(flow_data_type) (mxl_flow_metadata{flow_data_type=~\"[Vv]ideo\"}) * on(flow_id, domain, node) group_left() (mxl_flow_active == 1), \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
-          "legendFormat": "{{node}} / {{flow_short}}"
+          "expr": "(mxl_flow_latency_grains{node=~\"$node\",flow_id=~\"$flow\"} / mxl_flow_rate_num{node=~\"$node\",flow_id=~\"$flow\"} * mxl_flow_rate_den{node=~\"$node\",flow_id=~\"$flow\"} * 1000) * on(flow_id, domain, node) group_left(flow_data_type) (mxl_flow_metadata{flow_data_type=~\"[Vv]ideo\"}) * on(flow_id, domain, node) group_left() (mxl_flow_active == 1)",
+          "legendFormat": "{{node}} / {{flow_id}}"
         }
       ]
     },
@@ -772,7 +772,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 18
+        "y": 28
       },
       "datasource": {
         "type": "prometheus",
@@ -812,8 +812,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace((mxl_flow_latency_grains{node=~\"$node\",flow_id=~\"$flow\"} / mxl_flow_rate_num{node=~\"$node\",flow_id=~\"$flow\"} * mxl_flow_rate_den{node=~\"$node\",flow_id=~\"$flow\"} * 1000) * on(flow_id, domain, node) group_left(flow_data_type) (mxl_flow_metadata{flow_data_type=~\"[Aa]udio\"}) * on(flow_id, domain, node) group_left() (mxl_flow_active == 1), \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
-          "legendFormat": "{{node}} / {{flow_short}}"
+          "expr": "(mxl_flow_latency_grains{node=~\"$node\",flow_id=~\"$flow\"} / mxl_flow_rate_num{node=~\"$node\",flow_id=~\"$flow\"} * mxl_flow_rate_den{node=~\"$node\",flow_id=~\"$flow\"} * 1000) * on(flow_id, domain, node) group_left(flow_data_type) (mxl_flow_metadata{flow_data_type=~\"[Aa]udio\"}) * on(flow_id, domain, node) group_left() (mxl_flow_active == 1)",
+          "legendFormat": "{{node}} / {{flow_id}}"
         }
       ]
     },
@@ -825,7 +825,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 26
+        "y": 36
       },
       "collapsed": false,
       "panels": []
@@ -839,7 +839,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 27
+        "y": 37
       },
       "datasource": {
         "type": "prometheus",
@@ -875,8 +875,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace(rate(mxl_flow_head_index_grains{node=~\"$node\",flow_id=~\"$flow\"}[1m]) * on(flow_id, domain, node) group_left() (mxl_flow_metadata{flow_data_type=~\"[Vv]ideo\"}), \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
-          "legendFormat": "{{node}} / {{flow_short}}"
+          "expr": "rate(mxl_flow_head_index_grains{node=~\"$node\",flow_id=~\"$flow\"}[1m]) * on(flow_id, domain, node) group_left() (mxl_flow_metadata{flow_data_type=~\"[Vv]ideo\"})",
+          "legendFormat": "{{node}} / {{flow_id}}"
         }
       ]
     },
@@ -889,7 +889,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 27
+        "y": 37
       },
       "datasource": {
         "type": "prometheus",
@@ -925,8 +925,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace(rate(mxl_flow_head_index_grains{node=~\"$node\",flow_id=~\"$flow\"}[1m]) * on(flow_id, domain, node) group_left() (mxl_flow_metadata{flow_data_type=~\"[Aa]udio\"}), \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
-          "legendFormat": "{{node}} / {{flow_short}}"
+          "expr": "rate(mxl_flow_head_index_grains{node=~\"$node\",flow_id=~\"$flow\"}[1m]) * on(flow_id, domain, node) group_left() (mxl_flow_metadata{flow_data_type=~\"[Aa]udio\"})",
+          "legendFormat": "{{node}} / {{flow_id}}"
         }
       ]
     },
@@ -938,7 +938,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 35
+        "y": 45
       },
       "collapsed": false,
       "panels": []
@@ -952,7 +952,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 46
       },
       "datasource": {
         "type": "prometheus",
@@ -984,8 +984,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace((rate(mxl_flow_head_index_grains{node=~\"$node\",flow_id=~\"$flow\"}[1m]) * ignoring(payload_buffer_index) mxl_flow_payload_slice_size_bytes{node=~\"$node\",flow_id=~\"$flow\",payload_buffer_index=\"0\"}) * on(flow_id, domain, node) group_left() (mxl_flow_metadata{flow_data_type=~\"[Vv]ideo\"}), \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
-          "legendFormat": "{{node}} / {{flow_short}}"
+          "expr": "(rate(mxl_flow_head_index_grains{node=~\"$node\",flow_id=~\"$flow\"}[1m]) * ignoring(payload_buffer_index) mxl_flow_payload_slice_size_bytes{node=~\"$node\",flow_id=~\"$flow\",payload_buffer_index=\"0\"}) * on(flow_id, domain, node) group_left() (mxl_flow_metadata{flow_data_type=~\"[Vv]ideo\"})",
+          "legendFormat": "{{node}} / {{flow_id}}"
         }
       ]
     },
@@ -998,7 +998,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 46
       },
       "datasource": {
         "type": "prometheus",
@@ -1030,8 +1030,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace((rate(mxl_flow_head_index_grains{node=~\"$node\",flow_id=~\"$flow\"}[1m]) * ignoring(payload_buffer_index) mxl_flow_payload_slice_size_bytes{node=~\"$node\",flow_id=~\"$flow\",payload_buffer_index=\"0\"}) * on(flow_id, domain, node) group_left() (mxl_flow_metadata{flow_data_type=~\"[Aa]udio\"}), \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
-          "legendFormat": "{{node}} / {{flow_short}}"
+          "expr": "(rate(mxl_flow_head_index_grains{node=~\"$node\",flow_id=~\"$flow\"}[1m]) * ignoring(payload_buffer_index) mxl_flow_payload_slice_size_bytes{node=~\"$node\",flow_id=~\"$flow\",payload_buffer_index=\"0\"}) * on(flow_id, domain, node) group_left() (mxl_flow_metadata{flow_data_type=~\"[Aa]udio\"})",
+          "legendFormat": "{{node}} / {{flow_id}}"
         }
       ]
     },
@@ -1043,7 +1043,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 44
+        "y": 54
       },
       "collapsed": false,
       "panels": []
@@ -1057,7 +1057,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 45
+        "y": 55
       },
       "datasource": {
         "type": "prometheus",
@@ -1098,8 +1098,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace(mxl_flow_last_write_age_seconds{node=~\"$node\",flow_id=~\"$flow\"} * 1000, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
-          "legendFormat": "{{node}} / {{flow_short}}"
+          "expr": "mxl_flow_last_write_age_seconds{node=~\"$node\",flow_id=~\"$flow\"} * 1000",
+          "legendFormat": "{{node}} / {{flow_id}}"
         }
       ]
     },
@@ -1111,7 +1111,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 53
+        "y": 63
       },
       "collapsed": false,
       "panels": []
@@ -1123,9 +1123,9 @@
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 6,
+        "w": 12,
         "x": 0,
-        "y": 54
+        "y": 64
       },
       "datasource": {
         "type": "prometheus",
@@ -1159,8 +1159,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace(mxl_flow_ring_buffer_size_grains{node=~\"$node\",flow_id=~\"$flow\"} / mxl_flow_rate_num{node=~\"$node\",flow_id=~\"$flow\"} * mxl_flow_rate_den{node=~\"$node\",flow_id=~\"$flow\"} * 1000, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
-          "legendFormat": "{{node}} / {{flow_short}}"
+          "expr": "mxl_flow_ring_buffer_size_grains{node=~\"$node\",flow_id=~\"$flow\"} / mxl_flow_rate_num{node=~\"$node\",flow_id=~\"$flow\"} * mxl_flow_rate_den{node=~\"$node\",flow_id=~\"$flow\"} * 1000",
+          "legendFormat": "{{node}} / {{flow_id}}"
         }
       ]
     },
@@ -1171,9 +1171,9 @@
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 6,
-        "y": 54
+        "w": 12,
+        "x": 12,
+        "y": 64
       },
       "datasource": {
         "type": "prometheus",
@@ -1206,8 +1206,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace(mxl_flow_payload_slice_size_bytes{node=~\"$node\",flow_id=~\"$flow\",payload_buffer_index=\"0\"}, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
-          "legendFormat": "{{node}} / {{flow_short}}"
+          "expr": "mxl_flow_payload_slice_size_bytes{node=~\"$node\",flow_id=~\"$flow\",payload_buffer_index=\"0\"}",
+          "legendFormat": "{{node}} / {{flow_id}}"
         }
       ]
     },
@@ -1218,9 +1218,9 @@
       "type": "stat",
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 12,
-        "y": 54
+        "w": 12,
+        "x": 0,
+        "y": 68
       },
       "datasource": {
         "type": "prometheus",
@@ -1254,8 +1254,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace(mxl_flow_channels_total{node=~\"$node\",flow_id=~\"$flow\"}, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
-          "legendFormat": "{{node}} / {{flow_short}}"
+          "expr": "mxl_flow_channels_total{node=~\"$node\",flow_id=~\"$flow\"}",
+          "legendFormat": "{{node}} / {{flow_id}}"
         }
       ]
     },
@@ -1266,9 +1266,9 @@
       "type": "gauge",
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 18,
-        "y": 54
+        "w": 12,
+        "x": 12,
+        "y": 68
       },
       "datasource": {
         "type": "prometheus",
@@ -1325,7 +1325,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 58
+        "y": 72
       },
       "collapsed": false,
       "panels": []
@@ -1336,10 +1336,10 @@
       "description": "Static properties of every flow the exporter found, taken from the flow_def.json written when the flow was created and from the flow header. Covers flow id, data type, media type, colorspace, label, description and group hint.",
       "type": "table",
       "gridPos": {
-        "h": 8,
+        "h": 16,
         "w": 24,
         "x": 0,
-        "y": 59
+        "y": 73
       },
       "datasource": {
         "type": "prometheus",
@@ -1357,7 +1357,7 @@
           "refId": "A",
           "instant": true,
           "format": "table",
-          "expr": "label_replace(mxl_flow_metadata{node=~\"$node\",flow_id=~\"$flow\"}, \"flow_short\", \"$1\", \"flow_id\", \".*(.{3})$\")",
+          "expr": "mxl_flow_metadata{node=~\"$node\",flow_id=~\"$flow\"}",
           "legendFormat": ""
         }
       ],
