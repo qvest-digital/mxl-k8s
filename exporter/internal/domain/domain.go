@@ -216,12 +216,15 @@ func activityWindow(cfg mxl.CommonFlowConfig) time.Duration {
 	if rate.Num <= 0 || rate.Den <= 0 {
 		return minActivityWindow
 	}
-	perWrite := time.Duration(float64(rate.Den) / float64(rate.Num) * float64(time.Second))
-	if !cfg.Format.IsDiscrete() {
-		if batch := cfg.MaxCommitBatchSizeHint; batch > 0 {
-			perWrite *= time.Duration(batch)
-		}
+	// One unit per write: a grain on a discrete flow, a commit batch of
+	// samples on a continuous one. Multiplied in before the division so
+	// a rate that does not divide evenly into a nanosecond does not
+	// lose a whole batch to truncation.
+	units := int64(1)
+	if !cfg.Format.IsDiscrete() && cfg.MaxCommitBatchSizeHint > 0 {
+		units = int64(cfg.MaxCommitBatchSizeHint)
 	}
+	perWrite := time.Duration(int64(time.Second) * rate.Den * units / rate.Num)
 	if w := activeGrains * perWrite; w > minActivityWindow {
 		return w
 	}
