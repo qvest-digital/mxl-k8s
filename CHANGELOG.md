@@ -3,6 +3,11 @@
 ## [1.0.0-rc.23](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.22...v1.0.0-rc.23) (2026-08-11)
 
 
+### Features
+
+* **gateway:** measure mirror throughput and show it per node ([#260](https://github.com/qvest-digital/mxl-k8s/issues/260)) ([a9087cc](https://github.com/qvest-digital/mxl-k8s/commit/a9087ccf986161bc0f76ec4e7c2d48131e8993eb))
+
+
 ### Bug Fixes
 
 * judge flow activity and mirror wedges on evidence that moves ([#258](https://github.com/qvest-digital/mxl-k8s/issues/258)) ([27996eb](https://github.com/qvest-digital/mxl-k8s/commit/27996eb6b84d82ee170b8337d64d1df2ad4cf200))
