@@ -1380,8 +1380,7 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 			entry.commits.Load() == entry.commitsAtFabricOpen.Load() &&
 			time.Since(*openedAt) > r.stuckHandshakeAfter() {
 			if mirror, err := r.fetchMirror(ctx, key); err == nil &&
-				mirror.Status.LastSentAt != nil &&
-				mirror.Status.LastSentAt.Time.After(*openedAt) {
+				sourceIsDelivering(mirror, *openedAt) {
 				neverHandshook = true
 			}
 		}

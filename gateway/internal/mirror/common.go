@@ -272,3 +272,29 @@ func (t attemptTable[I]) seed(key types.NamespacedName, count uint32) {
 }
 
 func (t attemptTable[I]) count(key types.NamespacedName) uint32 { return t[key].count }
+
+// sourceIsDelivering reports whether the source half of the mirror is
+// putting grains on the wire, judged against the moment the target's
+// fabric side opened.
+//
+// The target's stuck-handshake watchdog needs this to tell a wedge
+// from an idle producer, and status.lastSentAt alone cannot answer it:
+// the timestamp only moves on a successful transfer, so a source that
+// cannot reach the target never advances it and reads exactly like a
+// producer with nothing to send. The source publishes
+// ReasonTransfersNotLanding for that case, which is the same claim
+// lastSentAt would have made had a transfer been possible.
+func sourceIsDelivering(mirror *mxlv1alpha1.MxlFlowMirror, openedAt time.Time) bool {
+	if mirror == nil {
+		return false
+	}
+	if mirror.Status.LastSentAt != nil && mirror.Status.LastSentAt.Time.After(openedAt) {
+		return true
+	}
+	for _, c := range mirror.Status.Conditions {
+		if c.Type == mxlv1alpha1.ConditionTypeSourceProgress {
+			return c.Reason == mxlv1alpha1.ReasonTransfersNotLanding
+		}
+	}
+	return false
+}

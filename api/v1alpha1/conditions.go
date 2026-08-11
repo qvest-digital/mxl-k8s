@@ -67,6 +67,18 @@ const (
 	// not moved since the reader opened.
 	ReasonReaderNotAdvancing = "ReaderNotAdvancing"
 
+	// ReasonTransfersNotLanding marks a mirror whose source-side reader
+	// head is advancing, so the producer is alive, while nothing has
+	// reached the target since the initiator opened.
+	//
+	// It exists because status.lastSentAt cannot express this: the
+	// timestamp only moves on a successful transfer, so a source that
+	// cannot reach its target suppresses the very evidence that it is
+	// trying. The target's stuck-handshake watchdog reads this reason
+	// as the source-activity signal it would otherwise take from
+	// lastSentAt.
+	ReasonTransfersNotLanding = "TransfersNotLanding"
+
 	// ReasonProviderUnresolved marks a mirror the gateway refused to
 	// set up because spec.provider is still auto. libmxl-fabrics no
 	// longer resolves auto itself (v1.1.0-beta-1 dropped it), so the

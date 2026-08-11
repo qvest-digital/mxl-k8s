@@ -1333,6 +1333,24 @@ func observedState(entry *sourceEntry, stallAfter time.Duration) sourceProgressS
 			lastSentAt: sent,
 		}
 	}
+	// The head is moving, so the producer is alive and the reader is
+	// following it, yet nothing has landed at the target since this
+	// initiator opened. Reporting True here calls that healthy, and it
+	// is the state a source sits in when its target publishes an
+	// endpoint that never accepts: the initiator retries the address
+	// forever, transfers nothing, and never advances lastSentAt.
+	if !entry.openedAt.IsZero() &&
+		time.Since(entry.openedAt) > stallAfter &&
+		(sent == nil || sent.Before(entry.openedAt)) {
+		return sourceProgressState{
+			status: metav1.ConditionFalse,
+			reason: mxlv1alpha1.ReasonTransfersNotLanding,
+			message: fmt.Sprintf(
+				"reader head at %d is advancing but nothing has reached the target in %s",
+				entry.lastHead.Load(), stallAfter),
+			lastSentAt: sent,
+		}
+	}
 	return sourceProgressState{
 		status:     metav1.ConditionTrue,
 		reason:     mxlv1alpha1.ReasonHandshakeComplete,
