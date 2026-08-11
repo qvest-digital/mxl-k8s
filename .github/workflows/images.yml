@@ -5,9 +5,9 @@ on:
     branches: [main]
   pull_request:
   # Invoked from release-please.yml once the repository release tag
-  # has just been cut. One tag covers operator, agent, gateway and
-  # shim: they are one release-please package and therefore always
-  # carry the same version.
+  # has just been cut. One tag covers every component outside
+  # dev_only: they are one release-please package and therefore
+  # always carry the same version.
   workflow_call:
     inputs:
       release_tag:
@@ -105,7 +105,7 @@ jobs:
   #
   # The images list is a JSON array consumed by the build matrix
   # below. On a workflow_call/dispatch carrying release_tag, the
-  # released set (operator, agent, gateway, shim) is included. On
+  # released set is included. On
   # main / PR events the list is filtered by the changes job; an
   # unrelated diff publishes nothing.
   meta:
@@ -121,6 +121,7 @@ jobs:
       has_images: ${{ steps.m.outputs.has_images }}
       kind_wanted: ${{ steps.m.outputs.kind_wanted }}
       sha_short: ${{ steps.m.outputs.sha_short }}
+      all_components: ${{ steps.m.outputs.all_components }}
     env:
       INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
       # kind-integration eligibility (kind_wanted below):
@@ -172,17 +173,37 @@ jobs:
             "demo-tools|docker/demo-tools.Dockerfile"
           )
 
-          # Per-image change flags from the changes job. A workflow-
-          # file edit expands the set to all images so an edit cannot
-          # silently exclude an image from the publish surface.
-          declare -A wanted=(
-            [operator]="$CHANGED_OPERATOR"
-            [agent]="$CHANGED_AGENT"
-            [gateway]="$CHANGED_GATEWAY"
-            [exporter]="$CHANGED_EXPORTER"
-            [shim]="$CHANGED_SHIM"
-            [demo-tools]="$CHANGED_DEMO_TOOLS"
-          )
+          # Images that ship on the :dev / :sha-<short> channel only.
+          # Everything else in `all` is covered by the repository
+          # version, so a component added above is released by default
+          # rather than left out of the next tag by omission.
+          declare -a dev_only=(demo-tools)
+
+          # wanted and released are derived from `all`, not restated:
+          # three hand-maintained lists that have to agree drift
+          # silently, and the failure is an incomplete publish with
+          # every job green. An entry whose CHANGED_<NAME> is not wired
+          # in is a configuration error rather than a quiet "skip".
+          declare -A wanted=()
+          declare -a released=()
+          declare -a all_names=()
+          for entry in "${all[@]}"; do
+            comp="${entry%%|*}"
+            all_names+=("$comp")
+            var="CHANGED_$(printf '%s' "$comp" | tr 'a-z-' 'A-Z_')"
+            if [ -z "${!var+set}" ]; then
+              echo "::error::image '${comp}' has no ${var}; add it to the changes job filters and outputs"
+              exit 1
+            fi
+            wanted[$comp]="${!var}"
+            case " ${dev_only[*]} " in
+              *" ${comp} "*) ;;
+              *) released+=("$comp") ;;
+            esac
+          done
+
+          # A workflow-file edit expands the set to every image so an
+          # edit cannot silently exclude one from the publish surface.
           if [ "$CHANGED_WORKFLOW" = "true" ]; then
             for k in "${!wanted[@]}"; do wanted[$k]=true; done
           fi
@@ -200,11 +221,6 @@ jobs:
           push=false
           declare -a extra_tags=()
 
-          # The images the repository version covers. demo-tools is
-          # excluded on purpose: it carries no Go module and ships
-          # only on the :dev / :sha-<short> channel.
-          declare -a released=(operator agent gateway exporter shim)
-
           if [ -n "${INPUT_RELEASE_TAG:-}" ]; then
             push=true
             case "$INPUT_RELEASE_TAG" in
@@ -215,9 +231,9 @@ jobs:
                 ;;
             esac
             # One tag covers every released image: the root
-            # release-please package spans operator, agent, gateway,
-            # exporter, shim and the chart, so they all publish the
-            # same version. Selecting them here overrides the diff filter,
+            # release-please package spans every component outside
+            # dev_only, plus the chart, so they all publish the same
+            # version. Selecting them here overrides the diff filter,
             # which is meaningless for a workflow_call.
             for k in "${!wanted[@]}"; do wanted[$k]=false; done
             for k in "${released[@]}"; do wanted[$k]=true; done
@@ -348,6 +364,7 @@ jobs:
             echo "has_images=${has_images}"
             echo "kind_wanted=${kind_wanted}"
             echo "sha_short=${short_sha}"
+            echo "all_components=${all_names[*]}"
           } >> "$GITHUB_OUTPUT"
 
   # Per-image, per-arch build. Each cell builds on the matching native
@@ -513,14 +530,16 @@ jobs:
         env:
           BUILD: ${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.number, needs.meta.outputs.sha_short) || format('sha-{0}', needs.meta.outputs.sha_short) }}
           META_IMAGES_JSON: ${{ needs.meta.outputs.images }}
+          ALL_COMPONENTS: ${{ needs.meta.outputs.all_components }}
           IMAGE_REGISTRY_RAW: ghcr.io/${{ github.repository_owner }}/mxl-k8s
         run: |
           set -euo pipefail
           IMAGE_REGISTRY=$(echo "$IMAGE_REGISTRY_RAW" | tr '[:upper:]' '[:lower:]')
-          # Components the kind smoke test expects to find at $BUILD.
-          # Keep aligned with the `all` array in the meta job and the
-          # IMAGE_COMPONENTS list in hack/kind-up.sh.
-          all_components=(operator agent gateway shim demo-tools)
+          # Components the kind smoke test expects to find at $BUILD,
+          # taken from the meta job rather than restated: a component
+          # missing here is never retagged, and kind-up then fails
+          # pulling a tag that was never pushed.
+          read -r -a all_components <<< "$ALL_COMPONENTS"
           built=$(echo "$META_IMAGES_JSON" | jq -r '[.[].name] | join(" ")')
           for comp in "${all_components[@]}"; do
             case " $built " in

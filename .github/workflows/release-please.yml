@@ -20,8 +20,8 @@ jobs:
   #   api  -> tag api/vX.Y.Z, changelog api/CHANGELOG.md
   #   .    -> tag vX.Y.Z,     changelog CHANGELOG.md
   #
-  # The root package covers operator, agent, gateway, shim and the
-  # chart, which therefore all ship under one version. Whether a tag
+  # The root package covers every component image and the chart,
+  # which therefore all ship under one version. Whether a tag
   # is a prerelease (1.0.0-rc.N) or a stable release (1.0.0) is
   # controlled per package by the `prerelease` flag in
   # .github/release-please-config.json; graduating a package is a
