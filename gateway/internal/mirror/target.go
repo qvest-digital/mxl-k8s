@@ -286,10 +286,11 @@ type targetEntry struct {
 	// collector's business, not the progress loop's.
 	bytes atomic.Uint64
 
-	// flowID labels that counter alongside provider. Set once when the
-	// entry is published and never changed, so the collector reads it
-	// without the entry's atomics.
-	flowID string
+	// flowID and peerNode label that counter alongside provider. Set
+	// once when the entry is published and never changed, so the
+	// collector reads them without the entry's atomics.
+	flowID   string
+	peerNode string
 
 	// recoveryAttempts counts consecutive watchdog-spawned recovery
 	// invocations that did not result in a fresh commit. recordCommit
@@ -500,6 +501,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 	entry.flowID = mirror.Spec.FlowID
+	entry.peerNode = mirror.Spec.SourceNode
 	r.targets[req.NamespacedName] = entry
 	delete(r.attempts, req.NamespacedName)
 	r.mu.Unlock()
