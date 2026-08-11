@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.0.0-rc.22](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.21...v1.0.0-rc.22) (2026-08-11)
+
+
+### Features
+
+* **chart:** expose the gateway tuning flags as values ([#257](https://github.com/qvest-digital/mxl-k8s/issues/257)) ([314dec5](https://github.com/qvest-digital/mxl-k8s/commit/314dec5ea5b3a9e7e625030c13edef96bdbb6ff2))
+* **exporter:** build against go-mxl v1.0.0-rc.15 ([b96318d](https://github.com/qvest-digital/mxl-k8s/commit/b96318d5d51e48496b7824d782b3b98ea646de98))
+
+
+### Bug Fixes
+
+* **exporter:** make flow activity a property of the flow ([#252](https://github.com/qvest-digital/mxl-k8s/issues/252)) ([5f10b1b](https://github.com/qvest-digital/mxl-k8s/commit/5f10b1bbe28c0a56065cc3e8c13dc9341d6d321d))
+* **gateway:** make the target open backoff authoritative ([#255](https://github.com/qvest-digital/mxl-k8s/issues/255)) ([aa22733](https://github.com/qvest-digital/mxl-k8s/commit/aa22733ffc9bd0ce0c96eee4be5a7001707324fb))
+
+
+### Dependencies
+
+* **gomod:** update go modules ([#254](https://github.com/qvest-digital/mxl-k8s/issues/254)) ([40bcd47](https://github.com/qvest-digital/mxl-k8s/commit/40bcd47a69640c4b317e301e5532785f1e388b3b))
+* **gomod:** update module github.com/go-logr/logr to v1.4.4 ([#256](https://github.com/qvest-digital/mxl-k8s/issues/256)) ([83427ad](https://github.com/qvest-digital/mxl-k8s/commit/83427ad1bc17cc5873dde072d1952fe3b0c1df7a))
+
+
+### Performance
+
+* **gateway:** stop rewriting the target descriptor on every tick ([#250](https://github.com/qvest-digital/mxl-k8s/issues/250)) ([b96318d](https://github.com/qvest-digital/mxl-k8s/commit/b96318d5d51e48496b7824d782b3b98ea646de98))
+
+
+### Continuous Integration
+
+* **renovate:** drop the "*" that invalidates the gomod group rule ([#251](https://github.com/qvest-digital/mxl-k8s/issues/251)) ([ac82911](https://github.com/qvest-digital/mxl-k8s/commit/ac8291151e8dceeb9b493e20da81d10dba0deaa8)), closes [#215](https://github.com/qvest-digital/mxl-k8s/issues/215)
+
 ## [1.0.0-rc.21](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.20...v1.0.0-rc.21) (2026-08-10)
 
 
