@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/prometheus/client_golang v1.24.1
 	github.com/qvest-digital/go-mxl v1.0.0-rc.15
-	github.com/qvest-digital/mxl-k8s/api v1.0.0-rc.9 // x-release-please-version
+	github.com/qvest-digital/mxl-k8s/api v1.0.0-rc.10 // x-release-please-version
 	golang.org/x/sys v0.47.0
 	k8s.io/apimachinery v0.36.3
 	k8s.io/client-go v0.36.3
