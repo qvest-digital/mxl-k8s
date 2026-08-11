@@ -30,8 +30,8 @@ type Observation struct {
 	// false, until its lifetime expires.
 	Present bool
 
-	// Active reports whether the flow was written within
-	// ActivityWindow, measured on the MXL clock that stamps the write
+	// Active reports whether the flow was written within its own
+	// activity window, measured on the MXL clock that stamps the write
 	// itself. A flow can be present and inactive, which is what a
 	// stalled writer looks like from outside.
 	Active bool
@@ -188,10 +188,45 @@ func (d *Domain) openReader(e *entry) {
 	}
 }
 
-// ActivityWindow is how long after its last write a flow still counts
-// as active. Three grain periods at 25 fps, so a flow at any normal
-// rate has to miss several grains before it reads as stalled.
-const ActivityWindow = 120 * time.Millisecond
+// minActivityWindow floors the window derived from a flow's cadence.
+// A 48 kHz audio flow commits every 10 ms and a 60 fps video flow
+// every 17 ms; three of either is shorter than the jitter between two
+// scrapes, so without a floor a healthy fast flow would flap.
+const minActivityWindow = 100 * time.Millisecond
+
+// activeGrains is how many writes a flow may miss before it reads as
+// stalled.
+const activeGrains = 3
+
+// activityWindow returns how long after its last write a flow still
+// counts as active, derived from the flow's own cadence.
+//
+// libmxl does not define this. Its own notion of an active flow is
+// whether any process holds the data file locked, which is what
+// mxlGarbageCollectFlows tests; it maintains lastWriteTime but attaches
+// no threshold to it. The threshold is this exporter's policy, so it
+// has to be relative to the flow rather than a constant: a fixed window
+// that means three grains at 25 fps means a fifth of a grain at 1 fps,
+// where it would report a healthy flow stalled between every frame.
+//
+// On a continuous flow the grain rate is the sample rate and writes
+// land one commit batch apart, not one sample apart.
+func activityWindow(cfg mxl.CommonFlowConfig) time.Duration {
+	rate := cfg.GrainRate
+	if rate.Num <= 0 || rate.Den <= 0 {
+		return minActivityWindow
+	}
+	perWrite := time.Duration(float64(rate.Den) / float64(rate.Num) * float64(time.Second))
+	if !cfg.Format.IsDiscrete() {
+		if batch := cfg.MaxCommitBatchSizeHint; batch > 0 {
+			perWrite *= time.Duration(batch)
+		}
+	}
+	if w := activeGrains * perWrite; w > minActivityWindow {
+		return w
+	}
+	return minActivityWindow
+}
 
 // Observe samples every tracked flow. It holds no state across calls:
 // every value is read from the flow header, so calling it twice in a
@@ -228,7 +263,7 @@ func (d *Domain) Observe() []Observation {
 				}
 				if lw := info.Runtime.LastWriteTime; lw != 0 && now > lw {
 					obs.WriteAge = time.Duration(now-lw) * time.Nanosecond
-					active = obs.WriteAge < ActivityWindow
+					active = obs.WriteAge < activityWindow(info.Config.Common)
 				}
 			}
 		}

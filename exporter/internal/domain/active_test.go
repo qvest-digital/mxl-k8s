@@ -87,7 +87,7 @@ func TestObserveActivityFollowsTheFlowClock(t *testing.T) {
 	require.Len(t, obs, 1)
 	require.Equal(t, activeTestFlowID, obs[0].ID)
 	require.True(t, obs[0].Active)
-	require.Less(t, obs[0].WriteAge, ActivityWindow,
+	require.Less(t, obs[0].WriteAge, activityWindow(obs[0].Info.Config.Common),
 		"the write age is what decides activity, so it has to be inside "+
 			"the window for a flow just written")
 
@@ -99,4 +99,50 @@ func TestObserveActivityFollowsTheFlowClock(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond,
 		"a flow that stopped being written must go inactive once its "+
 			"last write ages past the window")
+}
+
+func TestActivityWindowFollowsTheFlowRate(t *testing.T) {
+	// A fixed window is wrong at both ends of the rate range: what is
+	// three grains at 25 fps is a fifth of a grain at 1 fps, where a
+	// healthy flow would read stalled between every frame.
+	slow := mxl.CommonFlowConfig{
+		Format:    mxl.FormatVideo,
+		GrainRate: mxl.Rational{Num: 1, Den: 1},
+	}
+	require.Equal(t, activeGrains*time.Second, activityWindow(slow),
+		"a 1 fps flow has to be allowed a full three seconds; anything "+
+			"shorter reports every healthy frame gap as a stall")
+
+	fast := mxl.CommonFlowConfig{
+		Format:    mxl.FormatVideo,
+		GrainRate: mxl.Rational{Num: 60, Den: 1},
+	}
+	require.Equal(t, minActivityWindow, activityWindow(fast),
+		"three grains at 60 fps is shorter than the jitter between two "+
+			"scrapes, so the floor has to take over")
+}
+
+func TestActivityWindowUsesCommitBatchForContinuousFlows(t *testing.T) {
+	// On a continuous flow the grain rate is the sample rate. Treating
+	// it as a write interval would give a 62 microsecond window at
+	// 48 kHz; writes actually land one commit batch apart.
+	audio := mxl.CommonFlowConfig{
+		Format:                 mxl.FormatAudio,
+		GrainRate:              mxl.Rational{Num: 48000, Den: 1},
+		MaxCommitBatchSizeHint: 480,
+	}
+	require.Equal(t, minActivityWindow, activityWindow(audio),
+		"three 10 ms batches is under the floor, so the floor applies")
+
+	sparse := audio
+	sparse.MaxCommitBatchSizeHint = 48000
+	require.Equal(t, activeGrains*time.Second, activityWindow(sparse),
+		"a flow committing one second of samples at a time must be "+
+			"allowed three seconds, not the floor")
+}
+
+func TestActivityWindowFallsBackOnAnUnusableRate(t *testing.T) {
+	require.Equal(t, minActivityWindow,
+		activityWindow(mxl.CommonFlowConfig{Format: mxl.FormatVideo}),
+		"a zero grain rate must not divide by zero or yield a zero window")
 }
