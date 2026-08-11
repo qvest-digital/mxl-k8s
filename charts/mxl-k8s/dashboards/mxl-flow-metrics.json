@@ -1130,7 +1130,7 @@
       "id": 113,
       "type": "stat",
       "title": "Node Fabric Throughput",
-      "description": "Transmitted plus received across every transport on the node.",
+      "description": "Transmitted plus received across every transport on the node. One selector over both counters rather than a sum of two: a node that only sources or only targets a mirror appears on one side alone, and a binary operator between them would match nothing.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1181,7 +1181,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (node) (rate(mxl_gateway_mirror_transmitted_bytes_total{node=~\"$node\"}[$__rate_interval])) + sum by (node) (rate(mxl_gateway_mirror_received_bytes_total{node=~\"$node\"}[$__rate_interval]))",
+          "expr": "sum by (node) (rate({__name__=~\"mxl_gateway_mirror_(transmitted|received)_bytes_total\",node=~\"$node\"}[$__rate_interval]))",
           "legendFormat": "{{node}}",
           "range": true
         }
