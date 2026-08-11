@@ -59,7 +59,7 @@ func TestReconcile_FlowOriginRotation_DetectedAfterStaleOpen(t *testing.T) {
 		opener:        opener,
 		FlushInterval: time.Hour,
 		sources:       map[types.NamespacedName]*sourceEntry{},
-		attempts:      map[types.NamespacedName]uint32{},
+		attempts:      attemptTable[sourceAddInputs]{},
 	}
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}

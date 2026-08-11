@@ -551,7 +551,9 @@ func TestReconcile_AddTargetFailureSurfacesConditionAndCapsBackoffAt30s(t *testi
 		Build()
 
 	addErr := errors.New("connect: target offline")
+	clock, advance := fixedClock(time.Now())
 	r := &SourceReconciler{
+		nowFn:    clock,
 		Client:   c,
 		Scheme:   scheme,
 		NodeName: "node-a",
@@ -561,7 +563,7 @@ func TestReconcile_AddTargetFailureSurfacesConditionAndCapsBackoffAt30s(t *testi
 			},
 		},
 		sources:  map[types.NamespacedName]*sourceEntry{},
-		attempts: map[types.NamespacedName]uint32{},
+		attempts: attemptTable[sourceAddInputs]{},
 	}
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
@@ -590,6 +592,7 @@ func TestReconcile_AddTargetFailureSurfacesConditionAndCapsBackoffAt30s(t *testi
 	// the 30s cap (2^9 * 100ms = 51.2s > 30s, so attempts=9 caps).
 	var lastResult ctrl.Result
 	for i := 0; i < 9; i++ {
+		advance(backoffFor(uint32(i + 1)))
 		lastResult, err = r.Reconcile(context.Background(), req)
 		require.NoError(t, err)
 	}
@@ -649,7 +652,7 @@ func TestReconcile_FlowOriginRotationReopensReader(t *testing.T) {
 		opener:        opener,
 		FlushInterval: time.Hour,
 		sources:       map[types.NamespacedName]*sourceEntry{},
-		attempts:      map[types.NamespacedName]uint32{},
+		attempts:      attemptTable[sourceAddInputs]{},
 	}
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
@@ -717,7 +720,7 @@ func TestReconcile_SourceNodeMutatedAwayClosesEntry(t *testing.T) {
 		Scheme:   scheme,
 		NodeName: selfNode,
 		sources:  map[types.NamespacedName]*sourceEntry{},
-		attempts: map[types.NamespacedName]uint32{},
+		attempts: attemptTable[sourceAddInputs]{},
 	}
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
@@ -767,7 +770,7 @@ func TestSource_SeedAttemptsFromStatus(t *testing.T) {
 			},
 		},
 		sources:  map[types.NamespacedName]*sourceEntry{},
-		attempts: map[types.NamespacedName]uint32{},
+		attempts: attemptTable[sourceAddInputs]{},
 	}
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
@@ -775,7 +778,7 @@ func TestSource_SeedAttemptsFromStatus(t *testing.T) {
 	require.NoError(t, err)
 
 	r.mu.Lock()
-	got := r.attempts[key]
+	got := r.attempts.count(key)
 	r.mu.Unlock()
 	assert.Equal(t, uint32(6), got,
 		"seed must restore the persisted attemptCount (5) before the "+
@@ -1010,7 +1013,7 @@ func TestPublishSourceProgress_IncludesLastSentAt(t *testing.T) {
 		Scheme:   scheme,
 		NodeName: "node-a",
 		sources:  map[types.NamespacedName]*sourceEntry{},
-		attempts: map[types.NamespacedName]uint32{},
+		attempts: attemptTable[sourceAddInputs]{},
 	}
 
 	sent := time.Now().UTC().Truncate(time.Second)
@@ -1118,7 +1121,7 @@ func TestSource_FlusherSuppressesIdenticalTicksAfterFirstTransfer(t *testing.T) 
 		NodeName:      "node-a",
 		FlushInterval: 2 * time.Millisecond,
 		sources:       map[types.NamespacedName]*sourceEntry{},
-		attempts:      map[types.NamespacedName]uint32{},
+		attempts:      attemptTable[sourceAddInputs]{},
 	}
 
 	entry := &sourceEntry{}
@@ -1181,7 +1184,7 @@ func TestPublishSourceProgress_OmitsLastSentAtWhenNeverTransferred(t *testing.T)
 		Scheme:   scheme,
 		NodeName: "node-a",
 		sources:  map[types.NamespacedName]*sourceEntry{},
-		attempts: map[types.NamespacedName]uint32{},
+		attempts: attemptTable[sourceAddInputs]{},
 	}
 
 	require.NoError(t, r.publishSourceProgress(context.Background(), key, sourceProgressState{

@@ -89,6 +89,14 @@ jobs:
             # true iff some changed file is not a .md.
             code:       ['!**/*.md']
             kind:
+              # The suite exercises the images these modules build, so a
+              # change to one is exactly what it exists to catch.
+              - 'operator/**'
+              - 'agent/**'
+              - 'gateway/**'
+              - 'exporter/**'
+              - 'api/**'
+              - 'go.work*'
               - 'hack/kind-*'
               - 'docker/**'
               - 'examples/tcp-demo/**'
