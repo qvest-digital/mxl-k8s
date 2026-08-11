@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,6 +33,18 @@ type openFailureFixture struct {
 	req    reconcile.Request
 	domain string
 	opens  int
+
+	// advance moves the reconciler's clock. Consecutive open attempts
+	// are separated by the open backoff now that it is enforced rather
+	// than advised, so a test driving several has to let it elapse the
+	// way the requeue does in production.
+	advance func(time.Duration)
+}
+
+// advancePastBackoff releases the open gate however long the last
+// failure earned, without a test having to track the attempt count.
+func (f *openFailureFixture) advancePastBackoff() {
+	f.advance(backoffFor(maxTargetOpenAttempts) + time.Second)
 }
 
 func newOpenFailureFixture(t *testing.T, openErr error, locPhase mxlv1alpha1.MxlFlowLocationPhase) *openFailureFixture {
@@ -57,12 +70,15 @@ func newOpenFailureFixture(t *testing.T, openErr error, locPhase mxlv1alpha1.Mxl
 		WithObjects(mirror, flow).
 		Build()
 
+	clock, advance := fixedClock(time.Now())
 	f := &openFailureFixture{
-		key:    key,
-		req:    reconcile.Request{NamespacedName: key},
-		domain: t.TempDir(),
+		key:     key,
+		req:     reconcile.Request{NamespacedName: key},
+		domain:  t.TempDir(),
+		advance: advance,
 	}
 	f.r = &TargetReconciler{
+		nowFn:      clock,
 		Client:     c,
 		Scheme:     scheme,
 		NodeName:   "node-a",
@@ -113,6 +129,7 @@ func TestTarget_OpenFailureEscalatesOutOfMaterializing(t *testing.T) {
 		require.NoError(t, err)
 		assert.Positive(t, res.RequeueAfter,
 			"a failed open must come back as a bounded-backoff requeue")
+		f.advancePastBackoff()
 
 		got := f.mirror(t)
 		assert.Equal(t, mxlv1alpha1.MxlFlowMirrorMaterializing, got.Status.Phase,
@@ -174,6 +191,7 @@ func TestTarget_WriterFailureReclaimsFlowDirAtThreshold(t *testing.T) {
 		require.NoError(t, err)
 		assert.DirExists(t, dir,
 			"a failure that has not yet repeated must not cost a directory")
+		f.advancePastBackoff()
 	}
 
 	res, err := f.r.Reconcile(context.Background(), f.req)
@@ -200,6 +218,7 @@ func TestTarget_WriterFailureKeepsOriginFlowDir(t *testing.T) {
 	for range maxTargetOpenAttempts + 1 {
 		_, err := f.r.Reconcile(context.Background(), f.req)
 		require.NoError(t, err)
+		f.advancePastBackoff()
 	}
 
 	assert.DirExists(t, dir,
@@ -221,6 +240,7 @@ func TestTarget_FabricFailureKeepsFlowDir(t *testing.T) {
 	for range maxTargetOpenAttempts + 1 {
 		_, err := f.r.Reconcile(context.Background(), f.req)
 		require.NoError(t, err)
+		f.advancePastBackoff()
 	}
 
 	assert.DirExists(t, dir,
@@ -243,6 +263,9 @@ func TestTarget_OpenSuccessClearsAttemptCount(t *testing.T) {
 	f.r.openTargetFn = func(types.NamespacedName, string, fabrics.Provider) (*targetEntry, error) {
 		return &targetEntry{infoStr: info}, nil
 	}
+	// The open that succeeds only runs once the failure's backoff has
+	// elapsed; inside it the reconciler does not attempt at all.
+	f.advancePastBackoff()
 	// A successful Reconcile starts the per-mirror flusher; drop the
 	// entry so the goroutine is joined before goleak inspects.
 	t.Cleanup(func() { f.r.closeEntry(f.key, keepFlow) })
