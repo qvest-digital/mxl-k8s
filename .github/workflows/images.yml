@@ -89,14 +89,6 @@ jobs:
             # true iff some changed file is not a .md.
             code:       ['!**/*.md']
             kind:
-              # The suite exercises the images these modules build, so a
-              # change to one is exactly what it exists to catch.
-              - 'operator/**'
-              - 'agent/**'
-              - 'gateway/**'
-              - 'exporter/**'
-              - 'api/**'
-              - 'go.work*'
               - 'hack/kind-*'
               - 'docker/**'
               - 'examples/tcp-demo/**'
@@ -314,13 +306,19 @@ jobs:
           # with-release_tag invocations always skip. has_images=false
           # short-circuits to false too: with no images to build,
           # there is nothing for kind to load.
+          #
+          # Any rebuilt image is worth smoke-testing, so has_images
+          # selects as well as vetoes. The kind filter stays for what
+          # changes the cluster without building an image: the chart,
+          # the CRDs, the harness. Listing module paths there instead
+          # would be a second list to keep in step with the modules.
           kind_wanted=false
           case "$GITHUB_EVENT_NAME" in
             pull_request)
               # Fork PRs are excluded -- the per-PR image tag is not
               # pushed to GHCR, so there is no manifest to kind-load.
               if [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}" ]; then
-                if [ "$CHANGED_KIND" = "true" ]; then
+                if [ "$CHANGED_KIND" = "true" ] || [ "$has_images" = "true" ]; then
                   kind_wanted=true
                 elif echo "${PR_LABELS_JSON:-[]}" | grep -q '"run-kind"'; then
                   kind_wanted=true
@@ -329,7 +327,7 @@ jobs:
               ;;
             push)
               if [ "$GITHUB_REF" = "refs/heads/main" ] \
-                  && [ "$CHANGED_KIND" = "true" ] \
+                  && { [ "$CHANGED_KIND" = "true" ] || [ "$has_images" = "true" ]; } \
                   && [ "$push" = "true" ]; then
                 kind_wanted=true
               fi
