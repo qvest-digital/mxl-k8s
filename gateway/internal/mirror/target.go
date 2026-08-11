@@ -2,7 +2,6 @@ package mirror
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -227,31 +226,14 @@ type TargetReconciler struct {
 	// attempts counts consecutive openTarget failures per mirror.
 	// Cleared the moment a target opens, so the value is always the
 	// length of the current failure run. Guarded by mu.
-	attempts map[types.NamespacedName]uint32
-
-	// openBackoff holds the earliest time the next openTarget for a
-	// mirror may run. Guarded by mu. Entries are dropped when the
-	// target opens and when the mirror is torn down, so the map holds
-	// at most one entry per mirror currently failing to open.
-	openBackoff map[types.NamespacedName]targetOpenBackoff
+	attempts attemptTable[targetOpenInputs]
 }
 
-// targetOpenBackoff gates repeated openTarget attempts for one mirror.
-//
-// A failed open publishes status on the mirror, and this reconciler
-// watches that same object, so the write wakes it again at once. The
-// RequeueAfter a failure returns is only advisory against that: the
-// watch event arrives long before the requeue is due, so the backoff
-// never applies and the open retries at apiserver rate, writing status
-// every time.
-//
-// signature pins the backoff to the inputs it was earned against. A
-// mirror whose flow definition or provider has changed is a new
-// attempt rather than a retry of the one that failed, and must not sit
-// out the accumulated delay.
-type targetOpenBackoff struct {
-	notBefore time.Time
-	signature string
+// targetOpenInputs is what an open attempt depends on. A change to
+// either makes the next attempt a new one rather than a retry.
+type targetOpenInputs struct {
+	flowDef  string
+	provider fabrics.Provider
 }
 
 // targetEntry holds the live libmxl handles for one target-side
@@ -482,26 +464,20 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// been unopenable across the bounce reads as Materializing again
 	// and the escalation to Degraded restarts from zero. Matches the
 	// source side's seeding of status.attemptCount.
+	inputs := targetOpenInputs{flowDef: string(flow.Spec.Definition.Raw), provider: provider}
 	r.mu.Lock()
-	if _, ok := r.attempts[req.NamespacedName]; !ok && mirror.Status.TargetAttemptCount > 0 {
-		r.attempts[req.NamespacedName] = uint32(mirror.Status.TargetAttemptCount)
-	}
+	r.attempts.seed(req.NamespacedName, uint32(mirror.Status.TargetAttemptCount))
+	remaining, gated := r.attempts.wait(req.NamespacedName, inputs, r.now())
 	r.mu.Unlock()
-
-	// A failed open wrote status, and that write wakes this reconciler
-	// through its own watch. Answering that wake with another open
-	// would retry at apiserver rate however long the returned
-	// RequeueAfter was, so the backoff is enforced here rather than
-	// left to the requeue. Nothing is written on a gated pass: the
-	// write is what closes the loop.
-	signature := targetAttemptSignature(string(flow.Spec.Definition.Raw), provider)
-	if remaining, gated := r.openGatedFor(req.NamespacedName, signature); gated {
+	// Nothing is written on a gated pass: the status write is what
+	// wakes this reconciler through its own watch.
+	if gated {
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
 
 	entry, err := r.openTargetDispatch(req.NamespacedName, string(flow.Spec.Definition.Raw), provider)
 	if err != nil {
-		return r.handleOpenTargetFailure(ctx, &mirror, signature, err)
+		return r.handleOpenTargetFailure(ctx, &mirror, inputs, err)
 	}
 
 	r.mu.Lock()
@@ -514,7 +490,6 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 	r.targets[req.NamespacedName] = entry
 	delete(r.attempts, req.NamespacedName)
-	delete(r.openBackoff, req.NamespacedName)
 	r.mu.Unlock()
 
 	// Publish the descriptor before the phase: a Ready mirror whose
@@ -545,46 +520,6 @@ func (r *TargetReconciler) now() time.Time {
 		return r.nowFn()
 	}
 	return time.Now()
-}
-
-// targetAttemptSignature identifies the inputs an open attempt was
-// made with, so a backoff earned against one flow definition and
-// provider does not hold back an attempt against different ones.
-func targetAttemptSignature(flowDef string, provider fabrics.Provider) string {
-	return fmt.Sprintf("%v|%x", provider, sha256.Sum256([]byte(flowDef)))
-}
-
-// openGatedFor reports how long remains of the backoff earned by the
-// previous failed open for key, and whether it still applies. A
-// signature that no longer matches, or an elapsed deadline, drops the
-// entry and reports no gate.
-func (r *TargetReconciler) openGatedFor(key types.NamespacedName, signature string) (time.Duration, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	b, ok := r.openBackoff[key]
-	if !ok {
-		return 0, false
-	}
-	if b.signature != signature {
-		delete(r.openBackoff, key)
-		return 0, false
-	}
-	remaining := b.notBefore.Sub(r.now())
-	if remaining <= 0 {
-		delete(r.openBackoff, key)
-		return 0, false
-	}
-	return remaining, true
-}
-
-// setOpenBackoff records that the next open for key must wait d.
-func (r *TargetReconciler) setOpenBackoff(key types.NamespacedName, signature string, d time.Duration) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.openBackoff == nil {
-		r.openBackoff = make(map[types.NamespacedName]targetOpenBackoff)
-	}
-	r.openBackoff[key] = targetOpenBackoff{notBefore: r.now().Add(d), signature: signature}
 }
 
 // openTarget walks the libmxl handshake: open FlowWriter, create +
@@ -643,13 +578,12 @@ func (r *TargetReconciler) openTargetDispatch(key types.NamespacedName, flowDef 
 // consecutive failures the phase escalates to Degraded and, for a
 // failure that came from the local writer, the flow directory is
 // reclaimed so the retry materialises a fresh one.
-func (r *TargetReconciler) handleOpenTargetFailure(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, signature string, openErr error) (ctrl.Result, error) {
+func (r *TargetReconciler) handleOpenTargetFailure(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, inputs targetOpenInputs, openErr error) (ctrl.Result, error) {
 	key := client.ObjectKeyFromObject(mirror)
 	l := log.FromContext(ctx).WithValues("mxlflowmirror", key)
 
 	r.mu.Lock()
-	r.attempts[key]++
-	attempts := r.attempts[key]
+	attempts, wait := r.attempts.fail(key, inputs, r.now(), backoffFor)
 	r.mu.Unlock()
 
 	phase := mxlv1alpha1.MxlFlowMirrorMaterializing
@@ -669,13 +603,13 @@ func (r *TargetReconciler) handleOpenTargetFailure(ctx context.Context, mirror *
 		if reclaimed := r.reclaimUnusableFlowDir(ctx, mirror.Spec.FlowID); reclaimed {
 			// Materialising a fresh directory is the point of the
 			// reclaim; do not sit out the accumulated backoff first.
-			r.setOpenBackoff(key, signature, reclaimRetryDelay)
+			r.mu.Lock()
+			r.attempts.rearm(key, r.now(), reclaimRetryDelay)
+			r.mu.Unlock()
 			return ctrl.Result{RequeueAfter: reclaimRetryDelay}, nil
 		}
 	}
-	d := backoffFor(attempts)
-	r.setOpenBackoff(key, signature, d)
-	return ctrl.Result{RequeueAfter: d}, nil
+	return ctrl.Result{RequeueAfter: wait}, nil
 }
 
 // reclaimUnusableFlowDir removes the local flow directory for flowID
@@ -999,7 +933,6 @@ func (r *TargetReconciler) closeEntry(key types.NamespacedName, disp flowDisposi
 	entry := r.targets[key]
 	delete(r.targets, key)
 	delete(r.attempts, key)
-	delete(r.openBackoff, key)
 	r.mu.Unlock()
 	if entry == nil {
 		return
@@ -1262,7 +1195,7 @@ func (r *TargetReconciler) applyTargetStatus(
 	patch.SetNamespace(mirror.Namespace)
 	patch.SetName(mirror.Name)
 	r.mu.Lock()
-	attempts := r.attempts[client.ObjectKeyFromObject(mirror)]
+	attempts := r.attempts.count(client.ObjectKeyFromObject(mirror))
 	r.mu.Unlock()
 	status := map[string]any{
 		"phase":              string(phase),
@@ -1716,10 +1649,7 @@ func (r *TargetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.targets = make(map[types.NamespacedName]*targetEntry)
 	}
 	if r.attempts == nil {
-		r.attempts = make(map[types.NamespacedName]uint32)
-	}
-	if r.openBackoff == nil {
-		r.openBackoff = make(map[types.NamespacedName]targetOpenBackoff)
+		r.attempts = make(attemptTable[targetOpenInputs])
 	}
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()

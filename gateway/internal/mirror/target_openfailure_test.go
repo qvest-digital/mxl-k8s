@@ -84,7 +84,7 @@ func newOpenFailureFixture(t *testing.T, openErr error, locPhase mxlv1alpha1.Mxl
 		NodeName:   "node-a",
 		DomainPath: f.domain,
 		targets:    map[types.NamespacedName]*targetEntry{},
-		attempts:   map[types.NamespacedName]uint32{},
+		attempts:   attemptTable[targetOpenInputs]{},
 		openTargetFn: func(types.NamespacedName, string, fabrics.Provider) (*targetEntry, error) {
 			f.opens++
 			return nil, openErr

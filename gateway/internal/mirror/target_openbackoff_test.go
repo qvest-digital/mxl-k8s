@@ -123,9 +123,10 @@ func TestTarget_OpenBackoffClearedOnSuccessAndTeardown(t *testing.T) {
 	require.NoError(t, err)
 
 	f.r.mu.Lock()
-	_, gated := f.r.openBackoff[f.key]
+	a, recorded := f.r.attempts[f.key]
 	f.r.mu.Unlock()
-	require.True(t, gated, "a failed open must record a backoff")
+	require.True(t, recorded, "a failed open must record an attempt")
+	require.False(t, a.notBefore.IsZero(), "the failure must arm the wait")
 
 	f.r.openTargetFn = func(types.NamespacedName, string, fabrics.Provider) (*targetEntry, error) {
 		return &targetEntry{infoStr: "info-1"}, nil
@@ -139,15 +140,15 @@ func TestTarget_OpenBackoffClearedOnSuccessAndTeardown(t *testing.T) {
 	require.NoError(t, err)
 
 	f.r.mu.Lock()
-	_, stillGated := f.r.openBackoff[f.key]
+	_, stillRecorded := f.r.attempts[f.key]
 	f.r.mu.Unlock()
-	assert.False(t, stillGated,
+	assert.False(t, stillRecorded,
 		"an open target must drop its backoff, or the next failure run "+
 			"starts already delayed")
 
 	f.r.closeEntry(f.key, keepFlow)
 	f.r.mu.Lock()
-	n := len(f.r.openBackoff)
+	n := len(f.r.attempts)
 	f.r.mu.Unlock()
-	assert.Zero(t, n, "teardown must not leave the mirror's backoff behind")
+	assert.Zero(t, n, "teardown must not leave the mirror's attempt behind")
 }
