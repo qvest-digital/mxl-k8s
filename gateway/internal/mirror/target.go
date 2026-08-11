@@ -106,6 +106,12 @@ const maxStuckRebuilds uint32 = 3
 // gets the flow directory reclaimed (see reclaimUnusableFlowDir).
 const maxTargetOpenAttempts uint32 = 3
 
+// reclaimRetryDelay is how long the retry after a flow-directory
+// reclaim waits. Short on purpose: materialising a fresh directory is
+// the point of the reclaim, so that attempt does not sit out the
+// backoff the failures before it earned.
+const reclaimRetryDelay = 100 * time.Millisecond
+
 // flowDirSuffix is the directory-name suffix libmxl gives a per-flow
 // directory under a domain (FLOW_DIRECTORY_NAME_SUFFIX). go-mxl keeps
 // its own copy unexported, so the gateway carries one; the agent
@@ -208,13 +214,26 @@ type TargetReconciler struct {
 	// escalation out of Materializing can be observed without one.
 	openTargetFn func(key types.NamespacedName, flowDef string, provider fabrics.Provider) (*targetEntry, error)
 
+	// nowFn is the clock the open backoff is measured against.
+	// Production leaves it nil and the reconciler falls back to
+	// time.Now; tests inject one so the gate can be driven without
+	// sleeping.
+	nowFn func() time.Time
+
 	mu      sync.Mutex
 	targets map[types.NamespacedName]*targetEntry
 
 	// attempts counts consecutive openTarget failures per mirror.
 	// Cleared the moment a target opens, so the value is always the
 	// length of the current failure run. Guarded by mu.
-	attempts map[types.NamespacedName]uint32
+	attempts attemptTable[targetOpenInputs]
+}
+
+// targetOpenInputs is what an open attempt depends on. A change to
+// either makes the next attempt a new one rather than a retry.
+type targetOpenInputs struct {
+	flowDef  string
+	provider fabrics.Provider
 }
 
 // targetEntry holds the live libmxl handles for one target-side
@@ -445,15 +464,20 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// been unopenable across the bounce reads as Materializing again
 	// and the escalation to Degraded restarts from zero. Matches the
 	// source side's seeding of status.attemptCount.
+	inputs := targetOpenInputs{flowDef: string(flow.Spec.Definition.Raw), provider: provider}
 	r.mu.Lock()
-	if _, ok := r.attempts[req.NamespacedName]; !ok && mirror.Status.TargetAttemptCount > 0 {
-		r.attempts[req.NamespacedName] = uint32(mirror.Status.TargetAttemptCount)
-	}
+	r.attempts.seed(req.NamespacedName, uint32(mirror.Status.TargetAttemptCount))
+	remaining, gated := r.attempts.wait(req.NamespacedName, inputs, r.now())
 	r.mu.Unlock()
+	// Nothing is written on a gated pass: the status write is what
+	// wakes this reconciler through its own watch.
+	if gated {
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
 
 	entry, err := r.openTargetDispatch(req.NamespacedName, string(flow.Spec.Definition.Raw), provider)
 	if err != nil {
-		return r.handleOpenTargetFailure(ctx, &mirror, err)
+		return r.handleOpenTargetFailure(ctx, &mirror, inputs, err)
 	}
 
 	r.mu.Lock()
@@ -488,6 +512,14 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		"sourceNode", mirror.Spec.SourceNode,
 		"provider", provider.String())
 	return ctrl.Result{}, nil
+}
+
+// now reports the current time through the reconciler's clock seam.
+func (r *TargetReconciler) now() time.Time {
+	if r.nowFn != nil {
+		return r.nowFn()
+	}
+	return time.Now()
 }
 
 // openTarget walks the libmxl handshake: open FlowWriter, create +
@@ -546,13 +578,12 @@ func (r *TargetReconciler) openTargetDispatch(key types.NamespacedName, flowDef 
 // consecutive failures the phase escalates to Degraded and, for a
 // failure that came from the local writer, the flow directory is
 // reclaimed so the retry materialises a fresh one.
-func (r *TargetReconciler) handleOpenTargetFailure(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, openErr error) (ctrl.Result, error) {
+func (r *TargetReconciler) handleOpenTargetFailure(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, inputs targetOpenInputs, openErr error) (ctrl.Result, error) {
 	key := client.ObjectKeyFromObject(mirror)
 	l := log.FromContext(ctx).WithValues("mxlflowmirror", key)
 
 	r.mu.Lock()
-	r.attempts[key]++
-	attempts := r.attempts[key]
+	attempts, wait := r.attempts.fail(key, inputs, r.now(), backoffFor)
 	r.mu.Unlock()
 
 	phase := mxlv1alpha1.MxlFlowMirrorMaterializing
@@ -572,10 +603,13 @@ func (r *TargetReconciler) handleOpenTargetFailure(ctx context.Context, mirror *
 		if reclaimed := r.reclaimUnusableFlowDir(ctx, mirror.Spec.FlowID); reclaimed {
 			// Materialising a fresh directory is the point of the
 			// reclaim; do not sit out the accumulated backoff first.
-			return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
+			r.mu.Lock()
+			r.attempts.rearm(key, r.now(), reclaimRetryDelay)
+			r.mu.Unlock()
+			return ctrl.Result{RequeueAfter: reclaimRetryDelay}, nil
 		}
 	}
-	return ctrl.Result{RequeueAfter: backoffFor(attempts)}, nil
+	return ctrl.Result{RequeueAfter: wait}, nil
 }
 
 // reclaimUnusableFlowDir removes the local flow directory for flowID
@@ -1161,7 +1195,7 @@ func (r *TargetReconciler) applyTargetStatus(
 	patch.SetNamespace(mirror.Namespace)
 	patch.SetName(mirror.Name)
 	r.mu.Lock()
-	attempts := r.attempts[client.ObjectKeyFromObject(mirror)]
+	attempts := r.attempts.count(client.ObjectKeyFromObject(mirror))
 	r.mu.Unlock()
 	status := map[string]any{
 		"phase":              string(phase),
@@ -1615,7 +1649,7 @@ func (r *TargetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.targets = make(map[types.NamespacedName]*targetEntry)
 	}
 	if r.attempts == nil {
-		r.attempts = make(map[types.NamespacedName]uint32)
+		r.attempts = make(attemptTable[targetOpenInputs])
 	}
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()

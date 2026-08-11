@@ -57,7 +57,7 @@ func TestReconcile_SourceFinalizerReapedWhenSourceNodeGone(t *testing.T) {
 		Scheme:   scheme,
 		NodeName: "node-a",
 		sources:  map[types.NamespacedName]*sourceEntry{},
-		attempts: map[types.NamespacedName]uint32{},
+		attempts: attemptTable[sourceAddInputs]{},
 	}
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
@@ -93,7 +93,7 @@ func TestReconcile_SourceFinalizerKeptWhileSourceNodeExists(t *testing.T) {
 		Scheme:   scheme,
 		NodeName: "node-a",
 		sources:  map[types.NamespacedName]*sourceEntry{},
-		attempts: map[types.NamespacedName]uint32{},
+		attempts: attemptTable[sourceAddInputs]{},
 	}
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
@@ -201,7 +201,7 @@ func TestReconcile_LastOrphanedFinalizerCompletesDeletion(t *testing.T) {
 		Scheme:   scheme,
 		NodeName: "node-a",
 		sources:  map[types.NamespacedName]*sourceEntry{},
-		attempts: map[types.NamespacedName]uint32{},
+		attempts: attemptTable[sourceAddInputs]{},
 	}
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}

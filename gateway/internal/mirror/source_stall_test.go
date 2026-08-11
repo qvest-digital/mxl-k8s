@@ -179,7 +179,7 @@ func TestReconcile_PreservesLastSentAtAcrossReopen(t *testing.T) {
 		opener:        opener,
 		FlushInterval: time.Hour,
 		sources:       map[types.NamespacedName]*sourceEntry{},
-		attempts:      map[types.NamespacedName]uint32{},
+		attempts:      attemptTable[sourceAddInputs]{},
 	}
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
@@ -222,7 +222,7 @@ func TestRunFlusher_ReopensWedgedReader(t *testing.T) {
 		Scheme:   scheme,
 		NodeName: "node-a",
 		sources:  map[types.NamespacedName]*sourceEntry{},
-		attempts: map[types.NamespacedName]uint32{},
+		attempts: attemptTable[sourceAddInputs]{},
 		rebuilds: map[types.NamespacedName]uint32{},
 		rebuildFn: func(key types.NamespacedName) {
 			rebuilt <- key
@@ -277,7 +277,7 @@ func TestRunFlusher_StopsReopeningAtCap(t *testing.T) {
 		Scheme:   scheme,
 		NodeName: "node-a",
 		sources:  map[types.NamespacedName]*sourceEntry{},
-		attempts: map[types.NamespacedName]uint32{},
+		attempts: attemptTable[sourceAddInputs]{},
 		rebuilds: map[types.NamespacedName]uint32{key: maxReaderRebuilds},
 		rebuildFn: func(types.NamespacedName) {
 			t.Error("no reopen may be spawned once the budget is spent")
@@ -320,7 +320,7 @@ func TestRunFlusher_ClearsRebuildBudgetOnProgress(t *testing.T) {
 		Scheme:   scheme,
 		NodeName: "node-a",
 		sources:  map[types.NamespacedName]*sourceEntry{},
-		attempts: map[types.NamespacedName]uint32{},
+		attempts: attemptTable[sourceAddInputs]{},
 		rebuilds: map[types.NamespacedName]uint32{key: 3},
 	}
 

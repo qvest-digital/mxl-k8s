@@ -24,6 +24,9 @@ package mirror
 import (
 	"errors"
 	"fmt"
+	"time"
+
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
 
@@ -209,3 +212,63 @@ func classifyFabricError(err error) fabricFailure {
 	}
 	return fabricEndpointLost
 }
+
+// attempt is one mirror's failure run: consecutive failures, the
+// earliest the next try may run, and the inputs that wait was earned
+// against.
+type attempt[I comparable] struct {
+	count     uint32
+	notBefore time.Time
+	inputs    I
+}
+
+// attemptTable holds the failure runs of a reconciler that publishes
+// status on the object it watches. Such a write wakes the reconciler
+// through its own watch long before the RequeueAfter a failure
+// returned is due, so the wait has to be enforced on the way in
+// rather than returned as advice. Callers hold their own lock.
+type attemptTable[I comparable] map[types.NamespacedName]attempt[I]
+
+// wait reports how long remains before key may be retried against
+// inputs. Different inputs are a new attempt rather than a retry of
+// the one that failed, and serve no wait.
+func (t attemptTable[I]) wait(key types.NamespacedName, inputs I, now time.Time) (time.Duration, bool) {
+	a, ok := t[key]
+	if !ok || a.inputs != inputs {
+		return 0, false
+	}
+	if d := a.notBefore.Sub(now); d > 0 {
+		return d, true
+	}
+	return 0, false
+}
+
+// fail records a failure against inputs, arms the wait and returns the
+// new consecutive count.
+func (t attemptTable[I]) fail(key types.NamespacedName, inputs I, now time.Time, backoff func(uint32) time.Duration) (uint32, time.Duration) {
+	a := t[key]
+	a.count++
+	a.inputs = inputs
+	d := backoff(a.count)
+	a.notBefore = now.Add(d)
+	t[key] = a
+	return a.count, d
+}
+
+// rearm shortens or extends the wait already recorded for key.
+func (t attemptTable[I]) rearm(key types.NamespacedName, now time.Time, d time.Duration) {
+	if a, ok := t[key]; ok {
+		a.notBefore = now.Add(d)
+		t[key] = a
+	}
+}
+
+// seed restores a count persisted on status without arming a wait, so
+// a restart does not hand a wedged mirror a fresh budget.
+func (t attemptTable[I]) seed(key types.NamespacedName, count uint32) {
+	if _, ok := t[key]; !ok && count > 0 {
+		t[key] = attempt[I]{count: count}
+	}
+}
+
+func (t attemptTable[I]) count(key types.NamespacedName) uint32 { return t[key].count }

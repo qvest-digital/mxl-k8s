@@ -66,7 +66,7 @@ func newCapturingTarget(t *testing.T, mirror *mxlv1alpha1.MxlFlowMirror) (*Targe
 		Scheme:   scheme,
 		NodeName: "node-a",
 		targets:  map[types.NamespacedName]*targetEntry{},
-		attempts: map[types.NamespacedName]uint32{},
+		attempts: attemptTable[targetOpenInputs]{},
 	}, &seen
 }
 

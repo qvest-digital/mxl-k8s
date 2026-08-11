@@ -139,9 +139,13 @@ type SourceReconciler struct {
 	// reader. Mirrors the target reconciler's recoverFn.
 	rebuildFn func(key types.NamespacedName)
 
+	// nowFn is the clock the AddTarget wait is measured against.
+	// Production leaves it nil.
+	nowFn func() time.Time
+
 	mu       sync.Mutex
 	sources  map[types.NamespacedName]*sourceEntry
-	attempts map[types.NamespacedName]uint32
+	attempts attemptTable[sourceAddInputs]
 	// rebuilds counts consecutive reader reopens per mirror. It
 	// outlives the sourceEntry the watchdog tears down, which is the
 	// point: the budget has to survive the reopen it is bounding.
@@ -387,16 +391,21 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// Only the counter is restored: the next attempt fires immediately
 	// rather than waiting out a remembered backoff window, which keeps
 	// the design's "one free retry on restart" budget intact.
+	inputs := sourceAddInputs{targetInfo: mirror.Status.TargetInfo, provider: provider}
 	r.mu.Lock()
-	if _, ok := r.attempts[req.NamespacedName]; !ok && mirror.Status.AttemptCount > 0 {
-		r.attempts[req.NamespacedName] = uint32(mirror.Status.AttemptCount)
-	}
+	r.attempts.seed(req.NamespacedName, uint32(mirror.Status.AttemptCount))
+	remaining, gated := r.attempts.wait(req.NamespacedName, inputs, r.now())
 	r.mu.Unlock()
+	// Publishing SourceProgress is what wakes this reconciler through
+	// its own watch, so a gated pass writes nothing.
+	if gated {
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
 
 	entry, err := r.opener.open(mirror.Spec.FlowID, mirror.Status.TargetInfo, provider)
 	if err != nil {
 		if errors.Is(err, errAddTargetFailed) {
-			return r.handleAddTargetFailure(ctx, req.NamespacedName, err)
+			return r.handleAddTargetFailure(ctx, req.NamespacedName, inputs, err)
 		}
 		return ctrl.Result{}, fmt.Errorf("open initiator: %w", err)
 	}
@@ -437,10 +446,9 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 // returns a bounded-backoff RequeueAfter so the libmxl-fabrics
 // initiator is not torn down and rebuilt every controller-runtime
 // tick while the target is unreachable.
-func (r *SourceReconciler) handleAddTargetFailure(ctx context.Context, key types.NamespacedName, addErr error) (ctrl.Result, error) {
+func (r *SourceReconciler) handleAddTargetFailure(ctx context.Context, key types.NamespacedName, inputs sourceAddInputs, addErr error) (ctrl.Result, error) {
 	r.mu.Lock()
-	r.attempts[key]++
-	attempts := r.attempts[key]
+	attempts, wait := r.attempts.fail(key, inputs, r.now(), backoffFor)
 	r.mu.Unlock()
 
 	msg := addErr.Error()
@@ -452,7 +460,22 @@ func (r *SourceReconciler) handleAddTargetFailure(ctx context.Context, key types
 	}); err != nil {
 		log.FromContext(ctx).Error(err, "publish SourceProgress")
 	}
-	return ctrl.Result{RequeueAfter: backoffFor(attempts)}, nil
+	return ctrl.Result{RequeueAfter: wait}, nil
+}
+
+// now reports the current time through the reconciler's clock seam.
+func (r *SourceReconciler) now() time.Time {
+	if r.nowFn != nil {
+		return r.nowFn()
+	}
+	return time.Now()
+}
+
+// sourceAddInputs is what an AddTarget attempt depends on. A rotated
+// TargetInfo is a new attempt, not a retry of the one that failed.
+type sourceAddInputs struct {
+	targetInfo string
+	provider   fabrics.Provider
 }
 
 // backoffFor returns 100ms * 2^(attempts-1) capped at 30s. The cap
@@ -1341,7 +1364,7 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.sources = make(map[types.NamespacedName]*sourceEntry)
 	}
 	if r.attempts == nil {
-		r.attempts = make(map[types.NamespacedName]uint32)
+		r.attempts = make(attemptTable[sourceAddInputs])
 	}
 	if r.rebuilds == nil {
 		r.rebuilds = make(map[types.NamespacedName]uint32)
