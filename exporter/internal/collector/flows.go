@@ -153,7 +153,9 @@ func (c *FlowCollector) collectFlow(ch chan<- prometheus.Metric, dom string, obs
 	gauge(descHeadIndex, float64(rt.HeadIndex))
 	gauge(descLastRead, float64(rt.LastReadTime))
 	gauge(descLastWrite, float64(rt.LastWriteTime))
-	gauge(descWriteAge, obs.WriteAge.Seconds())
+	if obs.HaveWriteAge {
+		gauge(descWriteAge, obs.WriteAge.Seconds())
+	}
 	gauge(descLatency, float64(obs.LatencyGrains))
 	gauge(descRateNum, float64(cfg.Common.GrainRate.Num))
 	gauge(descRateDen, float64(cfg.Common.GrainRate.Den))

@@ -146,3 +146,80 @@ func TestActivityWindowFallsBackOnAnUnusableRate(t *testing.T) {
 		activityWindow(mxl.CommonFlowConfig{Format: mxl.FormatVideo}),
 		"a zero grain rate must not divide by zero or yield a zero window")
 }
+
+const activeTestAudioDef = `{
+  "id": "1f8e2c04-6f2a-4f3e-9d55-2c0d5a9b7e11",
+  "format": "urn:x-nmos:format:audio",
+  "tags": { "urn:x-nmos:tag:grouphint/v1.0": ["exporter probe:Audio"] },
+  "label": "activity probe, audio",
+  "media_type": "audio/float32",
+  "sample_rate": { "numerator": 48000, "denominator": 1 },
+  "channel_count": 2,
+  "bit_depth": 32
+}`
+
+const activeTestAudioID = "1f8e2c04-6f2a-4f3e-9d55-2c0d5a9b7e11"
+
+func TestObserveJudgesAContinuousFlowByItsHead(t *testing.T) {
+	// libmxl stamps runtime.lastWriteTime in PosixDiscreteFlowWriter's
+	// commit path only; PosixContinuousFlowWriter::commit advances
+	// headIndex and leaves lastWriteTime holding whatever flow creation
+	// wrote. A window measured against that field expires once and then
+	// reports every audio flow stalled for the rest of its life, however
+	// healthy the writer.
+	dir := t.TempDir()
+	inst, err := mxl.NewInstance(dir, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = inst.Close() })
+
+	w, _, err := inst.NewWriter(activeTestAudioDef)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = w.Close() })
+
+	d, err := Open(dir, time.Minute)
+	require.NoError(t, err)
+	t.Cleanup(func() { d.Close() })
+	require.NoError(t, d.Scan())
+
+	rate := w.Config().Common.GrainRate
+	commit := func() {
+		sa, err := w.OpenSamples(mxl.CurrentIndex(rate), 48)
+		require.NoError(t, err)
+		require.NoError(t, sa.Commit())
+	}
+
+	commit()
+	obs := d.Observe()
+	require.Len(t, obs, 1)
+	require.Equal(t, activeTestAudioID, obs[0].ID)
+	require.False(t, obs[0].HaveWriteAge,
+		"libmxl maintains no last write time for a continuous flow, so "+
+			"the exporter must not report an age derived from one")
+
+	// Past the window a lastWriteTime-derived answer would have expired
+	// at: the flow was created once and the writer has been committing
+	// ever since, which is the shape that read stalled on sc and on a
+	// freshly started kind cluster.
+	require.Greater(t, 300*time.Millisecond,
+		activityWindow(obs[0].Info.Config.Common),
+		"the sleep below has to outlast the window this flow would have "+
+			"been judged by, or it proves nothing")
+	time.Sleep(300 * time.Millisecond)
+	commit()
+
+	obs = d.Observe()
+	require.Len(t, obs, 1)
+	require.True(t, obs[0].Active,
+		"an audio flow whose head is tracking the clock is active however "+
+			"long ago the flow was created")
+
+	// A head that stops advancing still has to fall out on its own,
+	// which is what makes the reading about the flow and not about the
+	// fact that it is continuous.
+	require.Eventually(t, func() bool {
+		o := d.Observe()
+		return len(o) == 1 && !o[0].Active
+	}, 10*time.Second, 50*time.Millisecond,
+		"a continuous flow whose writer stopped must go inactive once the "+
+			"clock outruns its head by the span a reader could still reach")
+}
