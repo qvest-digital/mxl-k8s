@@ -12,6 +12,7 @@ import (
 
 	"github.com/qvest-digital/go-mxl/fabrics"
 
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/domaingc"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
 )
 
@@ -81,6 +82,15 @@ type Config struct {
 	// MxlFlowMirror freshness expectation.
 	DegradedAfter time.Duration
 
+	// DomainGCInterval is how often the gateway asks libmxl to reclaim
+	// flow directories no writer holds. Zero disables the sweep.
+	DomainGCInterval time.Duration
+
+	// DomainGCGrace is how long after start the first sweep is held
+	// back, so a restart does not collect mirror copies the target
+	// reconciler is about to re-establish.
+	DomainGCGrace time.Duration
+
 	// ReaderStallAfter is how long the source-side reconciler lets a
 	// reader report an unchanged head index, having never transferred
 	// a grain, before SourceProgress reports ReaderNotAdvancing.
@@ -146,6 +156,10 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 			"no device for.")
 	fs.DurationVar(&c.DegradedAfter, "degraded-after", 10*time.Second,
 		"Grain-commit inactivity after which the target gateway demotes a mirror to Degraded.")
+	fs.DurationVar(&c.DomainGCInterval, "domain-gc-interval", domaingc.DefaultInterval,
+		"How often to reclaim flow directories no writer holds. Zero disables it.")
+	fs.DurationVar(&c.DomainGCGrace, "domain-gc-grace", domaingc.DefaultGrace,
+		"How long after start to hold back the first reclaim sweep.")
 	fs.DurationVar(&c.ReaderStallAfter, "reader-stall-after", 20*time.Second,
 		"Head-index inactivity after which the source gateway reports a reader that has never transferred a grain as not advancing.")
 	fs.Float64Var(&c.KubeAPIQPS, "kube-api-qps", 50,

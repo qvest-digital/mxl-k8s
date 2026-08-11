@@ -25,6 +25,7 @@ import (
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/capabilities"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/config"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/domaingc"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/mirror"
 )
@@ -150,6 +151,23 @@ func run(args []string) error {
 		return nil
 	})); err != nil {
 		return fmt.Errorf("register capabilities runnable: %w", err)
+	}
+
+	// Reclaiming abandoned flow directories is a Manager Runnable so
+	// it starts only once the caches have synced, which is the first
+	// half of not collecting a mirror copy the target reconciler has
+	// yet to re-establish; the sweeper's own grace is the second.
+	sweeper := &domaingc.Sweeper{
+		DomainPath: cfg.DomainPath,
+		Interval:   cfg.DomainGCInterval,
+		Grace:      cfg.DomainGCGrace,
+		Log:        ctrl.Log.WithName("domaingc"),
+	}
+	if inst := handles.MXL(); inst != nil {
+		sweeper.Collector = inst
+	}
+	if err := mgr.Add(manager.RunnableFunc(sweeper.Start)); err != nil {
+		return fmt.Errorf("add domain gc sweeper: %w", err)
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
