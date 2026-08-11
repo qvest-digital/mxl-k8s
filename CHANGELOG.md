@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.24](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.23...v1.0.0-rc.24) (2026-08-11)
+
+
+### Bug Fixes
+
+* **gateway:** keep the mirror throughput label set unique ([#263](https://github.com/qvest-digital/mxl-k8s/issues/263)) ([a9678eb](https://github.com/qvest-digital/mxl-k8s/commit/a9678eb71765b6be90f7aafcc99f8081f8d84c19))
+
 ## [1.0.0-rc.23](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.22...v1.0.0-rc.23) (2026-08-11)
 
 
