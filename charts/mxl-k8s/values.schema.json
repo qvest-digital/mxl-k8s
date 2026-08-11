@@ -133,6 +133,18 @@
               "required": [],
               "title": "intentSocket"
             },
+            "kubeApiBurst": {
+              "default": "100",
+              "description": "Client-side burst above kubeApiQps. 0 leaves the client-go default in place.",
+              "required": [],
+              "title": "kubeApiBurst"
+            },
+            "kubeApiQps": {
+              "default": "50",
+              "description": "Client-side request rate to the API server. A node holding many flows spends one Get and one Update per flow per renewal pass; at the client-go default of 5 the loop blocks rather than fails, stretching past the Lease duration it exists to keep fresh. 0 leaves the client-go default in place.",
+              "required": [],
+              "title": "kubeApiQps"
+            },
             "materializeTimeout": {
               "default": "5s",
               "title": "materializeTimeout",
@@ -1372,6 +1384,18 @@
               "required": [],
               "title": "degradedAfter"
             },
+            "domainGcGrace": {
+              "default": "2m",
+              "description": "How long after start the first reclaim sweep is held back. A restarted gateway has no writer attached to the mirror copies it was serving, and a consumer's reader does not protect them, so a sweep inside this window would delete flows consumers are still reading and the reconciler is about to re-establish. Must outlast the reconciler's re-establish path.",
+              "required": [],
+              "title": "domainGcGrace"
+            },
+            "domainGcInterval": {
+              "default": "5m",
+              "description": "How often libmxl reclaims flow directories no writer holds. The criterion is libmxl's own: a writer keeps a shared lock for as long as it is attached, so a live producer or mirror writer is never a candidate however long since its last grain. Set to 0 to disable reclaiming.",
+              "required": [],
+              "title": "domainGcInterval"
+            },
             "domainPath": {
               "default": "/run/mxl/domain",
               "description": " pattern: ^/.+ @schema",
@@ -1408,6 +1432,18 @@
               "required": [],
               "title": "healthProbeBindAddress"
             },
+            "kubeApiBurst": {
+              "default": "100",
+              "description": "Client-side burst above kubeApiQps. 0 leaves the client-go default in place.",
+              "required": [],
+              "title": "kubeApiBurst"
+            },
+            "kubeApiQps": {
+              "default": "50",
+              "description": "Client-side request rate to the API server. A node holding many flows spends one Get and one Update per flow per renewal pass; at the client-go default of 5 the loop blocks rather than fails, stretching past the Lease duration it exists to keep fresh. 0 leaves the client-go default in place.",
+              "required": [],
+              "title": "kubeApiQps"
+            },
             "metricsBindAddress": {
               "default": ":8080",
               "description": " pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$ @schema",
@@ -1443,6 +1479,12 @@
               },
               "required": [],
               "title": "providers"
+            },
+            "readerStallAfter": {
+              "default": "20s",
+              "description": "How long a source-side reader may report an unchanged head index, having never transferred a grain, before SourceProgress reports ReaderNotAdvancing.",
+              "required": [],
+              "title": "readerStallAfter"
             },
             "resyncPeriod": {
               "default": "30s",

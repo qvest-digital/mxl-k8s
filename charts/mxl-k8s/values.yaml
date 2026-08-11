@@ -227,6 +227,15 @@ agent:
     intentSocket: /run/mxl/agent.sock
     materializeTimeout: 5s
     resyncPeriod: 30s
+    # -- Client-side request rate to the API server. A node holding
+    # many flows spends one Get and one Update per flow per renewal
+    # pass; at the client-go default of 5 the loop blocks rather than
+    # fails, stretching past the Lease duration it exists to keep
+    # fresh. 0 leaves the client-go default in place.
+    kubeApiQps: 50
+    # -- Client-side burst above kubeApiQps. 0 leaves the client-go
+    # default in place.
+    kubeApiBurst: 100
     # @schema
     # enum: ["", "tcp", "verbs", "efa", "shm", "auto"]
     # @schema
@@ -408,6 +417,32 @@ gateway:
     # Reconcile fast-path so a stale Ready status falls through to
     # re-establish.
     degradedAfter: 10s
+    # -- How long a source-side reader may report an unchanged head
+    # index, having never transferred a grain, before SourceProgress
+    # reports ReaderNotAdvancing.
+    readerStallAfter: 20s
+    # -- How often libmxl reclaims flow directories no writer holds.
+    # The criterion is libmxl's own: a writer keeps a shared lock for
+    # as long as it is attached, so a live producer or mirror writer is
+    # never a candidate however long since its last grain. Set to 0 to
+    # disable reclaiming.
+    domainGcInterval: 5m
+    # -- How long after start the first reclaim sweep is held back. A
+    # restarted gateway has no writer attached to the mirror copies it
+    # was serving, and a consumer's reader does not protect them, so a
+    # sweep inside this window would delete flows consumers are still
+    # reading and the reconciler is about to re-establish. Must outlast
+    # the reconciler's re-establish path.
+    domainGcGrace: 2m
+    # -- Client-side request rate to the API server. A node holding
+    # many flows spends one Get and one Update per flow per renewal
+    # pass; at the client-go default of 5 the loop blocks rather than
+    # fails, stretching past the Lease duration it exists to keep
+    # fresh. 0 leaves the client-go default in place.
+    kubeApiQps: 50
+    # -- Client-side burst above kubeApiQps. 0 leaves the client-go
+    # default in place.
+    kubeApiBurst: 100
     # @schema
     # pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$
     # @schema
