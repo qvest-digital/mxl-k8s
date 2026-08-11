@@ -44,7 +44,7 @@ var (
 	descPresent = prometheus.NewDesc("mxl_flow_present",
 		"1 while the flow's directory exists in the domain.", flowLabels, nil)
 	descActive = prometheus.NewDesc("mxl_flow_active",
-		"1 when the head index advanced since the previous scrape.", flowLabels, nil)
+		"1 when the flow was written within the exporter's activity window.", flowLabels, nil)
 
 	descHeadIndex = prometheus.NewDesc("mxl_flow_head_index_grains",
 		"Current head index of the flow, in grains.", flowLabels, nil)

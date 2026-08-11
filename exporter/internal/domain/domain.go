@@ -30,9 +30,10 @@ type Observation struct {
 	// false, until its lifetime expires.
 	Present bool
 
-	// Active reports whether the head index advanced since the
-	// previous observation. A flow can be present and inactive, which
-	// is what a stalled writer looks like from outside.
+	// Active reports whether the flow was written within
+	// ActivityWindow, measured on the MXL clock that stamps the write
+	// itself. A flow can be present and inactive, which is what a
+	// stalled writer looks like from outside.
 	Active bool
 
 	// HaveInfo reports whether Info and Latency could be read. A flow
@@ -71,9 +72,6 @@ type entry struct {
 	reader *mxl.Reader
 	def    *FlowDef
 
-	lastHead    uint64
-	haveLast    bool
-	active      bool
 	removedAt   time.Time
 	sizeBytes   uint64
 	openAttempt bool
@@ -190,9 +188,22 @@ func (d *Domain) openReader(e *entry) {
 	}
 }
 
-// Observe samples every tracked flow. Activity is measured between
-// consecutive calls, so the scrape interval is what "active" is
-// relative to.
+// ActivityWindow is how long after its last write a flow still counts
+// as active. Three grain periods at 25 fps, so a flow at any normal
+// rate has to miss several grains before it reads as stalled.
+const ActivityWindow = 120 * time.Millisecond
+
+// Observe samples every tracked flow. It holds no state across calls:
+// every value is read from the flow header, so calling it twice in a
+// row answers the same thing twice.
+//
+// Activity used to be a delta against the previous call, which made it
+// a property of the caller rather than of the flow. Two collectors are
+// registered and Prometheus calls both in one scrape, so whichever ran
+// first consumed the head advancement and the other reported the flow
+// idle - the same scrape could carry an advancing head index and
+// active=0. Anything else sampling the endpoint, a probe or a second
+// Prometheus, corrupted the answer the same way.
 func (d *Domain) Observe() []Observation {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -205,15 +216,11 @@ func (d *Domain) Observe() []Observation {
 			Present: e.removedAt.IsZero(),
 			Def:     e.def,
 		}
+		active := false
 		if e.reader != nil {
 			if info, err := e.reader.Info(); err == nil {
 				obs.HaveInfo = true
 				obs.Info = info
-				if e.haveLast {
-					e.active = info.Runtime.HeadIndex > e.lastHead
-				}
-				e.lastHead = info.Runtime.HeadIndex
-				e.haveLast = true
 
 				rate := info.Config.Common.GrainRate
 				if rate.Den != 0 && rate.Num != 0 {
@@ -221,12 +228,13 @@ func (d *Domain) Observe() []Observation {
 				}
 				if lw := info.Runtime.LastWriteTime; lw != 0 && now > lw {
 					obs.WriteAge = time.Duration(now-lw) * time.Nanosecond
+					active = obs.WriteAge < ActivityWindow
 				}
 			}
 		}
-		// A departed flow is never active, whatever the last sample
-		// said.
-		obs.Active = e.active && obs.Present
+		// A departed flow is never active, however recent its last
+		// write was.
+		obs.Active = active && obs.Present
 		out = append(out, obs)
 	}
 	return out
@@ -295,6 +303,4 @@ func (e *entry) close() {
 		_ = e.reader.Close()
 		e.reader = nil
 	}
-	e.haveLast = false
-	e.active = false
 }
