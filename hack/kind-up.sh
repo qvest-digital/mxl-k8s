@@ -230,6 +230,13 @@ if [ "$MONITORING" = "1" ]; then
     # scrapes.
     --set exporter.metrics.serviceMonitor.interval=15s
     --set "exporter.metrics.serviceMonitor.labels.release=${MONITORING_RELEASE}"
+    # The gateway carries the mirror byte counters the Node Throughput
+    # panels read. They come from a different Service than the
+    # exporter's flow metrics, so scraping one does not scrape the
+    # other and the panels stay empty without this.
+    --set gateway.metrics.serviceMonitor.enabled=true
+    --set gateway.metrics.serviceMonitor.interval=15s
+    --set "gateway.metrics.serviceMonitor.labels.release=${MONITORING_RELEASE}"
     --set dashboards.enabled=true
     --set "dashboards.namespace=${MONITORING_NAMESPACE}"
   )

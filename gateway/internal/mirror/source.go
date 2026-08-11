@@ -173,6 +173,18 @@ type sourceEntry struct {
 	progress   atomic.Uint64
 	lastSentAt atomic.Pointer[time.Time]
 
+	// bytes counts payload actually handed to the fabric for this
+	// mirror, read by the throughput collector at scrape time. A
+	// counter rather than a rate: the scrape interval is the
+	// collector's business, not the transfer loop's.
+	bytes atomic.Uint64
+
+	// flowID and provider label that counter. Immutable for the life
+	// of the entry, so the collector reads them without the entry's
+	// atomics.
+	flowID   string
+	provider fabrics.Provider
+
 	// agedOutAt records the wall-clock of the most recent
 	// reader-aged-out skip the transfer loop has had to perform.
 	// Used by the flusher to publish SourceProgress with reason
@@ -673,6 +685,8 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 		infoStr:   targetInfoStr,
 		cancel:    cancel,
 		done:      done,
+		flowID:    flowID,
+		provider:  provider,
 	}
 
 	progressInterval := o.ProgressInterval
@@ -689,8 +703,19 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 	progressFn := initiator.MakeProgressNonBlocking
 
 	if audio {
+		// Resolved on the first transfer and reused: the width is fixed
+		// for the flow, and only the transfer goroutine reads or writes
+		// it, so it needs no synchronization.
+		var frameBytes uint64
 		transferSamplesFn := func(headIndex uint64, count int) error {
-			return initiator.TransferSamples(headIndex, count)
+			if err := initiator.TransferSamples(headIndex, count); err != nil {
+				return err
+			}
+			if frameBytes == 0 {
+				frameBytes = sampleFrameBytes(reader, headIndex)
+			}
+			entry.bytes.Add(uint64(count) * frameBytes)
+			return nil
 		}
 		go runSampleTransferLoop(loopCtx, done, flowID, runtimeFn, transferSamplesFn, progressFn, maxBatch, xferBatch, progressInterval, entry)
 	} else {
@@ -707,7 +732,11 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 				// reach here.
 				return true, nil
 			}
-			return false, initiator.TransferGrain(idx, 0, grain.TotalSlices)
+			if err := initiator.TransferGrain(idx, 0, grain.TotalSlices); err != nil {
+				return false, err
+			}
+			entry.bytes.Add(uint64(grain.GrainSize))
+			return false, nil
 		}
 		go runTransferLoop(loopCtx, done, flowID, runtimeFn, transferFn, progressFn, progressInterval, entry)
 	}
@@ -909,6 +938,31 @@ func runTransferLoop(
 // probeRuntime to mxl.Reader.Runtime().HeadIndex, transferSamples to
 // Initiator.TransferSamples, and makeProgress to
 // Initiator.MakeProgressNonBlocking.
+// sampleFrameBytes is the payload one sample of a continuous flow
+// occupies across all its channels.
+//
+// libmxl publishes no per-sample width. The sample view's Stride is
+// the byte distance between two channels' ring buffers, which
+// PosixContinuousFlowWriter sets to sampleWordSize * bufferLength, so
+// dividing it by the bufferLength the flow config carries recovers the
+// word size exactly. Zero when the view cannot be opened, which leaves
+// the caller to ask again on its next transfer.
+func sampleFrameBytes(reader *mxl.Reader, index uint64) uint64 {
+	cfg, err := reader.Config()
+	if err != nil {
+		return 0
+	}
+	bufferLength := uint64(cfg.Continuous.BufferLength)
+	if bufferLength == 0 {
+		return 0
+	}
+	view, viewErr := reader.GetSamplesNonBlocking(index, 1)
+	if viewErr != nil {
+		return 0
+	}
+	return (view.Stride / bufferLength) * view.ChannelCount
+}
+
 func runSampleTransferLoop(
 	ctx context.Context,
 	done chan struct{},

@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
@@ -106,7 +107,7 @@ func run(args []string) error {
 	// the publisher advertises, and nothing else.
 	selector := cfg.Selector()
 
-	if err := (&mirror.TargetReconciler{
+	targetReconciler := &mirror.TargetReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 		NodeName:      cfg.NodeName,
@@ -115,10 +116,11 @@ func run(args []string) error {
 		Handles:       handles,
 		DomainPath:    cfg.DomainPath,
 		DegradedAfter: cfg.DegradedAfter,
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if err := targetReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup target reconciler: %w", err)
 	}
-	if err := (&mirror.SourceReconciler{
+	sourceReconciler := &mirror.SourceReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
 		NodeName:         cfg.NodeName,
@@ -126,9 +128,19 @@ func run(args []string) error {
 		Selector:         selector,
 		Handles:          handles,
 		ReaderStallAfter: cfg.ReaderStallAfter,
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if err := sourceReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup source reconciler: %w", err)
 	}
+
+	// Both reconcilers hold per-mirror byte counters the collector
+	// reads on scrape, so the metrics server already listening on
+	// --metrics-bind-address serves them beside controller-runtime's.
+	metrics.Registry.MustRegister(&mirror.ThroughputCollector{
+		NodeName: cfg.NodeName,
+		Source:   sourceReconciler,
+		Target:   targetReconciler,
+	})
 
 	// MxlNodeCapabilities publisher runs as a Manager Runnable so it
 	// joins the leader-election / shutdown lifecycle and only fires
