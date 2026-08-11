@@ -30,9 +30,10 @@ type Observation struct {
 	// false, until its lifetime expires.
 	Present bool
 
-	// Active reports whether the head index advanced since the
-	// previous observation. A flow can be present and inactive, which
-	// is what a stalled writer looks like from outside.
+	// Active reports whether the flow was written within its own
+	// activity window, measured on the MXL clock that stamps the write
+	// itself. A flow can be present and inactive, which is what a
+	// stalled writer looks like from outside.
 	Active bool
 
 	// HaveInfo reports whether Info and Latency could be read. A flow
@@ -71,9 +72,6 @@ type entry struct {
 	reader *mxl.Reader
 	def    *FlowDef
 
-	lastHead    uint64
-	haveLast    bool
-	active      bool
 	removedAt   time.Time
 	sizeBytes   uint64
 	openAttempt bool
@@ -190,9 +188,60 @@ func (d *Domain) openReader(e *entry) {
 	}
 }
 
-// Observe samples every tracked flow. Activity is measured between
-// consecutive calls, so the scrape interval is what "active" is
-// relative to.
+// minActivityWindow floors the window derived from a flow's cadence.
+// A 48 kHz audio flow commits every 10 ms and a 60 fps video flow
+// every 17 ms; three of either is shorter than the jitter between two
+// scrapes, so without a floor a healthy fast flow would flap.
+const minActivityWindow = 100 * time.Millisecond
+
+// activeGrains is how many writes a flow may miss before it reads as
+// stalled.
+const activeGrains = 3
+
+// activityWindow returns how long after its last write a flow still
+// counts as active, derived from the flow's own cadence.
+//
+// libmxl does not define this. Its own notion of an active flow is
+// whether any process holds the data file locked, which is what
+// mxlGarbageCollectFlows tests; it maintains lastWriteTime but attaches
+// no threshold to it. The threshold is this exporter's policy, so it
+// has to be relative to the flow rather than a constant: a fixed window
+// that means three grains at 25 fps means a fifth of a grain at 1 fps,
+// where it would report a healthy flow stalled between every frame.
+//
+// On a continuous flow the grain rate is the sample rate and writes
+// land one commit batch apart, not one sample apart.
+func activityWindow(cfg mxl.CommonFlowConfig) time.Duration {
+	rate := cfg.GrainRate
+	if rate.Num <= 0 || rate.Den <= 0 {
+		return minActivityWindow
+	}
+	// One unit per write: a grain on a discrete flow, a commit batch of
+	// samples on a continuous one. Multiplied in before the division so
+	// a rate that does not divide evenly into a nanosecond does not
+	// lose a whole batch to truncation.
+	units := int64(1)
+	if !cfg.Format.IsDiscrete() && cfg.MaxCommitBatchSizeHint > 0 {
+		units = int64(cfg.MaxCommitBatchSizeHint)
+	}
+	perWrite := time.Duration(int64(time.Second) * rate.Den * units / rate.Num)
+	if w := activeGrains * perWrite; w > minActivityWindow {
+		return w
+	}
+	return minActivityWindow
+}
+
+// Observe samples every tracked flow. It holds no state across calls:
+// every value is read from the flow header, so calling it twice in a
+// row answers the same thing twice.
+//
+// Activity used to be a delta against the previous call, which made it
+// a property of the caller rather than of the flow. Two collectors are
+// registered and Prometheus calls both in one scrape, so whichever ran
+// first consumed the head advancement and the other reported the flow
+// idle - the same scrape could carry an advancing head index and
+// active=0. Anything else sampling the endpoint, a probe or a second
+// Prometheus, corrupted the answer the same way.
 func (d *Domain) Observe() []Observation {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -205,15 +254,11 @@ func (d *Domain) Observe() []Observation {
 			Present: e.removedAt.IsZero(),
 			Def:     e.def,
 		}
+		active := false
 		if e.reader != nil {
 			if info, err := e.reader.Info(); err == nil {
 				obs.HaveInfo = true
 				obs.Info = info
-				if e.haveLast {
-					e.active = info.Runtime.HeadIndex > e.lastHead
-				}
-				e.lastHead = info.Runtime.HeadIndex
-				e.haveLast = true
 
 				rate := info.Config.Common.GrainRate
 				if rate.Den != 0 && rate.Num != 0 {
@@ -221,12 +266,13 @@ func (d *Domain) Observe() []Observation {
 				}
 				if lw := info.Runtime.LastWriteTime; lw != 0 && now > lw {
 					obs.WriteAge = time.Duration(now-lw) * time.Nanosecond
+					active = obs.WriteAge < activityWindow(info.Config.Common)
 				}
 			}
 		}
-		// A departed flow is never active, whatever the last sample
-		// said.
-		obs.Active = e.active && obs.Present
+		// A departed flow is never active, however recent its last
+		// write was.
+		obs.Active = active && obs.Present
 		out = append(out, obs)
 	}
 	return out
@@ -295,6 +341,4 @@ func (e *entry) close() {
 		_ = e.reader.Close()
 		e.reader = nil
 	}
-	e.haveLast = false
-	e.active = false
 }
