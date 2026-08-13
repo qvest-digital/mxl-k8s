@@ -107,6 +107,79 @@ func TestRunTargetProgressLoop_FatalErrorExitsAndCallsOnFatalOnce(t *testing.T) 
 			"concurrent recoverFromFatalError invocations against the same writer")
 }
 
+func TestRunTargetProgressLoop_InterruptedIsRetriedNotFatal(t *testing.T) {
+	// Go's async preemption sends SIGURG to running goroutines, so
+	// libmxl-fabrics reports MXL_ERR_INTERRUPTED as a matter of course.
+	// Rebuilding the fabric side on each one would churn continuously,
+	// so the loop must poll again and eventually commit.
+	var calls atomic.Int32
+	read := func() (uint64, error) {
+		if calls.Add(1) <= 3 {
+			return 0, mxl.ErrInterrupted
+		}
+		return 7, nil
+	}
+
+	committed := make(chan uint64, 1)
+	commit := func(idx uint64) error {
+		select {
+		case committed <- idx:
+		default:
+		}
+		return nil
+	}
+	onFatal := func() { t.Error("interrupted read must not be treated as fatal") }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go runTargetProgressLoop(ctx, done, read, commit, onFatal, nil)
+
+	select {
+	case idx := <-committed:
+		assert.Equal(t, uint64(7), idx)
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop never got past the interrupted reads")
+	}
+	cancel()
+	<-done
+}
+
+func TestRunTargetSampleProgressLoop_InterruptedIsRetriedNotFatal(t *testing.T) {
+	// Same contract on the sample path, which shares the classifier.
+	var calls atomic.Int32
+	read := func() (uint64, int, error) {
+		if calls.Add(1) <= 3 {
+			return 0, 0, mxl.ErrInterrupted
+		}
+		return 11, 2, nil
+	}
+
+	committed := make(chan uint64, 1)
+	commit := func(head uint64, _ int) error {
+		select {
+		case committed <- head:
+		default:
+		}
+		return nil
+	}
+	onFatal := func() { t.Error("interrupted read must not be treated as fatal") }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go runTargetSampleProgressLoop(ctx, done, read, commit, onFatal, nil)
+
+	select {
+	case head := <-committed:
+		assert.Equal(t, uint64(11), head)
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop never got past the interrupted reads")
+	}
+	cancel()
+	<-done
+}
+
 func TestRunTargetProgressLoop_CommitErrorIsLoggedButLoopContinues(t *testing.T) {
 	// A commit-side error (e.g. OpenGrain returning busy under load)
 	// must not exit the loop. The next ReadGrain is allowed to

@@ -809,7 +809,9 @@ func (e *targetEntry) recordCommit(_ uint64, at time.Time) {
 // OpenGrain + Commit dance on the local FlowWriter so consumer
 // FlowReaders see the arrived grain.
 //
-// On any non-ErrNotReady error from ReadGrain the underlying Target
+// Errors from ReadGrain are classified: idle means nothing arrived,
+// transient means the call was disturbed and the handles are still
+// good. On anything else the underlying Target
 // is no longer safe to poll - libmxl-fabrics has been observed to
 // dangle internal state after the remote endpoint drops, and the
 // next ReadGrain call segfaults inside cgo. We exit the loop and
@@ -838,7 +840,7 @@ func runTargetProgressLoop(
 		default:
 		}
 		idx, err := readGrain()
-		switch {
+		switch kind := classifyFabricError(err); {
 		case err == nil:
 			if err := commit(idx); err != nil {
 				l.Error(err, "commit received grain", "idx", idx)
@@ -847,14 +849,25 @@ func runTargetProgressLoop(
 			if tracker != nil {
 				tracker.recordCommit(idx, time.Now())
 			}
-		case errors.Is(err, fabrics.ErrNotReady):
+		case kind == fabricIdle:
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(idleSleep):
+			}
+		case kind == fabricTransient:
+			// Disturbed, not broken: the handles are still usable, so
+			// poll again instead of rebuilding the fabric side.
+			l.V(1).Info("ReadGrain disturbed, retrying",
+				"error", err.Error(), "class", kind.String())
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(idleSleep):
 			}
 		default:
-			l.Error(err, "ReadGrain - target is no longer safe to poll, exiting loop")
+			l.Error(err, "ReadGrain - target is no longer safe to poll, exiting loop",
+				"class", kind.String())
 			if onFatal != nil {
 				onFatal()
 			}
@@ -889,8 +902,9 @@ func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, error) {
 // blocking-variant SIGURG interaction documented there. For every run
 // of samples ReadSamples reports as arrived, commit does the
 // OpenSamples + Commit dance on the local FlowWriter so consumer
-// FlowReaders see them. Any non-ErrNotReady error is fatal and fires
-// onFatal so the reconciler rebuilds the fabric side.
+// FlowReaders see them. Errors are classified as in the grain loop:
+// idle and transient are retried, anything else fires onFatal so the
+// reconciler rebuilds the fabric side.
 func runTargetSampleProgressLoop(
 	ctx context.Context,
 	done chan struct{},
@@ -909,7 +923,7 @@ func runTargetSampleProgressLoop(
 		default:
 		}
 		head, count, err := readSamples()
-		switch {
+		switch kind := classifyFabricError(err); {
 		case err == nil:
 			if err := commit(head, count); err != nil {
 				l.Error(err, "commit received samples", "headIndex", head, "count", count)
@@ -918,14 +932,25 @@ func runTargetSampleProgressLoop(
 			if tracker != nil {
 				tracker.recordCommit(head, time.Now())
 			}
-		case errors.Is(err, fabrics.ErrNotReady):
+		case kind == fabricIdle:
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(idleSleep):
+			}
+		case kind == fabricTransient:
+			// Disturbed, not broken: the handles are still usable, so
+			// poll again instead of rebuilding the fabric side.
+			l.V(1).Info("ReadSamples disturbed, retrying",
+				"error", err.Error(), "class", kind.String())
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(idleSleep):
 			}
 		default:
-			l.Error(err, "ReadSamples - target is no longer safe to poll, exiting loop")
+			l.Error(err, "ReadSamples - target is no longer safe to poll, exiting loop",
+				"class", kind.String())
 			if onFatal != nil {
 				onFatal()
 			}
