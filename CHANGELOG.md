@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0-rc.1](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.24...v1.1.0-rc.1) (2026-08-13)
+
+
+### Features
+
+* build against libmxl 1.1.0-rc1 via go-mxl 1.1.0-rc.1 ([#269](https://github.com/qvest-digital/mxl-k8s/issues/269)) ([f1579fa](https://github.com/qvest-digital/mxl-k8s/commit/f1579fa2de8dbcad7ad3cfdcbc298ca81ae33e93))
+
+
+### Bug Fixes
+
+* **gateway:** classify target progress errors instead of assuming fatal ([#267](https://github.com/qvest-digital/mxl-k8s/issues/267)) ([7143cda](https://github.com/qvest-digital/mxl-k8s/commit/7143cdaaa5f7dade289f34161da13c69b1519999))
+
 ## [1.0.0-rc.24](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.23...v1.0.0-rc.24) (2026-08-11)
 
 
