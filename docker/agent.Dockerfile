@@ -4,6 +4,19 @@
 
 ARG GO_VERSION=1.26
 
+# The agent drops libmxl-intent.so on the node at startup, so it
+# carries its own build of the shim rather than the carrier image's:
+# the .so a node serves then always matches the agent serving the
+# intent socket it talks to. Same source, same glibc floor check as
+# docker/shim.Dockerfile.
+FROM docker.io/library/debian:trixie-slim AS shim-builder
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc libc6-dev make binutils && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY shim/libmxl-intent.c shim/Makefile ./
+RUN make
+
 FROM docker.io/library/golang:${GO_VERSION}-bookworm AS builder
 
 WORKDIR /workspace
@@ -27,4 +40,5 @@ RUN go mod download && \
 # alongside running as root.
 FROM gcr.io/distroless/static-debian12:latest
 COPY --from=builder /out/mxl-domain-agent /usr/local/bin/mxl-domain-agent
+COPY --from=shim-builder /src/libmxl-intent.so /opt/mxl-intent/libmxl-intent.so
 ENTRYPOINT ["/usr/local/bin/mxl-domain-agent"]

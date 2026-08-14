@@ -12,6 +12,9 @@ gateway -> `libmxl-fabrics` TCP transfer between two k3s nodes.
 3. A consumer reader pod is scheduled on node-2 (forced via pod
    anti-affinity). An initContainer drops `libmxl-intent.so` into a
    shared volume; the main container loads it via `LD_PRELOAD`.
+   `23-reader-audio.yaml` uses the other delivery method and
+   preloads `/run/mxl/libmxl-intent.so`, the copy the agent writes
+   on the node, so it needs no initContainer.
 4. The reader's first `mxlCreateFlowReader` probes the flow
    directory under `/run/mxl/domain/<uuid>.mxl-flow/` (libmxl
    calls `access`/`stat` on the directory and the access file

@@ -37,6 +37,12 @@ type Config struct {
 	// disables the intent endpoint.
 	IntentSocketPath string
 
+	// ShimPath is where the agent writes the copy of libmxl-intent.so
+	// it carries, for consumer pods that preload the shim off the
+	// node instead of copying it out of the carrier image. Empty
+	// disables the drop.
+	ShimPath string
+
 	// MaterializeTimeout caps the per-request wait the intent
 	// dispatcher allows before giving up on a mirror reaching
 	// Ready.
@@ -78,6 +84,9 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"How often to refresh MxlDomain status.")
 	fs.StringVar(&c.IntentSocketPath, "intent-socket", "/run/mxl/agent.sock",
 		"UDS path for the on-demand intent endpoint. Empty disables.")
+	fs.StringVar(&c.ShimPath, "shim-path", "/run/mxl/libmxl-intent.so",
+		"Path the agent writes its copy of libmxl-intent.so to on every "+
+			"start, for consumers that preload it off the node. Empty disables.")
 	fs.DurationVar(&c.MaterializeTimeout, "materialize-timeout", 5*time.Second,
 		"Per-request budget for the intent dispatcher waiting for a mirror Ready.")
 	fs.StringVar(&c.Provider, "provider", "",
@@ -107,6 +116,9 @@ func (c *Config) Validate() error {
 	}
 	if c.NodeName == "" {
 		return fmt.Errorf("--node-name (or $NODE_NAME) is required")
+	}
+	if c.ShimPath != "" && c.ShimPath[0] != '/' {
+		return fmt.Errorf("--shim-path must be absolute, got %q", c.ShimPath)
 	}
 	switch mxlv1alpha1.MxlFabricsProvider(c.Provider) {
 	case "",

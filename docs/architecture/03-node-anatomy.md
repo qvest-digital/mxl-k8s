@@ -14,7 +14,7 @@ Everything mxl-k8s touches on a node lives under `/run/mxl/`:
 
 ![Per-node tmpfs layout](./diagrams/03-tmpfs-layout.drawio.svg)
 
-Three things matter here:
+Four things matter here:
 
 - **`/run/mxl` is a tmpfs**, not a backed mount. The bytes live in
   page-cache RAM. Nothing survives a node reboot. mxl-k8s does not
@@ -38,6 +38,12 @@ Three things matter here:
   runs with `hostPID: true` so `SO_PEERCRED` returns the consumer's
   host-namespace PID and `/proc/<pid>/cgroup` is readable for the
   pod-UID lookup.
+- **`libmxl-intent.so` sits next to the socket.** The agent writes
+  the copy it carries to `/run/mxl/libmxl-intent.so` on every start,
+  world-readable and replacing whatever was there. A consumer that
+  preloads it off the node therefore runs the shim belonging to the
+  agent it then talks to, and an agent upgrade leaves no older
+  build behind.
 
 ## Shared-memory zero-copy
 
@@ -97,13 +103,17 @@ table:
 | agent DaemonSet | rw | rw (binds, listens) | none (pure Go) |
 | gateway DaemonSet | rw | -- | libmxl + libmxl-fabrics + libfabric provider |
 
-The LD_PRELOAD shim is delivered through a small two-container
-pattern: an initContainer copies the prebuilt `libmxl-intent.so`
-into a shared `emptyDir`, and the main container's
-`LD_PRELOAD=/opt/mxl-intent/libmxl-intent.so` picks it up. The
-default agent socket path can be overridden with
-`MXL_INTENT_SOCK`. The shim itself has no daemon, no Kubernetes
-client, and no state -- see [02-components](./02-components.md#shim).
+The LD_PRELOAD shim reaches the consumer either off the node or out
+of the carrier image. The agent writes the copy it carries to
+`/run/mxl/libmxl-intent.so` on every start, inside the directory the
+consumer already mounts for the socket, so
+`LD_PRELOAD=/run/mxl/libmxl-intent.so` is the whole injection. The
+carrier image is the two-container pattern: an initContainer copies
+the same `.so` into a shared `emptyDir` and the main container
+preloads it from there. The default agent socket path can be
+overridden with `MXL_INTENT_SOCK`. The shim itself has no daemon, no
+Kubernetes client, and no state -- see
+[02-components](./02-components.md#shim).
 
 ## Why these per-node choices
 

@@ -171,6 +171,17 @@ is forced by what libmxl exposes:
   see the attempted call *and* re-issue it after the agent has
   materialised the file.
 
+Two things deliver the library into a consumer pod. The agent carries
+a build of it and writes that copy to `/run/mxl/libmxl-intent.so` on
+every start
+([`shiminstall.Install`](../../agent/internal/shiminstall/install.go)),
+which puts the shim in the mount a consumer already needs for the
+socket and keeps it in lockstep with the agent answering there. The
+carrier image (`docker/shim.Dockerfile`) holds the same `.so` for a
+consumer that copies it out of an initContainer instead, which is how
+one pins a shim version independent of the agent. `docs/USAGE.md`
+carries the pod spec for each.
+
 ## End-to-end: applying an `MxlReceiver`
 
 The per-component workflows above describe what each process does in

@@ -74,7 +74,7 @@ jobs:
         with:
           filters: |
             operator:   ['docker/operator.Dockerfile', 'operator/**', 'api/**', 'go.work*']
-            agent:      ['docker/agent.Dockerfile', 'agent/**', 'api/**', 'go.work*']
+            agent:      ['docker/agent.Dockerfile', 'agent/**', 'api/**', 'shim/**', 'go.work*']
             gateway:    ['docker/gateway.Dockerfile', 'gateway/**', 'api/**', 'go.work*']
             exporter:   ['docker/exporter.Dockerfile', 'exporter/**', 'api/**', 'go.work*']
             shim:       ['docker/shim.Dockerfile', 'shim/**']
@@ -91,6 +91,7 @@ jobs:
             kind:
               - 'hack/kind-*'
               - 'docker/**'
+              - 'shim/**'
               - 'examples/tcp-demo/**'
               - 'config/crd/**'
               - 'config/rbac/**'

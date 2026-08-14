@@ -40,6 +40,9 @@ func TestFromFlags_DefaultsFireWhenArgsProvided(t *testing.T) {
 	assert.Equal(t, ":8080", c.MetricsAddr)
 	assert.Equal(t, 30*time.Second, c.ResyncPeriod)
 	assert.Equal(t, "/run/mxl/agent.sock", c.IntentSocketPath)
+	assert.Equal(t, "/run/mxl/libmxl-intent.so", c.ShimPath,
+		"consumer pods hardcode this path in LD_PRELOAD; moving it "+
+			"breaks every pod that preloads the node-delivered shim")
 	assert.Equal(t, 5*time.Second, c.MaterializeTimeout)
 	assert.Equal(t, 50.0, c.KubeAPIQPS,
 		"client-go's 5 QPS fallback queues status publishes behind "+
@@ -60,6 +63,7 @@ func TestFromFlags_OverridesAreRespected(t *testing.T) {
 		"--metrics-bind-address=:9080",
 		"--resync-period=15s",
 		"--intent-socket=/tmp/mxl.sock",
+		"--shim-path=/tmp/libmxl-intent.so",
 		"--materialize-timeout=2s",
 	})
 	require.NoError(t, err)
@@ -70,6 +74,7 @@ func TestFromFlags_OverridesAreRespected(t *testing.T) {
 	assert.Equal(t, ":9080", c.MetricsAddr)
 	assert.Equal(t, 15*time.Second, c.ResyncPeriod)
 	assert.Equal(t, "/tmp/mxl.sock", c.IntentSocketPath)
+	assert.Equal(t, "/tmp/libmxl-intent.so", c.ShimPath)
 	assert.Equal(t, 2*time.Second, c.MaterializeTimeout)
 }
 
@@ -131,6 +136,16 @@ func TestValidate(t *testing.T) {
 			name:    "zero burst rejected",
 			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIQPS: 50},
 			wantErr: "--kube-api-burst",
+		},
+		{
+			name:    "relative shim path rejected",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", ShimPath: "libmxl-intent.so", KubeAPIQPS: 50, KubeAPIBurst: 100},
+			wantErr: "--shim-path must be absolute",
+		},
+		{
+			name:    "empty shim path disables the drop",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIQPS: 50, KubeAPIBurst: 100},
+			wantErr: "",
 		},
 		{
 			name:    "unknown provider rejected",

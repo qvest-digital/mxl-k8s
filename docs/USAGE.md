@@ -204,12 +204,52 @@ probes the directory and the access file before flow_def.json),
 blocks on the agent's UDS until the mirror has materialised, and
 then lets the call complete.
 
+The agent writes the shim it carries to
+`/run/mxl/libmxl-intent.so` on every start, so the consumer
+preloads it out of the same mount it already needs for the agent's
+socket:
+
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
   name: my-consumer
   namespace: my-namespace
+spec:
+  containers:
+    - name: consumer
+      image: registry.example.com/my-consumer:1.2.3
+      env:
+        - name: LD_PRELOAD
+          value: /run/mxl/libmxl-intent.so
+      securityContext:
+        capabilities:
+          add: ["IPC_LOCK", "SYS_RESOURCE"]
+      volumeMounts:
+        - name: mxl-run
+          mountPath: /run/mxl
+  volumes:
+    - name: mxl-run
+      hostPath:
+        path: /run/mxl
+        type: DirectoryOrCreate
+```
+
+The volume mount targets `/run/mxl` rather than just
+`/run/mxl/domain` so the domain directory, the agent's
+`/run/mxl/agent.sock` and the shim are all visible inside the pod,
+even if the socket is created after the pod schedules.
+
+`agent.flags.shimPath` moves the drop or, set empty, turns it off.
+
+#### Shim from the carrier image
+
+The `shim` image carries the same `libmxl-intent.so` at
+`/opt/mxl-intent/libmxl-intent.so` and nothing else. A consumer
+that pins a shim version of its own, independent of the agent the
+cluster runs, copies it out of an `initContainer` instead:
+
+```yaml
 spec:
   initContainers:
     - name: install-intent-shim
@@ -241,10 +281,7 @@ spec:
       emptyDir: {}
 ```
 
-The volume mount targets `/run/mxl` rather than just
-`/run/mxl/domain` so both the domain directory and the agent's
-`/run/mxl/agent.sock` are visible inside the pod, even if the
-socket is created after the pod schedules.
+Both deliver the same library and behave identically at runtime.
 
 ### Which path to use
 
