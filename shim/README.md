@@ -28,25 +28,58 @@ with `make GLIBC_FLOOR=2.17` to target something older.
 
 ## Use
 
-In a consumer pod:
+Every consumer pod mounts the agent's `/run/mxl` and sets
+`LD_PRELOAD` to a copy of this `.so`. `MXL_INTENT_SOCK` overrides
+the socket path, which defaults to `/run/mxl/agent.sock`.
 
-1. Add an `initContainer` that copies `libmxl-intent.so` out of the
-   shim image into a shared `emptyDir` volume.
-2. Mount that volume into the main container.
-3. Set `LD_PRELOAD=/path/to/libmxl-intent.so`.
-4. Mount the agent's UDS (`/run/mxl/agent.sock`) into the main
-   container so the shim can reach it. `MXL_INTENT_SOCK` overrides
-   the default path. Mount the containing directory (`/run/mxl`),
-   not the socket file by itself: a single-file hostPath mount
-   pins the socket's inode at container start, and the agent
-   unlinks and recreates `agent.sock` on every restart. A consumer
-   pod already running when that happens keeps the old, orphaned
-   inode and never reaches the agent again until the pod itself
-   restarts. Mounting the directory re-resolves the path on every
-   connect, so it always reaches whichever agent is currently
-   listening.
+Mount the containing directory (`/run/mxl`), not the socket file by
+itself: a single-file hostPath mount pins the socket's inode at
+container start, and the agent unlinks and recreates `agent.sock` on
+every restart. A consumer pod already running when that happens keeps
+the old, orphaned inode and never reaches the agent again until the
+pod itself restarts. Mounting the directory re-resolves the path on
+every connect, so it always reaches whichever agent is currently
+listening.
+
+What differs between the two delivery methods is where the `.so`
+comes from.
+
+### From the node
+
+The agent carries this library and writes it to
+`/run/mxl/libmxl-intent.so` on every start, so the mount the consumer
+already needs for the socket carries the shim too:
+
+```yaml
+env:
+  - name: LD_PRELOAD
+    value: /run/mxl/libmxl-intent.so
+```
+
+Nothing else goes into the pod spec. `--shim-path` (the agent flag,
+`agent.flags.shimPath` in the chart) moves the drop or, set empty,
+turns it off.
+
+See `examples/tcp-demo/23-reader-audio.yaml` for a working example.
+
+### From the carrier image
+
+`docker/shim.Dockerfile` builds an image whose only content is the
+compiled `.so` at `/opt/mxl-intent/libmxl-intent.so`. A consumer runs
+it as an `initContainer` that copies the file into an `emptyDir`
+shared with the main container, and preloads it from there.
 
 See `examples/tcp-demo/21-reader.yaml` for a working example.
+
+### Which one
+
+The node-delivered copy needs nothing in the pod spec beyond the
+mount and the `LD_PRELOAD` value, and it always matches the agent
+answering on the socket, because the two ship in one image.
+
+The carrier image is what a consumer uses to pin a shim version of
+its own, independent of the agent the cluster runs, or where the node
+drop is turned off.
 
 ## Protocol
 

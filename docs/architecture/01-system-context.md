@@ -61,7 +61,9 @@ node, and then get out of the way of the data path.
 - **Agent** (`agent/cmd/mxl-domain-agent`) -- DaemonSet. Watches the
   node's tmpfs domain with `fanotify`, publishes `MxlFlow.status.
   locations` and `MxlDomain.status` for this node, and serves the
-  intent UDS at `/run/mxl/agent.sock`.
+  intent UDS at `/run/mxl/agent.sock`. It also drops the
+  `libmxl-intent.so` it carries beside that socket, for consumers
+  that preload it from there.
 - **Gateway** (`gateway/cmd/mxl-fabrics-gateway`) -- DaemonSet, runs
   with `hostNetwork: true`. Hosts the source and target
   `MxlFlowMirror` reconcilers and the capabilities publisher in one

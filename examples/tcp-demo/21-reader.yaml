@@ -7,6 +7,10 @@
 # the reader's first mxlCreateFlowReader already sees the
 # mirrored flow.
 #
+# The shim comes out of the carrier image here, copied into a shared
+# emptyDir by an initContainer. 23-reader-audio.yaml shows the other
+# delivery method, preloading the copy the agent drops on the node.
+#
 # Anti-affinity forces the pod onto a different node than the
 # writer so the mirror plumbing is actually exercised across the
 # fabric.
