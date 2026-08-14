@@ -25,6 +25,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/agent/internal/intentsock"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/originlease"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/podlookup"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/shiminstall"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/statfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -55,6 +56,14 @@ func run(args []string) error {
 		return err
 	}
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
+
+	// Before anything that can block on the apiserver: the shim is
+	// node-local, and a consumer pod may already be waiting on it.
+	if cfg.ShimPath != "" {
+		if err := shiminstall.Install(shiminstall.ImagePath, cfg.ShimPath); err != nil {
+			return fmt.Errorf("install intent shim: %w", err)
+		}
+	}
 
 	restCfg, err := clientcmd.BuildConfigFromFlags("", cfg.Kubeconfig)
 	if err != nil {
@@ -153,7 +162,8 @@ func run(args []string) error {
 		"domainPath", cfg.DomainPath,
 		"probeAddr", cfg.ProbeAddr,
 		"resyncPeriod", cfg.ResyncPeriod,
-		"intentSocket", cfg.IntentSocketPath)
+		"intentSocket", cfg.IntentSocketPath,
+		"shimPath", cfg.ShimPath)
 
 	select {
 	case <-ctx.Done():
