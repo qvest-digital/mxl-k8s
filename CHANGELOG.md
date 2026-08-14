@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0-rc.2](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.1...v1.1.0-rc.2) (2026-08-14)
+
+
+### Features
+
+* **agent:** deliver the LD_PRELOAD shim from the node ([#271](https://github.com/qvest-digital/mxl-k8s/issues/271)) ([838d937](https://github.com/qvest-digital/mxl-k8s/commit/838d9370c47bee81ffaf501bb98d7e72ce3e52ec))
+
+
+### Dependencies
+
+* **gomod:** update module github.com/prometheus/client_golang to v1.24.1 ([#270](https://github.com/qvest-digital/mxl-k8s/issues/270)) ([a08614b](https://github.com/qvest-digital/mxl-k8s/commit/a08614b45dce679505241c44dbfcb134d159ee76))
+
 ## [1.1.0-rc.1](https://github.com/qvest-digital/mxl-k8s/compare/v1.0.0-rc.24...v1.1.0-rc.1) (2026-08-13)
 
 
