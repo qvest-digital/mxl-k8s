@@ -59,6 +59,20 @@ tests:
           path: spec.template.spec.volumes[0].hostPath.path
           value: /var/run/mxl
 
+  - it: drops the shim inside the mounted hostPath by default
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --shim-path=/run/mxl/libmxl-intent.so
+
+  - it: leaves the shim drop out when shimPath is empty
+    set:
+      agent.flags.shimPath: ""
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --shim-path=
+
   - it: runs in the host PID namespace so SO_PEERCRED returns host PIDs
     asserts:
       - equal:

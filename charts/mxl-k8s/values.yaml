@@ -225,6 +225,16 @@ agent:
     # pattern: ^/.+
     # @schema
     intentSocket: /run/mxl/agent.sock
+    # @schema
+    # pattern: ^$|^/.+
+    # @schema
+    # -- Where the agent drops the copy of libmxl-intent.so its image
+    # carries, on every start. A consumer that already mounts
+    # hostPath.run for the intent socket preloads the shim from there
+    # instead of copying it out of the carrier image with an
+    # initContainer. Keep the path under hostPath.run, or consumer
+    # pods cannot see it. Empty disables the drop.
+    shimPath: /run/mxl/libmxl-intent.so
     materializeTimeout: 5s
     resyncPeriod: 30s
     # -- Client-side request rate to the API server. A node holding

@@ -176,6 +176,13 @@
               "title": "resyncPeriod",
               "type": "string"
             },
+            "shimPath": {
+              "default": "/run/mxl/libmxl-intent.so",
+              "description": "Where the agent drops the copy of libmxl-intent.so its image carries, on every start. A consumer that already mounts hostPath.run for the intent socket preloads the shim from there instead of copying it out of the carrier image with an initContainer. Keep the path under hostPath.run, or consumer pods cannot see it. Empty disables the drop.",
+              "pattern": "^$|^/.+",
+              "required": [],
+              "title": "shimPath"
+            },
             "zapLogLevel": {
               "default": "info",
               "description": " enum: [\"debug\", \"info\", \"warn\", \"error\"] @schema",
