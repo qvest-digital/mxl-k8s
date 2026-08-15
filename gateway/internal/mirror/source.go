@@ -755,10 +755,13 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 		transferSlices := func(idx uint64, start, end uint16) error {
 			return initiator.TransferGrain(idx, start, end)
 		}
+		// Its own throttle rather than the transfer loop's: this call
+		// site fires once per chunk instead of once per tick, so it
+		// needs its own failure history. Both only ever run on the
+		// transfer goroutine, so neither needs a lock.
+		var chunkProgress progressThrottle
 		betweenChunks := func() {
-			if err := progressFn(); err != nil {
-				logProgressFailure(l, err)
-			}
+			chunkProgress.runProgress(progressFn, func(err error) { logProgressFailure(l, err) })
 		}
 		transferFn := func(idx uint64, paced bool) (bool, error) {
 			grain, err := reader.GetGrainNonBlocking(idx)
