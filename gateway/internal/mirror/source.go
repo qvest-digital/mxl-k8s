@@ -882,6 +882,8 @@ func runTransferLoop(
 
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	// Throttles MakeProgress while it keeps failing; see progress.go.
+	var progress progressThrottle
 
 	for {
 		select {
@@ -968,9 +970,7 @@ func runTransferLoop(
 			lastSent = idx
 		}
 
-		if err := makeProgress(); err != nil {
-			logProgressFailure(l, err)
-		}
+		progress.runProgress(makeProgress, func(err error) { logProgressFailure(l, err) })
 	}
 }
 
@@ -1044,6 +1044,8 @@ func runSampleTransferLoop(
 
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	// Throttles MakeProgress while it keeps failing; see progress.go.
+	var progress progressThrottle
 
 	for {
 		select {
@@ -1090,9 +1092,7 @@ func runSampleTransferLoop(
 			}
 		}
 
-		if err := makeProgress(); err != nil {
-			logProgressFailure(l, err)
-		}
+		progress.runProgress(makeProgress, func(err error) { logProgressFailure(l, err) })
 	}
 }
 
