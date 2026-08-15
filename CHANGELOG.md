@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0-rc.3](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.2...v1.1.0-rc.3) (2026-08-15)
+
+
+### Features
+
+* **gateway:** pace grain transmission and stop polling the fabric ([#275](https://github.com/qvest-digital/mxl-k8s/issues/275)) ([86655c3](https://github.com/qvest-digital/mxl-k8s/commit/86655c315f524285d7a152ae226a191ff6c07ddd))
+
+
+### Dependencies
+
+* **tools:** update module github.com/vektra/mockery/v3 to v3.7.3 ([#274](https://github.com/qvest-digital/mxl-k8s/issues/274)) ([9b8166f](https://github.com/qvest-digital/mxl-k8s/commit/9b8166ff6d07283559571368586deda67318d9ce))
+
 ## [1.1.0-rc.2](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.1...v1.1.0-rc.2) (2026-08-14)
 
 
