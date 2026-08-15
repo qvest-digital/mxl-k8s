@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.11](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.10...api/v1.0.0-rc.11) (2026-08-15)
+
+
+### Features
+
+* **gateway:** pace grain transmission and stop polling the fabric ([#275](https://github.com/qvest-digital/mxl-k8s/issues/275)) ([86655c3](https://github.com/qvest-digital/mxl-k8s/commit/86655c315f524285d7a152ae226a191ff6c07ddd))
+
 ## [1.0.0-rc.10](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.9...api/v1.0.0-rc.10) (2026-08-11)
 
 
