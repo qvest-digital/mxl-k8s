@@ -128,6 +128,8 @@ func run(args []string) error {
 		Selector:         selector,
 		Handles:          handles,
 		ReaderStallAfter: cfg.ReaderStallAfter,
+		PacingFraction:   cfg.PacingFraction,
+		PacingChunks:     cfg.PacingChunks,
 	}
 	if err := sourceReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup source reconciler: %w", err)
