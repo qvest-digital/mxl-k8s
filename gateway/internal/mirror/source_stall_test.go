@@ -16,7 +16,10 @@ import (
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
-func stalledEntry(head uint64, headAt *time.Time, transfers uint64) *sourceEntry {
+// stalledEntry builds a sourceEntry whose head last moved at headAt
+// and which has delivered transfers grains, the last of them at
+// sentAt. A zero sentAt leaves the entry with no delivery on record.
+func stalledEntry(head uint64, headAt *time.Time, transfers uint64, sentAt time.Time) *sourceEntry {
 	e := &sourceEntry{}
 	e.lastHead.Store(head)
 	if headAt != nil {
@@ -24,7 +27,7 @@ func stalledEntry(head uint64, headAt *time.Time, transfers uint64) *sourceEntry
 		e.headAdvancedAt.Store(&t)
 	}
 	for i := uint64(0); i < transfers; i++ {
-		e.recordTransfer(i, time.Now())
+		e.recordTransfer(i, sentAt)
 	}
 	return e
 }
@@ -39,32 +42,50 @@ func TestObservedState_ReaderNotAdvancing(t *testing.T) {
 	fresh := time.Now()
 
 	tests := []struct {
-		name       string
-		entry      *sourceEntry
-		wantStatus metav1.ConditionStatus
-		wantReason string
+		name        string
+		entry       *sourceEntry
+		wantStatus  metav1.ConditionStatus
+		wantReason  string
+		wantRebuild bool
 	}{
 		{
 			name:       "never probed",
-			entry:      stalledEntry(0, nil, 0),
+			entry:      stalledEntry(0, nil, 0, time.Time{}),
 			wantStatus: metav1.ConditionTrue,
 			wantReason: mxlv1alpha1.ReasonHandshakeComplete,
 		},
 		{
 			name:       "head advanced within window",
-			entry:      stalledEntry(42, &fresh, 0),
+			entry:      stalledEntry(42, &fresh, 0, time.Time{}),
 			wantStatus: metav1.ConditionTrue,
 			wantReason: mxlv1alpha1.ReasonHandshakeComplete,
 		},
 		{
-			name:       "head frozen past window without transfers",
-			entry:      stalledEntry(42, &stale, 0),
-			wantStatus: metav1.ConditionFalse,
-			wantReason: mxlv1alpha1.ReasonReaderNotAdvancing,
+			name:        "head frozen past window without transfers",
+			entry:       stalledEntry(42, &stale, 0, time.Time{}),
+			wantStatus:  metav1.ConditionFalse,
+			wantReason:  mxlv1alpha1.ReasonReaderNotAdvancing,
+			wantRebuild: true,
 		},
 		{
-			name:       "head frozen past window after transfers",
-			entry:      stalledEntry(42, &stale, 3),
+			// The state a mirror lands in when the producer on its
+			// source node restarts: the reader stays on the flow
+			// directory that went away, so the head it can see never
+			// moves again. Judged on the lifetime transfer count this
+			// read as Recovered, which is how a mirror that had
+			// delivered for hours could then sit dead for hours with
+			// neither side reopening anything.
+			name:        "head frozen past window after transfers stopped",
+			entry:       stalledEntry(42, &stale, 3, stale),
+			wantStatus:  metav1.ConditionFalse,
+			wantReason:  mxlv1alpha1.ReasonReaderNotAdvancing,
+			wantRebuild: true,
+		},
+		{
+			// A backlog drained after the head stopped moving is a
+			// reader doing its job, not a wedge.
+			name:       "head frozen past window while transfers land",
+			entry:      stalledEntry(42, &stale, 3, fresh),
 			wantStatus: metav1.ConditionTrue,
 			wantReason: mxlv1alpha1.ReasonRecovered,
 		},
@@ -75,8 +96,65 @@ func TestObservedState_ReaderNotAdvancing(t *testing.T) {
 			got := observedState(tc.entry, window)
 			assert.Equal(t, tc.wantStatus, got.status)
 			assert.Equal(t, tc.wantReason, got.reason)
+			assert.Equal(t, tc.wantRebuild, got.rebuildReader)
 		})
 	}
+}
+
+func TestObservedState_AgedOutDoesNotOutliveItself(t *testing.T) {
+	// The aged-out skip used to be reported for the life of the entry
+	// and ahead of every other state, so one fall-behind pinned
+	// SourceProgress at ReaderAgedOut whatever the reader did next.
+	// That hid both stall detectors behind it: the flusher never saw
+	// ReaderNotAdvancing, so it never reopened the reader, and the
+	// target's stuck-handshake watchdog never saw TransfersNotLanding,
+	// so it never rebuilt its endpoint. The mirror kept reporting a
+	// fault that had already passed and nothing recovered it.
+	const window = 20 * time.Second
+	stale := time.Now().Add(-window - time.Second)
+	fresh := time.Now()
+
+	skipped := stalledEntry(42, &fresh, 1, fresh)
+	skipped.recordAgedOut(fresh)
+	state := observedState(skipped, window)
+	assert.Equal(t, mxlv1alpha1.ReasonReaderAgedOut, state.reason,
+		"a recent skip stays visible while the reader delivers")
+	assert.False(t, state.rebuildReader,
+		"a reader that skipped and caught up needs no reopen")
+
+	recovered := stalledEntry(42, &fresh, 1, fresh)
+	recovered.recordAgedOut(stale)
+	assert.Equal(t, mxlv1alpha1.ReasonRecovered,
+		observedState(recovered, window).reason,
+		"a skip a whole window old is history, not the current state")
+
+	wedged := stalledEntry(42, &fresh, 1, stale)
+	wedged.recordAgedOut(fresh)
+	state = observedState(wedged, window)
+	assert.Equal(t, metav1.ConditionFalse, state.status)
+	assert.Equal(t, mxlv1alpha1.ReasonReaderAgedOut, state.reason)
+	assert.True(t, state.rebuildReader,
+		"skipping to the head is the loop's own recovery, so a reader "+
+			"still aging out a window after its last grain cannot reach "+
+			"the live tail at all")
+}
+
+func TestObservedState_TransfersStoppedWithLiveHead(t *testing.T) {
+	// The head keeps moving, so the reader is demonstrably reading and
+	// reopening it fixes nothing; the target owns this recovery and
+	// gates it on seeing this reason. Judged on the lifetime transfer
+	// count instead, a mirror that delivered and then stopped reported
+	// Recovered, and the target went on reading it as an idle producer.
+	const window = 20 * time.Second
+	entry := stalledEntry(4242, ptrTime(time.Now()), 3,
+		time.Now().Add(-window-time.Second))
+	entry.openedAt = time.Now().Add(-time.Hour)
+
+	state := observedState(entry, window)
+	assert.Equal(t, metav1.ConditionFalse, state.status)
+	assert.Equal(t, mxlv1alpha1.ReasonTransfersNotLanding, state.reason)
+	assert.False(t, state.rebuildReader,
+		"a reader whose head advances is not the broken half")
 }
 
 func TestRecordHead_StampsOnlyOnChange(t *testing.T) {
@@ -122,7 +200,7 @@ func TestRunTransferLoop_RecordsProbedHead(t *testing.T) {
 			cancel()
 			return 7, nil
 		},
-		func(uint64) (bool, error) { return true, nil },
+		func(uint64, bool) (bool, error) { return true, nil },
 		func() error { return nil },
 		time.Millisecond, tracker)
 
@@ -230,7 +308,7 @@ func TestRunFlusher_ReopensWedgedReader(t *testing.T) {
 	}
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
-	entry := stalledEntry(42, ptrTime(time.Now().Add(-time.Minute)), 0)
+	entry := stalledEntry(42, ptrTime(time.Now().Add(-time.Minute)), 0, time.Time{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -260,6 +338,60 @@ func TestRunFlusher_ReopensWedgedReader(t *testing.T) {
 		"the wedge stays visible on status while the reopen runs")
 }
 
+func TestRunFlusher_ReopensReaderStuckOutsideTheRing(t *testing.T) {
+	// Observed in a running deployment: a mirror sat at
+	// SourceProgress=ReaderAgedOut with TargetProgress=NoGrains for
+	// hours while its producer wrote continuously, and came back
+	// within a minute and a half of being deleted by hand. Deleting it
+	// amounts to a fresh reader at the current head, which is what the
+	// reopen does without an operator.
+	scheme := newSourceTestScheme(t)
+	mirror := mirrorWithFinalizer("m1", "ns1", "node-a", "flow-1", "info-1")
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	rebuilt := make(chan types.NamespacedName, 4)
+	r := &SourceReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		NodeName: "node-a",
+		sources:  map[types.NamespacedName]*sourceEntry{},
+		attempts: attemptTable[sourceAddInputs]{},
+		rebuilds: map[types.NamespacedName]uint32{},
+		rebuildFn: func(key types.NamespacedName) {
+			rebuilt <- key
+		},
+	}
+
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	// A live head, a delivery a stall window old, and a skip the loop
+	// is still performing: the reader keeps landing outside the ring.
+	entry := stalledEntry(42, ptrTime(time.Now()), 1,
+		time.Now().Add(-defaultReaderStallAfter-time.Second))
+	entry.recordAgedOut(time.Now())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go r.runFlusher(ctx, done, key, entry, time.Millisecond)
+
+	select {
+	case got := <-rebuilt:
+		assert.Equal(t, key, got)
+	case <-time.After(5 * time.Second):
+		t.Fatal("an aged-out reader that cannot reach the tail must be reopened")
+	}
+	<-done
+
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &got))
+	require.Len(t, got.Status.Conditions, 1)
+	assert.Equal(t, mxlv1alpha1.ReasonReaderAgedOut, got.Status.Conditions[0].Reason)
+}
+
 func TestRunFlusher_StopsReopeningAtCap(t *testing.T) {
 	// A flow whose producer is genuinely gone would otherwise cost a
 	// reopen every stall window for as long as the mirror exists.
@@ -284,7 +416,7 @@ func TestRunFlusher_StopsReopeningAtCap(t *testing.T) {
 		},
 	}
 
-	entry := stalledEntry(42, ptrTime(time.Now().Add(-time.Minute)), 0)
+	entry := stalledEntry(42, ptrTime(time.Now().Add(-time.Minute)), 0, time.Time{})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go r.runFlusher(ctx, done, key, entry, time.Millisecond)
@@ -324,7 +456,7 @@ func TestRunFlusher_ClearsRebuildBudgetOnProgress(t *testing.T) {
 		rebuilds: map[types.NamespacedName]uint32{key: 3},
 	}
 
-	entry := stalledEntry(42, ptrTime(time.Now()), 5)
+	entry := stalledEntry(42, ptrTime(time.Now()), 5, time.Now())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go r.runFlusher(ctx, done, key, entry, time.Millisecond)

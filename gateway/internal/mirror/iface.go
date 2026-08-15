@@ -41,20 +41,38 @@ type RuntimeProbe func() (head uint64, err error)
 // returns it true when grain.TotalSlices == 0. Continuous (audio)
 // flows take the sample-transfer path and never reach this loop.
 //
+// paced asks for the grain to be spread across a fraction of the
+// flow's own grain interval rather than handed over whole. The loop
+// sets it only for a grain with nothing queued behind it: a mirror
+// that has fallen behind has to catch up at whatever rate the fabric
+// allows, and shaping a backlog would keep it behind for good.
+// Production ignores it when pacing is disabled.
+//
 // A non-nil error breaks the per-tick loop; the next tick re-reads
 // head and re-tries from lastSent+1.
-type TransferFunc func(idx uint64) (skipped bool, err error)
+type TransferFunc func(idx uint64, paced bool) (skipped bool, err error)
+
+// TransferSlicesFunc transfers the half-open slice range [start, end)
+// of grain idx. It is the primitive the pacer schedules against;
+// production binds it to fabrics.Initiator.TransferGrain.
+type TransferSlicesFunc func(idx uint64, start, end uint16) error
 
 // ProgressFunc drives libmxl-fabrics's event/completion queues.
 // Production calls Initiator.MakeProgressNonBlocking; the loop
 // tolerates fabrics.ErrNotReady silently.
 type ProgressFunc func() error
 
-// ReadGrainFunc polls the target side for an arrived grain. Returns
-// fabrics.ErrNotReady when nothing landed since the previous call so
-// the loop can sleep. Any other error is fatal: it tells the loop
-// to exit and the recovery callback to fire.
+// ReadGrainFunc waits for the target side to report an arrived grain.
+// Returns fabrics.ErrNotReady when nothing landed before its own
+// timeout. Any other error is fatal: it tells the loop to exit and the
+// recovery callback to fire.
 type ReadGrainFunc func() (idx uint64, err error)
+
+// GrainCompleteFunc reports whether every slice of an arrived grain has
+// landed. A paced source transfers a grain as several slice ranges and
+// each one signals the target separately, so the loop has to know which
+// arrival finishes the grain before committing it.
+type GrainCompleteFunc func(idx uint64) (bool, error)
 
 // CommitFunc finishes one arrived grain on the local writer
 // (OpenGrain + Commit) so consumer FlowReaders see it. Production

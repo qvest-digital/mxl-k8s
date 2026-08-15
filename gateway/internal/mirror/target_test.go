@@ -65,7 +65,7 @@ func TestRunTargetProgressLoop_CommitsArrivedGrains(t *testing.T) {
 	fatal := atomic.Int32{}
 	onFatal := func() { fatal.Add(1) }
 
-	go runTargetProgressLoop(ctx, done, read, commit, onFatal, nil)
+	go runTargetProgressLoop(ctx, done, read, nil, commit, onFatal, nil)
 
 	require.Eventually(t, func() bool { return len(committedSnap()) == 2 },
 		time.Second, time.Millisecond, "expected 2 commits")
@@ -95,7 +95,7 @@ func TestRunTargetProgressLoop_FatalErrorExitsAndCallsOnFatalOnce(t *testing.T) 
 	onFatal := func() { fatalCalls.Add(1) }
 
 	done := make(chan struct{})
-	go runTargetProgressLoop(context.Background(), done, read, commit, onFatal, nil)
+	go runTargetProgressLoop(context.Background(), done, read, nil, commit, onFatal, nil)
 
 	select {
 	case <-done:
@@ -133,7 +133,7 @@ func TestRunTargetProgressLoop_InterruptedIsRetriedNotFatal(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go runTargetProgressLoop(ctx, done, read, commit, onFatal, nil)
+	go runTargetProgressLoop(ctx, done, read, nil, commit, onFatal, nil)
 
 	select {
 	case idx := <-committed:
@@ -204,7 +204,7 @@ func TestRunTargetProgressLoop_CommitErrorIsLoggedButLoopContinues(t *testing.T)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runTargetProgressLoop(ctx, done, read, commit, onFatal, nil)
+	go runTargetProgressLoop(ctx, done, read, nil, commit, onFatal, nil)
 
 	require.Eventually(t, func() bool { return commitCalls.Load() >= 2 },
 		time.Second, time.Millisecond)
@@ -219,7 +219,7 @@ func TestRunTargetProgressLoop_CtxCancelExitsImmediately(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runTargetProgressLoop(ctx, done, read, commit, onFatal, nil)
+	go runTargetProgressLoop(ctx, done, read, nil, commit, onFatal, nil)
 
 	cancel()
 	select {
@@ -238,7 +238,7 @@ func TestRunTargetProgressLoop_NilOnFatalDoesNotPanic(t *testing.T) {
 	commit := func(uint64) error { return nil }
 
 	done := make(chan struct{})
-	go runTargetProgressLoop(context.Background(), done, read, commit, nil, nil)
+	go runTargetProgressLoop(context.Background(), done, read, nil, commit, nil, nil)
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -297,7 +297,7 @@ func TestRunTargetProgressLoop_TracksCommits(t *testing.T) {
 	tracker := &recordingCommitTracker{}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runTargetProgressLoop(ctx, done, read, commit, func() {}, tracker)
+	go runTargetProgressLoop(ctx, done, read, nil, commit, func() {}, tracker)
 
 	require.Eventually(t, func() bool { return len(tracker.snapshot()) >= 2 },
 		time.Second, time.Millisecond)

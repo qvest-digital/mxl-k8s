@@ -226,3 +226,65 @@ func TestValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestFromFlags_PacingDefaults(t *testing.T) {
+	t.Setenv("NODE_NAME", "n1")
+	t.Setenv("MXL_DOMAIN", "/d")
+	t.Setenv("POD_IP", "")
+	t.Setenv("KUBECONFIG", "")
+
+	c, err := FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0.5, c.PacingFraction,
+		"an unset --pacing-fraction must arrive as the enabled default, not as "+
+			"zero: the reconciler reads zero as 'not configured'")
+	assert.Equal(t, 8, c.PacingChunks)
+	require.NoError(t, c.Validate())
+}
+
+func TestFromFlags_PacingRoundTrips(t *testing.T) {
+	t.Setenv("NODE_NAME", "n1")
+	t.Setenv("MXL_DOMAIN", "/d")
+	t.Setenv("POD_IP", "")
+	t.Setenv("KUBECONFIG", "")
+
+	c, err := FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), []string{
+		"--pacing-fraction=0.75",
+		"--pacing-chunks=16",
+	})
+	require.NoError(t, err)
+	assert.InDelta(t, 0.75, c.PacingFraction, 1e-9)
+	assert.Equal(t, 16, c.PacingChunks)
+	require.NoError(t, c.Validate())
+}
+
+func TestValidate_PacingFractionMustStayBelowOne(t *testing.T) {
+	// At or above 1 a grain is spread over its whole interval or more,
+	// so its transmission runs into the next grain's and the mirror
+	// falls permanently behind. Disabling is spelled with a negative
+	// value instead, which keeps zero meaning "unset".
+	for _, f := range []float64{1, 1.5, 2} {
+		c := &Config{
+			NodeName:       "n1",
+			DomainPath:     "/d",
+			Providers:      []fabrics.Provider{fabrics.ProviderTCP},
+			KubeAPIQPS:     50,
+			KubeAPIBurst:   100,
+			PacingFraction: f,
+		}
+		assert.Errorf(t, c.Validate(), "fraction %v must be rejected", f)
+	}
+}
+
+func TestValidate_NegativePacingFractionDisables(t *testing.T) {
+	c := &Config{
+		NodeName:       "n1",
+		DomainPath:     "/d",
+		Providers:      []fabrics.Provider{fabrics.ProviderTCP},
+		KubeAPIQPS:     50,
+		KubeAPIBurst:   100,
+		PacingFraction: -1,
+	}
+	assert.NoError(t, c.Validate(),
+		"a negative fraction is how an operator turns pacing off")
+}

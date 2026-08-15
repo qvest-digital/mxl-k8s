@@ -76,6 +76,17 @@ type Config struct {
 	// enumerations. The status still refreshes on ResyncPeriod.
 	ProbePeriod time.Duration
 
+	// PacingFraction is how much of a grain's own edit-rate interval
+	// the source gateway spreads that grain's transmission over. It
+	// caps peak rate at the flow's own rate divided by this, and costs
+	// up to this much of a grain interval in added latency. Negative
+	// disables pacing and restores whole-grain transfers.
+	PacingFraction float64
+
+	// PacingChunks is how many slice ranges a paced grain is split
+	// into. Under 2 disables pacing.
+	PacingChunks int
+
 	// DegradedAfter is the inactivity window the target-side
 	// reconciler uses to demote a Ready mirror to Degraded and to
 	// invalidate its Reconcile fast-path. Matches the operator-side
@@ -154,6 +165,14 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 			"still refreshes every --resync-period from the last result. Each enumeration "+
 			"sweeps every provider libfabric was built with and warns about those it finds "+
 			"no device for.")
+	fs.Float64Var(&c.PacingFraction, "pacing-fraction", 0.5,
+		"Fraction of a grain's own interval to spread that grain's transmission over. "+
+			"Caps peak rate at the flow's rate divided by this, and costs up to this much "+
+			"of a grain interval in latency. Negative disables pacing.")
+	fs.IntVar(&c.PacingChunks, "pacing-chunks", 8,
+		"Number of slice ranges a paced grain is split into. Higher shortens the burst "+
+			"further at the cost of one cgo call and one RMA write per plane each. "+
+			"Under 2 disables pacing.")
 	fs.DurationVar(&c.DegradedAfter, "degraded-after", 10*time.Second,
 		"Grain-commit inactivity after which the target gateway demotes a mirror to Degraded.")
 	fs.DurationVar(&c.DomainGCInterval, "domain-gc-interval", domaingc.DefaultInterval,
@@ -262,6 +281,13 @@ func (c *Config) Validate() error {
 	}
 	if c.KubeAPIBurst <= 0 {
 		return fmt.Errorf("--kube-api-burst must be positive, got %d", c.KubeAPIBurst)
+	}
+	// A fraction at or above 1 spreads a grain over its whole interval
+	// or beyond, so its transmission runs into the next grain's and the
+	// mirror never catches up. Disabling is spelled with a negative
+	// value, which keeps zero meaning "unset" for the reconciler.
+	if c.PacingFraction >= 1 {
+		return fmt.Errorf("--pacing-fraction must be below 1, got %v", c.PacingFraction)
 	}
 	return nil
 }

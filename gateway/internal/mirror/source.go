@@ -77,9 +77,9 @@ const maxReaderRebuilds = 5
 
 // ReasonReaderRebuildCapReached marks a mirror whose source-side
 // reader stayed wedged across maxReaderRebuilds consecutive reopens.
-// Distinct from ReasonReaderNotAdvancing: that one is the
-// recoverable observation, this one says the gateway has stopped
-// reopening the reader.
+// Distinct from ReasonReaderNotAdvancing and ReasonReaderAgedOut:
+// those are the recoverable observations that spend the budget, this
+// one says the gateway has stopped reopening the reader.
 const ReasonReaderRebuildCapReached = "ReaderRebuildCapReached"
 
 // SourceReconciler reconciles MxlFlowMirror resources from the
@@ -112,6 +112,16 @@ type SourceReconciler struct {
 	// calls MakeProgress + polls FlowRuntime for new grain indices.
 	// Defaults to 2ms.
 	ProgressInterval time.Duration
+
+	// PacingFraction is how much of a grain interval one grain's
+	// transmission is spread over, which caps peak rate at the flow's
+	// own rate divided by it. Zero takes defaultPacingFraction;
+	// negative disables pacing and restores whole-grain transfers.
+	PacingFraction float64
+
+	// PacingChunks is how many slice ranges a paced grain is split
+	// into. Zero takes defaultPacingChunks; under 2 disables pacing.
+	PacingChunks int
 
 	// FlushInterval is how often the per-mirror status flusher
 	// checks the sourceEntry trackers and publishes SourceProgress
@@ -190,7 +200,9 @@ type sourceEntry struct {
 	// agedOutAt records the wall-clock of the most recent
 	// reader-aged-out skip the transfer loop has had to perform.
 	// Used by the flusher to publish SourceProgress with reason
-	// ReaderAgedOut on the transition.
+	// ReaderAgedOut on the transition, and read against lastSentAt to
+	// tell a reader that skipped and caught up from one still outside
+	// the ring.
 	agedOutAt atomic.Pointer[time.Time]
 
 	// lastHead is the most recent head index the transfer loop probed
@@ -594,6 +606,8 @@ type libmxlOpener struct {
 	BindAddress      string
 	Selector         fabric.Selector
 	ProgressInterval time.Duration
+	PacingFraction   float64
+	PacingChunks     int
 }
 
 func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provider) (*sourceEntry, error) {
@@ -696,6 +710,17 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 	if progressInterval <= 0 {
 		progressInterval = 2 * time.Millisecond
 	}
+	// Zero means "not configured" and takes the default; a negative
+	// fraction is how an operator turns pacing off, which newPacer
+	// reads as a disabled pacer.
+	pacingFraction := o.PacingFraction
+	if pacingFraction == 0 {
+		pacingFraction = defaultPacingFraction
+	}
+	pacingChunks := o.PacingChunks
+	if pacingChunks == 0 {
+		pacingChunks = defaultPacingChunks
+	}
 	runtimeFn := func() (uint64, error) {
 		rt, err := reader.Runtime()
 		if err != nil {
@@ -722,7 +747,25 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 		}
 		go runSampleTransferLoop(loopCtx, done, flowID, runtimeFn, transferSamplesFn, progressFn, maxBatch, xferBatch, progressInterval, entry)
 	} else {
-		transferFn := func(idx uint64) (bool, error) {
+		// The pacer is keyed on flow plus target so two mirrors of one
+		// flow, and mirrors of different flows, get different phase
+		// offsets. Flows sharing an edit rate advance their heads on
+		// the same MXL clock instants, so without the offset every
+		// mirror on this node would hand its chunks over in lockstep.
+		p := newPacer(cfg.Common.GrainRate, pacingFraction, pacingChunks, flowID+"\x00"+targetInfoStr)
+		l := ctrl.Log.WithName("transfer").WithValues("flowID", flowID)
+		transferSlices := func(idx uint64, start, end uint16) error {
+			return initiator.TransferGrain(idx, start, end)
+		}
+		// Its own throttle rather than the transfer loop's: this call
+		// site fires once per chunk instead of once per tick, so it
+		// needs its own failure history. Both only ever run on the
+		// transfer goroutine, so neither needs a lock.
+		var chunkProgress progressThrottle
+		betweenChunks := func() {
+			chunkProgress.runProgress(progressFn, func(err error) { logProgressFailure(l, err) })
+		}
+		transferFn := func(idx uint64, paced bool) (bool, error) {
 			grain, err := reader.GetGrainNonBlocking(idx)
 			if err != nil {
 				// Not yet committed or already aged out; signal the loop
@@ -735,7 +778,15 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 				// reach here.
 				return true, nil
 			}
-			if err := initiator.TransferGrain(idx, 0, grain.TotalSlices); err != nil {
+			if !paced || !p.enabled() {
+				if err := initiator.TransferGrain(idx, 0, grain.TotalSlices); err != nil {
+					return false, err
+				}
+				entry.bytes.Add(uint64(grain.GrainSize))
+				return false, nil
+			}
+			if err := transferPaced(loopCtx, realClock{}, p.plan(grain.TotalSlices), idx,
+				transferSlices, betweenChunks); err != nil {
 				return false, err
 			}
 			entry.bytes.Add(uint64(grain.GrainSize))
@@ -836,6 +887,8 @@ func runTransferLoop(
 
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	// Throttles MakeProgress while it keeps failing; see progress.go.
+	var progress progressThrottle
 
 	for {
 		select {
@@ -885,7 +938,11 @@ func runTransferLoop(
 		}
 
 		for idx := lastSent + 1; idx <= int64(head); idx++ {
-			if _, err := transferGrain(uint64(idx)); err != nil {
+			// Pace only the grain that is the live head with nothing
+			// behind it. Any earlier index means a backlog, and a
+			// backlog has to be cleared at the fabric's own rate.
+			paced := idx == int64(head)
+			if _, err := transferGrain(uint64(idx), paced); err != nil {
 				// libmxl reports "out of range (too late)" when the
 				// writer has already overwritten the slot the reader
 				// is asking for. The grains between lastSent+1 and
@@ -918,9 +975,7 @@ func runTransferLoop(
 			lastSent = idx
 		}
 
-		if err := makeProgress(); err != nil {
-			logProgressFailure(l, err)
-		}
+		progress.runProgress(makeProgress, func(err error) { logProgressFailure(l, err) })
 	}
 }
 
@@ -994,6 +1049,8 @@ func runSampleTransferLoop(
 
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	// Throttles MakeProgress while it keeps failing; see progress.go.
+	var progress progressThrottle
 
 	for {
 		select {
@@ -1040,9 +1097,7 @@ func runSampleTransferLoop(
 			}
 		}
 
-		if err := makeProgress(); err != nil {
-			logProgressFailure(l, err)
-		}
+		progress.runProgress(makeProgress, func(err error) { logProgressFailure(l, err) })
 	}
 }
 
@@ -1095,6 +1150,12 @@ type sourceProgressState struct {
 	reason   string
 	message  string
 	attempts uint32
+	// rebuildReader marks the states only a fresh FlowReader resolves,
+	// so the flusher does not have to re-derive that from the reason:
+	// ReaderAgedOut is published both for a reader that skipped once
+	// and kept delivering and for one stuck outside the ring, and only
+	// the second is a wedge.
+	rebuildReader bool
 	// lastSentAt carries the wall-clock of the most recent successful
 	// TransferGrain forward into the SSA payload. The target-side
 	// stuck-handshake watchdog reads it to discriminate "source is
@@ -1192,22 +1253,23 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		}
 		state := observedState(entry, r.readerStallAfter())
 
-		// A reader whose head never moves is the one wedge neither
-		// side of the mirror resolves on its own. The target's
+		// A reader that has stopped feeding the fabric is the one wedge
+		// neither side of the mirror resolves on its own. The target's
 		// stuck-handshake watchdog is gated on status.lastSentAt
-		// postdating its own fabric open, and a reader that has
-		// transferred nothing never advances lastSentAt, so the
-		// target reads the mirror as an idle producer and declines to
-		// rebuild. Reporting the wedge and waiting for the other side
-		// leaves the mirror Degraded indefinitely; reopening the
-		// reader here is what ends it.
-		if state.reason == mxlv1alpha1.ReasonReaderNotAdvancing {
+		// postdating its own fabric open, and a reader that transfers
+		// nothing never advances lastSentAt, so the target reads the
+		// mirror as an idle producer and declines to rebuild.
+		// Reporting the wedge and waiting for the other side leaves
+		// the mirror Degraded indefinitely; reopening the reader here
+		// is what ends it, and it is the same recovery an operator
+		// gets by deleting the mirror and letting the requestor
+		// recreate it.
+		if state.rebuildReader {
 			switch {
 			case r.readerRebuildsExhausted(key):
 				state.reason = ReasonReaderRebuildCapReached
-				state.message = fmt.Sprintf(
-					"reader head stuck at %d across %d reopens",
-					entry.lastHead.Load(), maxReaderRebuilds)
+				state.message = fmt.Sprintf("%s; unresolved across %d reopens",
+					state.message, maxReaderRebuilds)
 			case entry.rebuilding.CompareAndSwap(false, true):
 				attempt := r.bumpReaderRebuilds(key)
 				if err := r.publishSourceProgress(ctx, key, state); err != nil {
@@ -1215,8 +1277,8 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 						"mirror", key, "reason", state.reason)
 				}
 				ctrl.Log.WithName("source-flush").Info(
-					"reader head stuck; reopening reader",
-					"mirror", key, "attempt", attempt)
+					"source reader wedged; reopening reader",
+					"mirror", key, "reason", state.reason, "attempt", attempt)
 				// Returning first is what makes the reopen safe:
 				// closeSourceHandles waits on flusherDone, and this
 				// goroutine is the one that closes it.
@@ -1341,6 +1403,14 @@ func sourceStateEqual(a, b sourceProgressState) bool {
 // propagated into every state so the target-side watchdog gets a
 // freshness signal regardless of which condition is currently being
 // published.
+//
+// Every fault here is judged against the last grain that reached the
+// target rather than against the lifetime transfer count. A mirror
+// that delivered for hours and then stopped reads identically to one
+// that never started, and the lifetime count reports the history
+// instead: it turned a source that had gone dead into ConditionTrue /
+// Recovered, and no watchdog on either side of the mirror looks at a
+// source that calls itself healthy.
 func observedState(entry *sourceEntry, stallAfter time.Duration) sourceProgressState {
 	var sent *time.Time
 	if p := entry.lastSentAt.Load(); p != nil {
@@ -1361,7 +1431,73 @@ func observedState(entry *sourceEntry, stallAfter time.Duration) sourceProgressS
 			lastSentAt: sent,
 		}
 	}
-	if entry.agedOutAt.Load() != nil {
+	delivering := sent != nil && time.Since(*sent) <= stallAfter
+	// An aged-out skip is only evidence about the reader while it is
+	// recent. Held for the stall window rather than until the next
+	// transfer so a reader skipping every tick stays on one condition
+	// instead of flapping it against Recovered, and so a single skip
+	// stays visible to an operator for a moment either way.
+	agedOut := false
+	if at := entry.agedOutAt.Load(); at != nil && time.Since(*at) <= stallAfter {
+		agedOut = true
+	}
+
+	// The head has not moved: the loop's inner range never runs, so it
+	// emits no error and no aged-out skip, and the target reads the
+	// mirror as an idle producer and declines to recover. This is what
+	// a reader left on a producer's previous flow directory looks like
+	// after the producer restarts -- the ring it is mapped onto is
+	// gone, so no later grain can ever arrive and only a fresh reader
+	// resolves it.
+	if at := entry.headAdvancedAt.Load(); at != nil &&
+		time.Since(*at) > stallAfter && !delivering {
+		return sourceProgressState{
+			status: metav1.ConditionFalse,
+			reason: mxlv1alpha1.ReasonReaderNotAdvancing,
+			message: fmt.Sprintf("reader head stuck at %d for over %s",
+				entry.lastHead.Load(), stallAfter),
+			rebuildReader: true,
+			lastSentAt:    sent,
+		}
+	}
+	// The head is moving and the reader keeps landing outside the
+	// producer's ring. Skipping to the head is the loop's own recovery
+	// and it works whenever the ring underneath is live, so a reader
+	// still aging out a whole stall window after its last delivery is
+	// one that cannot reach the live tail at all; only reopening it
+	// gets the mirror back.
+	if agedOut && !delivering {
+		return sourceProgressState{
+			status: metav1.ConditionFalse,
+			reason: mxlv1alpha1.ReasonReaderAgedOut,
+			message: fmt.Sprintf(
+				"source reader fell behind writer and has delivered nothing in %s",
+				stallAfter),
+			rebuildReader: true,
+			lastSentAt:    sent,
+		}
+	}
+	// The head is moving, so the producer is alive and the reader is
+	// following it, yet nothing has landed at the target. Reporting
+	// True here calls that healthy, and it is the state a source sits
+	// in when its target publishes an endpoint that never accepts: the
+	// initiator retries the address forever, transfers nothing, and
+	// never advances lastSentAt. Left to the target's stuck-handshake
+	// watchdog rather than reopened here: the reader is demonstrably
+	// reading, and the target gates its own rebuild on seeing this
+	// reason.
+	if !delivering && !entry.openedAt.IsZero() &&
+		time.Since(entry.openedAt) > stallAfter {
+		return sourceProgressState{
+			status: metav1.ConditionFalse,
+			reason: mxlv1alpha1.ReasonTransfersNotLanding,
+			message: fmt.Sprintf(
+				"reader head at %d is advancing but nothing has reached the target in %s",
+				entry.lastHead.Load(), stallAfter),
+			lastSentAt: sent,
+		}
+	}
+	if agedOut {
 		return sourceProgressState{
 			status:     metav1.ConditionFalse,
 			reason:     mxlv1alpha1.ReasonReaderAgedOut,
@@ -1374,37 +1510,6 @@ func observedState(entry *sourceEntry, stallAfter time.Duration) sourceProgressS
 			status:     metav1.ConditionTrue,
 			reason:     mxlv1alpha1.ReasonRecovered,
 			message:    "grain progress observed",
-			lastSentAt: sent,
-		}
-	}
-	// Nothing transferred and the head has not moved: the loop's inner
-	// range never runs, so it emits no error and no aged-out skip, and
-	// the target reads the mirror as an idle producer and declines to
-	// recover. Reporting True here describes that wedge as healthy.
-	if at := entry.headAdvancedAt.Load(); at != nil && time.Since(*at) > stallAfter {
-		return sourceProgressState{
-			status: metav1.ConditionFalse,
-			reason: mxlv1alpha1.ReasonReaderNotAdvancing,
-			message: fmt.Sprintf("reader head stuck at %d for over %s",
-				entry.lastHead.Load(), stallAfter),
-			lastSentAt: sent,
-		}
-	}
-	// The head is moving, so the producer is alive and the reader is
-	// following it, yet nothing has landed at the target since this
-	// initiator opened. Reporting True here calls that healthy, and it
-	// is the state a source sits in when its target publishes an
-	// endpoint that never accepts: the initiator retries the address
-	// forever, transfers nothing, and never advances lastSentAt.
-	if !entry.openedAt.IsZero() &&
-		time.Since(entry.openedAt) > stallAfter &&
-		(sent == nil || sent.Before(entry.openedAt)) {
-		return sourceProgressState{
-			status: metav1.ConditionFalse,
-			reason: mxlv1alpha1.ReasonTransfersNotLanding,
-			message: fmt.Sprintf(
-				"reader head at %d is advancing but nothing has reached the target in %s",
-				entry.lastHead.Load(), stallAfter),
 			lastSentAt: sent,
 		}
 	}
@@ -1454,6 +1559,8 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			BindAddress:      r.BindAddress,
 			Selector:         r.Selector,
 			ProgressInterval: r.ProgressInterval,
+			PacingFraction:   r.PacingFraction,
+			PacingChunks:     r.PacingChunks,
 		}
 	}
 	if err := mgr.GetFieldIndexer().IndexField(

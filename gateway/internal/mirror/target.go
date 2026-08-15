@@ -750,7 +750,7 @@ func (r *TargetReconciler) startProgressLoop(entry *targetEntry, key types.Names
 	// the progress path from the flow's data format. The writer's
 	// cached config is the source of truth for which API is valid.
 	if writer.Config().Common.Format == mxl.FormatAudio {
-		readFn := target.ReadSamplesNonBlocking
+		readFn := func() (uint64, int, error) { return target.ReadSamples(targetReadTimeout) }
 		commitFn := func(head uint64, count int) error {
 			n, err := commitArrivedSamples(writer, head, count)
 			entry.bytes.Add(n)
@@ -758,15 +758,31 @@ func (r *TargetReconciler) startProgressLoop(entry *targetEntry, key types.Names
 		}
 		go runTargetSampleProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)
 	} else {
-		readFn := target.ReadGrainNonBlocking
+		readFn := func() (uint64, error) { return target.ReadGrain(targetReadTimeout) }
+		completeFn := func(idx uint64) (bool, error) {
+			g, err := writer.GrainInfo(idx)
+			if err != nil {
+				return false, err
+			}
+			// TotalSlices == 0 is a grain the source never subdivides
+			// and never transfers in ranges, so there is nothing to
+			// wait for; Complete() reports false for it.
+			return g.TotalSlices == 0 || g.Complete(), nil
+		}
 		commitFn := func(idx uint64) error {
 			n, err := commitArrivedGrain(writer, idx)
 			entry.bytes.Add(n)
 			return err
 		}
-		go runTargetProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)
+		go runTargetProgressLoop(loopCtx, done, readFn, completeFn, commitFn, onFatal, entry)
 	}
 }
+
+// targetReadTimeout is how long a blocking target read parks before
+// reporting not-ready. It bounds how long a cancelled loop takes to
+// notice, so it stays short enough for a responsive teardown while
+// still being long next to the grain intervals in use.
+const targetReadTimeout = 20 * time.Millisecond
 
 // commitTracker is the subset of targetEntry the progress loop
 // updates after every successful commit. Defined as an interface so
@@ -795,19 +811,28 @@ func (e *targetEntry) recordCommit(_ uint64, at time.Time) {
 // completion queues - without it the target never accepts incoming
 // connections nor signals grain arrivals.
 //
-// We use the non-blocking ReadGrain plus a Go-side sleep on idle
-// rather than the blocking variant. libfabric's util_wait.c (line
-// ~404) returns -EINTR from epoll_wait as fatal "poll failed" in
-// release builds (the EINTR filter only fires under ENABLE_DEBUG);
-// Go's async preemption sends SIGURG to running goroutines ~50/sec
-// since Go 1.14, and that's the signal the blocking ReadGrain
-// receives via the libfabric thread, tearing the endpoint down
-// every 10-60 seconds in steady state. Polling from Go avoids
-// blocking in libfabric, which sidesteps the signal-interaction.
+// The read is the blocking variant. libfabric still treats -EINTR from
+// epoll_wait as a fatal "poll failed" in release builds - the filter in
+// util_wait.c is behind ENABLE_DEBUG in every release up to and
+// including the pinned v2.5.1 - and Go's async preemption sends SIGURG
+// to running goroutines ~50/sec, so that interrupt remains routine.
+// What changed is libmxl-fabrics: RCTarget and RDMTarget now catch the
+// interrupted FabricException per state and return the state unchanged,
+// surfacing MXL_ERR_INTERRUPTED instead of tearing the endpoint down.
+// classifyFabricError already reads that as fabricTransient, so the
+// loop retries and keeps its handles.
 //
-// For every grain ReadGrain reports as received, commitFn does the
-// OpenGrain + Commit dance on the local FlowWriter so consumer
-// FlowReaders see the arrived grain.
+// idleSleep survives the switch as a spin guard, not as the wait: a
+// provider whose blocking read returns not-ready immediately would
+// otherwise spin a core. On a provider that does block, the sleep is
+// only ever reached after a full timeout, and an arriving grain still
+// wakes the read at once.
+//
+// For every grain ReadGrain reports as received, completeFn decides
+// whether the whole grain has landed - a paced source transfers one
+// grain as several slice ranges and each range signals separately -
+// and commitFn then does the OpenGrain + Commit dance on the local
+// FlowWriter so consumer FlowReaders see the arrived grain.
 //
 // Errors from ReadGrain are classified: idle means nothing arrived,
 // transient means the call was disturbed and the handles are still
@@ -817,15 +842,16 @@ func (e *targetEntry) recordCommit(_ uint64, at time.Time) {
 // next ReadGrain call segfaults inside cgo. We exit the loop and
 // call onFatal so the reconciler can rebuild the fabric side.
 //
-// The loop takes readFn and commitFn as injected closures so the
-// state machine - the only piece prone to bugs and the only piece
-// worth unit-testing - is isolated from cgo. Production passes a
-// closure over fabrics.Target.ReadGrainNonBlocking and a closure
-// over commitArrivedGrain(writer, ...).
+// The loop takes readFn, completeFn and commitFn as injected closures
+// so the state machine - the only piece prone to bugs and the only
+// piece worth unit-testing - is isolated from cgo. Production passes a
+// closure over fabrics.Target.ReadGrain, one over mxl.Writer.GrainInfo
+// and one over commitArrivedGrain(writer, ...).
 func runTargetProgressLoop(
 	ctx context.Context,
 	done chan struct{},
 	readGrain ReadGrainFunc,
+	grainComplete GrainCompleteFunc,
 	commit CommitFunc,
 	onFatal func(),
 	tracker commitTracker,
@@ -842,6 +868,22 @@ func runTargetProgressLoop(
 		idx, err := readGrain()
 		switch kind := classifyFabricError(err); {
 		case err == nil:
+			// A grain the source paced arrives as several slice ranges,
+			// each signalling separately with a growing valid-slice
+			// count. Committing on the first would publish a grain with
+			// most of its lines unwritten, and commitArrivedGrain marks
+			// every slice valid regardless. Only the arrival that
+			// completes the grain may commit it.
+			if grainComplete != nil {
+				ok, cerr := grainComplete(idx)
+				if cerr != nil {
+					l.Error(cerr, "grain completeness check", "idx", idx)
+					break
+				}
+				if !ok {
+					break
+				}
+			}
 			if err := commit(idx); err != nil {
 				l.Error(err, "commit received grain", "idx", idx)
 				break
@@ -897,10 +939,12 @@ func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, error) {
 // runTargetSampleProgressLoop drives a libmxl-fabrics Target for a
 // continuous (audio) flow until ctx is canceled or ReadSamples reports
 // a non-recoverable error. It mirrors runTargetProgressLoop: the
-// non-blocking ReadSamples advances the libfabric event + completion
-// queues on every call, and the same Go-side idle sleep avoids the
-// blocking-variant SIGURG interaction documented there. For every run
-// of samples ReadSamples reports as arrived, commit does the
+// blocking ReadSamples advances the libfabric event + completion
+// queues and parks until a run arrives, with the same idle sleep kept
+// as a spin guard for providers that do not block. There is no
+// completeness gate here - TransferSamples carries no slice range, so
+// a run of samples arrives whole or not at all. For every run of
+// samples ReadSamples reports as arrived, commit does the
 // OpenSamples + Commit dance on the local FlowWriter so consumer
 // FlowReaders see them. Errors are classified as in the grain loop:
 // idle and transient are retried, anything else fires onFatal so the
