@@ -59,12 +59,16 @@ const (
 
 	// ReasonReaderAgedOut marks a mirror whose source-side flow
 	// reader fell behind the writer and advanced past the missed
-	// grains.
+	// grains. Benign on its own: a reader that skips once and reaches
+	// the live tail again keeps the mirror delivering. The message
+	// separates that from a reader still outside the ring a whole
+	// stall window after its last delivered grain, which is the one
+	// the gateway reopens.
 	ReasonReaderAgedOut = "ReaderAgedOut"
 
 	// ReasonReaderNotAdvancing marks a mirror whose source-side flow
-	// reader has never transferred a grain and whose head index has
-	// not moved since the reader opened.
+	// reader has delivered no grain within the stall window and whose
+	// head index has not moved either.
 	ReasonReaderNotAdvancing = "ReaderNotAdvancing"
 
 	// ReasonTransfersNotLanding marks a mirror whose source-side reader
