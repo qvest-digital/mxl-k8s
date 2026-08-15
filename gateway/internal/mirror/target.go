@@ -759,12 +759,22 @@ func (r *TargetReconciler) startProgressLoop(entry *targetEntry, key types.Names
 		go runTargetSampleProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)
 	} else {
 		readFn := func() (uint64, error) { return target.ReadGrain(targetReadTimeout) }
+		completeFn := func(idx uint64) (bool, error) {
+			g, err := writer.GrainInfo(idx)
+			if err != nil {
+				return false, err
+			}
+			// TotalSlices == 0 is a grain the source never subdivides
+			// and never transfers in ranges, so there is nothing to
+			// wait for; Complete() reports false for it.
+			return g.TotalSlices == 0 || g.Complete(), nil
+		}
 		commitFn := func(idx uint64) error {
 			n, err := commitArrivedGrain(writer, idx)
 			entry.bytes.Add(n)
 			return err
 		}
-		go runTargetProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)
+		go runTargetProgressLoop(loopCtx, done, readFn, completeFn, commitFn, onFatal, entry)
 	}
 }
 
@@ -818,9 +828,11 @@ func (e *targetEntry) recordCommit(_ uint64, at time.Time) {
 // only ever reached after a full timeout, and an arriving grain still
 // wakes the read at once.
 //
-// For every grain ReadGrain reports as received, commitFn does the
-// OpenGrain + Commit dance on the local FlowWriter so consumer
-// FlowReaders see the arrived grain.
+// For every grain ReadGrain reports as received, completeFn decides
+// whether the whole grain has landed - a paced source transfers one
+// grain as several slice ranges and each range signals separately -
+// and commitFn then does the OpenGrain + Commit dance on the local
+// FlowWriter so consumer FlowReaders see the arrived grain.
 //
 // Errors from ReadGrain are classified: idle means nothing arrived,
 // transient means the call was disturbed and the handles are still
@@ -830,15 +842,16 @@ func (e *targetEntry) recordCommit(_ uint64, at time.Time) {
 // next ReadGrain call segfaults inside cgo. We exit the loop and
 // call onFatal so the reconciler can rebuild the fabric side.
 //
-// The loop takes readFn and commitFn as injected closures so the
-// state machine - the only piece prone to bugs and the only piece
-// worth unit-testing - is isolated from cgo. Production passes a
-// closure over fabrics.Target.ReadGrainNonBlocking and a closure
-// over commitArrivedGrain(writer, ...).
+// The loop takes readFn, completeFn and commitFn as injected closures
+// so the state machine - the only piece prone to bugs and the only
+// piece worth unit-testing - is isolated from cgo. Production passes a
+// closure over fabrics.Target.ReadGrain, one over mxl.Writer.GrainInfo
+// and one over commitArrivedGrain(writer, ...).
 func runTargetProgressLoop(
 	ctx context.Context,
 	done chan struct{},
 	readGrain ReadGrainFunc,
+	grainComplete GrainCompleteFunc,
 	commit CommitFunc,
 	onFatal func(),
 	tracker commitTracker,
@@ -855,6 +868,22 @@ func runTargetProgressLoop(
 		idx, err := readGrain()
 		switch kind := classifyFabricError(err); {
 		case err == nil:
+			// A grain the source paced arrives as several slice ranges,
+			// each signalling separately with a growing valid-slice
+			// count. Committing on the first would publish a grain with
+			// most of its lines unwritten, and commitArrivedGrain marks
+			// every slice valid regardless. Only the arrival that
+			// completes the grain may commit it.
+			if grainComplete != nil {
+				ok, cerr := grainComplete(idx)
+				if cerr != nil {
+					l.Error(cerr, "grain completeness check", "idx", idx)
+					break
+				}
+				if !ok {
+					break
+				}
+			}
 			if err := commit(idx); err != nil {
 				l.Error(err, "commit received grain", "idx", idx)
 				break
@@ -912,7 +941,9 @@ func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, error) {
 // a non-recoverable error. It mirrors runTargetProgressLoop: the
 // blocking ReadSamples advances the libfabric event + completion
 // queues and parks until a run arrives, with the same idle sleep kept
-// as a spin guard for providers that do not block. For every run of
+// as a spin guard for providers that do not block. There is no
+// completeness gate here - TransferSamples carries no slice range, so
+// a run of samples arrives whole or not at all. For every run of
 // samples ReadSamples reports as arrived, commit does the
 // OpenSamples + Commit dance on the local FlowWriter so consumer
 // FlowReaders see them. Errors are classified as in the grain loop:

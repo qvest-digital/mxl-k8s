@@ -122,7 +122,7 @@ func TestRunTransferLoop_RecordsProbedHead(t *testing.T) {
 			cancel()
 			return 7, nil
 		},
-		func(uint64) (bool, error) { return true, nil },
+		func(uint64, bool) (bool, error) { return true, nil },
 		func() error { return nil },
 		time.Millisecond, tracker)
 

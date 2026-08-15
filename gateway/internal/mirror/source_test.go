@@ -47,6 +47,7 @@ type transferFixture struct {
 	headCalls int
 
 	transferLog  []uint64
+	pacedLog     []bool
 	transferErr  error
 	transferSkip map[uint64]bool
 
@@ -69,10 +70,11 @@ func (f *transferFixture) probeRuntime() (uint64, error) {
 	return h, nil
 }
 
-func (f *transferFixture) transferGrain(idx uint64) (bool, error) {
+func (f *transferFixture) transferGrain(idx uint64, paced bool) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.transferLog = append(f.transferLog, idx)
+	f.pacedLog = append(f.pacedLog, paced)
 	if f.transferErr != nil {
 		return false, f.transferErr
 	}
@@ -148,7 +150,7 @@ func TestRunTransferLoop_ResyncsToHeadWhenLapped(t *testing.T) {
 
 	var mu sync.Mutex
 	var transferred []uint64
-	transfer := func(idx uint64) (bool, error) {
+	transfer := func(idx uint64, _ bool) (bool, error) {
 		// Only grains within maxMirrorLag of the head are still in the
 		// producer ring; older indices have aged out.
 		if int64(idx) < 1000-maxMirrorLag {
@@ -199,7 +201,7 @@ func TestRunTransferLoop_TransferErrorBreaksInnerLoopButLoopSurvives(t *testing.
 	}
 
 	var transferCalls atomic.Int32
-	transfer := func(idx uint64) (bool, error) {
+	transfer := func(idx uint64, _ bool) (bool, error) {
 		transferCalls.Add(1)
 		if idx == 2 {
 			return false, errors.New("transient")
@@ -230,7 +232,7 @@ func TestRunTransferLoop_InitialProbeErrorReturnsEarly(t *testing.T) {
 	// the loop would proceed with a zero head index and silently
 	// flood the initiator with stale grains.
 	probe := func() (uint64, error) { return 0, errors.New("dead reader") }
-	transfer := func(uint64) (bool, error) {
+	transfer := func(uint64, bool) (bool, error) {
 		t.Fatal("transferGrain must not be called when initial probe errors")
 		return false, nil
 	}
@@ -255,7 +257,7 @@ func TestRunTransferLoop_ProgressErrNotReadyIsSwallowed(t *testing.T) {
 	// is logged but does not stop the loop either - the next tick
 	// recovers.
 	probe := func() (uint64, error) { return 0, nil }
-	transfer := func(uint64) (bool, error) {
+	transfer := func(uint64, bool) (bool, error) {
 		return false, nil
 	}
 	calls := atomic.Int32{}
@@ -278,7 +280,7 @@ func TestRunTransferLoop_ProgressErrNotReadyIsSwallowed(t *testing.T) {
 
 func TestRunTransferLoop_CtxCancelExitsImmediately(t *testing.T) {
 	probe := func() (uint64, error) { return 0, nil }
-	transfer := func(uint64) (bool, error) { return false, nil }
+	transfer := func(uint64, bool) (bool, error) { return false, nil }
 	progress := func() error { return nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -361,7 +363,7 @@ func TestRunTransferLoop_AdvancesLastSentOnAgedOutError(t *testing.T) {
 
 	var mu sync.Mutex
 	var attempts []uint64
-	transfer := func(idx uint64) (bool, error) {
+	transfer := func(idx uint64, _ bool) (bool, error) {
 		mu.Lock()
 		attempts = append(attempts, idx)
 		mu.Unlock()
@@ -428,7 +430,7 @@ func TestRunTransferLoop_ResyncRecordsAgedOutOnFallBehind(t *testing.T) {
 		}
 	}
 
-	transfer := func(uint64) (bool, error) { return false, nil }
+	transfer := func(uint64, bool) (bool, error) { return false, nil }
 
 	tracker := &recordingTracker{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -464,7 +466,7 @@ func TestRunTransferLoop_TracksProgressAndLastSentAt(t *testing.T) {
 		}
 		return 3, nil
 	}
-	transfer := func(uint64) (bool, error) { return false, nil }
+	transfer := func(uint64, bool) (bool, error) { return false, nil }
 
 	tracker := &recordingTracker{}
 	ctx, cancel := context.WithCancel(context.Background())

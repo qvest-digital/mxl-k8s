@@ -113,6 +113,16 @@ type SourceReconciler struct {
 	// Defaults to 2ms.
 	ProgressInterval time.Duration
 
+	// PacingFraction is how much of a grain interval one grain's
+	// transmission is spread over, which caps peak rate at the flow's
+	// own rate divided by it. Zero takes defaultPacingFraction;
+	// negative disables pacing and restores whole-grain transfers.
+	PacingFraction float64
+
+	// PacingChunks is how many slice ranges a paced grain is split
+	// into. Zero takes defaultPacingChunks; under 2 disables pacing.
+	PacingChunks int
+
 	// FlushInterval is how often the per-mirror status flusher
 	// checks the sourceEntry trackers and publishes SourceProgress
 	// when the observed state has transitioned. Defaults to 1s.
@@ -594,6 +604,8 @@ type libmxlOpener struct {
 	BindAddress      string
 	Selector         fabric.Selector
 	ProgressInterval time.Duration
+	PacingFraction   float64
+	PacingChunks     int
 }
 
 func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provider) (*sourceEntry, error) {
@@ -696,6 +708,17 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 	if progressInterval <= 0 {
 		progressInterval = 2 * time.Millisecond
 	}
+	// Zero means "not configured" and takes the default; a negative
+	// fraction is how an operator turns pacing off, which newPacer
+	// reads as a disabled pacer.
+	pacingFraction := o.PacingFraction
+	if pacingFraction == 0 {
+		pacingFraction = defaultPacingFraction
+	}
+	pacingChunks := o.PacingChunks
+	if pacingChunks == 0 {
+		pacingChunks = defaultPacingChunks
+	}
 	runtimeFn := func() (uint64, error) {
 		rt, err := reader.Runtime()
 		if err != nil {
@@ -722,7 +745,22 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 		}
 		go runSampleTransferLoop(loopCtx, done, flowID, runtimeFn, transferSamplesFn, progressFn, maxBatch, xferBatch, progressInterval, entry)
 	} else {
-		transferFn := func(idx uint64) (bool, error) {
+		// The pacer is keyed on flow plus target so two mirrors of one
+		// flow, and mirrors of different flows, get different phase
+		// offsets. Flows sharing an edit rate advance their heads on
+		// the same MXL clock instants, so without the offset every
+		// mirror on this node would hand its chunks over in lockstep.
+		p := newPacer(cfg.Common.GrainRate, pacingFraction, pacingChunks, flowID+"\x00"+targetInfoStr)
+		l := ctrl.Log.WithName("transfer").WithValues("flowID", flowID)
+		transferSlices := func(idx uint64, start, end uint16) error {
+			return initiator.TransferGrain(idx, start, end)
+		}
+		betweenChunks := func() {
+			if err := progressFn(); err != nil {
+				logProgressFailure(l, err)
+			}
+		}
+		transferFn := func(idx uint64, paced bool) (bool, error) {
 			grain, err := reader.GetGrainNonBlocking(idx)
 			if err != nil {
 				// Not yet committed or already aged out; signal the loop
@@ -735,7 +773,15 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 				// reach here.
 				return true, nil
 			}
-			if err := initiator.TransferGrain(idx, 0, grain.TotalSlices); err != nil {
+			if !paced || !p.enabled() {
+				if err := initiator.TransferGrain(idx, 0, grain.TotalSlices); err != nil {
+					return false, err
+				}
+				entry.bytes.Add(uint64(grain.GrainSize))
+				return false, nil
+			}
+			if err := transferPaced(loopCtx, realClock{}, p.plan(grain.TotalSlices), idx,
+				transferSlices, betweenChunks); err != nil {
 				return false, err
 			}
 			entry.bytes.Add(uint64(grain.GrainSize))
@@ -885,7 +931,11 @@ func runTransferLoop(
 		}
 
 		for idx := lastSent + 1; idx <= int64(head); idx++ {
-			if _, err := transferGrain(uint64(idx)); err != nil {
+			// Pace only the grain that is the live head with nothing
+			// behind it. Any earlier index means a backlog, and a
+			// backlog has to be cleared at the fabric's own rate.
+			paced := idx == int64(head)
+			if _, err := transferGrain(uint64(idx), paced); err != nil {
 				// libmxl reports "out of range (too late)" when the
 				// writer has already overwritten the slot the reader
 				// is asking for. The grains between lastSent+1 and
@@ -1454,6 +1504,8 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			BindAddress:      r.BindAddress,
 			Selector:         r.Selector,
 			ProgressInterval: r.ProgressInterval,
+			PacingFraction:   r.PacingFraction,
+			PacingChunks:     r.PacingChunks,
 		}
 	}
 	if err := mgr.GetFieldIndexer().IndexField(
