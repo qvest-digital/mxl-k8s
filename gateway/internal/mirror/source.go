@@ -1080,16 +1080,35 @@ func runSampleTransferLoop(
 			// Transfer the remaining (lastSent, head] delta in chunks
 			// of at most xferBatch samples, each ending at the chunk's
 			// last index.
+			//
+			// A chunk that comes back not-ready is backpressure, not a
+			// failure: libmxl-fabrics reports the initiator's send
+			// queue being full as EAGAIN, which surfaces here as
+			// fabrics.ErrNotReady. The queue drains on MakeProgress, so
+			// the chunk is retried after driving it rather than
+			// abandoned until the next tick. Abandoning it is what let
+			// the reader slide out of the readable window while the
+			// producer kept writing, at which point the loop skipped
+			// samples and published ReaderAgedOut for what was really a
+			// momentarily full queue.
+			retries := 0
 			for lastSent < head {
 				count := head - lastSent
 				if xferBatch > 0 && count > xferBatch {
 					count = xferBatch
 				}
 				end := lastSent + count
-				if err := transferSamples(end, int(count)); err != nil {
-					l.Error(err, "TransferSamples", "headIndex", end, "count", count)
+				err := transferSamples(end, int(count))
+				if err != nil {
+					if classifyFabricError(err) == fabricIdle && retries < maxSampleTransferRetries {
+						retries++
+						progress.runProgress(makeProgress, func(perr error) { logProgressFailure(l, perr) })
+						continue
+					}
+					logSampleTransferFailure(l, err, end, count)
 					break
 				}
+				retries = 0
 				if tracker != nil {
 					tracker.recordTransfer(end, time.Now())
 				}
@@ -1679,6 +1698,32 @@ func (r *SourceReconciler) flowToMirrors(ctx context.Context, obj client.Object)
 //
 // The classification is logged alongside the error so an operator can
 // tell the two apart without reading libmxl's headers.
+// maxSampleTransferRetries bounds how many times one chunk is retried
+// against a full send queue within a single tick. Each retry drives
+// MakeProgress first, so the bound is what stops a genuinely wedged
+// fabric from spinning the tick instead of yielding to the next one,
+// where the head is re-read and the wedge becomes visible as a stalled
+// lastSent.
+const maxSampleTransferRetries = 8
+
+// logSampleTransferFailure renders a TransferSamples failure at a level
+// that matches what it means. A full send queue that outlived its
+// retries is congestion the next tick will pick up, and a disturbed
+// call is one the handles survive; neither is worth an error line per
+// occurrence on a flow that transfers hundreds of times a second.
+func logSampleTransferFailure(l logr.Logger, err error, end, count uint64) {
+	kind := classifyFabricError(err)
+	switch kind {
+	case fabricIdle, fabricTransient:
+		l.V(1).Info("TransferSamples deferred, retrying",
+			"error", err.Error(), "class", kind.String(),
+			"headIndex", end, "count", count)
+	default:
+		l.Error(err, "TransferSamples", "class", kind.String(),
+			"headIndex", end, "count", count)
+	}
+}
+
 func logProgressFailure(l logr.Logger, err error) {
 	kind := classifyFabricError(err)
 	switch kind {
