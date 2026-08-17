@@ -315,6 +315,22 @@ diff. Two consequences for contributors:
   required upstream is in `failure` / `cancelled`). Do not add
   individual conditional jobs to the required-checks list -- a
   skipped check on an unrelated diff would block the PR.
+- `images.yml` filters on path and then again on whether the diff
+  can reach a binary, because the per-image filters glob whole
+  module directories and so match a changelog or a test-only
+  requirement the same as a source file. That second pass is the
+  `inert` block in `meta`, and each arm asserts the binaries come
+  out identical to the ones main already published: markdown only,
+  release-please's own branch (whose api pin is inert under the
+  `replace` directives), and a requirement bump that `go list
+  -deps` does not find in any `cmd/` import graph. Adding an arm
+  means making that same claim for it.
+- The `kind` filter selects the suite independently of any image
+  build, for changes that alter what the cluster runs without
+  producing a binary: the chart, the CRDs, the RBAC, the demo
+  manifests, the harness. `kind-up` is the only place in CI that
+  installs the chart rather than rendering it, so a path that
+  changes the installed result belongs on that filter.
 
 ## When in doubt
 

@@ -208,10 +208,24 @@ make kind-down
 ```
 
 The same suite drives the `kind-integration` GitHub Actions job in
-`.github/workflows/images.yml`: on a same-repo PR that touches
-anything `make kind-up` consumes, the job pulls the PR's per-tag
-images from GHCR (`BUILD=pr-<num>-<sha>`), brings up a cluster on
-the runner, and runs `make kind-test`. New assertions land as
+`.github/workflows/images.yml`. On a same-repo pull request it runs
+when the diff rebuilds any image, and when the diff changes what the
+cluster runs without rebuilding one -- the chart, the CRDs, the RBAC,
+the demo manifests, the harness. Those two cases differ in what the
+cluster is built from:
+
+- An image was rebuilt: the job pulls that build from GHCR at
+  `BUILD=pr-<num>-<sha>`, with the components the diff did not touch
+  retagged from `:dev` so every component resolves at one tag.
+- Nothing was rebuilt: the job pulls `BUILD=dev`, which is main HEAD.
+  The change under test is then the only thing that is not main.
+
+It does not run for a diff that cannot change either -- markdown,
+release-please's version bumps, a dependency bump no binary links --
+nor on a push to main whose tree the pull request already took
+through the suite. Attaching a `run-kind` label runs it regardless.
+
+New assertions land as
 `test/integration/kind/cases/<NN>-<name>.sh`; no runner changes
 required. See the suite's [`README.md`](../test/integration/kind/README.md)
 for the case-authoring conventions.
