@@ -12,7 +12,7 @@ require (
 	sigs.k8s.io/controller-runtime v0.24.1
 )
 
-require github.com/stretchr/testify v1.11.1
+require github.com/stretchr/testify v1.12.0
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
