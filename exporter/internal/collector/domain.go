@@ -1,8 +1,7 @@
 package collector
 
 import (
-	"log/slog"
-
+	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/domain"
@@ -33,11 +32,11 @@ type DomainSource interface {
 // DomainCollector exports the domain-wide counters.
 type DomainCollector struct {
 	src DomainSource
-	log *slog.Logger
+	log logr.Logger
 }
 
 // NewDomainCollector returns a collector over src.
-func NewDomainCollector(src DomainSource, log *slog.Logger) *DomainCollector {
+func NewDomainCollector(src DomainSource, log logr.Logger) *DomainCollector {
 	return &DomainCollector{src: src, log: log}
 }
 
@@ -68,7 +67,7 @@ func (c *DomainCollector) Collect(ch chan<- prometheus.Metric) {
 		// The domain directory can be absent on a node that has never
 		// carried a flow. Skipping the filesystem series leaves a gap
 		// rather than a wrong zero.
-		c.log.Warn("statfs domain", "domain", dom, "error", err)
+		c.log.Error(err, "statfs domain", "domain", dom)
 		return
 	}
 	ch <- prometheus.MustNewConstMetric(descFSTotal, prometheus.GaugeValue, float64(st.TotalBytes), dom)

@@ -12,8 +12,8 @@ package topology
 
 import (
 	"context"
-	"log/slog"
 
+	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -28,14 +28,14 @@ var descLocation = prometheus.NewDesc("mxl_flow_location_info",
 type Collector struct {
 	reader   client.Reader
 	nodeName string
-	log      *slog.Logger
+	log      logr.Logger
 }
 
 // New returns a collector reading MxlFlow through reader and reporting
 // only the entries for nodeName. Restricting to the local node is what
 // keeps every node's exporter from re-exporting the whole cluster's
 // flows as duplicate series.
-func New(reader client.Reader, nodeName string, log *slog.Logger) *Collector {
+func New(reader client.Reader, nodeName string, log logr.Logger) *Collector {
 	return &Collector{reader: reader, nodeName: nodeName, log: log}
 }
 
@@ -51,7 +51,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		// Emitting nothing leaves a gap the dashboard shows as no
 		// data, which is honest; emitting zeros would read as "no
 		// producer anywhere".
-		c.log.Warn("list MxlFlow", "error", err)
+		c.log.Error(err, "list MxlFlow")
 		return
 	}
 	for i := range flows.Items {

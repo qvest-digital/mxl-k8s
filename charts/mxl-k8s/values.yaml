@@ -727,6 +727,10 @@ exporter:
     # mxl_flow_present at 0, so a flow that ends between two scrapes
     # leaves a record rather than a gap.
     flowLifetime: 24h
+    # @schema
+    # enum: ["debug", "info", "warn", "error"]
+    # @schema
+    zapLogLevel: info
   # -- hostPath layout. The exporter mounts the runtime root read-only;
   # it opens libmxl flow readers and never writes into the domain.
   hostPath:

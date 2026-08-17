@@ -194,6 +194,7 @@ Kubernetes: `>=1.28-0`
 | exporter.flags.healthProbeBindAddress | string | `":8081"` |  |
 | exporter.flags.metricsBindAddress | string | `":8080"` |  |
 | exporter.flags.scanPeriod | string | `"5s"` | How often the domain directory is re-listed for flows that appeared or disappeared. Scrapes read the cache this maintains. |
+| exporter.flags.zapLogLevel | string | `"info"` |  |
 | exporter.hostPath | object | `{"run":"/run/mxl","type":"Directory"}` | hostPath layout. The exporter mounts the runtime root read-only; it opens libmxl flow readers and never writes into the domain. |
 | exporter.image.digest | string | `""` | Image digest. Wins over tag when set. @schema pattern: ^$|^sha256:[0-9a-f]{64}$ @schema |
 | exporter.image.pullPolicy | string | `""` |  |

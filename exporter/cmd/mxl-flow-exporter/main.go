@@ -6,13 +6,13 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -21,6 +21,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/collector"
@@ -29,25 +30,35 @@ import (
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/topology"
 )
 
-func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+var setupLog = ctrl.Log.WithName("setup")
 
-	cfg, err := config.FromFlags(flag.NewFlagSet(os.Args[0], flag.ExitOnError), os.Args[1:])
+func main() {
+	fs := flag.NewFlagSet("mxl-flow-exporter", flag.ContinueOnError)
+	zapOpts := zap.Options{Development: false}
+	zapOpts.BindFlags(fs)
+
+	cfg, err := config.FromFlags(fs, os.Args[1:])
 	if err != nil {
-		log.Error("configuration", "error", err)
+		// The flags carry the logger's own configuration, so a
+		// configuration error predates it. Installing a default logger
+		// first keeps the reason the process refused to start from being
+		// the one message it cannot emit.
+		ctrl.SetLogger(zap.New())
+		setupLog.Error(err, "configuration")
 		os.Exit(1)
 	}
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, cfg, log); err != nil {
-		log.Error("exporter", "error", err)
+	if err := run(ctx, cfg, ctrl.Log.WithName("exporter")); err != nil {
+		setupLog.Error(err, "exporter exited with error")
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
+func run(ctx context.Context, cfg *config.Config, log logr.Logger) error {
 	dom, err := domain.Open(cfg.DomainPath, cfg.FlowLifetime)
 	if err != nil {
 		return err
@@ -66,7 +77,7 @@ func run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	)
 	nodeReg.MustRegister(
 		collector.NewFlowCollector(dom),
-		collector.NewDomainCollector(dom, log),
+		collector.NewDomainCollector(dom, log.WithName("domain")),
 	)
 
 	if cfg.TopologyEnabled {
@@ -74,14 +85,14 @@ func run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		if err != nil {
 			return err
 		}
-		nodeReg.MustRegister(topology.New(reader, cfg.NodeName, log))
+		nodeReg.MustRegister(topology.New(reader, cfg.NodeName, log.WithName("topology")))
 	}
 
 	if err := dom.Scan(); err != nil {
 		// A node that has never carried a flow has no domain directory
 		// yet. Failing to boot on that would take the DaemonSet down
 		// on exactly the nodes with nothing to report.
-		log.Warn("initial domain scan", "domain", cfg.DomainPath, "error", err)
+		log.Error(err, "initial domain scan", "domain", cfg.DomainPath)
 	}
 	go scanLoop(ctx, dom, cfg.ScanPeriod, log)
 
@@ -91,7 +102,7 @@ func run(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 // startTopologyCache brings up a controller-runtime cache over
 // MxlFlow so a scrape reads from a watch-backed store instead of
 // listing against the API server.
-func startTopologyCache(ctx context.Context, cfg *config.Config, log *slog.Logger) (client.Reader, error) {
+func startTopologyCache(ctx context.Context, cfg *config.Config, log logr.Logger) (client.Reader, error) {
 	restCfg, err := ctrl.GetConfig()
 	if err != nil {
 		return nil, err
@@ -109,7 +120,7 @@ func startTopologyCache(ctx context.Context, cfg *config.Config, log *slog.Logge
 	}
 	go func() {
 		if err := c.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Error("topology cache", "error", err)
+			log.Error(err, "topology cache")
 		}
 	}()
 	if !c.WaitForCacheSync(ctx) {
@@ -119,7 +130,7 @@ func startTopologyCache(ctx context.Context, cfg *config.Config, log *slog.Logge
 }
 
 // scanLoop re-lists the domain until ctx is done.
-func scanLoop(ctx context.Context, dom *domain.Domain, period time.Duration, log *slog.Logger) {
+func scanLoop(ctx context.Context, dom *domain.Domain, period time.Duration, log logr.Logger) {
 	t := time.NewTicker(period)
 	defer t.Stop()
 	for {
@@ -128,14 +139,14 @@ func scanLoop(ctx context.Context, dom *domain.Domain, period time.Duration, log
 			return
 		case <-t.C:
 			if err := dom.Scan(); err != nil {
-				log.Warn("scan domain", "error", err)
+				log.Error(err, "scan domain")
 			}
 		}
 	}
 }
 
 // serve runs the metrics and probe endpoints until ctx is done.
-func serve(ctx context.Context, cfg *config.Config, reg *prometheus.Registry, log *slog.Logger) error {
+func serve(ctx context.Context, cfg *config.Config, reg *prometheus.Registry, log logr.Logger) error {
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{ErrorHandling: promhttp.ContinueOnError}))
 

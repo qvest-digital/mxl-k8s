@@ -848,6 +848,18 @@
               "description": "How often the domain directory is re-listed for flows that appeared or disappeared. Scrapes read the cache this maintains.",
               "required": [],
               "title": "scanPeriod"
+            },
+            "zapLogLevel": {
+              "default": "info",
+              "description": " enum: [\"debug\", \"info\", \"warn\", \"error\"] @schema",
+              "enum": [
+                "debug",
+                "info",
+                "warn",
+                "error"
+              ],
+              "required": [],
+              "title": "zapLogLevel"
             }
           },
           "required": [],
