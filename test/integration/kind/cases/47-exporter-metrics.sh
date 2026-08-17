@@ -7,10 +7,10 @@
 # are identified by node, the producing node reports its flow as
 # Origin, and the consuming node reports the same flow as a mirror.
 #
-# Activity is only observable from the second scrape onward -- the
-# exporter decides it by comparing the head index against the previous
-# collection -- so every assertion about movement is made across two
-# scrapes rather than one.
+# Head index movement cannot be read from one sample, so the assertions
+# about it span two scrapes a window apart. Activity needs no such
+# window: the exporter judges it against the flow's own write clock and
+# reports it on the first scrape that finds the flow.
 #
 # Numbered with the steady-state cases: from 50 on the suite reschedules
 # producers, drains nodes and evicts consumers, and the demo pods this
@@ -94,9 +94,6 @@ echo "-> exporter on the writer node: ${writer_exp}"
 # and a writer that has only just started leaves its flow directory in
 # place before it produces, so present alone would let the head-index
 # window below open against a stalled flow.
-#
-# Activity needs two collections to be decidable at all, which this
-# loop supplies by scraping repeatedly.
 deadline=$(( $(date +%s) + DISCOVER_TIMEOUT_SECS ))
 present=""
 active=""

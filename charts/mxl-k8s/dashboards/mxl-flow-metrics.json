@@ -87,7 +87,7 @@
     {
       "id": 1,
       "title": "Active Flows",
-      "description": "Whether a flow is currently being written. The exporter compares the head index at each scrape against the previous one: advanced means data is flowing (ACTIVE), unchanged means the flow is frozen (STALLED). A flow can be present and stalled at once, which is what a writer that died while its flow directory survived looks like.",
+      "description": "ACTIVE when the flow was written within its own activity window, STALLED when the flow directory is still in the domain and nothing wrote to it, ABSENT when the directory is gone. The window is derived from the flow's cadence rather than fixed: three grain periods on a discrete flow, half the ring buffer on a continuous one. Sums mxl_flow_active and mxl_flow_present, which is what separates a writer that stopped from a flow that ended.",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -106,7 +106,8 @@
           ]
         },
         "orientation": "auto",
-        "colorMode": "background"
+        "colorMode": "background",
+        "graphMode": "none"
       },
       "fieldConfig": {
         "defaults": {
@@ -115,10 +116,14 @@
               "type": "value",
               "options": {
                 "0": {
+                  "text": "ABSENT",
+                  "color": "text"
+                },
+                "1": {
                   "text": "STALLED",
                   "color": "red"
                 },
-                "1": {
+                "2": {
                   "text": "ACTIVE",
                   "color": "green"
                 }
@@ -129,12 +134,16 @@
             "mode": "absolute",
             "steps": [
               {
+                "color": "text",
+                "value": null
+              },
+              {
                 "color": "red",
-                "value": 0
+                "value": 1
               },
               {
                 "color": "green",
-                "value": 1
+                "value": 2
               }
             ]
           }
@@ -143,15 +152,16 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "mxl_flow_active{node=~\"$node\",flow_id=~\"$flow\"}",
-          "legendFormat": "{{node}} / {{flow_id}}"
+          "expr": "mxl_flow_active{node=~\"$node\",flow_id=~\"$flow\"} + mxl_flow_present{node=~\"$node\",flow_id=~\"$flow\"}",
+          "legendFormat": "{{node}} / {{flow_id}}",
+          "instant": true
         }
       ]
     },
     {
       "id": 2,
       "title": "Flows Present",
-      "description": "Whether the flow directory (*.mxl-flow) still exists in the node's domain. PRESENT means the directory is there, MISSING that it is gone. A departed flow keeps its series, at 0, until --flow-lifetime expires, so a short outage stays visible in the time range instead of leaving a gap. Present says nothing about data flowing; Active Flows does.",
+      "description": "Whether the flow directory (*.mxl-flow) still exists in the node's domain. PRESENT means the directory is there, ABSENT that it is gone. A departed flow keeps its series, at 0, until --flow-lifetime expires, so a flow that ends between two scrapes leaves a record rather than a gap. Present says nothing about data flowing; Active Flows does.",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -170,7 +180,8 @@
           ]
         },
         "orientation": "auto",
-        "colorMode": "background"
+        "colorMode": "background",
+        "graphMode": "none"
       },
       "fieldConfig": {
         "defaults": {
@@ -179,8 +190,8 @@
               "type": "value",
               "options": {
                 "0": {
-                  "text": "MISSING",
-                  "color": "red"
+                  "text": "ABSENT",
+                  "color": "text"
                 },
                 "1": {
                   "text": "PRESENT",
@@ -193,8 +204,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
-                "value": 0
+                "color": "text",
+                "value": null
               },
               {
                 "color": "green",
@@ -208,7 +219,8 @@
         {
           "refId": "A",
           "expr": "mxl_flow_present{node=~\"$node\",flow_id=~\"$flow\"}",
-          "legendFormat": "{{node}} / {{flow_id}}"
+          "legendFormat": "{{node}} / {{flow_id}}",
+          "instant": true
         }
       ]
     },
@@ -543,7 +555,7 @@
     {
       "id": 15,
       "title": "Active Timeline",
-      "description": "ACTIVE/STALLED state of every flow over the selected range. Where the Active Flows stat shows the current value, this shows when a flow stopped and how long it stayed stopped.",
+      "description": "ACTIVE/STALLED/ABSENT state of every flow over the selected range. Where the Active Flows stat shows the current value, this shows when a flow stopped, how long it stayed stopped, and when it left the domain.",
       "type": "state-timeline",
       "gridPos": {
         "h": 6,
@@ -580,6 +592,15 @@
               "type": "value",
               "options": {
                 "0": {
+                  "text": "ABSENT",
+                  "color": "text"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "1": {
                   "text": "STALLED",
                   "color": "red"
                 }
@@ -588,7 +609,7 @@
             {
               "type": "value",
               "options": {
-                "1": {
+                "2": {
                   "text": "ACTIVE",
                   "color": "green"
                 }
@@ -599,12 +620,16 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "text",
                 "value": null
               },
               {
-                "color": "green",
+                "color": "red",
                 "value": 1
+              },
+              {
+                "color": "green",
+                "value": 2
               }
             ]
           }
@@ -613,7 +638,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "mxl_flow_active{node=~\"$node\",flow_id=~\"$flow\"}",
+          "expr": "mxl_flow_active{node=~\"$node\",flow_id=~\"$flow\"} + mxl_flow_present{node=~\"$node\",flow_id=~\"$flow\"}",
           "legendFormat": "{{node}} / {{flow_id}}"
         }
       ]
@@ -621,7 +646,7 @@
     {
       "id": 16,
       "title": "Present Timeline",
-      "description": "PRESENT/MISSING state of every flow over the selected range. A flow whose directory is gone keeps its series until --flow-lifetime expires, so a restart reads as a bounded gap rather than a series that disappears.",
+      "description": "PRESENT/ABSENT state of every flow over the selected range. A flow whose directory is gone keeps its series until --flow-lifetime expires, so a restart reads as a bounded gap rather than a series that disappears.",
       "type": "state-timeline",
       "gridPos": {
         "h": 6,
@@ -658,8 +683,8 @@
               "type": "value",
               "options": {
                 "0": {
-                  "text": "MISSING",
-                  "color": "red"
+                  "text": "ABSENT",
+                  "color": "text"
                 }
               }
             },
@@ -677,7 +702,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "text",
                 "value": null
               },
               {
@@ -1500,7 +1525,7 @@
       "options": {
         "sortBy": [
           {
-            "displayName": "role"
+            "displayName": "flow_group_type"
           }
         ]
       },
@@ -1528,6 +1553,21 @@
               "namespace": true,
               "pod": true,
               "service": true
+            },
+            "indexByName": {
+              "domain": 0,
+              "flow_id": 1,
+              "flow_colorspace": 2,
+              "flow_data_type": 3,
+              "flow_description": 4,
+              "flow_format": 5,
+              "flow_group_name": 6,
+              "flow_group_type": 7,
+              "flow_label": 8,
+              "flow_media_type": 9,
+              "flow_payload_location": 10,
+              "flow_version": 11,
+              "node": 12
             }
           }
         }

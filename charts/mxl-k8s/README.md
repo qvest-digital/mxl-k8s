@@ -190,7 +190,7 @@ Kubernetes: `>=1.28-0`
 | exporter.extraVolumeMounts | list | `[]` |  |
 | exporter.extraVolumes | list | `[]` |  |
 | exporter.flags.domainPath | string | `"/run/mxl/domain"` | Absolute path of the MXL domain directory to report on. Must resolve to the same domain the agent watches, below hostPath.run. |
-| exporter.flags.flowLifetime | string | `"24h"` | How long a departed flow keeps being exported with mxl_flow_present at 0, so a flow that ends between two scrapes leaves a record rather than a gap. |
+| exporter.flags.flowLifetime | string | `"5m"` | How long a departed flow keeps being exported with mxl_flow_present at 0, so a flow that ends between two scrapes leaves a record rather than a gap. One sweep of gateway.flags.domainGcInterval, so the metric set describes the domain as it is rather than as it was. |
 | exporter.flags.healthProbeBindAddress | string | `":8081"` |  |
 | exporter.flags.metricsBindAddress | string | `":8080"` |  |
 | exporter.flags.scanPeriod | string | `"5s"` | How often the domain directory is re-listed for flows that appeared or disappeared. Scrapes read the cache this maintains. |

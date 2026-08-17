@@ -32,6 +32,13 @@ const activeTestFlowID = "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
 // and returns the Domain with the flow scanned in.
 func newObservedFlow(t *testing.T) *Domain {
 	t.Helper()
+	return newObservedFlowWithLifetime(t, time.Minute)
+}
+
+// newObservedFlowWithLifetime is newObservedFlow with control over how
+// long the Domain keeps a flow that left it.
+func newObservedFlowWithLifetime(t *testing.T, lifetime time.Duration) *Domain {
+	t.Helper()
 	dir := t.TempDir()
 	inst, err := mxl.NewInstance(dir, "")
 	require.NoError(t, err)
@@ -46,7 +53,7 @@ func newObservedFlow(t *testing.T) *Domain {
 	require.NoError(t, err)
 	require.NoError(t, ga.Commit(ga.TotalSlices, 0))
 
-	d, err := Open(dir, time.Minute)
+	d, err := Open(dir, lifetime)
 	require.NoError(t, err)
 	t.Cleanup(func() { d.Close() })
 	require.NoError(t, d.Scan())

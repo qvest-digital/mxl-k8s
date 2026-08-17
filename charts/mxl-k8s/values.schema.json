@@ -824,8 +824,8 @@
               "title": "domainPath"
             },
             "flowLifetime": {
-              "default": "24h",
-              "description": "How long a departed flow keeps being exported with mxl_flow_present at 0, so a flow that ends between two scrapes leaves a record rather than a gap.",
+              "default": "5m",
+              "description": "How long a departed flow keeps being exported with mxl_flow_present at 0, so a flow that ends between two scrapes leaves a record rather than a gap. One sweep of gateway.flags.domainGcInterval, so the metric set describes the domain as it is rather than as it was.",
               "required": [],
               "title": "flowLifetime"
             },
