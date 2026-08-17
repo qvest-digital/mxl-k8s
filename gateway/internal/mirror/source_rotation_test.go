@@ -73,12 +73,12 @@ func TestReconcile_FlowOriginRotation_DetectedAfterStaleOpen(t *testing.T) {
 	t.Cleanup(func() { r.closeEntry(key) })
 
 	// Writer restarts: the agent publishes Origin with a fresh
-	// LastObserved that postdates the reader.
+	// AppearedAt that postdates the reader.
 	var f mxlv1alpha1.MxlFlow
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: flowID}, &f))
 	now := metav1.Now()
 	f.Status.Locations[0].Phase = mxlv1alpha1.MxlFlowLocationOrigin
-	f.Status.Locations[0].LastObserved = &now
+	f.Status.Locations[0].AppearedAt = &now
 	require.NoError(t, c.Status().Update(context.Background(), &f))
 
 	_, err = r.Reconcile(context.Background(), req)

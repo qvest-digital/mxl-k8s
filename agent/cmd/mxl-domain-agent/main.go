@@ -9,10 +9,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -81,6 +85,25 @@ func run(args []string) error {
 	ctx, cancel := context.WithCancel(ctrl.SetupSignalHandler())
 	defer cancel()
 
+	// The agent runs no controller-runtime manager, so the event
+	// recorder is built by hand rather than taken from one. It carries
+	// the retarget event onto a mirror whose source was repointed,
+	// which is the only place an operator reading the object can see
+	// that a move happened.
+	kubeClient, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return fmt.Errorf("build kubernetes clientset: %w", err)
+	}
+	broadcaster := record.NewBroadcaster()
+	broadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{
+		Interface: kubeClient.CoreV1().Events(""),
+	})
+	defer broadcaster.Shutdown()
+	recorder := broadcaster.NewRecorder(scheme, corev1.EventSource{
+		Component: "mxl-domain-agent",
+		Host:      cfg.NodeName,
+	})
+
 	// fanotify-readiness flag, observable by the domain publisher.
 	var ready atomic.Bool
 
@@ -142,6 +165,7 @@ func run(args []string) error {
 			NodeName:           cfg.NodeName,
 			Provider:           mxlv1alpha1.MxlFabricsProvider(cfg.Provider),
 			MaterializeTimeout: cfg.MaterializeTimeout,
+			Recorder:           recorder,
 			Lease:              leaseMgr,
 			Origin:             flowPub,
 		}

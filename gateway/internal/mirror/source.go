@@ -219,7 +219,7 @@ type sourceEntry struct {
 	lastError         atomic.Pointer[string]
 
 	// lastObservedOriginAt records the MxlFlow status.locations
-	// entry's LastObserved timestamp for r.NodeName at the moment
+	// entry's AppearedAt timestamp for r.NodeName at the moment
 	// the FlowReader was opened. A subsequent reconcile that sees
 	// a newer timestamp tears the reader down and reopens it so
 	// the gateway tails the freshly rebound writer. May be nil (the
@@ -357,7 +357,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 
-	// originAt is the MxlFlow's most recent LastObserved timestamp
+	// originAt is the MxlFlow's most recent AppearedAt timestamp
 	// for the Origin location on this node. It is read once here so
 	// the fast-path comparison below and the openInitiator handoff
 	// both observe the same value, and a later rotation is detected
@@ -524,9 +524,15 @@ func backoffFor(attempts uint32) time.Duration {
 	return d
 }
 
-// observedOriginAt returns the LastObserved timestamp of the Origin
+// observedOriginAt returns the AppearedAt timestamp of the Origin
 // location entry on r.NodeName for the given flow, or nil if the
-// flow or location is missing. Errors are logged but not fatal: a
+// flow or location is missing.
+//
+// AppearedAt, not LastObserved: the latter is refreshed on every
+// agent rescan to report liveness, so keying rotation on it would
+// read every steady-state flow as a restarted producer once per
+// rescan. AppearedAt moves only when a flow directory actually
+// appears, which is the event this is trying to detect. Errors are logged but not fatal: a
 // missing flow means the reconciler will wait for the MxlFlow watch
 // to fire.
 func (r *SourceReconciler) observedOriginAt(ctx context.Context, flowID string) *time.Time {
@@ -538,10 +544,10 @@ func (r *SourceReconciler) observedOriginAt(ctx context.Context, flowID string) 
 		if loc.NodeName != r.NodeName || loc.Phase != mxlv1alpha1.MxlFlowLocationOrigin {
 			continue
 		}
-		if loc.LastObserved == nil {
+		if loc.AppearedAt == nil {
 			return nil
 		}
-		t := loc.LastObserved.Time
+		t := loc.AppearedAt.Time
 		return &t
 	}
 	return nil
@@ -557,7 +563,7 @@ func (r *SourceReconciler) observedOriginAt(ctx context.Context, flowID string) 
 // observation is a rotation.
 //
 // A nil baseline means the reader opened while the location carried
-// no LastObserved yet -- Stale, or an appearance whose status write
+// no AppearedAt yet -- Stale, or an appearance whose status write
 // had not landed (a status-update conflict, or a fanotify event that
 // raced the watcher's startup). Treating that case as "never rotated"
 // is wrong: lastObservedOriginAt is set once at open and never
@@ -577,7 +583,7 @@ func originRotated(baseline, observed *time.Time, openedAt time.Time) bool {
 	if baseline != nil {
 		return observed.After(*baseline)
 	}
-	// observed is sourced from MxlFlow.status.locations[].lastObserved,
+	// observed is sourced from MxlFlow.status.locations[].appearedAt,
 	// a metav1.Time -- the Kubernetes API always truncates timestamps
 	// to second precision on the round trip through the apiserver,
 	// while openedAt is a full-precision local time.Time. Comparing

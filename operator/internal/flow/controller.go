@@ -8,8 +8,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -37,6 +39,11 @@ import (
 type Reconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// Recorder publishes the origin-move event. Nil records nothing,
+	// which keeps the reconciler usable in tests that do not wire a
+	// manager.
+	Recorder record.EventRecorder
 
 	// Lease gates the Origin locations this reconciler trusts when
 	// deciding whether a flow still has a producer. Nil treats any
@@ -77,6 +84,7 @@ const defaultGracePeriod = 5 * time.Minute
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors,verbs=get;list;watch
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile drops every status.locations entry whose node is absent
 // from the API.
@@ -86,6 +94,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	var obj mxlv1alpha1.MxlFlow
 	if err := r.Get(ctx, req.NamespacedName, &obj); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	if err := r.recordOriginMove(ctx, &obj); err != nil {
+		// Losing the record does not justify abandoning the reconcile:
+		// the pruning and collection below keep the flow correct, and
+		// the move is recorded again on the next pass.
+		l.Error(err, "record origin move", "id", obj.Spec.ID)
 	}
 
 	departed, err := r.departedNodes(ctx, obj.Status.Locations)
@@ -127,6 +142,81 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	l.Info("pruned MxlFlow locations for departed nodes",
 		"id", obj.Spec.ID, "nodes", departedNames(departed))
 	return ctrl.Result{}, nil
+}
+
+// ReasonOriginMoved is the event reason recorded on an MxlFlow when
+// the authoritative copy lands on a different node.
+const ReasonOriginMoved = "OriginMoved"
+
+// currentOrigin returns the node holding the authoritative copy, or
+// the empty string when no location claims it.
+func currentOrigin(locs []mxlv1alpha1.MxlFlowLocation) string {
+	for _, loc := range locs {
+		if loc.Phase == mxlv1alpha1.MxlFlowLocationOrigin {
+			return loc.NodeName
+		}
+	}
+	return ""
+}
+
+// recordOriginMove writes status.originNode, previousOriginNode and
+// originChangedAt when the authoritative copy lands somewhere new, and
+// emits an event naming both ends of the move.
+//
+// The locations list already says where the origin is now. What it
+// cannot say is when it got there, and that gap is expensive to work
+// around: a mirror pointed at a node the flow marks Stale looks
+// identical whether its agent is one rescan away from repointing it or
+// has been stuck for hours. Recovering the difference previously meant
+// correlating agent logs against a rescan interval, and once those
+// logs rotate it is unrecoverable.
+//
+// An origin disappearing is deliberately not a move. It happens
+// whenever a producer restarts, the node is recorded as Stale for a
+// few seconds, and treating that as a transition would stamp a move on
+// every restart and lose the previous node, which is the one worth
+// knowing. The record updates only when a new origin is actually
+// claimed.
+func (r *Reconciler) recordOriginMove(ctx context.Context, flow *mxlv1alpha1.MxlFlow) error {
+	origin := currentOrigin(flow.Status.Locations)
+	if origin == "" || origin == flow.Status.OriginNode {
+		return nil
+	}
+
+	previous := flow.Status.OriginNode
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var live mxlv1alpha1.MxlFlow
+		if err := r.Get(ctx, types.NamespacedName{Name: flow.Name}, &live); err != nil {
+			return err
+		}
+		// Re-derive from the live object: another pass may have
+		// recorded the same move between the read above and this one.
+		origin = currentOrigin(live.Status.Locations)
+		if origin == "" || origin == live.Status.OriginNode {
+			return nil
+		}
+		previous = live.Status.OriginNode
+		now := metav1.Now()
+		live.Status.PreviousOriginNode = previous
+		live.Status.OriginNode = origin
+		live.Status.OriginChangedAt = &now
+		return r.Status().Update(ctx, &live)
+	}); err != nil {
+		return err
+	}
+
+	if r.Recorder == nil {
+		return nil
+	}
+	if previous == "" {
+		r.Recorder.Eventf(flow, corev1.EventTypeNormal, ReasonOriginMoved,
+			"Origin established on %s", origin)
+		return nil
+	}
+	r.Recorder.Eventf(flow, corev1.EventTypeNormal, ReasonOriginMoved,
+		"Origin moved from %s to %s; mirrors sourcing from %s are repointed on the next agent rescan",
+		previous, origin, previous)
+	return nil
 }
 
 // collect deletes an MxlFlow that no longer describes anything: no
