@@ -33,6 +33,13 @@ type Config struct {
 	// after its directory is gone, with mxl_flow_present at 0. Without
 	// it a flow that ends between two scrapes leaves no trace of having
 	// stopped, only a gap.
+	//
+	// It buys an after-image, not a history. Every series a departed
+	// flow keeps is a series a consumer has to tell apart from a live
+	// one, so the default is one sweep of the gateway's domain garbage
+	// collector: long enough that the end of a flow is never missed,
+	// short enough that what the metrics describe is the domain as it
+	// is now.
 	FlowLifetime time.Duration
 
 	// Kubeconfig is an optional kubeconfig path; empty uses in-cluster.
@@ -58,7 +65,7 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"Address the health probe endpoint binds to.")
 	fs.DurationVar(&c.ScanPeriod, "scan-period", 5*time.Second,
 		"How often the domain directory is re-listed for flows that appeared or disappeared.")
-	fs.DurationVar(&c.FlowLifetime, "flow-lifetime", 24*time.Hour,
+	fs.DurationVar(&c.FlowLifetime, "flow-lifetime", 5*time.Minute,
 		"How long a departed flow keeps being exported with mxl_flow_present at 0.")
 	fs.StringVar(&c.Kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"),
 		"Path to a kubeconfig file. Empty uses the in-cluster config.")
