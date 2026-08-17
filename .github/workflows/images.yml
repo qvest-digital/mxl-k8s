@@ -58,17 +58,26 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     outputs:
-      operator:   ${{ steps.f.outputs.operator }}
-      agent:      ${{ steps.f.outputs.agent }}
-      gateway:    ${{ steps.f.outputs.gateway }}
-      exporter:   ${{ steps.f.outputs.exporter }}
-      shim:       ${{ steps.f.outputs.shim }}
-      demo_tools: ${{ steps.f.outputs.demo_tools }}
-      workflow:   ${{ steps.f.outputs.workflow }}
-      kind:       ${{ steps.f.outputs.kind }}
-      code:       ${{ steps.f.outputs.code }}
+      operator:    ${{ steps.f.outputs.operator }}
+      agent:       ${{ steps.f.outputs.agent }}
+      gateway:     ${{ steps.f.outputs.gateway }}
+      exporter:    ${{ steps.f.outputs.exporter }}
+      shim:        ${{ steps.f.outputs.shim }}
+      demo_tools:  ${{ steps.f.outputs.demo_tools }}
+      workflow:    ${{ steps.f.outputs.workflow }}
+      kind:        ${{ steps.f.outputs.kind }}
+      code:        ${{ steps.f.outputs.code }}
+      deps_only:   ${{ steps.n.outputs.non_deps == 'false' }}
+      tree_tested: ${{ steps.tree.outputs.tested }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The tree comparison below needs the pushed commit and the
+          # pull request head it fetches to be readable in the same
+          # repository. Full history rather than a shallow clone plus
+          # a shallow fetch of an unrelated ref; the history is small
+          # enough that the difference does not show.
+          fetch-depth: 0
       - uses: dorny/paths-filter@v4
         id: f
         with:
@@ -100,6 +109,185 @@ jobs:
               - 'test/integration/kind/**'
               - '.github/workflows/images.yml'
 
+      # Cheap pre-gate for the deps-impact job: true when the diff
+      # touches nothing but module requirement files. Needs its own
+      # step because 'every' is the only quantifier that reads a list
+      # of '!' patterns as "none of these" -- under the default 'some'
+      # each negation is satisfied by any file the others exclude, and
+      # under 'some-with-excludes' a negation-only filter matches
+      # nothing at all. The filters above are unions that 'every'
+      # could never satisfy, hence two steps rather than one.
+      #
+      # Only a hint either way: deps-impact re-derives the answer from
+      # the diff, and a run that never gets there builds as before.
+      - uses: dorny/paths-filter@v4
+        id: n
+        with:
+          predicate-quantifier: every
+          filters: |
+            non_deps:
+              - '!**/go.mod'
+              - '!**/go.sum'
+              - '!go.work'
+              - '!go.work.sum'
+
+      # Push to main only: whether this exact tree already went
+      # through the suite on the pull request it came from.
+      #
+      # The repository ruleset allows squash merges only, but leaves
+      # strict_required_status_checks_policy off, so a branch may be
+      # merged while main has moved on. The squash then lands a tree
+      # nobody ran anything against, and "it passed on the PR" stops
+      # being an answer. Comparing trees is what separates the two
+      # cases: they are equal only when main did not move between the
+      # PR's last run and the merge, and in that case the push-side
+      # diff is the PR's diff, so every filter above lands where it
+      # landed there. images-summary is a required check, so a merge
+      # also implies that run was green for this tree.
+      #
+      # Nothing else establishes that: no marker survives the squash,
+      # and the commit subject is the only handle on the pull request
+      # (GitHub appends "(#N)" to the squashed subject). Unresolvable
+      # for a direct push or a stripped subject, which reports false
+      # and runs the suite.
+      - id: tree
+        if: github.event_name == 'push'
+        env:
+          SUBJECT: ${{ github.event.head_commit.message }}
+        run: |
+          set -uo pipefail
+          tested=false
+          subject="${SUBJECT%%$'\n'*}"
+          pr=""
+          case "$subject" in
+            *"(#"*")")
+              pr="${subject##*(#}"
+              pr="${pr%)}"
+              ;;
+          esac
+          case "$pr" in
+            ''|*[!0-9]*) pr="" ;;
+          esac
+          if [ -n "$pr" ] \
+              && git fetch --no-tags --depth=1 origin "refs/pull/${pr}/head" 2>/dev/null; then
+            head_tree=$(git rev-parse 'FETCH_HEAD^{tree}')
+            main_tree=$(git rev-parse 'HEAD^{tree}')
+            echo "pr #${pr} tree ${head_tree}; pushed tree ${main_tree}"
+            if [ "$head_tree" = "$main_tree" ]; then
+              tested=true
+            fi
+          else
+            echo "no pull request resolvable from subject: ${subject}"
+          fi
+          echo "tested=${tested}" >> "$GITHUB_OUTPUT"
+
+  # Whether a requirement-file-only diff can reach a binary.
+  #
+  # Every module requires test-only dependencies -- testify, and
+  # whatever the test lane pulls in -- that no cmd/ package imports.
+  # The Dockerfiles build with GOWORK=off against ./cmd/<binary>, so
+  # bumping one of those produces a byte-identical binary while still
+  # matching the module's path filter above. Left alone, a renovate
+  # testify bump rebuilds every image and runs the kind suite over
+  # them.
+  #
+  # The linked set comes from `go list -deps` rather than a list of
+  # test-only module paths kept here by hand: the paths change as
+  # dependencies come and go, and a stale list would answer "not
+  # linked" for something that is.
+  deps-impact:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.deps_only == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      binary_affected: ${{ steps.d.outputs.binary_affected }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - id: d
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+
+          # No usable base to diff against; a branch's first push
+          # reports the null sha. Nothing can be ruled out from there,
+          # so build.
+          if [ -z "$BASE_SHA" ] || [ -z "$(printf '%s' "$BASE_SHA" | tr -d 0)" ]; then
+            echo "no base commit to compare against"
+            echo "binary_affected=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The paths-filter gate that selected this job is a
+          # convenience, not the authority: a wrong 'true' from it
+          # would otherwise skip a build that a source change needs.
+          # Anything outside the requirement files answers "affected"
+          # regardless of what the module comparison finds.
+          outside=$(git diff --name-only "$BASE_SHA" "$GITHUB_SHA" \
+            | grep -vE '(^|/)go\.(mod|sum)$|^go\.work(\.sum)?$' || true)
+          if [ -n "$outside" ]; then
+            echo "diff reaches outside the requirement files:"
+            echo "$outside" | awk '{ print "  " $0 }'
+            echo "binary_affected=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Module paths whose version moved. A require line is the
+          # module path followed by a v-prefixed version, indented
+          # inside a require block or on a single `require` line;
+          # `go` and `toolchain` directives carry no second field
+          # that looks like a version and drop out here.
+          changed=$(git diff --unified=0 "$BASE_SHA" "$GITHUB_SHA" -- '*/go.mod' 'go.mod' \
+            | awk '/^[+-]/ {
+                     line = substr($0, 2)
+                     sub(/^[[:space:]]+/, "", line)
+                     sub(/^require[[:space:]]+/, "", line)
+                     n = split(line, f, " ")
+                     if (n >= 2 && f[1] ~ /\./ && f[2] ~ /^v[0-9]/) print f[1]
+                   }' \
+            | sort -u)
+
+          if [ -z "$changed" ]; then
+            echo "no module requirement moved; only go.sum entries changed"
+            echo "binary_affected=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # One main package per module, matching the Dockerfiles.
+          # GOWORK=off for the same reason they set it: the published
+          # binary resolves the api module through the replace
+          # directive in each go.mod, not through the workspace.
+          linked=$(
+            for module in operator agent gateway exporter; do
+              ( cd "$module" \
+                && GOWORK=off go list -deps -f '{{if .Module}}{{.Module.Path}}{{end}}' ./cmd/... )
+            done | sort -u
+          )
+
+          echo "requirements moved:"
+          echo "$changed" | awk '{ print "  " $0 }'
+
+          affected=false
+          for module in $changed; do
+            if printf '%s\n' "$linked" | grep -qxF "$module"; then
+              echo "  -> ${module} links into a binary"
+              affected=true
+            fi
+          done
+          if [ "$affected" = "false" ]; then
+            echo "  -> none of them link into a binary"
+          fi
+          echo "binary_affected=${affected}" >> "$GITHUB_OUTPUT"
+
   # Compute the list of images to build and the registry references /
   # tag lists each image should be published under. Centralised here
   # so build and merge agree on what to publish.
@@ -110,10 +298,11 @@ jobs:
   # main / PR events the list is filtered by the changes job; an
   # unrelated diff publishes nothing.
   meta:
-    needs: changes
+    needs: [changes, deps-impact]
     # changes is skipped for workflow_call and workflow_dispatch
-    # (neither relies on diff-based filtering), so meta must run
-    # even when its dependency was skipped.
+    # (neither relies on diff-based filtering), and deps-impact is
+    # skipped for every diff that is not requirement-file-only, so
+    # meta must run even when its dependencies were skipped.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     outputs:
@@ -121,20 +310,38 @@ jobs:
       push: ${{ steps.m.outputs.push }}
       has_images: ${{ steps.m.outputs.has_images }}
       kind_wanted: ${{ steps.m.outputs.kind_wanted }}
+      kind_build: ${{ steps.m.outputs.kind_build }}
       sha_short: ${{ steps.m.outputs.sha_short }}
       all_components: ${{ steps.m.outputs.all_components }}
     env:
       INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
       # kind-integration eligibility (kind_wanted below):
-      # - pull_request: changes.kind == true on a same-repo PR, OR a
-      #   `run-kind` label is attached (opt-in escape hatch).
-      # - push to main (branch): changes.kind == true and push == true
-      #   (release-please merges already toggled push=false above).
+      # - pull_request: an image rebuilds or changes.kind == true on a
+      #   same-repo PR, OR a `run-kind` label is attached (opt-in
+      #   escape hatch).
+      # - push to main (branch): the same, and push == true
+      #   (release-please merges already toggled push=false above),
+      #   and the tree is not one the pull request already ran.
       # - workflow_dispatch with empty release_tag: always true.
       # - workflow_call with release_tag: false. Release publishes
       #   are not gated on a smoke test.
       CHANGED_KIND:   ${{ needs.changes.outputs.kind   || 'false' }}
       PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+      # True when the pushed tree is the one the originating pull
+      # request already took through the suite. Empty for every event
+      # that is not a push to a branch.
+      TREE_TESTED:    ${{ needs.changes.outputs.tree_tested }}
+      # release-please owns this branch and force-pushes it on every
+      # regeneration, so nothing hand-written survives on it. Its diff
+      # is changelogs, the chart version, the manifest, and the api
+      # pin in each go.mod -- and that pin is inert, because every
+      # module `replace`s the api module to ../api and the Dockerfiles
+      # build with GOWORK=off. The binaries come out identical to the
+      # main commit already published as :dev.
+      RELEASE_PR_HEAD: ${{ startsWith(github.head_ref, 'release-please--branches--') }}
+      # false when a requirement-file-only diff moved nothing that
+      # links into a binary; empty when deps-impact did not run.
+      BINARY_AFFECTED: ${{ needs.deps-impact.outputs.binary_affected }}
       # head_commit is present on push events; empty otherwise. Used
       # to detect release-please's own merge commits and defer their
       # image publish to the workflow_call run that release-please.yml
@@ -209,13 +416,24 @@ jobs:
             for k in "${!wanted[@]}"; do wanted[$k]=true; done
           fi
 
-          # A markdown-only diff cannot change an image. The per-image
-          # filters glob whole module directories, so release-please
-          # writing <component>/CHANGELOG.md matches them; without this
-          # every release PR rebuilds and republishes its component's
-          # image, and images-summary being a required check puts that
-          # build on the critical path to merging a changelog entry.
-          if [ "$CHANGED_CODE" = "false" ]; then
+          # Diffs that cannot change what the cluster runs. The
+          # per-image filters glob whole module directories, so a diff
+          # confined to a module's changelog or its test-only
+          # requirements matches them all the same; images-summary
+          # being a required check puts every one of those builds, and
+          # the suite that follows them, on the critical path to
+          # merging. Each case is an assertion that the resulting
+          # binaries are identical to the ones main already published,
+          # so there is neither an image to build nor anything for the
+          # kind suite to find.
+          inert=false
+          # Markdown only.
+          if [ "$CHANGED_CODE" = "false" ]; then inert=true; fi
+          # release-please's own pull request.
+          if [ "$RELEASE_PR_HEAD" = "true" ]; then inert=true; fi
+          # A requirement bump that no binary links.
+          if [ "$BINARY_AFFECTED" = "false" ]; then inert=true; fi
+          if [ "$inert" = "true" ]; then
             for k in "${!wanted[@]}"; do wanted[$k]=false; done
           fi
 
@@ -320,22 +538,28 @@ jobs:
 
           # kind-integration eligibility. The kind path is a pre-
           # release smoke test, not a release gate, so workflow_call-
-          # with-release_tag invocations always skip. has_images=false
-          # short-circuits to false too: with no images to build,
-          # there is nothing for kind to load.
+          # with-release_tag invocations always skip.
           #
           # Any rebuilt image is worth smoke-testing, so has_images
-          # selects as well as vetoes. The kind filter stays for what
+          # selects. The kind filter selects independently, for what
           # changes the cluster without building an image: the chart,
-          # the CRDs, the harness. Listing module paths there instead
-          # would be a second list to keep in step with the modules.
+          # the CRDs, the harness, the demo manifests. kind-up is the
+          # only place in CI where the chart is installed rather than
+          # rendered, so gating the suite on an image build would
+          # leave that class with no coverage at all.
+          #
+          # `inert` vetoes both, and the run-kind label overrides the
+          # veto: the label is a human asserting the suite is worth
+          # running on a diff none of these rules select.
           kind_wanted=false
           case "$GITHUB_EVENT_NAME" in
             pull_request)
-              # Fork PRs are excluded -- the per-PR image tag is not
-              # pushed to GHCR, so there is no manifest to kind-load.
+              # Fork PRs are excluded -- neither the per-PR image tag
+              # nor :dev is readable with a fork's token, so there is
+              # no manifest to kind-load.
               if [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}" ]; then
-                if [ "$CHANGED_KIND" = "true" ] || [ "$has_images" = "true" ]; then
+                if [ "$inert" != "true" ] \
+                    && { [ "$CHANGED_KIND" = "true" ] || [ "$has_images" = "true" ]; }; then
                   kind_wanted=true
                 elif echo "${PR_LABELS_JSON:-[]}" | grep -q '"run-kind"'; then
                   kind_wanted=true
@@ -343,7 +567,12 @@ jobs:
               fi
               ;;
             push)
+              # TREE_TESTED means the pull request this commit was
+              # squashed from already ran the suite over this exact
+              # tree; see the changes job for why that holds.
               if [ "$GITHUB_REF" = "refs/heads/main" ] \
+                  && [ "$inert" != "true" ] \
+                  && [ "$TREE_TESTED" != "true" ] \
                   && { [ "$CHANGED_KIND" = "true" ] || [ "$has_images" = "true" ]; } \
                   && [ "$push" = "true" ]; then
                 kind_wanted=true
@@ -355,8 +584,20 @@ jobs:
               fi
               ;;
           esac
-          if [ "$has_images" != "true" ]; then
-            kind_wanted=false
+
+          # The tag kind-up pulls every component at. A run that built
+          # images uses the tag they were just published under, with
+          # the retag job filling in the components the diff skipped.
+          # A run that built none has no such tag and takes :dev,
+          # which tracks main HEAD -- current code underneath the
+          # chart or harness change under test.
+          if [ "$has_images" = "true" ]; then
+            case "$GITHUB_EVENT_NAME" in
+              pull_request) kind_build="pr-${{ github.event.number }}-${short_sha}" ;;
+              *)            kind_build="sha-${short_sha}" ;;
+            esac
+          else
+            kind_build=dev
           fi
 
           {
@@ -364,6 +605,7 @@ jobs:
             echo "images=${images}"
             echo "has_images=${has_images}"
             echo "kind_wanted=${kind_wanted}"
+            echo "kind_build=${kind_build}"
             echo "sha_short=${short_sha}"
             echo "all_components=${all_names[*]}"
           } >> "$GITHUB_OUTPUT"
@@ -513,6 +755,9 @@ jobs:
   # multi-arch manifest list is preserved. Required so kind-up can
   # pull every component at a single uniform tag without per-
   # component fallback logic.
+  #
+  # Skipped when the run built no images: kind_build is :dev there,
+  # which every component already carries.
   retag:
     needs: [meta, merge]
     if: ${{ !cancelled() && needs.meta.outputs.kind_wanted == 'true' && needs.merge.result == 'success' }}
@@ -529,7 +774,7 @@ jobs:
 
       - name: Retag skipped components to ${BUILD}
         env:
-          BUILD: ${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.number, needs.meta.outputs.sha_short) || format('sha-{0}', needs.meta.outputs.sha_short) }}
+          BUILD: ${{ needs.meta.outputs.kind_build }}
           META_IMAGES_JSON: ${{ needs.meta.outputs.images }}
           ALL_COMPONENTS: ${{ needs.meta.outputs.all_components }}
           IMAGE_REGISTRY_RAW: ghcr.io/${{ github.repository_owner }}/mxl-k8s
@@ -553,14 +798,22 @@ jobs:
           done
 
   # Bring up a 3-node KIND cluster on the runner, point `make kind-up`
-  # at the per-PR multi-arch manifest the `merge` job just published,
-  # and exercise the integration suite under test/integration/kind.
+  # at meta.kind_build -- the per-PR multi-arch manifest the `merge`
+  # job just published, or :dev when the diff built nothing -- and
+  # exercise the integration suite under test/integration/kind.
   # Gated by meta.kind_wanted so unrelated diffs skip cleanly.
   # workflow_call-with-release_tag invocations skip by design --
   # the kind path is a pre-release smoke test, not a release gate.
   kind-integration:
     needs: [meta, build, merge, retag]
-    if: ${{ !cancelled() && needs.meta.outputs.kind_wanted == 'true' && needs.merge.result == 'success' && needs.retag.result == 'success' }}
+    # A run that published images must have finished publishing them
+    # before the cluster can pull the tag; a run that published none
+    # takes :dev and does not wait on either job.
+    if: >-
+      ${{ !cancelled()
+          && needs.meta.outputs.kind_wanted == 'true'
+          && (needs.meta.outputs.has_images != 'true'
+              || (needs.merge.result == 'success' && needs.retag.result == 'success')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -592,9 +845,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Bring up KIND demo against merge-published images
+      - name: Bring up KIND demo against ${{ needs.meta.outputs.kind_build }} images
         env:
-          BUILD: ${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.number, needs.meta.outputs.sha_short) || format('sha-{0}', needs.meta.outputs.sha_short) }}
+          BUILD: ${{ needs.meta.outputs.kind_build }}
           IMAGE_REGISTRY_RAW: ghcr.io/${{ github.repository_owner }}/mxl-k8s
           KIND_CLUSTER: mxl-k8s-ci
           # Hosted runners are slower on first image pull than a
@@ -631,7 +884,7 @@ jobs:
   # conditional job individually and would block PRs that legitimately
   # skipped one.
   images-summary:
-    needs: [changes, meta, build, merge, retag, kind-integration]
+    needs: [changes, deps-impact, meta, build, merge, retag, kind-integration]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
