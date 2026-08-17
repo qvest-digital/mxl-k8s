@@ -731,9 +731,9 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 	if progressInterval <= 0 {
 		progressInterval = 2 * time.Millisecond
 	}
-	// Zero means "not configured" and takes the default; a negative
-	// fraction is how an operator turns pacing off, which newPacer
-	// reads as a disabled pacer.
+	// Zero means "not configured" and takes the default, which is
+	// itself negative; a negative fraction is how pacing is turned off,
+	// and newPacer reads either as a disabled pacer.
 	pacingFraction := o.PacingFraction
 	if pacingFraction == 0 {
 		pacingFraction = defaultPacingFraction

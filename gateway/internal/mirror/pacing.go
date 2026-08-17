@@ -33,13 +33,22 @@ import (
 // speed - only the flow's edit rate, which the flow itself carries.
 // A per-flow phase offset then staggers the chunk boundaries so aligned
 // flows do not step in time with one another.
+//
+// None of that runs unless an operator turns it on. The burst is only
+// worth shaping where a receiver loses grains to it, and where nothing
+// is lost the added latency and the per-chunk cgo call and RMA writes
+// buy nothing.
 
 const (
-	// defaultPacingFraction is how much of a grain interval one grain's
-	// transmission is spread over. Half leaves the rest of the interval
-	// as headroom for a late-committing producer and for catch-up, and
-	// caps peak rate at twice the flow's own rate.
-	defaultPacingFraction = 0.5
+	// defaultPacingFraction disables pacing, which is what a gateway
+	// does unless an operator asks for it. Shaping only pays where a
+	// receiver actually loses grains to overlapping bursts, and a
+	// fabric that loses none gets the latency and the per-chunk cost
+	// for nothing. Half a grain interval is where to start when
+	// enabling it: it leaves the rest of the interval as headroom for
+	// a late-committing producer and for catch-up, and caps peak rate
+	// at twice the flow's own rate.
+	defaultPacingFraction = -1
 
 	// defaultPacingChunks is how many slice ranges one grain is split
 	// into. Each chunk is a cgo call under the initiator mutex, and a

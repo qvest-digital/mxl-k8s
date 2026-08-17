@@ -433,28 +433,34 @@ gateway:
     readerStallAfter: 20s
     # -- How much of a grain's own interval the source gateway spreads
     # that grain's transmission over, instead of handing the fabric a
-    # whole grain the NIC then drains at line rate. Peak rate becomes
-    # the flow's own rate divided by this, so 0.5 halves the burst and
-    # doubles its length. The cost is latency: a grain completes at the
+    # whole grain the NIC then drains at line rate. Negative disables
+    # pacing and restores whole-grain transfers, which is the default:
+    # the burst is only worth shaping where a receiver loses grains to
+    # it, and where nothing is lost the added latency and the per-chunk
+    # cost buy nothing. Turn it on when a receiver several flows
+    # converge on reports drops well below nominal link utilisation,
+    # which is the signature of overlapping bursts rather than of
+    # offered load. Peak rate becomes the flow's own rate divided by
+    # this, so 0.5 halves the burst and doubles its length, and is
+    # where to start. The cost is latency: a grain completes at the
     # receiver up to this much of its interval later. Depends on the
     # flow's edit rate alone, never on the link speed, so one value
-    # holds from 25GbE to EFA. Raise it toward 1 when several flows
-    # converge on one receiver and the switch drops below nominal
-    # utilisation; lower it when the added latency matters more than
-    # the burst. Must stay below 1, or a grain's transmission runs into
-    # the next one. Negative disables pacing and restores whole-grain
-    # transfers.
-    pacingFraction: 0.5
-    # -- How many slice ranges a paced grain is split into. This sets
-    # how short the individual bursts get: the contiguous burst is one
-    # grain divided by this, and switch buffer occupancy follows that
-    # length. Each range costs one cgo call and, because a partial
-    # range leaves libmxl-fabrics's one-write-per-grain fast path, one
-    # RMA write per plane. Raise it if the switch still reports drops
-    # at a pacing fraction you are happy with; lower it if gateway CPU
-    # is the constraint. Capped by the grain's slice count, so a flow
-    # with fewer slices than this uses one range per slice. Under 2
-    # disables pacing.
+    # holds from 25GbE to EFA. Raise it toward 1 while drops remain;
+    # lower it when the added latency matters more than the burst.
+    # Must stay below 1, or a grain's transmission runs into the next
+    # one.
+    pacingFraction: -1
+    # -- How many slice ranges a paced grain is split into. Read only
+    # while pacingFraction is positive. This sets how short the
+    # individual bursts get: the contiguous burst is one grain divided
+    # by this, and switch buffer occupancy follows that length. Each
+    # range costs one cgo call and, because a partial range leaves
+    # libmxl-fabrics's one-write-per-grain fast path, one RMA write per
+    # plane. Raise it if the switch still reports drops at a pacing
+    # fraction you are happy with; lower it if gateway CPU is the
+    # constraint. Capped by the grain's slice count, so a flow with
+    # fewer slices than this uses one range per slice. Under 2 disables
+    # pacing.
     pacingChunks: 8
     # -- How often libmxl reclaims flow directories no writer holds.
     # The criterion is libmxl's own: a writer keeps a shared lock for
