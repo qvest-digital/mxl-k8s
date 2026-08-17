@@ -1525,7 +1525,7 @@
       "options": {
         "sortBy": [
           {
-            "displayName": "role"
+            "displayName": "flow_group_type"
           }
         ]
       },
@@ -1553,6 +1553,21 @@
               "namespace": true,
               "pod": true,
               "service": true
+            },
+            "indexByName": {
+              "domain": 0,
+              "flow_id": 1,
+              "flow_colorspace": 2,
+              "flow_data_type": 3,
+              "flow_description": 4,
+              "flow_format": 5,
+              "flow_group_name": 6,
+              "flow_group_type": 7,
+              "flow_label": 8,
+              "flow_media_type": 9,
+              "flow_payload_location": 10,
+              "flow_version": 11,
+              "node": 12
             }
           }
         }
