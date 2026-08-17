@@ -1301,6 +1301,20 @@ func (r *TargetReconciler) applyTargetStatus(
 	r.mu.Lock()
 	attempts := r.attempts.count(client.ObjectKeyFromObject(mirror))
 	r.mu.Unlock()
+
+	// Every target-side status write lands here: the phase-only
+	// transitions, surfaceTargetFailure, the Failed path and the
+	// flusher's progress condition. Emitting from the funnel rather
+	// than from each caller is what stops a writer added later from
+	// silently skipping events, which is exactly how the first pass at
+	// this missed six of the seven.
+	key := client.ObjectKeyFromObject(mirror)
+	if cond != nil {
+		recordProgress(r.Recorder, key, cond.Type, cond.Reason, cond.Message)
+	}
+	if phase != "" && phase != mirror.Status.Phase {
+		recordPhase(r.Recorder, key, mirror.Status.Phase, phase)
+	}
 	status := map[string]any{
 		"phase":              string(phase),
 		"observedGeneration": mirror.Generation,
@@ -1735,8 +1749,6 @@ func (r *TargetReconciler) publishTargetProgress(ctx context.Context, key types.
 	if err != nil {
 		return fmt.Errorf("get mirror for status flush: %w", err)
 	}
-	recordProgress(r.Recorder, key, mxlv1alpha1.ConditionTypeTargetProgress,
-		state.reason, state.message)
 	cond := metav1.Condition{
 		Type:               mxlv1alpha1.ConditionTypeTargetProgress,
 		Status:             state.status,

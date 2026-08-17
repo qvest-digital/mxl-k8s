@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -22,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	utilptr "k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -60,8 +62,32 @@ const flowIDIndex = "spec.flowID"
 // readable.
 const ownerUIDIndex = "ownerReferences.uid"
 
+// Event reasons recorded on an MxlReceiver.
+const (
+	// ReasonReceiverPending marks a receiver that could not be bound,
+	// carrying the reason it could not. The phase alone says Pending
+	// without saying why, and the why is the actionable half.
+	ReasonReceiverPending = "ReceiverPending"
+	// ReasonReceiverBound marks a receiver reaching a usable mirror.
+	ReasonReceiverBound = "ReceiverBound"
+	// ReasonMirrorReleased marks a mirror this receiver no longer
+	// wants, released or deleted. A mirror disappearing under a
+	// consumer is otherwise silent.
+	ReasonMirrorReleased = "MirrorReleased"
+)
+
 // Reconciler reconciles MxlReceiver resources.
 type Reconciler struct {
+	// Recorder publishes receiver lifecycle events. Nil records
+	// nothing.
+	Recorder record.EventRecorder
+
+	// originFresh remembers the last OriginFresh reason published per
+	// flow so the condition is evented on transition rather than on
+	// every reconcile.
+	originFreshMu sync.Mutex
+	originFresh   map[string]string
+
 	client.Client
 	Scheme *runtime.Scheme
 
@@ -108,6 +134,7 @@ type nodeTarget struct {
 }
 
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlreceivers,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlreceivers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlreceivers/finalizers,verbs=update
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflows,verbs=get;list;watch
@@ -279,6 +306,10 @@ func (r *Reconciler) handleDeletion(ctx context.Context, recv *mxlv1alpha1.MxlRe
 	for i := range crossNs {
 		if !crossNs[i].DeletionTimestamp.IsZero() {
 			continue
+		}
+		if r.Recorder != nil {
+			r.Recorder.Eventf(&crossNs[i], corev1.EventTypeNormal, ReasonMirrorReleased,
+				"Deleting: the requesting MxlReceiver is going away")
 		}
 		if err := r.Delete(ctx, &crossNs[i]); err != nil && !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("delete cross-ns mirror %s/%s: %w",
@@ -510,6 +541,10 @@ func (r *Reconciler) gcOrphanMirrors(ctx context.Context, recv *mxlv1alpha1.MxlR
 		key := mirrorKey{namespace: m.Namespace, name: m.Name}
 		if _, keep := desired[key]; keep {
 			continue
+		}
+		if r.Recorder != nil {
+			r.Recorder.Eventf(m, corev1.EventTypeNormal, ReasonMirrorReleased,
+				"Deleting: no target of the requesting MxlReceiver needs this mirror")
 		}
 		if err := r.Delete(ctx, m); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete orphan cross-ns mirror %s/%s: %w", m.Namespace, m.Name, err)
@@ -949,6 +984,10 @@ func (r *Reconciler) deleteIfStillEmpty(ctx context.Context, key types.Namespace
 				ResourceVersion: rv,
 			},
 		}
+		if r.Recorder != nil {
+			r.Recorder.Eventf(mirrorRef, corev1.EventTypeNormal, ReasonMirrorReleased,
+				"Deleting: the last MxlReceiver owning this mirror released it")
+		}
 		err := r.Delete(ctx, mirrorRef, &client.DeleteOptions{
 			Preconditions: &metav1.Preconditions{ResourceVersion: &rv},
 		})
@@ -1071,6 +1110,14 @@ func (r *Reconciler) pruneForeignOwnerRefs(ctx context.Context, mirror *mxlv1alp
 func (r *Reconciler) markPending(ctx context.Context, recv *mxlv1alpha1.MxlReceiver, reason string) (ctrl.Result, error) {
 	log.FromContext(ctx).V(1).Info("pending", "reason", reason)
 	if recv.Status.Phase != mxlv1alpha1.MxlReceiverPending {
+		// Only on the transition: markPending is the return path for
+		// several reconcile outcomes and runs on a 10s requeue, so
+		// eventing unconditionally would be an event every 10s for as
+		// long as a receiver waits.
+		if r.Recorder != nil {
+			r.Recorder.Eventf(recv, corev1.EventTypeWarning, ReasonReceiverPending,
+				"Not bound: %s", reason)
+		}
 		recv.Status.Phase = mxlv1alpha1.MxlReceiverPending
 		recv.Status.ObservedGeneration = recv.Generation
 		if err := r.Status().Update(ctx, recv); err != nil {
@@ -1081,6 +1128,10 @@ func (r *Reconciler) markPending(ctx context.Context, recv *mxlv1alpha1.MxlRecei
 }
 
 func (r *Reconciler) markBound(ctx context.Context, recv *mxlv1alpha1.MxlReceiver, primary *mxlv1alpha1.MirrorRef) (ctrl.Result, error) {
+	if r.Recorder != nil && recv.Status.Phase != mxlv1alpha1.MxlReceiverBound {
+		r.Recorder.Eventf(recv, corev1.EventTypeNormal, ReasonReceiverBound,
+			"Bound to mirror %s/%s", primary.Namespace, primary.Name)
+	}
 	recv.Status.BoundMirror = primary
 	recv.Status.Phase = mxlv1alpha1.MxlReceiverBound
 	recv.Status.ObservedGeneration = recv.Generation

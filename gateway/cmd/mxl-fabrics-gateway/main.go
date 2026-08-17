@@ -153,6 +153,7 @@ func run(args []string) error {
 		pub := &capabilities.Publisher{
 			Client:      mgr.GetClient(),
 			APIReader:   mgr.GetAPIReader(),
+			Recorder:    mgr.GetEventRecorderFor("mxl-node-capabilities"),
 			NodeName:    cfg.NodeName,
 			Providers:   cfg.Providers,
 			Lister:      handles.Fabrics(),

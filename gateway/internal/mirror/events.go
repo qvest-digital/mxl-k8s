@@ -47,6 +47,30 @@ func mirrorRef(key types.NamespacedName) *mxlv1alpha1.MxlFlowMirror {
 	}
 }
 
+// ReasonPhaseChanged is the event reason for a mirror lifecycle
+// transition. The phase is the coarse answer an operator reads first,
+// and Ready -> Materializing -> Ready is the flap a consumer feels;
+// the conditions explain it, the phase says when.
+const ReasonPhaseChanged = "PhaseChanged"
+
+// recordPhase emits an event for a mirror phase transition. Called
+// only when the phase actually differs, so a status write that merely
+// refreshes counters is silent.
+func recordPhase(rec record.EventRecorder, key types.NamespacedName, from, to mxlv1alpha1.MxlFlowMirrorPhase) {
+	if rec == nil {
+		return
+	}
+	kind := corev1.EventTypeNormal
+	if to == mxlv1alpha1.MxlFlowMirrorFailed || to == mxlv1alpha1.MxlFlowMirrorDegraded {
+		kind = corev1.EventTypeWarning
+	}
+	if from == "" {
+		rec.Eventf(mirrorRef(key), kind, ReasonPhaseChanged, "Phase set to %s", to)
+		return
+	}
+	rec.Eventf(mirrorRef(key), kind, ReasonPhaseChanged, "Phase %s -> %s", from, to)
+}
+
 // recordProgress emits one event for a published progress condition.
 // A nil recorder or an empty reason records nothing, which is what a
 // test that wires no manager wants.

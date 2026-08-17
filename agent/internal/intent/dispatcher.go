@@ -319,9 +319,16 @@ func (d *Dispatcher) repointMirror(ctx context.Context, mirror *mxlv1alpha1.MxlF
 	return nil
 }
 
-// ReasonSourceRetargeted is the event reason recorded on a mirror
-// whose source was repointed at a moved origin.
-const ReasonSourceRetargeted = "SourceRetargeted"
+// Event reasons recorded on a mirror by the agent.
+const (
+	// ReasonSourceRetargeted marks a mirror repointed at a moved origin.
+	ReasonSourceRetargeted = "SourceRetargeted"
+	// ReasonOriginLocal marks a mirror deleted because the flow's origin
+	// arrived on the mirror's own target node, which makes the mirror a
+	// transfer from a node to itself. Deleting it is correct and looks
+	// identical to a mirror being lost.
+	ReasonOriginLocal = "OriginLocal"
+)
 
 // recordRetarget stamps status.sourceRetargetedAt and
 // previousSourceNode. Status is a separate subresource from the spec
@@ -485,6 +492,11 @@ func (d *Dispatcher) ReconcileMirrors(ctx context.Context) error {
 					"flowID", m.Spec.FlowID, "mirror", m.Namespace+"/"+m.Name)
 				errs = append(errs, err)
 				continue
+			}
+			if d.Recorder != nil {
+				d.Recorder.Eventf(m, corev1.EventTypeNormal, ReasonOriginLocal,
+					"Deleting: the flow's origin moved onto %s, so this node reads it directly",
+					d.NodeName)
 			}
 			l.Info("deleted mirror whose origin moved onto this node",
 				"flowID", m.Spec.FlowID, "mirror", m.Namespace+"/"+m.Name)

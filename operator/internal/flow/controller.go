@@ -141,12 +141,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	l.Info("pruned MxlFlow locations for departed nodes",
 		"id", obj.Spec.ID, "nodes", departedNames(departed))
+	if r.Recorder != nil {
+		r.Recorder.Eventf(&obj, corev1.EventTypeWarning, ReasonLocationsPruned,
+			"Dropped locations for departed nodes: %v", departedNames(departed))
+	}
 	return ctrl.Result{}, nil
 }
 
-// ReasonOriginMoved is the event reason recorded on an MxlFlow when
-// the authoritative copy lands on a different node.
-const ReasonOriginMoved = "OriginMoved"
+// Event reasons recorded on an MxlFlow.
+const (
+	// ReasonOriginMoved marks the authoritative copy landing on a
+	// different node.
+	ReasonOriginMoved = "OriginMoved"
+	// ReasonFlowCollected marks the flow being deleted because nothing
+	// holds a copy any more. Without it a flow simply disappears, and
+	// a consumer that was waiting on it has no record of why.
+	ReasonFlowCollected = "FlowCollected"
+	// ReasonLocationsPruned marks locations dropped because their node
+	// left the cluster. This is the node-lifecycle half: an entry can
+	// vanish without the flow changing in any other visible way.
+	ReasonLocationsPruned = "LocationsPruned"
+)
 
 // currentOrigin returns the node holding the authoritative copy, or
 // the empty string when no location claims it.
@@ -292,6 +307,13 @@ func (r *Reconciler) collect(ctx context.Context, flow *mxlv1alpha1.MxlFlow) (ct
 	r.forget(flow.Name)
 	log.FromContext(ctx).Info("collected MxlFlow with no copy and no mirror",
 		"id", flow.Spec.ID)
+	// Recorded against the object being deleted, so the event outlives
+	// it for the event TTL. A flow that simply vanishes leaves whoever
+	// was waiting on it nothing to read.
+	if r.Recorder != nil {
+		r.Recorder.Eventf(flow, corev1.EventTypeNormal, ReasonFlowCollected,
+			"Collected: no node holds a copy and no mirror references it")
+	}
 	return ctrl.Result{}, nil
 }
 

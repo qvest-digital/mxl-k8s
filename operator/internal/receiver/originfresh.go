@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,6 +44,22 @@ func (r *Reconciler) applyOriginFreshCondition(ctx context.Context, flowID strin
 		return nil
 	}
 
+	// Reconcile re-asserts this on every pass with the same value, and
+	// the patch is server-side apply so it cannot report whether
+	// anything changed. Deduping in memory keeps this to one event per
+	// transition rather than one per reconcile; an operator restart
+	// costs one repeated event, which is the same trade the collector
+	// makes for firstCollectable.
+	if r.originFreshChanged(flowID, reason) && r.Recorder != nil {
+		kind := corev1.EventTypeNormal
+		if status != metav1.ConditionTrue {
+			kind = corev1.EventTypeWarning
+		}
+		r.Recorder.Eventf(
+			&mxlv1alpha1.MxlFlow{ObjectMeta: metav1.ObjectMeta{Name: flowID}},
+			kind, reason, "OriginFresh: %s", message)
+	}
+
 	patch := &unstructured.Unstructured{}
 	patch.SetGroupVersionKind(mxlv1alpha1.GroupVersion.WithKind("MxlFlow"))
 	patch.SetName(flowID)
@@ -62,4 +79,21 @@ func (r *Reconciler) applyOriginFreshCondition(ctx context.Context, flowID strin
 		client.FieldOwner(MxlOperatorFieldManager),
 		client.ForceOwnership,
 	)
+}
+
+// originFreshChanged reports whether flowID's OriginFresh reason
+// differs from the last one this process published, recording the new
+// one. Guarded by the reconciler's own mutex: several receivers can
+// name the same flow and reconcile concurrently.
+func (r *Reconciler) originFreshChanged(flowID, reason string) bool {
+	r.originFreshMu.Lock()
+	defer r.originFreshMu.Unlock()
+	if r.originFresh == nil {
+		r.originFresh = map[string]string{}
+	}
+	if r.originFresh[flowID] == reason {
+		return false
+	}
+	r.originFresh[flowID] = reason
+	return true
 }

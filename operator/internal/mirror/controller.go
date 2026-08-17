@@ -23,6 +23,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -50,15 +51,25 @@ const MxlFlowMirrorIntentFinalizer = "mxl.qvest-digital.com/intent-gc"
 // scanning every mirror in the cluster.
 const requestorIndex = "spec.requestor.nsname"
 
+// ReasonRequestorGone is the event reason recorded on a mirror this
+// reconciler deletes. A mirror disappearing is otherwise indis-
+// tinguishable from one that never existed, and the requestor is the
+// piece of context that explains it.
+const ReasonRequestorGone = "RequestorGone"
+
 // Reconciler garbage-collects MxlFlowMirror objects created by the
 // agent on a pod's behalf whose requestor pod is gone or has been
 // replaced.
 type Reconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// Recorder publishes the deletion event. Nil records nothing.
+	Recorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
@@ -134,6 +145,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		"reason", gcReason(gone, replaced),
 		"requestor", req2.Namespace+"/"+req2.Name,
 		"requestorUID", req2.UID)
+	if r.Recorder != nil {
+		r.Recorder.Eventf(&mirror, corev1.EventTypeNormal, ReasonRequestorGone,
+			"Deleting: requestor pod %s/%s is gone or was replaced",
+			mirror.Spec.Requestor.Namespace, mirror.Spec.Requestor.Name)
+	}
 	if err := r.Delete(ctx, &mirror); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("delete mirror: %w", err)
 	}
