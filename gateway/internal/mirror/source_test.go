@@ -611,7 +611,7 @@ func TestReconcile_AddTargetFailureSurfacesConditionAndCapsBackoffAt30s(t *testi
 
 func TestReconcile_FlowOriginRotationReopensReader(t *testing.T) {
 	// Pod restart on the source node: the agent re-registers the flow
-	// and the MxlFlow's Origin location entry gets a fresh LastObserved
+	// and the MxlFlow's Origin location entry gets a fresh AppearedAt
 	// timestamp. The source reconciler must tear down the existing
 	// FlowReader and reopen against the freshly bound writer, otherwise
 	// the reader holds an invalid handle and the transfer loop stalls
@@ -628,6 +628,7 @@ func TestReconcile_FlowOriginRotationReopensReader(t *testing.T) {
 				NodeName:     "node-a",
 				Phase:        mxlv1alpha1.MxlFlowLocationOrigin,
 				LastObserved: &originalOriginAt,
+				AppearedAt:   &originalOriginAt,
 			}},
 		},
 	}
@@ -674,18 +675,18 @@ func TestReconcile_FlowOriginRotationReopensReader(t *testing.T) {
 			"opening the initiator twice would tear down the live transfer "+
 			"goroutine every controller-runtime tick")
 
-	// Bump the MxlFlow's Origin LastObserved into the future and ensure
+	// Bump the MxlFlow's Origin AppearedAt into the future and ensure
 	// the next reconcile reopens.
 	var f mxlv1alpha1.MxlFlow
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: flowID}, &f))
 	newer := metav1.NewTime(originalOriginAt.Time.Add(time.Minute))
-	f.Status.Locations[0].LastObserved = &newer
+	f.Status.Locations[0].AppearedAt = &newer
 	require.NoError(t, c.Status().Update(context.Background(), &f))
 
 	_, err = r.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), opener.calls.Load(),
-		"a fresher Origin LastObserved must reopen the FlowReader so the "+
+		"a fresher Origin AppearedAt must reopen the FlowReader so the "+
 			"gateway tails the rebound writer instead of the stale handle")
 }
 

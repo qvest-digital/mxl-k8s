@@ -116,6 +116,7 @@ func run(args []string) error {
 		Handles:       handles,
 		DomainPath:    cfg.DomainPath,
 		DegradedAfter: cfg.DegradedAfter,
+		Recorder:      mgr.GetEventRecorderFor("mxl-target-gateway"),
 	}
 	if err := targetReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup target reconciler: %w", err)
@@ -130,6 +131,7 @@ func run(args []string) error {
 		ReaderStallAfter: cfg.ReaderStallAfter,
 		PacingFraction:   cfg.PacingFraction,
 		PacingChunks:     cfg.PacingChunks,
+		Recorder:         mgr.GetEventRecorderFor("mxl-source-gateway"),
 	}
 	if err := sourceReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup source reconciler: %w", err)
@@ -151,6 +153,7 @@ func run(args []string) error {
 		pub := &capabilities.Publisher{
 			Client:      mgr.GetClient(),
 			APIReader:   mgr.GetAPIReader(),
+			Recorder:    mgr.GetEventRecorderFor("mxl-node-capabilities"),
 			NodeName:    cfg.NodeName,
 			Providers:   cfg.Providers,
 			Lister:      handles.Fabrics(),

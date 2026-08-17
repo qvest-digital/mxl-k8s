@@ -3,6 +3,7 @@ package flowpublisher
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -116,7 +117,7 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	} else if isMirror {
 		phase = mxlv1alpha1.MxlFlowLocationReady
 	}
-	if err := p.upsertLocation(ctx, flowID, phase, &now); err != nil {
+	if err := p.upsertLocation(ctx, flowID, phase, &now, &now); err != nil {
 		return err
 	}
 	// Only the producer side renews a Lease; a mirror target's local
@@ -180,7 +181,7 @@ func (p *Publisher) ClaimOrigin(ctx context.Context, flowID string) error {
 	}
 
 	now := metav1.Now()
-	if err := p.upsertLocation(ctx, flowID, mxlv1alpha1.MxlFlowLocationOrigin, &now); err != nil {
+	if err := p.upsertLocation(ctx, flowID, mxlv1alpha1.MxlFlowLocationOrigin, &now, &now); err != nil {
 		return err
 	}
 	l.Info("claimed Origin for locally attached producer", "flowID", flowID)
@@ -201,7 +202,7 @@ func (p *Publisher) PublishVanished(ctx context.Context, dirName string) error {
 	if !ok {
 		return nil
 	}
-	if err := p.upsertLocation(ctx, flowID, mxlv1alpha1.MxlFlowLocationStale, nil); err != nil {
+	if err := p.upsertLocation(ctx, flowID, mxlv1alpha1.MxlFlowLocationStale, nil, nil); err != nil {
 		return err
 	}
 	if p.Lease != nil {
@@ -222,7 +223,11 @@ func (p *Publisher) PublishVanished(ctx context.Context, dirName string) error {
 // here permanently drops the appearance/vanish it was reporting, and
 // for an Origin location that is the source gateway's only signal
 // that the flow's writer rotated.
-func (p *Publisher) upsertLocation(ctx context.Context, flowID string, phase mxlv1alpha1.MxlFlowLocationPhase, observed *metav1.Time) error {
+// appeared carries the appearance timestamp: non-nil stamps
+// AppearedAt, which is what the source gateway keys rotation
+// detection on, and nil leaves whatever is already there. A Stale
+// phase clears it, so the next appearance reads as a rotation.
+func (p *Publisher) upsertLocation(ctx context.Context, flowID string, phase mxlv1alpha1.MxlFlowLocationPhase, observed, appeared *metav1.Time) error {
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var obj mxlv1alpha1.MxlFlow
 		if err := p.Client.Get(ctx, types.NamespacedName{Name: flowID}, &obj); err != nil {
@@ -232,21 +237,32 @@ func (p *Publisher) upsertLocation(ctx context.Context, flowID string, phase mxl
 			return fmt.Errorf("get MxlFlow %s: %w", flowID, err)
 		}
 
+		stale := phase == mxlv1alpha1.MxlFlowLocationStale
 		found := false
 		for i := range obj.Status.Locations {
 			if obj.Status.Locations[i].NodeName == p.NodeName {
 				obj.Status.Locations[i].Phase = phase
 				obj.Status.Locations[i].LastObserved = observed
+				switch {
+				case stale:
+					obj.Status.Locations[i].AppearedAt = nil
+				case appeared != nil:
+					obj.Status.Locations[i].AppearedAt = appeared
+				}
 				found = true
 				break
 			}
 		}
 		if !found {
-			obj.Status.Locations = append(obj.Status.Locations, mxlv1alpha1.MxlFlowLocation{
+			loc := mxlv1alpha1.MxlFlowLocation{
 				NodeName:     p.NodeName,
 				Phase:        phase,
 				LastObserved: observed,
-			})
+			}
+			if !stale {
+				loc.AppearedAt = appeared
+			}
+			obj.Status.Locations = append(obj.Status.Locations, loc)
 		}
 
 		return p.Client.Status().Update(ctx, &obj)
@@ -343,7 +359,7 @@ func (p *Publisher) demoteVanishedLocalOrigins(ctx context.Context, onDisk map[s
 			if loc.Phase == mxlv1alpha1.MxlFlowLocationStale {
 				continue
 			}
-			if err := p.upsertLocation(ctx, flow.Spec.ID, mxlv1alpha1.MxlFlowLocationStale, nil); err != nil {
+			if err := p.upsertLocation(ctx, flow.Spec.ID, mxlv1alpha1.MxlFlowLocationStale, nil, nil); err != nil {
 				log.FromContext(ctx).Error(err, "demote vanished local origin failed", "flowID", flow.Spec.ID)
 			}
 			if p.Lease != nil {
@@ -358,7 +374,7 @@ func (p *Publisher) demoteVanishedLocalOrigins(ctx context.Context, onDisk map[s
 }
 
 // localLocationHealthy reports whether flow.status.locations carries
-// a non-Stale entry for this node with a LastObserved timestamp. A
+// a non-Stale entry for this node with an AppearedAt timestamp. A
 // missing entry, a Stale phase, or a nil timestamp are all states
 // that leave the source gateway's rotation detector permanently
 // unable to fire: its baseline is recorded once at reader-open, and
@@ -369,7 +385,7 @@ func (p *Publisher) localLocationHealthy(flow *mxlv1alpha1.MxlFlow) bool {
 		if loc.NodeName != p.NodeName {
 			continue
 		}
-		return loc.Phase != mxlv1alpha1.MxlFlowLocationStale && loc.LastObserved != nil
+		return loc.Phase != mxlv1alpha1.MxlFlowLocationStale && loc.AppearedAt != nil
 	}
 	return false
 }
@@ -522,6 +538,59 @@ func (p *Publisher) RunLocalRescan(ctx context.Context, interval time.Duration) 
 			if err := p.promoteStaleLocalOrigins(ctx, ids); err != nil {
 				l.Error(err, "promote pass failed")
 			}
+			if err := p.refreshLocalObservations(ctx, ids); err != nil {
+				l.Error(err, "observation refresh failed")
+			}
 		}
 	}
+}
+
+// refreshLocalObservations stamps LastObserved on every flow this node
+// still holds on disk, so the field means what it says: the agent
+// confirmed this copy just now.
+//
+// This is the whole point of splitting AppearedAt out. LastObserved
+// used to double as the source gateway's rotation signal, so
+// refreshing it on a healthy flow read as a producer restart and
+// triggered a reader reopen once per rescan. The refresh had to be
+// suppressed, which left every Ready location advertising the moment
+// it was established and nothing advertising liveness at all -- a
+// timestamp hours old on a flow being written to continuously.
+//
+// Rotation now keys on AppearedAt, which this pass never touches, so
+// the refresh is inert to the gateway.
+//
+// Phase is left alone: promoteStaleLocalOrigins owns repairing a
+// wrong one, and writing it here would race that. A location this
+// node does not already claim is skipped for the same reason.
+func (p *Publisher) refreshLocalObservations(ctx context.Context, onDisk map[string]struct{}) error {
+	now := metav1.Now()
+	var errs []error
+	for id := range onDisk {
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			var flow mxlv1alpha1.MxlFlow
+			if err := p.Client.Get(ctx, types.NamespacedName{Name: id}, &flow); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil
+				}
+				return err
+			}
+			for i := range flow.Status.Locations {
+				if flow.Status.Locations[i].NodeName != p.NodeName {
+					continue
+				}
+				if flow.Status.Locations[i].Phase == mxlv1alpha1.MxlFlowLocationStale {
+					return nil
+				}
+				stamp := now
+				flow.Status.Locations[i].LastObserved = &stamp
+				return p.Client.Status().Update(ctx, &flow)
+			}
+			return nil
+		})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("refresh observation for %s: %w", id, err))
+		}
+	}
+	return errors.Join(errs...)
 }

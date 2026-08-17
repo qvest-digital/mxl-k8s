@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -147,6 +148,10 @@ type TargetReconciler struct {
 	// APIReader is an uncached reader for the Node lookup that gates
 	// orphaned-finalizer reaping. Nil falls back to Client.
 	APIReader client.Reader
+
+	// Recorder publishes mirror-level events for the target side. Nil
+	// records nothing.
+	Recorder record.EventRecorder
 
 	// NodeName is the Kubernetes node this gateway runs on. Mirrors
 	// with spec.targetNode set to a different node are ignored.
@@ -1296,6 +1301,20 @@ func (r *TargetReconciler) applyTargetStatus(
 	r.mu.Lock()
 	attempts := r.attempts.count(client.ObjectKeyFromObject(mirror))
 	r.mu.Unlock()
+
+	// Every target-side status write lands here: the phase-only
+	// transitions, surfaceTargetFailure, the Failed path and the
+	// flusher's progress condition. Emitting from the funnel rather
+	// than from each caller is what stops a writer added later from
+	// silently skipping events, which is exactly how the first pass at
+	// this missed six of the seven.
+	key := client.ObjectKeyFromObject(mirror)
+	if cond != nil {
+		recordProgress(r.Recorder, key, cond.Type, cond.Reason, cond.Message)
+	}
+	if phase != "" && phase != mirror.Status.Phase {
+		recordPhase(r.Recorder, key, mirror.Status.Phase, phase)
+	}
 	status := map[string]any{
 		"phase":              string(phase),
 		"observedGeneration": mirror.Generation,

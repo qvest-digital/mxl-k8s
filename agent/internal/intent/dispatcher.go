@@ -21,9 +21,12 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -66,6 +69,11 @@ type Dispatcher struct {
 	Resolver   *podlookup.Resolver
 	DomainPath string
 	NodeName   string
+
+	// Recorder publishes the retarget event onto the mirror. Nil
+	// records nothing, which keeps the dispatcher usable in tests that
+	// wire no manager.
+	Recorder record.EventRecorder
 
 	// Provider is the libmxl-fabrics provider stamped onto mirrors
 	// created on demand. Empty defaults to ProviderAuto.
@@ -281,17 +289,68 @@ func (d *Dispatcher) repointMirror(ctx context.Context, mirror *mxlv1alpha1.MxlF
 	if err != nil {
 		return fmt.Errorf("marshal repoint patch: %w", err)
 	}
+	previous := mirror.Spec.SourceNode
 	if err := d.Client.Patch(ctx, mirror, client.RawPatch(types.MergePatchType, patch)); err != nil {
 		return fmt.Errorf("repoint mirror %s/%s to source %s: %w",
 			mirror.Namespace, mirror.Name, sourceNode, err)
 	}
 
+	// Record the retarget on the mirror itself. The log line below says
+	// the same thing, but only for as long as the agent's logs are
+	// retained, and a mirror that is Degraded right now is read through
+	// kubectl rather than through a log a day later. Without this,
+	// "Degraded and converging" and "Degraded and stuck" look alike on
+	// the object.
+	if err := d.recordRetarget(ctx, mirror, previous); err != nil {
+		log.FromContext(ctx).WithName("intent").Error(err, "record retarget on mirror",
+			"mirror", mirror.Namespace+"/"+mirror.Name)
+	}
+	if d.Recorder != nil {
+		d.Recorder.Eventf(mirror, corev1.EventTypeNormal, ReasonSourceRetargeted,
+			"Source repointed from %s to %s after the flow's origin moved", previous, sourceNode)
+	}
+
 	log.FromContext(ctx).WithName("intent").Info("repointed mirror to new origin",
 		"flowID", flowID,
 		"mirror", mirror.Namespace+"/"+mirror.Name,
+		"previousSourceNode", previous,
 		"sourceNode", sourceNode,
 		"provider", provider)
 	return nil
+}
+
+// Event reasons recorded on a mirror by the agent.
+const (
+	// ReasonSourceRetargeted marks a mirror repointed at a moved origin.
+	ReasonSourceRetargeted = "SourceRetargeted"
+	// ReasonOriginLocal marks a mirror deleted because the flow's origin
+	// arrived on the mirror's own target node, which makes the mirror a
+	// transfer from a node to itself. Deleting it is correct and looks
+	// identical to a mirror being lost.
+	ReasonOriginLocal = "OriginLocal"
+)
+
+// recordRetarget stamps status.sourceRetargetedAt and
+// previousSourceNode. Status is a separate subresource from the spec
+// patch above, so this is a second write; the spec change is the one
+// that matters and its failure is returned, while losing the record
+// only costs the operator the timestamp.
+func (d *Dispatcher) recordRetarget(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, previous string) error {
+	if previous == "" {
+		return nil
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var live mxlv1alpha1.MxlFlowMirror
+		if err := d.Client.Get(ctx, types.NamespacedName{
+			Namespace: mirror.Namespace, Name: mirror.Name,
+		}, &live); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		now := metav1.Now()
+		live.Status.PreviousSourceNode = previous
+		live.Status.SourceRetargetedAt = &now
+		return d.Client.Status().Update(ctx, &live)
+	})
 }
 
 // NotifyProducerAttached records that a local process opened a flow
@@ -433,6 +492,11 @@ func (d *Dispatcher) ReconcileMirrors(ctx context.Context) error {
 					"flowID", m.Spec.FlowID, "mirror", m.Namespace+"/"+m.Name)
 				errs = append(errs, err)
 				continue
+			}
+			if d.Recorder != nil {
+				d.Recorder.Eventf(m, corev1.EventTypeNormal, ReasonOriginLocal,
+					"Deleting: the flow's origin moved onto %s, so this node reads it directly",
+					d.NodeName)
 			}
 			l.Info("deleted mirror whose origin moved onto this node",
 				"flowID", m.Spec.FlowID, "mirror", m.Namespace+"/"+m.Name)

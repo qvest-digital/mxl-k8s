@@ -136,10 +136,28 @@ spec:
                 items:
                   description: MxlFlowLocation reports a flow's state on one node.
                   properties:
+                    appearedAt:
+                      description: |-
+                        AppearedAt is when the agent last saw this copy of the flow
+                        come into existence, and changes only when it does: a fresh
+                        directory, or one recreated after the previous writer released
+                        it. A steady rescan leaves it alone.
+
+                        The source gateway keys writer-rotation detection on this
+                        rather than on LastObserved. The two were one field, which made
+                        a periodic refresh indistinguishable from a producer restart
+                        and so forced LastObserved to stand still, leaving nothing that
+                        answered "is this copy still being confirmed".
+                      format: date-time
+                      type: string
                     lastObserved:
                       description: |-
                         LastObserved is when the local agent last confirmed the flow's
-                        presence.
+                        presence on this node. It is refreshed on every agent rescan
+                        while the flow is present, so a recent value means "seen just
+                        now" and a value drifting into the past means the agent has
+                        stopped confirming it. It says nothing about when this copy
+                        arrived, which is AppearedAt.
                       format: date-time
                       type: string
                     nodeName:
@@ -161,6 +179,32 @@ spec:
                 x-kubernetes-list-map-keys:
                 - nodeName
                 x-kubernetes-list-type: map
+              originChangedAt:
+                description: |-
+                  OriginChangedAt is when the authoritative copy last moved to a
+                  different node.
+
+                  Nothing else records this. A location's LastObserved says the
+                  copy is alive now and AppearedAt says when that copy arrived,
+                  but neither distinguishes a mirror still converging on a moved
+                  origin from one stranded on a node that no longer holds it.
+                  Diagnosing that difference from the objects alone was not
+                  possible before this field existed.
+                format: date-time
+                type: string
+              originNode:
+                description: |-
+                  OriginNode is the node currently holding the authoritative copy,
+                  mirroring the Locations entry whose phase is Origin. Duplicated
+                  here so the move can be recorded as a transition rather than
+                  inferred by diffing a list.
+                type: string
+              previousOriginNode:
+                description: |-
+                  PreviousOriginNode is where the authoritative copy sat before
+                  the most recent move. Empty until the flow's origin has moved
+                  at least once.
+                type: string
             type: object
         type: object
     served: true

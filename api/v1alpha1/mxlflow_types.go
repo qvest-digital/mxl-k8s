@@ -36,9 +36,26 @@ type MxlFlowLocation struct {
 	Phase MxlFlowLocationPhase `json:"phase"`
 
 	// LastObserved is when the local agent last confirmed the flow's
-	// presence.
+	// presence on this node. It is refreshed on every agent rescan
+	// while the flow is present, so a recent value means "seen just
+	// now" and a value drifting into the past means the agent has
+	// stopped confirming it. It says nothing about when this copy
+	// arrived, which is AppearedAt.
 	// +optional
 	LastObserved *metav1.Time `json:"lastObserved,omitempty"`
+
+	// AppearedAt is when the agent last saw this copy of the flow
+	// come into existence, and changes only when it does: a fresh
+	// directory, or one recreated after the previous writer released
+	// it. A steady rescan leaves it alone.
+	//
+	// The source gateway keys writer-rotation detection on this
+	// rather than on LastObserved. The two were one field, which made
+	// a periodic refresh indistinguishable from a producer restart
+	// and so forced LastObserved to stand still, leaving nothing that
+	// answered "is this copy still being confirmed".
+	// +optional
+	AppearedAt *metav1.Time `json:"appearedAt,omitempty"`
 }
 
 // MxlFlowSpec defines a logical MXL flow.
@@ -66,6 +83,31 @@ type MxlFlowStatus struct {
 	// +listType=map
 	// +listMapKey=nodeName
 	Locations []MxlFlowLocation `json:"locations,omitempty"`
+
+	// OriginNode is the node currently holding the authoritative copy,
+	// mirroring the Locations entry whose phase is Origin. Duplicated
+	// here so the move can be recorded as a transition rather than
+	// inferred by diffing a list.
+	// +optional
+	OriginNode string `json:"originNode,omitempty"`
+
+	// PreviousOriginNode is where the authoritative copy sat before
+	// the most recent move. Empty until the flow's origin has moved
+	// at least once.
+	// +optional
+	PreviousOriginNode string `json:"previousOriginNode,omitempty"`
+
+	// OriginChangedAt is when the authoritative copy last moved to a
+	// different node.
+	//
+	// Nothing else records this. A location's LastObserved says the
+	// copy is alive now and AppearedAt says when that copy arrived,
+	// but neither distinguishes a mirror still converging on a moved
+	// origin from one stranded on a node that no longer holds it.
+	// Diagnosing that difference from the objects alone was not
+	// possible before this field existed.
+	// +optional
+	OriginChangedAt *metav1.Time `json:"originChangedAt,omitempty"`
 
 	// Conditions describes the current state of the flow.
 	// +optional

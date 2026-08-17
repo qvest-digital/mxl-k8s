@@ -67,18 +67,28 @@ func main() {
 	}{
 		{"MxlDomain", (&domain.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
 		{"MxlFlow", (&flow.Reconciler{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
-			Lease:  &leasecheck.Checker{Client: mgr.GetClient()},
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			Recorder: mgr.GetEventRecorderFor("mxlflow-controller"),
+			Lease:    &leasecheck.Checker{Client: mgr.GetClient()},
 		}).SetupWithManager},
-		{"MxlFlowMirror", (&mirror.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+		{"MxlFlowMirror", (&mirror.Reconciler{
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			Recorder: mgr.GetEventRecorderFor("mxlflowmirror-gc"),
+		}).SetupWithManager},
 		{"MxlReceiver", (&receiver.Reconciler{
 			Client:    mgr.GetClient(),
 			APIReader: mgr.GetAPIReader(),
 			Scheme:    mgr.GetScheme(),
+			Recorder:  mgr.GetEventRecorderFor("mxlreceiver-controller"),
 			Lease:     &leasecheck.Checker{Client: mgr.GetClient()},
 		}).SetupWithManager},
-		{"MxlNodeCapabilities", (&nodecaps.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
+		{"MxlNodeCapabilities", (&nodecaps.Reconciler{
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			Recorder: mgr.GetEventRecorderFor("mxlnodecapabilities-controller"),
+		}).SetupWithManager},
 	}
 	for _, rc := range reconcilers {
 		if err := rc.setup(mgr); err != nil {

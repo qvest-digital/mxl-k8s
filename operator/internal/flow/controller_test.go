@@ -69,9 +69,12 @@ func TestReconcile_LiveNodeLocations_AreNotMutated(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(),
 		types.NamespacedName{Name: flow.Name}, &after))
 	assert.Equal(t, flow.Spec, after.Spec)
-	assert.Equal(t, flow.Status, after.Status,
+	// Locations specifically, not the whole status: the operator owns
+	// the derived origin record alongside it and does write that.
+	assert.Equal(t, flow.Status.Locations, after.Status.Locations,
 		"a location whose node is still registered belongs to that node's "+
 			"agent; writing it here would race the agent's own updates")
+	assert.Equal(t, flow.Status.Conditions, after.Status.Conditions)
 }
 
 // The incident this guards: spot capacity is reclaimed, the agent
@@ -222,7 +225,7 @@ func TestReconcile_CordonedNodeLocation_IsKept(t *testing.T) {
 	var after mxlv1alpha1.MxlFlow
 	require.NoError(t, c.Get(context.Background(),
 		types.NamespacedName{Name: flow.Name}, &after))
-	assert.Equal(t, flow.Status, after.Status,
+	assert.Equal(t, flow.Status.Locations, after.Status.Locations,
 		"a cordoned node still runs its agent and its flow; only scheduling "+
 			"of new pods is blocked")
 }
@@ -258,6 +261,6 @@ func TestReconcile_NotReadyNodeLocation_IsKept(t *testing.T) {
 	var after mxlv1alpha1.MxlFlow
 	require.NoError(t, c.Get(context.Background(),
 		types.NamespacedName{Name: flow.Name}, &after))
-	assert.Equal(t, flow.Status, after.Status,
+	assert.Equal(t, flow.Status.Locations, after.Status.Locations,
 		"absence of the Node object is the departure signal, not unreadiness")
 }

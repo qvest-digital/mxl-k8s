@@ -26,6 +26,8 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"k8s.io/client-go/tools/record"
+
 	"github.com/qvest-digital/go-mxl/fabrics"
 	"github.com/qvest-digital/go-mxl/mxl"
 
@@ -128,6 +130,10 @@ type SourceReconciler struct {
 	// when the observed state has transitioned. Defaults to 1s.
 	FlushInterval time.Duration
 
+	// Recorder publishes mirror-level events for the source side. Nil
+	// records nothing.
+	Recorder record.EventRecorder
+
 	// ReaderStallAfter is how long a reader may report an unchanged
 	// head index, having never transferred a grain, before
 	// SourceProgress reports ReaderNotAdvancing. Defaults to
@@ -152,6 +158,14 @@ type SourceReconciler struct {
 	// nowFn is the clock the AddTarget wait is measured against.
 	// Production leaves it nil.
 	nowFn func() time.Time
+
+	// writerLiveFn answers whether a flow still has a live writer.
+	// SetupWithManager binds it to libmxl's own mxlIsFlowActive, which
+	// is an authoritative answer rather than an inference from a
+	// stalled head. Nil disables the check, which leaves the previous
+	// reopen-and-hope behaviour and is what tests wire when the
+	// question is not what they are exercising.
+	writerLiveFn func(flowID string) (bool, error)
 
 	mu       sync.Mutex
 	sources  map[types.NamespacedName]*sourceEntry
@@ -219,7 +233,7 @@ type sourceEntry struct {
 	lastError         atomic.Pointer[string]
 
 	// lastObservedOriginAt records the MxlFlow status.locations
-	// entry's LastObserved timestamp for r.NodeName at the moment
+	// entry's AppearedAt timestamp for r.NodeName at the moment
 	// the FlowReader was opened. A subsequent reconcile that sees
 	// a newer timestamp tears the reader down and reopens it so
 	// the gateway tails the freshly rebound writer. May be nil (the
@@ -252,6 +266,7 @@ type sourceEntry struct {
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflows,verbs=get;list;watch
 
 // reapOrphanedFinalizer drops SourceFinalizerName from a deleting
@@ -357,7 +372,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, nil
 	}
 
-	// originAt is the MxlFlow's most recent LastObserved timestamp
+	// originAt is the MxlFlow's most recent AppearedAt timestamp
 	// for the Origin location on this node. It is read once here so
 	// the fast-path comparison below and the openInitiator handoff
 	// both observe the same value, and a later rotation is detected
@@ -524,9 +539,15 @@ func backoffFor(attempts uint32) time.Duration {
 	return d
 }
 
-// observedOriginAt returns the LastObserved timestamp of the Origin
+// observedOriginAt returns the AppearedAt timestamp of the Origin
 // location entry on r.NodeName for the given flow, or nil if the
-// flow or location is missing. Errors are logged but not fatal: a
+// flow or location is missing.
+//
+// AppearedAt, not LastObserved: the latter is refreshed on every
+// agent rescan to report liveness, so keying rotation on it would
+// read every steady-state flow as a restarted producer once per
+// rescan. AppearedAt moves only when a flow directory actually
+// appears, which is the event this is trying to detect. Errors are logged but not fatal: a
 // missing flow means the reconciler will wait for the MxlFlow watch
 // to fire.
 func (r *SourceReconciler) observedOriginAt(ctx context.Context, flowID string) *time.Time {
@@ -538,10 +559,10 @@ func (r *SourceReconciler) observedOriginAt(ctx context.Context, flowID string) 
 		if loc.NodeName != r.NodeName || loc.Phase != mxlv1alpha1.MxlFlowLocationOrigin {
 			continue
 		}
-		if loc.LastObserved == nil {
+		if loc.AppearedAt == nil {
 			return nil
 		}
-		t := loc.LastObserved.Time
+		t := loc.AppearedAt.Time
 		return &t
 	}
 	return nil
@@ -557,7 +578,7 @@ func (r *SourceReconciler) observedOriginAt(ctx context.Context, flowID string) 
 // observation is a rotation.
 //
 // A nil baseline means the reader opened while the location carried
-// no LastObserved yet -- Stale, or an appearance whose status write
+// no AppearedAt yet -- Stale, or an appearance whose status write
 // had not landed (a status-update conflict, or a fanotify event that
 // raced the watcher's startup). Treating that case as "never rotated"
 // is wrong: lastObservedOriginAt is set once at open and never
@@ -577,7 +598,7 @@ func originRotated(baseline, observed *time.Time, openedAt time.Time) bool {
 	if baseline != nil {
 		return observed.After(*baseline)
 	}
-	// observed is sourced from MxlFlow.status.locations[].lastObserved,
+	// observed is sourced from MxlFlow.status.locations[].appearedAt,
 	// a metav1.Time -- the Kubernetes API always truncates timestamps
 	// to second precision on the round trip through the apiserver,
 	// while openedAt is a full-precision local time.Time. Comparing
@@ -1190,6 +1211,8 @@ type sourceProgressState struct {
 // The payload is the conditions slice and nothing else, so a stray
 // zero value never overwrites a foreign-owned status field.
 func (r *SourceReconciler) publishSourceProgress(ctx context.Context, key types.NamespacedName, state sourceProgressState) error {
+	recordProgress(r.Recorder, key, mxlv1alpha1.ConditionTypeSourceProgress,
+		state.reason, state.message)
 	cond := metav1.Condition{
 		Type:               mxlv1alpha1.ConditionTypeSourceProgress,
 		Status:             state.status,
@@ -1283,6 +1306,32 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// is what ends it, and it is the same recovery an operator
 		// gets by deleting the mirror and letting the requestor
 		// recreate it.
+		// Before spending a reopen: a reader can only be wedged in a way
+		// reopening fixes if something is still writing the flow. When
+		// nothing is, the reopen is not merely futile, it is what keeps
+		// the flow alive -- libmxl reclaims a flow directory only when
+		// the departing writer can take an exclusive lock, and this
+		// reader's own handle denies it. The directory then survives,
+		// the local agent keeps publishing Origin and renewing the
+		// Lease, and the flow is never collected.
+		if state.rebuildReader && r.writerGone(entry.flowID) {
+			state.status = metav1.ConditionFalse
+			state.reason = mxlv1alpha1.ReasonSourceWriterGone
+			state.message = "flow has no live writer; releasing the source reader so the flow can be reclaimed"
+			if err := r.publishSourceProgress(ctx, key, state); err != nil {
+				ctrl.Log.WithName("source-flush").Error(err, "publish",
+					"mirror", key, "reason", state.reason)
+			}
+			ctrl.Log.WithName("source-flush").Info(
+				"flow has no live writer; releasing source reader",
+				"mirror", key, "flowID", entry.flowID)
+			// Returning first for the same reason the reopen path does:
+			// closeSourceHandles waits on flusherDone, which this
+			// goroutine closes.
+			go r.closeEntry(key)
+			return
+		}
+
 		if state.rebuildReader {
 			switch {
 			case r.readerRebuildsExhausted(key):
@@ -1336,6 +1385,24 @@ func (r *SourceReconciler) bumpReaderRebuilds(key types.NamespacedName) uint32 {
 	}
 	r.rebuilds[key]++
 	return r.rebuilds[key]
+}
+
+// writerGone reports whether the flow has no live writer. A nil seam,
+// or an error asking, answers false: the check exists to stop a futile
+// reopen, and failing to get an answer is not grounds for tearing down
+// a mirror that may be healthy.
+func (r *SourceReconciler) writerGone(flowID string) bool {
+	if r.writerLiveFn == nil || flowID == "" {
+		return false
+	}
+	live, err := r.writerLiveFn(flowID)
+	if err != nil {
+		ctrl.Log.WithName("source-flush").V(1).Info(
+			"writer liveness check failed; assuming the writer is live",
+			"flowID", flowID, "error", err.Error())
+		return false
+	}
+	return !live
 }
 
 // readerRebuildsExhausted reports whether key has used its reopen
@@ -1580,6 +1647,16 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			ProgressInterval: r.ProgressInterval,
 			PacingFraction:   r.PacingFraction,
 			PacingChunks:     r.PacingChunks,
+		}
+	}
+	if r.writerLiveFn == nil {
+		// libmxl's own answer, not an inference from a stalled head.
+		r.writerLiveFn = func(flowID string) (bool, error) {
+			inst := r.Handles.MXL()
+			if inst == nil {
+				return false, fmt.Errorf("mxl instance closed")
+			}
+			return inst.IsFlowActive(flowID)
 		}
 	}
 	if err := mgr.GetFieldIndexer().IndexField(

@@ -109,6 +109,25 @@ type MxlFlowMirrorStatus struct {
 	// +optional
 	LastError string `json:"lastError,omitempty"`
 
+	// SourceRetargetedAt is when spec.sourceNode was last repointed
+	// because the flow's origin moved, and PreviousSourceNode is
+	// where it pointed before.
+	//
+	// A mirror briefly Degraded after its producer moves is
+	// converging; one Degraded with no recent retarget is not.
+	// Telling those apart previously meant correlating agent logs
+	// against a rescan interval, and reading the mirror alone gave no
+	// hint a move had happened at all.
+	// +optional
+	// +nullable
+	SourceRetargetedAt *metav1.Time `json:"sourceRetargetedAt,omitempty"`
+
+	// PreviousSourceNode is the node spec.sourceNode pointed at
+	// before the most recent retarget. Empty until the mirror has
+	// been repointed at least once.
+	// +optional
+	PreviousSourceNode string `json:"previousSourceNode,omitempty"`
+
 	// AttemptCount is the number of consecutive failed AddTarget
 	// attempts since the last successful reconcile. Reset to zero
 	// when the source gateway succeeds. Source-side only; the target

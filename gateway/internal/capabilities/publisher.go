@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -33,6 +34,9 @@ type InterfaceLister interface {
 // node rather than the ones the gateway was configured with.
 type Publisher struct {
 	Client client.Client
+
+	// Recorder publishes probe transitions. Nil records nothing.
+	Recorder record.EventRecorder
 
 	// NodeName is the Kubernetes node this gateway runs on.
 	NodeName string
@@ -197,12 +201,20 @@ func (p *Publisher) Refresh(ctx context.Context) error {
 
 	probed, perr := p.probe(ctx)
 	if perr != nil {
-		meta.SetStatusCondition(&obj.Status.Conditions, metav1.Condition{
+		// SetStatusCondition reports whether it changed anything, which
+		// is the only way to event this without one line per resync:
+		// the publisher runs on a timer and re-asserts the condition
+		// every pass whether or not the node's fabric moved.
+		changed := meta.SetStatusCondition(&obj.Status.Conditions, metav1.Condition{
 			Type:    mxlv1alpha1.ConditionTypeProbed,
 			Status:  metav1.ConditionFalse,
 			Reason:  mxlv1alpha1.ReasonProbeFailed,
 			Message: perr.Error(),
 		})
+		if changed && p.Recorder != nil {
+			p.Recorder.Eventf(&obj, corev1.EventTypeWarning, mxlv1alpha1.ReasonProbeFailed,
+				"Fabric probe failed on %s: %v", p.NodeName, perr)
+		}
 		if err := p.Client.Status().Update(ctx, &obj); err != nil {
 			return fmt.Errorf("update MxlNodeCapabilities status after a failed probe (%v): %w", perr, err)
 		}
@@ -210,12 +222,16 @@ func (p *Publisher) Refresh(ctx context.Context) error {
 	}
 
 	obj.Status.Providers = probed
-	meta.SetStatusCondition(&obj.Status.Conditions, metav1.Condition{
+	recovered := meta.SetStatusCondition(&obj.Status.Conditions, metav1.Condition{
 		Type:    mxlv1alpha1.ConditionTypeProbed,
 		Status:  metav1.ConditionTrue,
 		Reason:  mxlv1alpha1.ReasonProbeComplete,
 		Message: fmt.Sprintf("libmxl-fabrics reports %d provider(s) on this node", len(probed)),
 	})
+	if recovered && p.Recorder != nil {
+		p.Recorder.Eventf(&obj, corev1.EventTypeNormal, mxlv1alpha1.ReasonProbeComplete,
+			"Fabric probe succeeded on %s: %d provider(s)", p.NodeName, len(probed))
+	}
 
 	if err := p.Client.Status().Update(ctx, &obj); err != nil {
 		return fmt.Errorf("update MxlNodeCapabilities status: %w", err)

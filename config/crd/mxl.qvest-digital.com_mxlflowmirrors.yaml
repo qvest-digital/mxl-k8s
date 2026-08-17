@@ -235,6 +235,26 @@ spec:
                 - Degraded
                 - Failed
                 type: string
+              previousSourceNode:
+                description: |-
+                  PreviousSourceNode is the node spec.sourceNode pointed at
+                  before the most recent retarget. Empty until the mirror has
+                  been repointed at least once.
+                type: string
+              sourceRetargetedAt:
+                description: |-
+                  SourceRetargetedAt is when spec.sourceNode was last repointed
+                  because the flow's origin moved, and PreviousSourceNode is
+                  where it pointed before.
+
+                  A mirror briefly Degraded after its producer moves is
+                  converging; one Degraded with no recent retarget is not.
+                  Telling those apart previously meant correlating agent logs
+                  against a rescan interval, and reading the mirror alone gave no
+                  hint a move had happened at all.
+                format: date-time
+                nullable: true
+                type: string
               targetAttemptCount:
                 description: |-
                   TargetAttemptCount is the number of consecutive failed attempts

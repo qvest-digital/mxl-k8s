@@ -418,7 +418,12 @@ func TestPromoteStaleLocalOrigins_LeavesHealthyLocationUntouched(t *testing.T) {
 		Spec:       mxlv1alpha1.MxlFlowSpec{ID: validFlowID},
 		Status: mxlv1alpha1.MxlFlowStatus{
 			Locations: []mxlv1alpha1.MxlFlowLocation{
-				{NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationOrigin, LastObserved: &originalObserved},
+				{
+					NodeName:     "n1",
+					Phase:        mxlv1alpha1.MxlFlowLocationOrigin,
+					LastObserved: &originalObserved,
+					AppearedAt:   &originalObserved,
+				},
 			},
 		},
 	}
@@ -438,7 +443,7 @@ func TestPromoteStaleLocalOrigins_LeavesHealthyLocationUntouched(t *testing.T) {
 	// actually left it alone.
 	var before mxlv1alpha1.MxlFlow
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &before))
-	beforeObserved := before.Status.Locations[0].LastObserved
+	beforeAppeared := before.Status.Locations[0].AppearedAt
 
 	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
 	require.NoError(t, p.promoteStaleLocalOrigins(context.Background(),
@@ -447,12 +452,12 @@ func TestPromoteStaleLocalOrigins_LeavesHealthyLocationUntouched(t *testing.T) {
 	var got mxlv1alpha1.MxlFlow
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
 	require.Len(t, got.Status.Locations, 1)
-	assert.True(t, got.Status.Locations[0].LastObserved.Equal(beforeObserved),
+	assert.True(t, got.Status.Locations[0].AppearedAt.Equal(beforeAppeared),
 		"promoteStaleLocalOrigins must not touch an already-healthy "+
 			"location: RunLocalRescan calls it on every tick, and "+
-			"refreshing LastObserved on a steady-state flow would read "+
-			"to the source gateway as a genuine rotation, forcing a "+
-			"spurious reader reopen once per rescan interval")
+			"restamping AppearedAt on a steady-state flow reads to the "+
+			"source gateway as a genuine rotation, forcing a spurious "+
+			"reader reopen once per rescan interval")
 }
 
 // fakeLease records Renew/Release calls and lets a test return a
