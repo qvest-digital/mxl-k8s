@@ -38,9 +38,10 @@ kubelet:
 
 prometheus:
   prometheusSpec:
-    # The exporter decides a flow is active by comparing the head index
-    # against the previous scrape, so the scrape interval is the
-    # resolution of every activity panel on the board.
+    # The exporter reads flow state off the flow header at each scrape,
+    # against the flow's own write clock, so the interval is not what
+    # decides activity but what decides the board's resolution: a stall
+    # shorter than one interval falls between two samples.
     scrapeInterval: 15s
     retention: 2h
     resources:

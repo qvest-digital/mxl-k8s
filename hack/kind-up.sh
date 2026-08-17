@@ -225,9 +225,11 @@ if [ "$MONITORING" = "1" ]; then
   MONITORING_SET=(
     --set exporter.metrics.serviceMonitor.enabled=true
     # The ServiceMonitor's own interval wins over the Prometheus
-    # default, and it is the resolution of every activity panel: the
-    # exporter decides a flow is active by comparing consecutive
-    # scrapes.
+    # default, and it is the resolution of every flow panel. The
+    # exporter reads activity off the flow header at each scrape,
+    # against the flow's own write clock rather than against the
+    # previous scrape, so the interval decides how short a stall can be
+    # and still land on the board, not what counts as one.
     --set exporter.metrics.serviceMonitor.interval=15s
     --set "exporter.metrics.serviceMonitor.labels.release=${MONITORING_RELEASE}"
     # The gateway carries the mirror byte counters the Node Throughput
@@ -336,7 +338,7 @@ cat <<EOF
              so the board is reachable from another host
 
 The writer and reader are producing grains now, so the board has live
-data. Panels that compare a flow against the previous scrape need one
-scrape interval (15s) before they read anything but zero.
+data. The frame-rate panels are a rate over time and stay at zero until
+a few scrape intervals (15s each) have passed.
 EOF
 fi
