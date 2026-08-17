@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -147,6 +148,10 @@ type TargetReconciler struct {
 	// APIReader is an uncached reader for the Node lookup that gates
 	// orphaned-finalizer reaping. Nil falls back to Client.
 	APIReader client.Reader
+
+	// Recorder publishes mirror-level events for the target side. Nil
+	// records nothing.
+	Recorder record.EventRecorder
 
 	// NodeName is the Kubernetes node this gateway runs on. Mirrors
 	// with spec.targetNode set to a different node are ignored.
@@ -1730,6 +1735,8 @@ func (r *TargetReconciler) publishTargetProgress(ctx context.Context, key types.
 	if err != nil {
 		return fmt.Errorf("get mirror for status flush: %w", err)
 	}
+	recordProgress(r.Recorder, key, mxlv1alpha1.ConditionTypeTargetProgress,
+		state.reason, state.message)
 	cond := metav1.Condition{
 		Type:               mxlv1alpha1.ConditionTypeTargetProgress,
 		Status:             state.status,

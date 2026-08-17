@@ -83,6 +83,22 @@ const (
 	// lastSentAt.
 	ReasonTransfersNotLanding = "TransfersNotLanding"
 
+	// ReasonSourceWriterGone marks a source-side mirror whose flow has
+	// no live writer, as reported by libmxl rather than inferred from a
+	// stalled head.
+	//
+	// It is distinct from ReaderNotAdvancing and TransfersNotLanding,
+	// which describe a reader that might yet recover: reopening a
+	// reader on a flow nobody writes cannot help, and holding one open
+	// is actively harmful. libmxl only reclaims a flow directory when
+	// the departing writer can take an exclusive lock, so a reader
+	// kept on a dead flow prevents the reclaim, which keeps the local
+	// agent claiming Origin and renewing the flow's Lease, which in
+	// turn keeps the flow from being collected -- a cycle in which the
+	// mirror's own reader is what preserves the flow it is failing to
+	// mirror.
+	ReasonSourceWriterGone = "SourceWriterGone"
+
 	// ReasonProviderUnresolved marks a mirror the gateway refused to
 	// set up because spec.provider is still auto. libmxl-fabrics no
 	// longer resolves auto itself (v1.1.0-beta-1 dropped it), so the
