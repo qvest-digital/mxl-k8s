@@ -1,11 +1,10 @@
 package topology
 
 import (
-	"io"
-	"log/slog"
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr/testr"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -30,7 +29,7 @@ func newCollector(t *testing.T, node string, objs ...*mxlv1alpha1.MxlFlow) *Coll
 	for _, o := range objs {
 		b = b.WithObjects(o)
 	}
-	return New(b.Build(), node, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return New(b.Build(), node, testr.New(t))
 }
 
 // The producing node is the one whose location phase is Origin. That is
