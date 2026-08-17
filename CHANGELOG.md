@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.1.0-rc.4](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.3...v1.1.0-rc.4) (2026-08-17)
+
+
+### Features
+
+* **api:** record when a flow's origin moves and what confirmed it ([#285](https://github.com/qvest-digital/mxl-k8s/issues/285)) ([0de36fc](https://github.com/qvest-digital/mxl-k8s/commit/0de36fc670ef4600d469dbb1ad98670c8cd382d3))
+* emit events across the whole mirror flow lifecycle ([#285](https://github.com/qvest-digital/mxl-k8s/issues/285)) ([0de36fc](https://github.com/qvest-digital/mxl-k8s/commit/0de36fc670ef4600d469dbb1ad98670c8cd382d3))
+
+
+### Bug Fixes
+
+* **chart:** put flow_id where the metadata table is read from ([#284](https://github.com/qvest-digital/mxl-k8s/issues/284)) ([eaab973](https://github.com/qvest-digital/mxl-k8s/commit/eaab973bf3fc32dd9082196ef9a6dfacdecadb4c))
+* **chart:** separate flow ended from writer stopped ([#284](https://github.com/qvest-digital/mxl-k8s/issues/284)) ([eaab973](https://github.com/qvest-digital/mxl-k8s/commit/eaab973bf3fc32dd9082196ef9a6dfacdecadb4c))
+* **exporter:** bound a departed flow to one domain GC sweep ([#284](https://github.com/qvest-digital/mxl-k8s/issues/284)) ([eaab973](https://github.com/qvest-digital/mxl-k8s/commit/eaab973bf3fc32dd9082196ef9a6dfacdecadb4c))
+* **exporter:** log through the same logger as the other services ([#286](https://github.com/qvest-digital/mxl-k8s/issues/286)) ([fa4e07f](https://github.com/qvest-digital/mxl-k8s/commit/fa4e07fdc255435109d3d4831540874823b2c18e))
+* **gateway:** leave grain pacing off unless configured ([#289](https://github.com/qvest-digital/mxl-k8s/issues/289)) ([a7bebee](https://github.com/qvest-digital/mxl-k8s/commit/a7bebee14f83ab0c0c4cbdf33211ffed12127cc6))
+* **gateway:** release a source reader whose flow has no writer ([#285](https://github.com/qvest-digital/mxl-k8s/issues/285)) ([0de36fc](https://github.com/qvest-digital/mxl-k8s/commit/0de36fc670ef4600d469dbb1ad98670c8cd382d3))
+* **gateway:** retry a full send queue instead of falling behind it ([#278](https://github.com/qvest-digital/mxl-k8s/issues/278)) ([524e6bd](https://github.com/qvest-digital/mxl-k8s/commit/524e6bd9bc8abf479679d5b3c62c911057f30405))
+* report a flow that left the domain as gone, not stalled ([#284](https://github.com/qvest-digital/mxl-k8s/issues/284)) ([eaab973](https://github.com/qvest-digital/mxl-k8s/commit/eaab973bf3fc32dd9082196ef9a6dfacdecadb4c))
+
+
+### Dependencies
+
+* **gomod:** update module github.com/go-logr/logr to v1.4.4 ([#287](https://github.com/qvest-digital/mxl-k8s/issues/287)) ([b90ea76](https://github.com/qvest-digital/mxl-k8s/commit/b90ea7654eb21b39614b1b0a7de23da6731e8d97))
+* **gomod:** update module github.com/stretchr/testify to v1.12.0 ([#282](https://github.com/qvest-digital/mxl-k8s/issues/282)) ([251c3ff](https://github.com/qvest-digital/mxl-k8s/commit/251c3ff8703a75546273142b7a2e3eb071cf003d))
+
+
+### Continuous Integration
+
+* **images:** gate the kind suite on what a diff can change ([#288](https://github.com/qvest-digital/mxl-k8s/issues/288)) ([b317d05](https://github.com/qvest-digital/mxl-k8s/commit/b317d05f158de9a1fd54eb2f40613a5403c3e82c))
+
 ## [1.1.0-rc.3](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.2...v1.1.0-rc.3) (2026-08-15)
 
 

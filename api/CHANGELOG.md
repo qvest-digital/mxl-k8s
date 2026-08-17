@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.0-rc.12](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.11...api/v1.0.0-rc.12) (2026-08-17)
+
+
+### Features
+
+* **api:** record when a flow's origin moves and what confirmed it ([#285](https://github.com/qvest-digital/mxl-k8s/issues/285)) ([0de36fc](https://github.com/qvest-digital/mxl-k8s/commit/0de36fc670ef4600d469dbb1ad98670c8cd382d3))
+* emit events across the whole mirror flow lifecycle ([#285](https://github.com/qvest-digital/mxl-k8s/issues/285)) ([0de36fc](https://github.com/qvest-digital/mxl-k8s/commit/0de36fc670ef4600d469dbb1ad98670c8cd382d3))
+
+
+### Bug Fixes
+
+* **gateway:** release a source reader whose flow has no writer ([#285](https://github.com/qvest-digital/mxl-k8s/issues/285)) ([0de36fc](https://github.com/qvest-digital/mxl-k8s/commit/0de36fc670ef4600d469dbb1ad98670c8cd382d3))
+
+
+### Dependencies
+
+* **gomod:** update module github.com/stretchr/testify to v1.12.0 ([#282](https://github.com/qvest-digital/mxl-k8s/issues/282)) ([251c3ff](https://github.com/qvest-digital/mxl-k8s/commit/251c3ff8703a75546273142b7a2e3eb071cf003d))
+
 ## [1.0.0-rc.11](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.10...api/v1.0.0-rc.11) (2026-08-15)
 
 
