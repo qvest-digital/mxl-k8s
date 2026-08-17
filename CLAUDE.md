@@ -98,40 +98,58 @@ installed.
 
 ### Squash commit format for release-please
 
-GitHub's squash-merge uses the PR title as the resulting commit
-subject (with the PR number appended) and the PR body as the commit
-body. release-please parses that commit on `main` to decide what
-gets a changelog entry and how the version bumps. Two consequences:
+The repository is set to `squash_merge_commit_title=PR_TITLE` and
+`squash_merge_commit_message=COMMIT_MESSAGES`. The PR title becomes
+the commit subject with the PR number appended; the body is GitHub's
+bulleted list of the branch's commit messages. The PR description
+does not reach the commit at all.
+
+release-please reads that commit's subject, and footers -- the
+trailing block of `token: value` lines. The bulleted subjects in the
+body sit at column 0 with prose between them, so they are neither
+subject nor footer and produce no changelog entry. One squash is one
+entry, taken from the PR title. That is release-please's intended
+model rather than a defect: intra-PR churn ("fix a bug introduced two
+commits ago") never belonged in release notes.
+
+Three rules follow:
 
 1. **PR title is Conventional Commits.** Write the PR title in
    `<type>(<scope>): <subject>` form just as if it were a single
    commit subject. Subject `<= 72` chars, imperative mood.
-2. **Multiple release-relevant changes go in the PR body, at the
-   bottom, one per line.** release-please reads additional
-   conventional-commit footer lines and emits one changelog entry
-   per line. Add them after the prose explanation, separated by a
-   blank line. Example for a PR that touches two modules:
+2. **A PR carrying more than one release-relevant change is split,
+   or carries a `BEGIN_COMMIT_OVERRIDE` block in its PR body.**
+   release-please reads that block from the pull request over the
+   API, so it works even though `COMMIT_MESSAGES` discards the body.
+   The block replaces the whole commit message, so it repeats the
+   entry the title would have produced and carries every footer the
+   release needs:
 
    ```
-   feat(operator): adopt server-side apply for MxlFlowMirror status
+   BEGIN_COMMIT_OVERRIDE
+   feat(operator): adopt server-side apply for MxlFlowMirror status (#123)
 
-   Status updates collided with the controller-runtime cache when
-   the gateway raced the operator. Switch to SSA so only the
-   reconciler's field manager owns status.targetInfo.
-
-   fix(gateway): close FlowReader on shutdown
+   fix(gateway): close FlowReader on shutdown (#123)
    BREAKING CHANGE: operator now requires Kubernetes >= 1.30 for
    server-side apply on subresources
+   END_COMMIT_OVERRIDE
    ```
 
-   That single squash commit produces three changelog entries.
-   The bump is decided per release-please package, not per
-   scope: which package a line lands in follows the paths the
-   commit touched, and the strongest bump across a package's
-   lines wins. A commit touching only `api/` therefore bumps
-   both packages -- api compiles into all three binaries. Use
-   `BREAKING CHANGE:` or `BREAKING-CHANGE:` (release-please
-   accepts both) and `Release-As: X.Y.Z` for explicit overrides.
+   Adding the block to an already merged PR works: the next
+   release-please run rebuilds the pending release PR from it.
+3. **`!`, `BREAKING CHANGE:` (or `BREAKING-CHANGE:`, both are
+   accepted) and `Release-As: X.Y.Z` go on the PR title or in the
+   override block.** All three are parsed as footers, so they take
+   effect only at the bottom of the squashed message. A branch with
+   more than one commit ends in prose, and a footer written into an
+   intermediate commit is silently inert.
+
+Which package a line lands in follows the paths the commit touched,
+not the scope on the line, and the strongest bump across a package's
+lines wins. A commit touching only `api/` therefore bumps both
+packages -- api compiles into all three binaries -- and an override
+on such a commit puts every one of its lines in both changelogs.
+That is a reason to split a mixed PR rather than override it.
 
 ### Working in a worktree
 
@@ -172,8 +190,9 @@ case.
   footer.
 - Subject line ≤ 72 chars, imperative mood ("add", "fix", not "added",
   "fixes"). Body wraps at 72.
-- Prefer small, focused commits. The release tooling derives version
-  bumps and the changelog from commit subjects.
+- Prefer small, focused commits. They survive in the squashed body as
+  the record of how the change was built; the release tooling reads
+  the PR title, not them.
 
 ### Message content
 
