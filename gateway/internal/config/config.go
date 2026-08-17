@@ -80,7 +80,8 @@ type Config struct {
 	// the source gateway spreads that grain's transmission over. It
 	// caps peak rate at the flow's own rate divided by this, and costs
 	// up to this much of a grain interval in added latency. Negative
-	// disables pacing and restores whole-grain transfers.
+	// disables pacing and restores whole-grain transfers, which is the
+	// default.
 	PacingFraction float64
 
 	// PacingChunks is how many slice ranges a paced grain is split
@@ -165,10 +166,11 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 			"still refreshes every --resync-period from the last result. Each enumeration "+
 			"sweeps every provider libfabric was built with and warns about those it finds "+
 			"no device for.")
-	fs.Float64Var(&c.PacingFraction, "pacing-fraction", 0.5,
+	fs.Float64Var(&c.PacingFraction, "pacing-fraction", -1,
 		"Fraction of a grain's own interval to spread that grain's transmission over. "+
 			"Caps peak rate at the flow's rate divided by this, and costs up to this much "+
-			"of a grain interval in latency. Negative disables pacing.")
+			"of a grain interval in latency. Negative disables pacing, which is the "+
+			"default; 0.5 is where to start when enabling it.")
 	fs.IntVar(&c.PacingChunks, "pacing-chunks", 8,
 		"Number of slice ranges a paced grain is split into. Higher shortens the burst "+
 			"further at the cost of one cgo call and one RMA write per plane each. "+

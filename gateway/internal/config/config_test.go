@@ -235,9 +235,10 @@ func TestFromFlags_PacingDefaults(t *testing.T) {
 
 	c, err := FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), nil)
 	require.NoError(t, err)
-	assert.Equal(t, 0.5, c.PacingFraction,
-		"an unset --pacing-fraction must arrive as the enabled default, not as "+
-			"zero: the reconciler reads zero as 'not configured'")
+	assert.Negative(t, c.PacingFraction,
+		"an unset --pacing-fraction must arrive negative, which is how pacing is "+
+			"turned off, and not as zero: the reconciler reads zero as 'not "+
+			"configured' and would substitute its own default")
 	assert.Equal(t, 8, c.PacingChunks)
 	require.NoError(t, c.Validate())
 }
