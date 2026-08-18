@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0-rc.5](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.4...v1.1.0-rc.5) (2026-08-18)
+
+
+### Bug Fixes
+
+* **gateway:** check writer liveness on every failing source state ([#291](https://github.com/qvest-digital/mxl-k8s/issues/291)) ([b23ccb2](https://github.com/qvest-digital/mxl-k8s/commit/b23ccb2a601729c9076942b30af8479fbf038e50))
+* **gateway:** record the probed head on the sample path ([#291](https://github.com/qvest-digital/mxl-k8s/issues/291)) ([b23ccb2](https://github.com/qvest-digital/mxl-k8s/commit/b23ccb2a601729c9076942b30af8479fbf038e50))
+
+
+### Continuous Integration
+
+* bump the go-mxl builder and keep both its images tracked ([#292](https://github.com/qvest-digital/mxl-k8s/issues/292)) ([b5d3f63](https://github.com/qvest-digital/mxl-k8s/commit/b5d3f63ced72e1a37cd7a29d8a9e12b936146853))
+
 ## [1.1.0-rc.4](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.3...v1.1.0-rc.4) (2026-08-17)
 
 
