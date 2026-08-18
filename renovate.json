@@ -47,6 +47,21 @@
       "allowedVersions": "!/\\.test/"
     },
     {
+      "description": "go-mxl publishes its builder and runtime images only as rc prereleases. Docker versioning reads everything after the first hyphen as a compatibility suffix and never offers an update that changes it, so 1.0.0-rc.15 was never offered 1.1.0-rc.1 and both the ci.yml container pins and the docker/ ARGs stood still while the modules moved. Semver orders the tags; ignoreUnstable has to go with it because no stable tag has ever been published. Grouped so the workflow that compiles the modules and the images that ship them move together.",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "ghcr.io/qvest-digital/go-mxl-builder",
+        "ghcr.io/qvest-digital/go-mxl-runtime"
+      ],
+      "versioning": "semver",
+      "ignoreUnstable": false,
+      "groupName": "go-mxl images",
+      "semanticCommitType": "deps",
+      "semanticCommitScope": "images"
+    },
+    {
       "description": "Group GitHub Actions bumps into one PR",
       "matchManagers": [
         "github-actions"
