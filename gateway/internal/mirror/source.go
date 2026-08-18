@@ -11,6 +11,7 @@ import (
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -76,6 +77,15 @@ const readerAgedOutMarker = "out of range (too late)"
 // counter is cleared as soon as a grain transfers, so it counts
 // consecutive failed reopens rather than lifetime ones.
 const maxReaderRebuilds = 5
+
+// writerAbsentRetry is how long a mirror waits before asking again
+// whether its flow has a writer. It only paces the reopen of a mirror
+// whose producer is gone, so it is set for a cheap steady state rather
+// than a prompt one: the probe is an open plus a non-blocking flock,
+// and a producer that comes back on a fresh flow directory rotates the
+// Origin and wakes the reconciler through its watch well before this
+// fires.
+const writerAbsentRetry = 30 * time.Second
 
 // ReasonReaderRebuildCapReached marks a mirror whose source-side
 // reader stayed wedged across maxReaderRebuilds consecutive reopens.
@@ -441,6 +451,28 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// its own watch, so a gated pass writes nothing.
 	if gated {
 		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+
+	// No reader is opened on a flow nothing writes. Without this the
+	// release the flusher performs is undone within the second:
+	// publishing SourceWriterGone wakes this reconciler through its own
+	// watch, which opens a fresh reader and pins the flow directory
+	// again. The condition is written once and the requeue carries the
+	// retry, because a producer that re-attaches to a directory that
+	// was never collected rotates nothing and fires no watch.
+	if r.writerGone(mirror.Spec.FlowID) {
+		if !sourceProgressReads(&mirror, mxlv1alpha1.ReasonSourceWriterGone) {
+			if err := r.publishSourceProgress(ctx, req.NamespacedName, sourceProgressState{
+				status:  metav1.ConditionFalse,
+				reason:  mxlv1alpha1.ReasonSourceWriterGone,
+				message: "flow has no live writer; leaving the source reader closed so the flow can be reclaimed",
+			}); err != nil {
+				l.Error(err, "publish SourceWriterGone")
+			}
+			l.Info("flow has no live writer; not opening a source reader",
+				"flowID", mirror.Spec.FlowID)
+		}
+		return ctrl.Result{RequeueAfter: writerAbsentRetry}, nil
 	}
 
 	entry, err := r.opener.open(mirror.Spec.FlowID, mirror.Status.TargetInfo, provider)
@@ -1317,15 +1349,17 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// is what ends it, and it is the same recovery an operator
 		// gets by deleting the mirror and letting the requestor
 		// recreate it.
-		// Before spending a reopen: a reader can only be wedged in a way
-		// reopening fixes if something is still writing the flow. When
-		// nothing is, the reopen is not merely futile, it is what keeps
-		// the flow alive -- libmxl reclaims a flow directory only when
-		// the departing writer can take an exclusive lock, and this
-		// reader's own handle denies it. The directory then survives,
-		// the local agent keeps publishing Origin and renewing the
-		// Lease, and the flow is never collected.
-		if state.rebuildReader && r.writerGone(entry.flowID) {
+		// Asked of every failing state rather than only the ones a
+		// reopen resolves: a reader on a flow nothing writes is what
+		// keeps that flow alive, however its own failure reads. libmxl
+		// reclaims a flow directory only once an exclusive lock on it
+		// can be taken, and this reader's handle denies it, so the
+		// directory survives, the local agent keeps publishing Origin
+		// and renewing the Lease, and the flow is never collected.
+		// TransfersNotLanding is the state a source reaches without
+		// asking for a reopen, and it pins the flow exactly as the
+		// wedge states do.
+		if state.status == metav1.ConditionFalse && r.writerGone(entry.flowID) {
 			state.status = metav1.ConditionFalse
 			state.reason = mxlv1alpha1.ReasonSourceWriterGone
 			state.message = "flow has no live writer; releasing the source reader so the flow can be reclaimed"
@@ -1414,6 +1448,16 @@ func (r *SourceReconciler) writerGone(flowID string) bool {
 		return false
 	}
 	return !live
+}
+
+// sourceProgressReads reports whether the mirror already carries the
+// given reason on its SourceProgress condition. Used to keep a mirror
+// parked on an absent writer from rewriting the same condition, and
+// emitting the same event, on every retry.
+func sourceProgressReads(mirror *mxlv1alpha1.MxlFlowMirror, reason string) bool {
+	cond := apimeta.FindStatusCondition(mirror.Status.Conditions,
+		mxlv1alpha1.ConditionTypeSourceProgress)
+	return cond != nil && cond.Reason == reason
 }
 
 // readerRebuildsExhausted reports whether key has used its reopen
