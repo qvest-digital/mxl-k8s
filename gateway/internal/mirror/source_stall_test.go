@@ -215,6 +215,50 @@ func TestRunTransferLoop_RecordsProbedHead(t *testing.T) {
 		"a head that never advances leaves nothing to transfer")
 }
 
+func TestRunSampleTransferLoop_RecordsProbedHead(t *testing.T) {
+	// observedState reads a nil headAdvancedAt as "never probed" and
+	// cannot report ReaderNotAdvancing without it, so a continuous
+	// flow whose producer stops had no state that asks for a reopen
+	// and no state the writer-liveness check ran on.
+	tracker := &recordingTracker{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	probes := make(chan uint64, 3)
+	probes <- 4800
+	probes <- 4800
+	close(probes)
+
+	go runSampleTransferLoop(ctx, done, "flow-audio",
+		func() (uint64, error) {
+			if h, ok := <-probes; ok {
+				return h, nil
+			}
+			cancel()
+			return 4800, nil
+		},
+		func(uint64, int) error {
+			t.Error("a head that never advances leaves nothing to transfer")
+			return nil
+		},
+		func() error { return nil },
+		480, 480, time.Millisecond, tracker)
+
+	<-done
+	heads := tracker.headSnapshot()
+	require.NotEmpty(t, heads, "the sample loop must report the head it already probes")
+	for _, h := range heads {
+		assert.Equal(t, uint64(4800), h)
+	}
+
+	// What the recorded head buys: the state machine can now see the
+	// stall the sample path could not previously express.
+	entry := stalledEntry(heads[0], ptrTime(time.Now().Add(-defaultReaderStallAfter-time.Second)), 0, time.Time{})
+	state := observedState(entry, defaultReaderStallAfter)
+	assert.Equal(t, mxlv1alpha1.ReasonReaderNotAdvancing, state.reason)
+	assert.True(t, state.rebuildReader)
+}
+
 func TestReconcile_PreservesLastSentAtAcrossReopen(t *testing.T) {
 	// publishSourceProgress omits lastSentAt when the entry carries
 	// none, and SSA releases an omitted field, so the apiserver

@@ -1067,6 +1067,9 @@ func runSampleTransferLoop(
 		return
 	}
 	lastSent := head0
+	if tracker != nil {
+		tracker.recordHead(head0, time.Now())
+	}
 
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -1084,6 +1087,14 @@ func runSampleTransferLoop(
 		if err != nil {
 			l.Error(err, "Runtime")
 			continue
+		}
+		// Recorded on the sample path for the same reason as on the
+		// grain path: observedState reads a nil headAdvancedAt as
+		// "never probed" and cannot report ReaderNotAdvancing without
+		// it, which left a stalled continuous flow with no state that
+		// asks for a reopen.
+		if tracker != nil {
+			tracker.recordHead(head, time.Now())
 		}
 		if head > lastSent {
 			// Fell behind: the samples between lastSent+1 and
