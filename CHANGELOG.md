@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.6](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.5...v1.1.0-rc.6) (2026-08-22)
+
+
+### Bug Fixes
+
+* **gateway:** read a flow libmxl cannot find as having no writer ([#296](https://github.com/qvest-digital/mxl-k8s/issues/296)) ([58fa7e8](https://github.com/qvest-digital/mxl-k8s/commit/58fa7e800442a0050b3e0a91d9361cb4441211f4))
+
 ## [1.1.0-rc.5](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.4...v1.1.0-rc.5) (2026-08-18)
 
 
