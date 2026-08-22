@@ -2,6 +2,7 @@ package mirror
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
+	"github.com/qvest-digital/go-mxl/mxl"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -222,4 +224,69 @@ func TestReconcile_OpensAReaderOnceTheWriterIsBack(t *testing.T) {
 	t.Cleanup(func() { r.closeEntry(key) })
 	assert.Equal(t, int32(1), opener.calls.Load(),
 		"a returning producer must get its mirror back without an operator")
+}
+
+func TestReconcile_ParksAMirrorWhoseFlowIsNotInTheDomain(t *testing.T) {
+	// A mirror outlives the flow it names. When the origin cannot be
+	// resolved the rescan leaves an on-demand mirror pointed at its
+	// last known source, deliberately, so the consumer keeps its copy
+	// and the status says what is wrong. That source node is then
+	// asked for a flow it does not hold, and opening a reader on it
+	// returns ErrFlowNotFound every time.
+	//
+	// Returning that as a reconcile error retries it under the rate
+	// limiter and publishes nothing, so the mirror carries no reason
+	// for a reader that is never coming and the same failure repeats
+	// until something outside this reconciler deletes the mirror.
+	scheme := newSourceTestScheme(t)
+	mirror := mirrorWithFinalizer("m1", "ns1", "node-a", "flow-1", "info-1")
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	// What libmxl answers on both paths for a flow that is not in the
+	// domain, wrapped the way the production callers wrap it.
+	opener := &fakeOpener{
+		openFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
+			return nil, fmt.Errorf("NewReader: %w", mxl.ErrFlowNotFound)
+		},
+	}
+	events := record.NewFakeRecorder(10)
+	r := &SourceReconciler{
+		Client:        c,
+		Scheme:        scheme,
+		NodeName:      "node-a",
+		opener:        opener,
+		Recorder:      events,
+		FlushInterval: time.Hour,
+		sources:       map[types.NamespacedName]*sourceEntry{},
+		attempts:      attemptTable[sourceAddInputs]{},
+		writerLiveFn: func(string) (bool, error) {
+			return false, fmt.Errorf("IsFlowActive: %w", mxl.ErrFlowNotFound)
+		},
+	}
+
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	require.NoError(t, err,
+		"a flow that is not here is a state to report, not a failure to retry")
+	assert.Equal(t, writerAbsentRetry, res.RequeueAfter,
+		"the mirror has to ask again: a producer landing on this node fires no event here")
+	assert.Zero(t, opener.calls.Load(),
+		"opening a reader on a flow libmxl cannot find can only fail")
+
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &got))
+	require.Len(t, got.Status.Conditions, 1)
+	assert.Equal(t, mxlv1alpha1.ReasonSourceWriterGone, got.Status.Conditions[0].Reason,
+		"the rescan leaves the mirror here on the promise that the status names the problem")
+
+	// The retry is the point of parking, so it must not resume the loop.
+	res, err = r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	require.NoError(t, err)
+	assert.Equal(t, writerAbsentRetry, res.RequeueAfter)
+	assert.Zero(t, opener.calls.Load())
+	assert.Len(t, events.Events, 1, "a parked mirror must emit one event, not one per retry")
 }

@@ -1,6 +1,7 @@
 package mirror
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -8,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 
+	"github.com/qvest-digital/go-mxl/mxl"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -99,4 +101,16 @@ func TestWriterGone_ReportsGoneOnlyWhenLibmxlSaysSo(t *testing.T) {
 	assert.True(t, r.writerGone("f1"),
 		"libmxl reporting no active writer is the authoritative answer, not "+
 			"an inference from a stalled head")
+}
+
+func TestWriterGone_ReadsAFlowLibmxlCannotFindAsGone(t *testing.T) {
+	// ErrFlowNotFound is an answer, not a failure to get one: a flow
+	// that is not in this node's domain has no writer here, and no
+	// reader can be opened on it either. Wrapped, because the seam
+	// reports the call it made.
+	r := &SourceReconciler{writerLiveFn: func(string) (bool, error) {
+		return false, fmt.Errorf("IsFlowActive: %w", mxl.ErrFlowNotFound)
+	}}
+	assert.True(t, r.writerGone("f1"),
+		"a flow that is not in the domain has no writer to wait for")
 }
