@@ -1435,13 +1435,24 @@ func (r *SourceReconciler) bumpReaderRebuilds(key types.NamespacedName) uint32 {
 // writerGone reports whether the flow has no live writer. A nil seam,
 // or an error asking, answers false: the check exists to stop a futile
 // reopen, and failing to get an answer is not grounds for tearing down
-// a mirror that may be healthy.
+// a mirror that may be healthy. ErrFlowNotFound is the exception,
+// because it is an answer.
 func (r *SourceReconciler) writerGone(flowID string) bool {
 	if r.writerLiveFn == nil || flowID == "" {
 		return false
 	}
 	live, err := r.writerLiveFn(flowID)
 	if err != nil {
+		// The flow is not in this node's domain, so nothing here
+		// writes it and no reader can be opened on it. Answering
+		// "assume live" sends the mirror into an open that returns
+		// this same status, which the reconciler has nowhere to put
+		// but a returned error: a failure to retry rather than a state
+		// to publish, so the mirror carries no reason and the retry
+		// repeats for as long as it exists.
+		if errors.Is(err, mxl.ErrFlowNotFound) {
+			return true
+		}
 		ctrl.Log.WithName("source-flush").V(1).Info(
 			"writer liveness check failed; assuming the writer is live",
 			"flowID", flowID, "error", err.Error())
