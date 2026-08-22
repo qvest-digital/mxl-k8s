@@ -60,7 +60,7 @@ env:
   # mikefarah/yq for in-place yaml editing of values.yaml at
   # package-time. Pinned because we rely on `yq -i` semantics.
   # renovate: datasource=github-releases depName=mikefarah/yq versioning=semver
-  YQ_VERSION: v4.53.3
+  YQ_VERSION: v4.53.4
 
 jobs:
   # Decides whether this diff concerns the chart at all. Gating meta on
