@@ -75,6 +75,12 @@ type Sweeper struct {
 	// DefaultGrace for why this is not optional.
 	Grace time.Duration
 
+	// ScaffoldGrace is how old a half-built flow directory has to be
+	// before the sweep considers it. Zero takes DefaultScaffoldGrace; a
+	// negative value turns scaffold reclamation off and leaves libmxl's
+	// own collection running.
+	ScaffoldGrace time.Duration
+
 	Log logr.Logger
 }
 
@@ -117,6 +123,22 @@ func (s *Sweeper) Start(ctx context.Context) error {
 // continues: a domain that cannot be swept now is no worse than one
 // that was never swept, and giving up would strand every later sweep.
 func (s *Sweeper) sweep(ctx context.Context) {
+	// Scaffolds first, and before the collect can fail out of this
+	// function. libmxl's collection walks published flow directories, so
+	// a scaffold is invisible to it however long it has been there, and
+	// the two reclaim different things for different reasons. A domain
+	// libmxl cannot collect is exactly the state a node short of tmpfs is
+	// in, which is the worst moment to skip the scaffolds.
+	//
+	// Both still share the sweep loop, so Interval and the startup grace
+	// govern when this runs as well.
+	if grace := s.scaffoldGrace(); grace >= 0 {
+		if removed, reclaimed := s.sweepScaffolds(grace); removed > 0 {
+			s.Log.Info("reclaimed abandoned flow scaffolds",
+				"removed", removed, "bytes", reclaimed)
+		}
+	}
+
 	before, haveBefore := s.countFlows()
 	if err := s.Collector.GarbageCollect(); err != nil {
 		s.Log.Error(err, "garbage collect domain")
@@ -128,6 +150,15 @@ func (s *Sweeper) sweep(ctx context.Context) {
 			"removed", before-after, "remaining", after)
 	}
 	_ = ctx
+}
+
+// scaffoldGrace resolves the configured grace, with zero meaning the default
+// and a negative value meaning off.
+func (s *Sweeper) scaffoldGrace() time.Duration {
+	if s.ScaffoldGrace == 0 {
+		return DefaultScaffoldGrace
+	}
+	return s.ScaffoldGrace
 }
 
 // countFlows reports how many flow directories the domain holds. The
