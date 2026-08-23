@@ -94,7 +94,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26'
+          go-version: '1.27'
           check-latest: true
 
       - name: gofmt
@@ -216,7 +216,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26'
+          go-version: '1.27'
           check-latest: true
 
       - name: Regenerate manifests
@@ -248,7 +248,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26'
+          go-version: '1.27'
           check-latest: true
           cache-dependency-path: ${{ matrix.module }}/go.sum
 
