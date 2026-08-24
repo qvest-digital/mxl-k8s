@@ -175,10 +175,11 @@ func run(args []string) error {
 	// half of not collecting a mirror copy the target reconciler has
 	// yet to re-establish; the sweeper's own grace is the second.
 	sweeper := &domaingc.Sweeper{
-		DomainPath: cfg.DomainPath,
-		Interval:   cfg.DomainGCInterval,
-		Grace:      cfg.DomainGCGrace,
-		Log:        ctrl.Log.WithName("domaingc"),
+		DomainPath:    cfg.DomainPath,
+		Interval:      cfg.DomainGCInterval,
+		Grace:         cfg.DomainGCGrace,
+		ScaffoldGrace: cfg.DomainGCScaffoldGrace,
+		Log:           ctrl.Log.WithName("domaingc"),
 	}
 	if inst := handles.MXL(); inst != nil {
 		sweeper.Collector = inst

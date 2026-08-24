@@ -103,6 +103,13 @@ type Config struct {
 	// reconciler is about to re-establish.
 	DomainGCGrace time.Duration
 
+	// DomainGCScaffoldGrace is how old a half-built flow directory has
+	// to be before the sweep reclaims it. libmxl's own collection never
+	// sees one, so a producer killed part way through allocating its
+	// ring leaves the whole allocation in the shared domain. Negative
+	// turns that reclamation off.
+	DomainGCScaffoldGrace time.Duration
+
 	// ReaderStallAfter is how long the source-side reconciler lets a
 	// reader report an unchanged head index, having never transferred
 	// a grain, before SourceProgress reports ReaderNotAdvancing.
@@ -181,6 +188,8 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"How often to reclaim flow directories no writer holds. Zero disables it.")
 	fs.DurationVar(&c.DomainGCGrace, "domain-gc-grace", domaingc.DefaultGrace,
 		"How long after start to hold back the first reclaim sweep.")
+	fs.DurationVar(&c.DomainGCScaffoldGrace, "domain-gc-scaffold-grace", domaingc.DefaultScaffoldGrace,
+		"How old a half-built flow directory must be before it is reclaimed. Negative disables it.")
 	fs.DurationVar(&c.ReaderStallAfter, "reader-stall-after", 20*time.Second,
 		"Head-index inactivity after which the source gateway reports a reader that has never transferred a grain as not advancing.")
 	fs.Float64Var(&c.KubeAPIQPS, "kube-api-qps", 50,

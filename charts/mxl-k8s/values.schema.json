@@ -1415,6 +1415,12 @@
               "required": [],
               "title": "domainGcInterval"
             },
+            "domainGcScaffoldGrace": {
+              "default": "10m",
+              "description": "How old a half-built flow directory must be before it is reclaimed. libmxl builds a flow under a temporary name and renames it into place, removing it on every unwinding exit, so only a death that skips unwinding leaves one -- and libmxl's own collection walks published flows, so nothing sees it afterwards. A producer SIGKILLed part way through allocating its ring therefore leaves the whole allocation in the shared domain, at the node's expense rather than its own. Whether a writer still holds the scaffold is decided by the same lock libmxl uses; this only spans the moment between the data file being created and locked. Negative disables it.",
+              "required": [],
+              "title": "domainGcScaffoldGrace"
+            },
             "domainPath": {
               "default": "/run/mxl/domain",
               "description": " pattern: ^/.+ @schema",
