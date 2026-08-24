@@ -70,7 +70,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26'
+          go-version: '1.27'
           check-latest: true
 
       - name: Install helm-schema and helm-docs
