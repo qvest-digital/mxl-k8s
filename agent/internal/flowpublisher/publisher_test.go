@@ -288,6 +288,70 @@ func TestPublishAppeared_MirrorTargetMarksReadyNotOrigin(t *testing.T) {
 			"Origin would route downstream lookups at a mirror")
 }
 
+// The other half of the same classification. A producer rescheduled
+// onto a node that already mirrors its flow attaches to the directory
+// in place, so ClaimOrigin is the only record that this node produces
+// it -- and the mirror it attached to outlives that claim. Every
+// re-publish re-runs isMirrorTarget, which still says "mirror", and
+// demotes the node again; InitialSync does one per flow on every agent
+// start. The flow ends up with no Origin location anywhere, which
+// resolveSourceNode cannot answer from, and every consumer on every
+// other node gets FLOW_NOT_FOUND for good.
+func TestPublishAppeared_MirrorTargetDoesNotDemoteAClaimedOrigin(t *testing.T) {
+	scheme := newScheme(t)
+	domain := t.TempDir()
+	flowDir := filepath.Join(domain, validFlowID+".mxl-flow")
+	require.NoError(t, os.Mkdir(flowDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(flowDir, FlowDefName),
+		[]byte(`{"id":"`+validFlowID+`"}`), 0o644))
+
+	mirror := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "some-mirror",
+			Namespace: "mxl-system",
+		},
+		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
+			FlowID:     validFlowID,
+			SourceNode: "n0",
+			TargetNode: "n1",
+		},
+	}
+	claimed := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: ObjectMeta(validFlowID),
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: validFlowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{{
+				NodeName:     "n1",
+				Phase:        mxlv1alpha1.MxlFlowLocationOrigin,
+				LastObserved: &metav1.Time{Time: metav1.Now().Time},
+				AppearedAt:   &metav1.Time{Time: metav1.Now().Time},
+			}},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(mirror, claimed).
+		Build()
+
+	lease := &fakeLease{}
+	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1", Lease: lease}
+	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
+
+	var got mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: validFlowID}, &got))
+	assert.Equal(t, mxlv1alpha1.MxlFlowLocationOrigin, localPhase(t, &got, "n1"),
+		"a producer attaching to the flow is observed evidence and a "+
+			"mirror naming this node is an inference; the inference must "+
+			"not overrule it")
+	assert.Equal(t, []string{validFlowID}, lease.renewed,
+		"the location still reads Origin, so consumers check its Lease; "+
+			"skipping the renewal here leaves the Origin looking stale "+
+			"until the renew loop's next tick")
+}
+
 func TestInitialSync_DemotesOriginForFlowsNoLongerOnDisk(t *testing.T) {
 	scheme := newScheme(t)
 	domain := t.TempDir()
