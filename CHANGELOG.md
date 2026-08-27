@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0-rc.7](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.6...v1.1.0-rc.7) (2026-08-27)
+
+
+### Bug Fixes
+
+* **agent:** keep an Origin a producer claimed ([#304](https://github.com/qvest-digital/mxl-k8s/issues/304)) ([b6ee23f](https://github.com/qvest-digital/mxl-k8s/commit/b6ee23f9a013f75a904a15d57878a7f2f10a5da9)), closes [#303](https://github.com/qvest-digital/mxl-k8s/issues/303)
+
+
+### Dependencies
+
+* **gomod:** update go modules ([#295](https://github.com/qvest-digital/mxl-k8s/issues/295)) ([c4e0d3c](https://github.com/qvest-digital/mxl-k8s/commit/c4e0d3c1826ee5ed3f680aa8ef1ca4930bb8281e))
+* **tools:** update ci tool versions ([#301](https://github.com/qvest-digital/mxl-k8s/issues/301)) ([471cc56](https://github.com/qvest-digital/mxl-k8s/commit/471cc567a77b371d2c98be53f3dcd2584b948c6f))
+
 ## [1.1.0-rc.6](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.5...v1.1.0-rc.6) (2026-08-24)
 
 
