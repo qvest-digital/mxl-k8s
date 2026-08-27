@@ -105,12 +105,17 @@ table:
 
 The LD_PRELOAD shim reaches the consumer either off the node or out
 of the carrier image. The agent writes the copy it carries to
-`/run/mxl/libmxl-intent.so` on every start, inside the directory the
-consumer already mounts for the socket, so
-`LD_PRELOAD=/run/mxl/libmxl-intent.so` is the whole injection. The
-carrier image is the two-container pattern: an initContainer copies
-the same `.so` into a shared `emptyDir` and the main container
-preloads it from there. The default agent socket path can be
+`/run/mxl/libmxl-intent.so` on every start. The consumer mounts that
+file on a path of its own as a `hostPath` of type `File` and
+preloads from there, rather than naming it inside the `/run/mxl`
+directory mount: `/run` is tmpfs, so a node reboot loses the shim and
+the agent races the workload pods to write it back, and the loader
+treats an `LD_PRELOAD` object it cannot open as a warning. Declared
+as a `File`, the mount is what stops a pod from starting
+uninstrumented and staying that way for its whole life. The carrier
+image is the two-container pattern: an initContainer copies the same
+`.so` into a shared `emptyDir` and the main container preloads it
+from there, which is ordered by the kubelet and needs no gate. The default agent socket path can be
 overridden with `MXL_INTENT_SOCK`. The shim itself has no daemon, no
 Kubernetes client, and no state -- see
 [02-components](./02-components.md#shim).

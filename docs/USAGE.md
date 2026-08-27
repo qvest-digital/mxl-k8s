@@ -205,9 +205,9 @@ blocks on the agent's UDS until the mirror has materialised, and
 then lets the call complete.
 
 The agent writes the shim it carries to
-`/run/mxl/libmxl-intent.so` on every start, so the consumer
-preloads it out of the same mount it already needs for the agent's
-socket:
+`/run/mxl/libmxl-intent.so` on every start. The consumer mounts
+that file a second time, on its own path and as a `hostPath` of
+type `File`, and preloads it from there:
 
 ```yaml
 apiVersion: v1
@@ -221,24 +221,56 @@ spec:
       image: registry.example.com/my-consumer:1.2.3
       env:
         - name: LD_PRELOAD
-          value: /run/mxl/libmxl-intent.so
+          value: /run/mxl-shim/libmxl-intent.so
       securityContext:
         capabilities:
           add: ["IPC_LOCK", "SYS_RESOURCE"]
       volumeMounts:
         - name: mxl-run
           mountPath: /run/mxl
+        - name: mxl-shim
+          mountPath: /run/mxl-shim/libmxl-intent.so
+          readOnly: true
   volumes:
     - name: mxl-run
       hostPath:
         path: /run/mxl
         type: DirectoryOrCreate
+    - name: mxl-shim
+      hostPath:
+        path: /run/mxl/libmxl-intent.so
+        type: File
 ```
 
-The volume mount targets `/run/mxl` rather than just
-`/run/mxl/domain` so the domain directory, the agent's
-`/run/mxl/agent.sock` and the shim are all visible inside the pod,
-even if the socket is created after the pod schedules.
+The `mxl-run` mount targets `/run/mxl` rather than just
+`/run/mxl/domain` so the domain directory and the agent's
+`/run/mxl/agent.sock` are both visible inside the pod, even if the
+socket is created after the pod schedules. A shim call that finds
+no socket fails the open, which the consumer retries, so that one
+is self-healing.
+
+The second mount is not decoration, and `type: File` is the whole
+point of it. `/run` is tmpfs on most node images, so a reboot or a
+node replacement loses the shim and the agent DaemonSet races
+every workload pod on that node to write it back. The loader only
+*warns* about an `LD_PRELOAD` object it cannot open:
+
+```
+ERROR: ld.so: object '/run/mxl/libmxl-intent.so' from LD_PRELOAD
+cannot be preloaded (cannot open shared object file): ignored.
+```
+
+A pod that wins that race therefore starts with no interception at
+all and stays that way for as long as it runs: it reads the flows
+that are already local on its node and reports FLOW_NOT_FOUND for
+every other one, raising no intent, with nothing after that first
+line to connect the two. Declared as a `File`, the kubelet refuses
+to start the container until the path is one, so the pod waits in
+ContainerCreating with a `FailedMount` event naming it and comes
+up with interception intact once the agent has landed.
+
+Preloading straight out of the `/run/mxl` mount is what the older
+examples did. It works right up until a node reboots.
 
 `agent.flags.shimPath` moves the drop or, set empty, turns it off.
 
