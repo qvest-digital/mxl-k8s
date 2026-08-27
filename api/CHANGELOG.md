@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0-rc.13](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.12...api/v1.0.0-rc.13) (2026-08-27)
+
+
+### Dependencies
+
+* **gomod:** update go modules ([#295](https://github.com/qvest-digital/mxl-k8s/issues/295)) ([c4e0d3c](https://github.com/qvest-digital/mxl-k8s/commit/c4e0d3c1826ee5ed3f680aa8ef1ca4930bb8281e))
+
 ## [1.0.0-rc.12](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.11...api/v1.0.0-rc.12) (2026-08-17)
 
 
