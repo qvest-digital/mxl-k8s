@@ -117,12 +117,16 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	} else if isMirror {
 		phase = mxlv1alpha1.MxlFlowLocationReady
 	}
-	if err := p.upsertLocation(ctx, flowID, phase, &now, &now); err != nil {
+	// The phase actually written, not the one asked for: upsertLocation
+	// refuses to demote an Origin this node already claimed, so a
+	// mirror-target inference can come back out as Origin.
+	written, err := p.upsertLocation(ctx, flowID, phase, &now, &now)
+	if err != nil {
 		return err
 	}
 	// Only the producer side renews a Lease; a mirror target's local
 	// copy is not authoritative and must not claim Origin liveness.
-	if phase == mxlv1alpha1.MxlFlowLocationOrigin && p.Lease != nil {
+	if written == mxlv1alpha1.MxlFlowLocationOrigin && p.Lease != nil {
 		if err := p.Lease.Renew(ctx, flowID); err != nil {
 			l.Error(err, "renew origin lease", "flowID", flowID)
 		}
@@ -181,7 +185,7 @@ func (p *Publisher) ClaimOrigin(ctx context.Context, flowID string) error {
 	}
 
 	now := metav1.Now()
-	if err := p.upsertLocation(ctx, flowID, mxlv1alpha1.MxlFlowLocationOrigin, &now, &now); err != nil {
+	if _, err := p.upsertLocation(ctx, flowID, mxlv1alpha1.MxlFlowLocationOrigin, &now, &now); err != nil {
 		return err
 	}
 	l.Info("claimed Origin for locally attached producer", "flowID", flowID)
@@ -202,7 +206,7 @@ func (p *Publisher) PublishVanished(ctx context.Context, dirName string) error {
 	if !ok {
 		return nil
 	}
-	if err := p.upsertLocation(ctx, flowID, mxlv1alpha1.MxlFlowLocationStale, nil, nil); err != nil {
+	if _, err := p.upsertLocation(ctx, flowID, mxlv1alpha1.MxlFlowLocationStale, nil, nil); err != nil {
 		return err
 	}
 	if p.Lease != nil {
@@ -227,11 +231,18 @@ func (p *Publisher) PublishVanished(ctx context.Context, dirName string) error {
 // AppearedAt, which is what the source gateway keys rotation
 // detection on, and nil leaves whatever is already there. A Stale
 // phase clears it, so the next appearance reads as a rotation.
-func (p *Publisher) upsertLocation(ctx context.Context, flowID string, phase mxlv1alpha1.MxlFlowLocationPhase, observed, appeared *metav1.Time) error {
+//
+// Returns the phase this node's location carries once the update
+// lands, which is not always the one asked for -- see the Ready over
+// Origin guard below. An absent MxlFlow returns the empty phase.
+func (p *Publisher) upsertLocation(ctx context.Context, flowID string, phase mxlv1alpha1.MxlFlowLocationPhase, observed, appeared *metav1.Time) (mxlv1alpha1.MxlFlowLocationPhase, error) {
+	written := phase
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		written = phase
 		var obj mxlv1alpha1.MxlFlow
 		if err := p.Client.Get(ctx, types.NamespacedName{Name: flowID}, &obj); err != nil {
 			if apierrors.IsNotFound(err) {
+				written = ""
 				return nil
 			}
 			return fmt.Errorf("get MxlFlow %s: %w", flowID, err)
@@ -241,7 +252,26 @@ func (p *Publisher) upsertLocation(ctx context.Context, flowID string, phase mxl
 		found := false
 		for i := range obj.Status.Locations {
 			if obj.Status.Locations[i].NodeName == p.NodeName {
-				obj.Status.Locations[i].Phase = phase
+				// Ready is inferred, Origin is observed. Ready comes
+				// from a mirror naming this node as its target, which
+				// cannot separate a directory a mirror is filling from
+				// one a local producer has since taken over; Origin
+				// comes from the shim reporting that producer opening
+				// the flow for writing. Letting the inference overrule
+				// the observation strands the flow: the mirror outlives
+				// the producer's arrival, so every re-publish demotes
+				// the node again -- InitialSync does one per flow on
+				// every agent start -- and the flow ends up with no
+				// Origin location anywhere, which resolveSourceNode
+				// cannot answer from and no consumer on any node
+				// recovers from. A vanished directory still demotes:
+				// Stale is observed too.
+				if phase == mxlv1alpha1.MxlFlowLocationReady &&
+					obj.Status.Locations[i].Phase == mxlv1alpha1.MxlFlowLocationOrigin {
+					written = mxlv1alpha1.MxlFlowLocationOrigin
+				} else {
+					obj.Status.Locations[i].Phase = phase
+				}
 				obj.Status.Locations[i].LastObserved = observed
 				switch {
 				case stale:
@@ -268,9 +298,9 @@ func (p *Publisher) upsertLocation(ctx context.Context, flowID string, phase mxl
 		return p.Client.Status().Update(ctx, &obj)
 	})
 	if err != nil {
-		return fmt.Errorf("update MxlFlow %s status: %w", flowID, err)
+		return "", fmt.Errorf("update MxlFlow %s status: %w", flowID, err)
 	}
-	return nil
+	return written, nil
 }
 
 // InitialSync walks the domain directory at startup and calls
@@ -359,7 +389,7 @@ func (p *Publisher) demoteVanishedLocalOrigins(ctx context.Context, onDisk map[s
 			if loc.Phase == mxlv1alpha1.MxlFlowLocationStale {
 				continue
 			}
-			if err := p.upsertLocation(ctx, flow.Spec.ID, mxlv1alpha1.MxlFlowLocationStale, nil, nil); err != nil {
+			if _, err := p.upsertLocation(ctx, flow.Spec.ID, mxlv1alpha1.MxlFlowLocationStale, nil, nil); err != nil {
 				log.FromContext(ctx).Error(err, "demote vanished local origin failed", "flowID", flow.Spec.ID)
 			}
 			if p.Lease != nil {
