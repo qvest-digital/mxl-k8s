@@ -29,6 +29,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/domaingc"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/mirror"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/rdma"
 )
 
 var (
@@ -158,6 +159,7 @@ func run(args []string) error {
 			Providers:   cfg.Providers,
 			Lister:      handles.Fabrics(),
 			Selector:    selector,
+			HostDevices: rdma.Inventory{},
 			BindAddress: cfg.BindAddress,
 			ProbePeriod: cfg.ProbePeriod,
 		}

@@ -232,6 +232,45 @@ every count is zero whether or not the provider works, so
 consumers keep treating those entries as available. During a
 rolling upgrade both shapes are present in the cluster at once.
 
+The `RDMADevicesEnumerated` condition covers the one thing
+`deviceCount` cannot say for itself. libfabric builds a provider's
+device list once per process, on the first enumeration, and rebuilds
+it only for a caller that asks to rescan; the libmxl-fabrics
+enumeration entry point takes no flags, so nothing here can ask. A
+gateway that first enumerated while the host's RDMA devices were
+unusable -- the module not yet loaded, the port not yet up, the
+device node not yet mounted -- therefore publishes `deviceCount: 0`
+for the rest of its life, and that entry is indistinguishable from
+the one a node with no RDMA hardware produces. Every mirror the node
+takes part in resolves to tcp and still reaches `Ready`.
+
+The gateway cross-checks the probe against the RDMA devices the host
+kernel exposes, read from sysfs on each refresh rather than from the
+cached provider list:
+
+```console
+status:
+  conditions:
+    - type: RDMADevicesEnumerated
+      status: "False"
+      reason: HostDevicesUnenumerated
+      message: host exposes dev0 with an active port and no RDMA provider
+        enumerated a device; mirrors on this node resolve to a non-RDMA
+        provider until the gateway restarts
+```
+
+`False` is a discrepancy rather than a proven fault, and the gateway
+reports it rather than acting on it. An active port is necessary for
+the verbs provider to offer an endpoint but not sufficient -- it also
+needs an address on the matching interface -- so a node can hold this
+condition legitimately. Restarting the gateway pod is what runs the
+enumeration again; nothing reachable from a running process rebuilds
+it.
+
+The condition is absent on a gateway whose `--providers` admits no
+RDMA provider: such a node advertises none by instruction rather than
+by measurement, so the host device list contradicts nothing.
+
 `version` is unset on every entry: libmxl-fabrics exposes no
 per-provider version through its C API.
 
@@ -455,7 +494,8 @@ those nodes belong in their own variant.
 | --- | --- |
 | `MxlFlowMirror` `Degraded` with `TargetProgress=False/OpenTargetFailed` | Gateway can't `fi_getinfo` the provider on the local NIC. Check `/dev/infiniband` is mounted and the host module is loaded. `status.targetAttemptCount` carries the length of the failure run. |
 | Mirror fails with `no usable fabric interface` | Every candidate was excluded. The error names the first exclusion and its reason; check the fabric flags against `kubectl get mxlnodecapabilities <node> -o yaml`. |
-| A node advertises `deviceCount: 0` for a provider whose hardware is installed | libmxl-fabrics did not enumerate a usable device. Check the host module and `/dev/infiniband` first, then whether the fabric flags exclude the interface it would have used. |
+| A node advertises `deviceCount: 0` for a provider whose hardware is installed | libmxl-fabrics did not enumerate a usable device. Check `RDMADevicesEnumerated` first: `False` means the host exposes an active device this process never enumerated, which only a gateway restart clears. Otherwise check the host module and `/dev/infiniband`, then whether the fabric flags exclude the interface it would have used. |
+| Every mirror on one node sits on tcp while its peers use verbs | The gateway enumerated before the node's RDMA device was usable, and libfabric does not rebuild a provider's device list within a process. `RDMADevicesEnumerated=False/HostDevicesUnenumerated` reports it; restart the gateway pod on that node. |
 | Every mirror sits on tcp after an upgrade | Nodes whose gateway has not rolled yet report no `Probed` condition. Check `kubectl get mxlnodecapabilities` for the ones still on the old shape. |
 | Gateway pods Pending with `Insufficient <resource>` | The DaemonSet requests a device-plugin resource on nodes that do not advertise it. Split those nodes into their own `gateway.variants` entry. |
 | Gateway pods stuck in `ContainerCreating` | The `/dev/infiniband` hostPath is absent and `rdma.infinibandHostPathType` is `Directory`. Either place the DaemonSet only on RDMA-capable nodes or set `rdma.mountInfiniband: false` and reach the device through a device plugin. |

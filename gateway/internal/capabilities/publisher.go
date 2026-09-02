@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -27,6 +28,21 @@ import (
 // without a libmxl domain.
 type InterfaceLister interface {
 	Interfaces(query *fabrics.InterfaceConfig) ([]fabrics.InterfaceConfig, error)
+}
+
+// HostDeviceLister reports the RDMA devices the host kernel exposes
+// with at least one active port. Production binds it to an
+// rdma.Inventory; tests bind it to a stub.
+type HostDeviceLister interface {
+	ActiveDevices() ([]string, error)
+}
+
+// rdmaProviders are the providers that drive RDMA hardware, so the
+// ones whose absence the host device list can contradict. tcp and shm
+// need no device and never appear here.
+var rdmaProviders = []fabrics.Provider{
+	fabrics.ProviderEFA,
+	fabrics.ProviderVerbs,
 }
 
 // Publisher creates and refreshes the MxlNodeCapabilities CR for this
@@ -57,6 +73,13 @@ type Publisher struct {
 	// may carry MXL traffic on. The mirror setup path applies the
 	// same one, so nothing is advertised that a setup would refuse.
 	Selector fabric.Selector
+
+	// HostDevices reports the host's RDMA devices, which is the only
+	// thing that separates a provider that measured no hardware from
+	// one that enumerated before the hardware was usable. Both
+	// publish the same empty entry. Nil skips the cross-check and
+	// leaves the condition unset.
+	HostDevices HostDeviceLister
 
 	// BindAddress narrows the enumeration query the way a mirror
 	// setup narrows it, so a gateway pinned to one address does not
@@ -233,11 +256,118 @@ func (p *Publisher) Refresh(ctx context.Context) error {
 			"Fabric probe succeeded on %s: %d provider(s)", p.NodeName, len(probed))
 	}
 
+	// Log and event are transition-scoped; the state they announce
+	// lasts until the process restarts. The condition is what carries
+	// it for as long as it holds, which is why it is set even where
+	// nothing is emitted.
+	if cond, ok := p.hostDeviceCondition(probed); ok {
+		if meta.SetStatusCondition(&obj.Status.Conditions, cond) {
+			if cond.Status == metav1.ConditionTrue {
+				l.V(1).Info("host RDMA devices are represented in the probed providers",
+					"reason", cond.Reason, "detail", cond.Message)
+			} else {
+				l.Info("host RDMA devices are not represented in the probed providers",
+					"reason", cond.Reason, "detail", cond.Message)
+			}
+			if p.Recorder != nil {
+				eventType := corev1.EventTypeNormal
+				if cond.Status != metav1.ConditionTrue {
+					eventType = corev1.EventTypeWarning
+				}
+				p.Recorder.Eventf(&obj, eventType, cond.Reason,
+					"Host RDMA devices on %s: %s", p.NodeName, cond.Message)
+			}
+		}
+	}
+
 	if err := p.Client.Status().Update(ctx, &obj); err != nil {
 		return fmt.Errorf("update MxlNodeCapabilities status: %w", err)
 	}
 	l.V(1).Info("published node capabilities", "providers", providerSummary(probed))
 	return nil
+}
+
+// hostDeviceCondition compares the RDMA devices the host exposes
+// against the providers the probe reported, and returns the condition
+// to publish. The second return reports whether the comparison
+// applies at all.
+//
+// It applies only when a host device list is configured and the
+// provider bound admits a provider that drives RDMA hardware. A
+// gateway configured for tcp alone advertises no RDMA provider by
+// instruction rather than by measurement, and has nothing to
+// contradict.
+func (p *Publisher) hostDeviceCondition(probed []mxlv1alpha1.MxlFabricsProviderCapability) (metav1.Condition, bool) {
+	if p.HostDevices == nil {
+		return metav1.Condition{}, false
+	}
+	admitsRDMA := false
+	for _, provider := range rdmaProviders {
+		if p.allows(provider) {
+			admitsRDMA = true
+			break
+		}
+	}
+	if !admitsRDMA {
+		return metav1.Condition{}, false
+	}
+
+	devices, err := p.HostDevices.ActiveDevices()
+	if err != nil {
+		// Unknown rather than False: the providers stand on their own
+		// measurement, and only the cross-check went missing.
+		return metav1.Condition{
+			Type:    mxlv1alpha1.ConditionTypeRDMADevicesEnumerated,
+			Status:  metav1.ConditionUnknown,
+			Reason:  mxlv1alpha1.ReasonHostDevicesUnreadable,
+			Message: fmt.Sprintf("host RDMA device list unreadable: %v", err),
+		}, true
+	}
+
+	if enumerated := rdmaDeviceCount(probed); enumerated > 0 || len(devices) == 0 {
+		msg := fmt.Sprintf("%d host device(s) active, %d enumerated across %s",
+			len(devices), enumerated, providerNames(rdmaProviders))
+		return metav1.Condition{
+			Type:    mxlv1alpha1.ConditionTypeRDMADevicesEnumerated,
+			Status:  metav1.ConditionTrue,
+			Reason:  mxlv1alpha1.ReasonHostDevicesRepresented,
+			Message: msg,
+		}, true
+	}
+
+	return metav1.Condition{
+		Type:   mxlv1alpha1.ConditionTypeRDMADevicesEnumerated,
+		Status: metav1.ConditionFalse,
+		Reason: mxlv1alpha1.ReasonHostDevicesUnenumerated,
+		Message: fmt.Sprintf(
+			"host exposes %s with an active port and no RDMA provider enumerated a device; "+
+				"mirrors on this node resolve to a non-RDMA provider until the gateway restarts",
+			strings.Join(devices, ", ")),
+	}, true
+}
+
+// rdmaDeviceCount totals the devices reported across the providers
+// that drive RDMA hardware.
+func rdmaDeviceCount(probed []mxlv1alpha1.MxlFabricsProviderCapability) int {
+	total := 0
+	for _, capability := range probed {
+		for _, provider := range rdmaProviders {
+			if string(capability.Name) == provider.String() {
+				total += int(capability.DeviceCount)
+				break
+			}
+		}
+	}
+	return total
+}
+
+// providerNames renders providers for a condition message.
+func providerNames(providers []fabrics.Provider) string {
+	names := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		names = append(names, provider.String())
+	}
+	return strings.Join(names, "/")
 }
 
 // probe enumerates the host's fabric interfaces and folds them into
