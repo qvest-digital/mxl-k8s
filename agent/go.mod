@@ -3,7 +3,7 @@ module github.com/qvest-digital/mxl-k8s/agent
 go 1.26.0
 
 require (
-	github.com/qvest-digital/mxl-k8s/api v1.0.0-rc.13 // x-release-please-version
+	github.com/qvest-digital/mxl-k8s/api v1.0.0-rc.14 // x-release-please-version
 	github.com/stretchr/testify v1.12.1
 	go.uber.org/goleak v1.3.0
 	golang.org/x/sys v0.47.0
