@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0-rc.9](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.8...v1.1.0-rc.9) (2026-09-03)
+
+
+### Bug Fixes
+
+* **gateway:** blocking MakeProgress for verbs, grain-rate audio tick ([#311](https://github.com/qvest-digital/mxl-k8s/issues/311)) ([d089c24](https://github.com/qvest-digital/mxl-k8s/commit/d089c2455a18d4ca05c16eb62c5f19c26f08ae86))
+* **gateway:** use blocking MakeProgress for verbs and grain-rate interval for audio ([d089c24](https://github.com/qvest-digital/mxl-k8s/commit/d089c2455a18d4ca05c16eb62c5f19c26f08ae86))
+
 ## [1.1.0-rc.8](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.7...v1.1.0-rc.8) (2026-09-03)
 
 
