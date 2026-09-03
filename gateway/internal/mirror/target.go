@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -107,6 +108,53 @@ const maxStuckRebuilds uint32 = 3
 // gets the flow directory reclaimed (see reclaimUnusableFlowDir).
 const maxTargetOpenAttempts uint32 = 3
 
+// terminalTargetOpenAttempts is the consecutive-failure count past
+// which the target side stops treating an open failure as retryable.
+//
+// maxTargetOpenAttempts moves the phase out of Materializing, but
+// Degraded still reads as "retrying", and backoffFor tops out at 30 s.
+// A mirror whose fabric device has gone away therefore re-probes twice
+// a minute for as long as the CR exists and reports the same reason as
+// one that has failed twice, so nothing distinguishes a mirror that is
+// recovering from one that never will. Past this count the phase goes
+// to Failed under its own reason and the retry drops to
+// terminalRetryInterval.
+//
+// The count is reached after roughly 80 s of honest retrying, which is
+// longer than any handshake window the gateway waits on elsewhere.
+const terminalTargetOpenAttempts uint32 = 10
+
+// terminalRetryInterval is the retry period a mirror gets once its
+// open failures have been declared unrecoverable. Long enough that a
+// permanently dead device costs nothing, short enough that a device
+// that does come back is picked up without operator action.
+const terminalRetryInterval = 10 * time.Minute
+
+// targetConcurrentReconciles is how many mirrors the target side
+// reconciles at once.
+//
+// controller-runtime defaults to one worker, so every blocking step -
+// a libmxl handshake, a bounded teardown wait - stalls target-side
+// reconciliation for every other mirror on the node, and one mirror
+// whose fabric device is wedged holds up the deletion of all the
+// others. A worker per mirror is not wanted either: the work behind
+// each one is a libmxl open, and the map plus the per-entry lifecycle
+// lock are what keep the state correct, so the bound is about how much
+// of the node's libmxl work happens at once, not about safety.
+//
+// controller-runtime never reconciles one object key on two workers at
+// the same time regardless of this value, so raising it introduces no
+// same-mirror concurrency that did not already exist between Reconcile,
+// the flusher and the recovery goroutine.
+const targetConcurrentReconciles = 4
+
+// defaultTeardownGrace bounds how long a target teardown waits for the
+// per-mirror goroutines it cancelled to return. A progress loop parked
+// in a libmxl-fabrics call that never comes back cannot be waited out,
+// and every teardown path is on the critical path of either a deletion
+// or a rebuild.
+const defaultTeardownGrace = 5 * time.Second
+
 // reclaimRetryDelay is how long the retry after a flow-directory
 // reclaim waits. Short on purpose: materialising a fresh directory is
 // the point of the reclaim, so that attempt does not sit out the
@@ -138,6 +186,18 @@ var errOpenWriterFailed = errors.New("open local writer")
 // reason accompanies a terminal Phase=Failed and signals that the
 // gateway has given up rebuilding the target in place.
 const ReasonStuckHandshakeCapReached = "StuckHandshakeCapReached"
+
+// ReasonOpenTargetUnrecoverable marks a target-side mirror whose open
+// has failed terminalTargetOpenAttempts times running.
+//
+// Distinct from ReasonOpenTargetFailed, which rides on a Degraded
+// mirror the gateway is still retrying at full rate: this reason says
+// the gateway has stopped expecting the open to succeed, so an
+// operator reading it knows the mirror needs the device looked at
+// rather than more time. Held here rather than in the api module for
+// the same reason as ReasonStuckHandshakeCapReached - it names a
+// gateway-internal give-up rule, not part of the CRD contract.
+const ReasonOpenTargetUnrecoverable = "OpenTargetUnrecoverable"
 
 // TargetReconciler reconciles MxlFlowMirror resources from the
 // receiving side. See the package doc.
@@ -197,6 +257,11 @@ type TargetReconciler struct {
 	// defaultStuckHandshakeAfter.
 	StuckHandshakeAfter time.Duration
 
+	// TeardownGrace bounds how long a teardown waits for the per-mirror
+	// goroutines it cancelled to return before giving up on releasing
+	// their libmxl handles. Defaults to defaultTeardownGrace.
+	TeardownGrace time.Duration
+
 	// openFabricSideFn is overridable so tests exercise the recovery
 	// path without a real libmxl-fabrics. Production leaves it nil
 	// and the reconciler falls back to (*TargetReconciler).openFabricSide.
@@ -208,7 +273,7 @@ type TargetReconciler struct {
 	// stub so the watchdog's spawn/cap behavior can be observed
 	// without driving a real libmxl-fabrics rebuild. Kept distinct
 	// from openFabricSideFn because the watchdog's contract is
-	// "fire-and-forget" — it does not own the recovery result, only
+	// "fire-and-forget" -- it does not own the recovery result, only
 	// the gate that prevents double spawns.
 	recoverFn func(key types.NamespacedName)
 
@@ -310,6 +375,22 @@ type targetEntry struct {
 	// rebuilt and the new progress loop is running.
 	recovering atomic.Bool
 
+	// lifecycle guards every mutable handle below, together with
+	// closed. The recovery goroutine swaps the fabric side and the
+	// progress-loop pair while a teardown on the reconcile goroutine
+	// reads them, and the two have to move as one: a teardown that
+	// took one generation's cancel and the next generation's done
+	// channel would cancel a loop that had already exited and then
+	// wait on one nobody had asked to stop.
+	lifecycle sync.Mutex
+
+	// closed marks the entry as torn down, and is the authority on who
+	// owns its handles. A recovery already in flight when a teardown
+	// lands must not install a rebuilt fabric side or start a fresh
+	// progress loop against the entry: it is gone from r.targets, so
+	// nothing would ever cancel that loop again.
+	closed bool
+
 	// cancel stops the per-mirror progress goroutine; done is closed
 	// when the goroutine returns. Without this loop the libmxl-fabrics
 	// Target never advances its event/completion queues, so remote
@@ -321,6 +402,58 @@ type targetEntry struct {
 	// is closed when it returns.
 	flusherCancel context.CancelFunc
 	flusherDone   chan struct{}
+}
+
+// stopProgressLoop cancels the entry's progress loop and waits up to
+// grace for it to return, reporting whether it exited.
+//
+// The cancel and the done channel are read under one hold of lifecycle
+// so they always belong to the same loop generation. The wait is
+// bounded because a loop parked inside libmxl-fabrics never returns:
+// every caller is on the critical path of a deletion or a rebuild, and
+// neither may be held by a goroutine that is not coming back.
+func (e *targetEntry) stopProgressLoop(grace time.Duration) bool {
+	e.lifecycle.Lock()
+	cancel, done := e.cancel, e.done
+	e.lifecycle.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	return waitClosed(done, grace)
+}
+
+// abandon marks the entry torn down and hands back the writer, so a
+// caller that has already removed it from r.targets can release the
+// one handle it still owns. A nil writer means another teardown got
+// there first.
+func (e *targetEntry) abandon() *mxl.Writer {
+	e.lifecycle.Lock()
+	defer e.lifecycle.Unlock()
+	if e.closed {
+		return nil
+	}
+	e.closed = true
+	writer := e.writer
+	e.writer = nil
+	return writer
+}
+
+// waitClosed reports whether ch closed within d. A nil channel counts
+// as closed: an entry whose goroutine was never started has nothing to
+// wait for.
+func waitClosed(ch <-chan struct{}, d time.Duration) bool {
+	if ch == nil {
+		return true
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ch:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors,verbs=get;list;watch;update;patch
@@ -392,7 +525,19 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		if !controllerutil.ContainsFinalizer(&mirror, TargetFinalizerName) {
 			return ctrl.Result{}, nil
 		}
-		r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Spec.FlowID))
+		// The finalizer comes off whether or not the handles could be
+		// released. Teardown is bounded but not guaranteed: a progress
+		// loop wedged inside libmxl-fabrics never returns, and this
+		// reconciler is the only thing that can remove its own
+		// finalizer, so gating the removal on that wait leaves an
+		// MxlFlowMirror no delete can ever clear - a forced delete
+		// does not remove finalizers either. Abandoned handles cost
+		// one node's memory until the gateway restarts, which is
+		// recoverable; an undeletable object is not.
+		if !r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Spec.FlowID)) {
+			l.Info("target-side teardown timed out; abandoning libmxl handles to let the mirror be deleted",
+				"grace", r.teardownGrace())
+		}
 		controllerutil.RemoveFinalizer(&mirror, TargetFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
 			if apierrors.IsConflict(err) {
@@ -502,7 +647,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// Concurrent reconcile produced a stray entry; close the new
 		// one and reuse the existing.
 		r.mu.Unlock()
-		closeTargetHandles(entry, keepFlow)
+		closeTargetHandles(entry, keepFlow, r.teardownGrace())
 		return ctrl.Result{}, nil
 	}
 	entry.flowID = mirror.Spec.FlowID
@@ -565,14 +710,10 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, flowDef string, 
 		return nil, err
 	}
 
-	entry := &targetEntry{
-		writer:   writer,
-		target:   target,
-		info:     info,
-		infoStr:  s,
-		provider: provider,
-	}
-	r.startProgressLoop(entry, key)
+	// The entry is not in r.targets yet, so nothing can be tearing it
+	// down and the install cannot be refused.
+	entry := &targetEntry{writer: writer, provider: provider}
+	r.startProgressLoop(entry, key, target, info, s)
 	return entry, nil
 }
 
@@ -605,11 +746,29 @@ func (r *TargetReconciler) handleOpenTargetFailure(ctx context.Context, mirror *
 	attempts, wait := r.attempts.fail(key, inputs, r.now(), backoffFor)
 	r.mu.Unlock()
 
+	// Three escalations, not two. Materializing while the failure could
+	// still be a slow handshake, Degraded once it cannot, and Failed
+	// once the gateway has stopped expecting the open to work at all:
+	// backoffFor caps at 30s, so without the last step a mirror whose
+	// fabric device has gone away re-probes twice a minute forever and
+	// reads the same as one that has failed three times.
 	phase := mxlv1alpha1.MxlFlowMirrorMaterializing
-	if attempts >= maxTargetOpenAttempts {
+	reason := mxlv1alpha1.ReasonOpenTargetFailed
+	switch {
+	case attempts >= terminalTargetOpenAttempts:
+		phase = mxlv1alpha1.MxlFlowMirrorFailed
+		reason = ReasonOpenTargetUnrecoverable
+		// The retry is armed on the way in, not returned as advice:
+		// this reconciler watches the object it is about to write, so
+		// its own status write wakes it long before any RequeueAfter.
+		wait = terminalRetryInterval
+		r.mu.Lock()
+		r.attempts.rearm(key, r.now(), wait)
+		r.mu.Unlock()
+	case attempts >= maxTargetOpenAttempts:
 		phase = mxlv1alpha1.MxlFlowMirrorDegraded
 	}
-	r.surfaceTargetFailure(ctx, mirror, phase, mxlv1alpha1.ReasonOpenTargetFailed,
+	r.surfaceTargetFailure(ctx, mirror, phase, reason,
 		fmt.Sprintf("%s (attempt %d)", openErr.Error(), attempts))
 	l.Error(openErr, "open target", "attempt", attempts, "phase", string(phase))
 
@@ -726,10 +885,27 @@ func (r *TargetReconciler) openFabricSideDispatch(writer *mxl.Writer, provider f
 	return r.openFabricSide(writer, provider)
 }
 
-// startProgressLoop wires the progress goroutine for an entry and
-// arms the recovery callback. Called after openTarget and again
-// after every successful in-place fabric rebuild.
-func (r *TargetReconciler) startProgressLoop(entry *targetEntry, key types.NamespacedName) {
+// startProgressLoop publishes a freshly-opened fabric side on the
+// entry and wires the progress goroutine that drives it. Called after
+// openTarget and again after every successful in-place fabric rebuild.
+//
+// The install and the goroutine handles are written under one hold of
+// entry.lifecycle, so a teardown racing this either sees the whole new
+// generation or none of it. Splitting them is what lets a teardown
+// pair one generation's cancel with the next generation's done channel
+// and then wait forever on a loop nobody asked to stop.
+//
+// Reports false when the entry has already been torn down. The caller
+// still owns target and info in that case and has to release them:
+// nothing would ever cancel a loop started against an entry that is no
+// longer in r.targets.
+func (r *TargetReconciler) startProgressLoop(
+	entry *targetEntry,
+	key types.NamespacedName,
+	target *fabrics.Target,
+	info *fabrics.TargetInfo,
+	infoStr string,
+) bool {
 	// Re-arm the stuck-handshake watchdog reference: every fabric
 	// open (initial or rebuilt) gets its own elapsed window measured
 	// against its own commits baseline. Without resetting here the
@@ -741,10 +917,19 @@ func (r *TargetReconciler) startProgressLoop(entry *targetEntry, key types.Names
 
 	loopCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+
+	entry.lifecycle.Lock()
+	if entry.closed {
+		entry.lifecycle.Unlock()
+		cancel()
+		return false
+	}
+	entry.target, entry.info, entry.infoStr = target, info, infoStr
 	entry.cancel = cancel
 	entry.done = done
-	target := entry.target
 	writer := entry.writer
+	entry.lifecycle.Unlock()
+
 	onFatal := func() {
 		// Detach the recovery work from the goroutine that's exiting
 		// so the recovery's wait-for-done doesn't deadlock on its own
@@ -781,6 +966,7 @@ func (r *TargetReconciler) startProgressLoop(entry *targetEntry, key types.Names
 		}
 		go runTargetProgressLoop(loopCtx, done, readFn, completeFn, commitFn, onFatal, entry)
 	}
+	return true
 }
 
 // targetReadTimeout is how long a blocking target read parks before
@@ -1032,16 +1218,19 @@ func commitArrivedSamples(writer *mxl.Writer, head uint64, count int) (uint64, e
 	return uint64(count) * (sa.Stride / bufferLength) * sa.ChannelCount, nil
 }
 
-func (r *TargetReconciler) closeEntry(key types.NamespacedName, disp flowDisposition) {
+// closeEntry drops a mirror from the live set and tears its handles
+// down, reporting whether the teardown completed within the grace. An
+// entry that was not live counts as torn down.
+func (r *TargetReconciler) closeEntry(key types.NamespacedName, disp flowDisposition) bool {
 	r.mu.Lock()
 	entry := r.targets[key]
 	delete(r.targets, key)
 	delete(r.attempts, key)
 	r.mu.Unlock()
 	if entry == nil {
-		return
+		return true
 	}
-	closeTargetHandles(entry, disp)
+	return closeTargetHandles(entry, disp, r.teardownGrace())
 }
 
 // localFlowDisposition decides what a teardown should do with the
@@ -1116,25 +1305,42 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 	// the wait below would block forever and pin entry.recovering=true.
 	// The flusher would then skip every subsequent tick, no further
 	// recovery would ever spawn, and the cap branch could never fire.
-	if entry.cancel != nil {
-		entry.cancel()
-	}
-
-	// Wait for the previous progress loop to finish before swapping
-	// its target/info pointers.
-	if entry.done != nil {
-		<-entry.done
+	//
+	// The wait is bounded for the same reason the cancel is explicit: a
+	// loop parked inside libmxl-fabrics never returns, and waiting on
+	// it forever pins recovering=true, which is exactly the state this
+	// is trying to leave. On a timeout the old loop still owns the
+	// fabric handles, so the rebuild is abandoned rather than pulled
+	// out from under it; recoveryAttempts still counts the try, so the
+	// watchdog's cap retires the entry after maxStuckRebuilds of them.
+	if !entry.stopProgressLoop(r.teardownGrace()) {
+		l.Info("progress loop did not exit; skipping fabric-side rebuild",
+			"grace", r.teardownGrace())
+		return
 	}
 
 	// Tear down the fabric side; KEEP the writer so the flow file
 	// on disk and consumer FlowReader handles stay valid.
-	if entry.info != nil {
-		_ = entry.info.Close()
+	//
+	// Taken out from under lifecycle: a teardown that lands here owns
+	// the handles instead, and closing them from both sides is a
+	// double free.
+	entry.lifecycle.Lock()
+	if entry.closed {
+		entry.lifecycle.Unlock()
+		return
 	}
-	if entry.target != nil {
-		_ = entry.target.Close()
-	}
+	oldInfo, oldTarget := entry.info, entry.target
+	writer, provider := entry.writer, entry.provider
 	entry.info, entry.target, entry.infoStr = nil, nil, ""
+	entry.lifecycle.Unlock()
+
+	if oldInfo != nil {
+		_ = oldInfo.Close()
+	}
+	if oldTarget != nil {
+		_ = oldTarget.Close()
+	}
 
 	// Publish Materializing so observers see the in-flight rebuild.
 	// The flusher flips Phase back to Ready on the first commit the
@@ -1151,7 +1357,7 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 		}
 	}
 
-	target, info, s, err := r.openFabricSideDispatch(entry.writer, entry.provider)
+	target, info, s, err := r.openFabricSideDispatch(writer, provider)
 	if err != nil {
 		l.Error(err, "rebuild fabric side")
 		// Drop the entry so the next Reconcile rebuilds from scratch
@@ -1159,15 +1365,25 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 		r.mu.Lock()
 		delete(r.targets, key)
 		r.mu.Unlock()
-		if entry.writer != nil {
-			_ = entry.writer.Close()
+		if w := entry.abandon(); w != nil {
+			_ = w.Close()
 		}
 		return
 	}
-	entry.target = target
-	entry.info = info
-	entry.infoStr = s
-	r.startProgressLoop(entry, key)
+	if !r.startProgressLoop(entry, key, target, info, s) {
+		// Torn down while the fabric side was being rebuilt. The
+		// teardown has already passed this entry by, so release what
+		// this rebuild opened rather than leaving a loop driving a
+		// mirror nothing will ever cancel again.
+		l.Info("mirror torn down during rebuild; releasing the fabric side it opened")
+		if info != nil {
+			_ = info.Close()
+		}
+		if target != nil {
+			_ = target.Close()
+		}
+		return
+	}
 
 	mirror, err := r.fetchMirror(ctx, key)
 	if err != nil {
@@ -1217,32 +1433,59 @@ const (
 	keepFlow flowDisposition = true
 )
 
-func closeTargetHandles(e *targetEntry, disp flowDisposition) {
-	if e.flusherCancel != nil {
-		e.flusherCancel()
+// closeTargetHandles stops an entry's flusher and progress loop and
+// releases the libmxl handles they were driving, reporting whether the
+// goroutines actually exited.
+//
+// The entry's handles are taken under lifecycle in one step, so a
+// recovery running concurrently either sees an entry that is still
+// live and owns its handles, or one that is closed and owns none.
+//
+// The waits are bounded by grace, and the handles are released only if
+// both goroutines returned: freeing a handle underneath a loop still
+// polling it faults inside cgo. A loop that misses the grace period
+// therefore keeps what it is using and the entry is abandoned instead,
+// which leaks one target and one writer on a node whose fabric is
+// already broken. That is the deliberate trade: the alternative is an
+// unbounded wait on a goroutine that is not coming back, and every
+// caller of this is on the critical path of a deletion or a rebuild.
+func closeTargetHandles(e *targetEntry, disp flowDisposition, grace time.Duration) bool {
+	e.lifecycle.Lock()
+	if e.closed {
+		e.lifecycle.Unlock()
+		return true
 	}
-	if e.flusherDone != nil {
-		<-e.flusherDone
+	e.closed = true
+	cancel, done := e.cancel, e.done
+	flusherCancel, flusherDone := e.flusherCancel, e.flusherDone
+	info, target, writer := e.info, e.target, e.writer
+	e.info, e.target, e.writer = nil, nil, nil
+	e.lifecycle.Unlock()
+
+	if flusherCancel != nil {
+		flusherCancel()
 	}
-	if e.cancel != nil {
-		e.cancel()
+	if cancel != nil {
+		cancel()
 	}
-	if e.done != nil {
-		<-e.done
+	if !waitClosed(flusherDone, grace) || !waitClosed(done, grace) {
+		return false
 	}
-	if e.info != nil {
-		_ = e.info.Close()
+
+	if info != nil {
+		_ = info.Close()
 	}
-	if e.target != nil {
-		_ = e.target.Close()
+	if target != nil {
+		_ = target.Close()
 	}
-	if e.writer != nil {
+	if writer != nil {
 		if disp == keepFlow {
-			_ = e.writer.Detach()
+			_ = writer.Detach()
 		} else {
-			_ = e.writer.Close()
+			_ = writer.Close()
 		}
 	}
+	return true
 }
 
 // applyTargetStatus writes mirror.status via server-side apply with
@@ -1347,7 +1590,7 @@ func (r *TargetReconciler) applyTargetStatus(
 // the original error the caller returns/requeues on, so the result is
 // intentionally ignored. It exists so a target-open failure shows up
 // in MxlFlowMirror status (and `kubectl describe`) instead of the
-// mirror wedging silently at an empty phase — the producer, the
+// mirror wedging silently at an empty phase -- the producer, the
 // consumer, and the cluster diagnostics only observe the CR, never the
 // gateway log. Only reached on the pre-Ready path (the Reconcile
 // fast-path returns earlier for a live, fresh, Ready mirror), so this
@@ -1373,6 +1616,15 @@ func (r *TargetReconciler) degradedAfter() time.Duration {
 		return r.DegradedAfter
 	}
 	return defaultDegradedAfter
+}
+
+// teardownGrace returns how long a teardown waits for the per-mirror
+// goroutines it cancelled, falling back to defaultTeardownGrace.
+func (r *TargetReconciler) teardownGrace() time.Duration {
+	if r.TeardownGrace > 0 {
+		return r.TeardownGrace
+	}
+	return defaultTeardownGrace
 }
 
 // stuckHandshakeAfter returns the configured silent-wedge timeout the
@@ -1419,14 +1671,23 @@ type targetProgressState struct {
 // ticks at r.flushInterval() and publishes TargetProgress only when
 // the observed phase has transitioned, so a steady-state mirror
 // produces zero status writes.
+//
+// A torn-down entry gets no flusher: it is gone from r.targets, so
+// nothing would ever cancel one started against it.
 func (r *TargetReconciler) startFlusher(key types.NamespacedName, entry *targetEntry) {
-	if entry.flusherCancel != nil {
-		return
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+
+	entry.lifecycle.Lock()
+	if entry.closed || entry.flusherCancel != nil {
+		entry.lifecycle.Unlock()
+		cancel()
+		return
+	}
 	entry.flusherCancel = cancel
 	entry.flusherDone = done
+	entry.lifecycle.Unlock()
+
 	go r.runFlusher(ctx, done, key, entry)
 }
 
@@ -1543,27 +1804,25 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 						LastTransitionTime: metav1.Now(),
 					})
 				}
-				if entry.cancel != nil {
-					entry.cancel()
-				}
-				if entry.done != nil {
-					// Mirror recoverFromFatalError's ordering
-					// (target.go drop-entry exit): the progress loop
-					// must release its libmxl handles before Close
-					// runs underneath it.
-					<-entry.done
-				}
 				r.mu.Lock()
 				delete(r.targets, key)
 				r.mu.Unlock()
-				if entry.writer != nil {
+				// Mirror recoverFromFatalError's ordering (target.go
+				// drop-entry exit): the progress loop must release its
+				// libmxl handles before Close runs underneath it. The
+				// wait is bounded for the same reason as every other
+				// teardown, and a loop that outlasts it keeps the
+				// writer rather than having it closed from under it.
+				if !entry.stopProgressLoop(r.teardownGrace()) {
+					log.FromContext(ctx).Info(
+						"stuck handshake cap: progress loop did not exit, abandoning libmxl handles",
+						"mirror", key, "grace", r.teardownGrace())
+					return
+				}
+				if writer := entry.abandon(); writer != nil {
 					// Invalidates consumer FlowReaders, matching
-					// recoverFromFatalError's failure exit. A
-					// concurrent closeEntry+closeTargetHandles would
-					// also Close this writer; double-close on
-					// *mxl.Writer is safe per the existing precedent
-					// in closeTargetHandles.
-					_ = entry.writer.Close()
+					// recoverFromFatalError's failure exit.
+					_ = writer.Close()
 				}
 				return
 			}
@@ -1774,5 +2033,8 @@ func (r *TargetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&mxlv1alpha1.MxlFlowMirror{}).
 		Named("mxlflowmirror-target").
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: targetConcurrentReconciles,
+		}).
 		Complete(r)
 }
