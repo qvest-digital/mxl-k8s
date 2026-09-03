@@ -584,3 +584,153 @@ func TestRefresh_RecreatesADeletedResource(t *testing.T) {
 	require.NotNil(t, tcp)
 	assert.Equal(t, int32(1), tcp.DeviceCount)
 }
+
+// fakeHostDevices stands in for the host's RDMA device inventory.
+type fakeHostDevices struct {
+	out []string
+	err error
+}
+
+func (f fakeHostDevices) ActiveDevices() ([]string, error) { return f.out, f.err }
+
+// rdmaCondition returns the enumeration cross-check condition, or nil
+// when the publisher left it unset.
+func rdmaCondition(t *testing.T, p *Publisher) *metav1.Condition {
+	t.Helper()
+	got := getCR(t, p)
+	return meta.FindStatusCondition(got.Status.Conditions,
+		mxlv1alpha1.ConditionTypeRDMADevicesEnumerated)
+}
+
+// The defect this guards. libfabric builds a provider's device list
+// once per process and offers no rebuild through the libmxl-fabrics
+// API, so a gateway that enumerated before the host's RDMA devices
+// were usable reports none of them for the rest of its life. The
+// published entry is identical to the one a host with no RDMA
+// hardware produces, and every mirror silently resolves to a
+// non-RDMA provider.
+func TestRefresh_ReportsHostDevicesMissingFromTheProbe(t *testing.T) {
+	l := &fakeLister{out: []fabrics.InterfaceConfig{
+		iface(fabrics.ProviderTCP, "10.20.53.13", "eth0"),
+	}}
+	p := &Publisher{
+		Client:      newClient(t, existingCR()).Build(),
+		NodeName:    "n1",
+		Providers:   []fabrics.Provider{fabrics.ProviderAny},
+		Lister:      l,
+		HostDevices: fakeHostDevices{out: []string{"dev0"}},
+	}
+	require.NoError(t, p.Refresh(context.Background()))
+
+	cond := rdmaCondition(t, p)
+	require.NotNil(t, cond, "a provider that measured nothing while the host "+
+		"carries an active device is the whole condition")
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, mxlv1alpha1.ReasonHostDevicesUnenumerated, cond.Reason)
+	assert.Contains(t, cond.Message, "dev0")
+}
+
+// A host with no RDMA hardware is represented by definition, and
+// must not be reported as a discrepancy: the fix would otherwise turn
+// a correct zero into a permanent fault on every node without RDMA.
+func TestRefresh_HostWithoutRDMADevicesIsRepresented(t *testing.T) {
+	l := &fakeLister{out: []fabrics.InterfaceConfig{
+		iface(fabrics.ProviderTCP, "10.20.53.13", "eth0"),
+	}}
+	p := &Publisher{
+		Client:      newClient(t, existingCR()).Build(),
+		NodeName:    "n1",
+		Providers:   []fabrics.Provider{fabrics.ProviderAny},
+		Lister:      l,
+		HostDevices: fakeHostDevices{},
+	}
+	require.NoError(t, p.Refresh(context.Background()))
+
+	cond := rdmaCondition(t, p)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, mxlv1alpha1.ReasonHostDevicesRepresented, cond.Reason)
+}
+
+// A probe that found the hardware is the healthy case.
+func TestRefresh_EnumeratedRDMADeviceIsRepresented(t *testing.T) {
+	l := &fakeLister{out: []fabrics.InterfaceConfig{
+		iface(fabrics.ProviderVerbs, "10.20.53.13", "mlx5_0"),
+		iface(fabrics.ProviderTCP, "10.20.53.13", "eth0"),
+	}}
+	p := &Publisher{
+		Client:      newClient(t, existingCR()).Build(),
+		NodeName:    "n1",
+		Providers:   []fabrics.Provider{fabrics.ProviderAny},
+		Lister:      l,
+		HostDevices: fakeHostDevices{out: []string{"dev0"}},
+	}
+	require.NoError(t, p.Refresh(context.Background()))
+
+	cond := rdmaCondition(t, p)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, mxlv1alpha1.ReasonHostDevicesRepresented, cond.Reason)
+}
+
+// A gateway configured for tcp alone advertises no RDMA provider by
+// instruction rather than by measurement, so the host device list
+// contradicts nothing and the condition does not apply.
+func TestRefresh_TCPOnlyBoundLeavesTheConditionUnset(t *testing.T) {
+	l := &fakeLister{out: []fabrics.InterfaceConfig{
+		iface(fabrics.ProviderTCP, "10.20.53.13", "eth0"),
+	}}
+	p := &Publisher{
+		Client:      newClient(t, existingCR()).Build(),
+		NodeName:    "n1",
+		Providers:   []fabrics.Provider{fabrics.ProviderTCP},
+		Lister:      l,
+		HostDevices: fakeHostDevices{out: []string{"dev0"}},
+	}
+	require.NoError(t, p.Refresh(context.Background()))
+
+	assert.Nil(t, rdmaCondition(t, p))
+}
+
+// Without a host device list there is nothing to compare against, and
+// claiming either answer would be a guess.
+func TestRefresh_NoHostDeviceListLeavesTheConditionUnset(t *testing.T) {
+	l := &fakeLister{out: []fabrics.InterfaceConfig{
+		iface(fabrics.ProviderTCP, "10.20.53.13", "eth0"),
+	}}
+	p := &Publisher{
+		Client:    newClient(t, existingCR()).Build(),
+		NodeName:  "n1",
+		Providers: []fabrics.Provider{fabrics.ProviderAny},
+		Lister:    l,
+	}
+	require.NoError(t, p.Refresh(context.Background()))
+
+	assert.Nil(t, rdmaCondition(t, p))
+}
+
+// The providers stand on their own measurement when only the
+// cross-check fails, so the condition goes Unknown rather than False
+// and the probe result is published either way.
+func TestRefresh_UnreadableHostDeviceListIsUnknown(t *testing.T) {
+	l := &fakeLister{out: []fabrics.InterfaceConfig{
+		iface(fabrics.ProviderTCP, "10.20.53.13", "eth0"),
+	}}
+	p := &Publisher{
+		Client:      newClient(t, existingCR()).Build(),
+		NodeName:    "n1",
+		Providers:   []fabrics.Provider{fabrics.ProviderAny},
+		Lister:      l,
+		HostDevices: fakeHostDevices{err: errors.New("boom")},
+	}
+	require.NoError(t, p.Refresh(context.Background()))
+
+	cond := rdmaCondition(t, p)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionUnknown, cond.Status)
+	assert.Equal(t, mxlv1alpha1.ReasonHostDevicesUnreadable, cond.Reason)
+
+	got := getCR(t, p)
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions,
+		mxlv1alpha1.ConditionTypeProbed), "the probe itself still succeeded")
+}

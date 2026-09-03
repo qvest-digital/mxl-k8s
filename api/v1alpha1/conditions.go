@@ -29,6 +29,25 @@ const (
 	// providers that worked, so a consumer cannot tell "measured
 	// none" from "never measured" without this.
 	ConditionTypeProbed = "Probed"
+
+	// ConditionTypeRDMADevicesEnumerated reports whether the RDMA
+	// devices the host kernel exposes are accounted for by
+	// status.providers. Owned by the gateway capability publisher.
+	//
+	// libfabric builds a provider's device list once per process, on
+	// the first enumeration, and rebuilds it only for a caller that
+	// asks to rescan. libmxl-fabrics takes no flags on its
+	// enumeration entry point, so nothing here can ask. A gateway
+	// that first enumerated while the host's RDMA devices were
+	// unusable therefore reports none of them for the rest of its
+	// life, and every mirror it takes part in resolves to the tcp
+	// fallback while still reaching Ready.
+	//
+	// A False condition is a discrepancy, not a proven fault. An
+	// active port does not by itself make a device one the verbs
+	// provider will build an endpoint on, so the gateway reports the
+	// difference rather than acting on it.
+	ConditionTypeRDMADevicesEnumerated = "RDMADevicesEnumerated"
 )
 
 // Condition reason constants for MxlFlowMirror and MxlFlow status.
@@ -124,4 +143,21 @@ const (
 	// providers are left in place rather than cleared, so a
 	// transient failure does not strand every mirror on the node.
 	ReasonProbeFailed = "ProbeFailed"
+
+	// ReasonHostDevicesRepresented marks an MxlNodeCapabilities whose
+	// enumerated providers account for the host's RDMA devices. A
+	// host exposing none is represented by definition.
+	ReasonHostDevicesRepresented = "HostDevicesRepresented"
+
+	// ReasonHostDevicesUnenumerated marks an MxlNodeCapabilities
+	// where the host exposes an RDMA device with an active port and
+	// no RDMA-capable provider was enumerated. Restarting the gateway
+	// is what runs the enumeration again; nothing reachable from a
+	// running process rebuilds it.
+	ReasonHostDevicesUnenumerated = "HostDevicesUnenumerated"
+
+	// ReasonHostDevicesUnreadable marks an MxlNodeCapabilities whose
+	// host RDMA device list could not be read. The enumerated
+	// providers stand; only the cross-check is missing.
+	ReasonHostDevicesUnreadable = "HostDevicesUnreadable"
 )
