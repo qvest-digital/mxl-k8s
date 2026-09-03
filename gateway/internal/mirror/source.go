@@ -761,7 +761,23 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 
 	progressInterval := o.ProgressInterval
 	if progressInterval <= 0 {
-		progressInterval = 2 * time.Millisecond
+		// A continuous (audio) flow's head advances by many samples
+		// per tick, so the loop calls TransferSamples once per tick
+		// for the whole (lastSent, head] delta. A 2 ms tick at 48 kHz
+		// means ~96 samples per call, ~500 calls/second -- five times
+		// the call rate of one batch per natural commit period. Each
+		// call is a cgo boundary crossing plus one RMA write, so the
+		// higher rate fills the send queue faster than the verbs
+		// completion queue drains it. Default the tick to the xferBatch
+		// period instead: ~10 ms at 48 kHz, ~100 calls/second, one call
+		// per natural batch -- matching the cadence the upstream
+		// reference transfer loop uses.
+		if audio && xferBatch > 0 {
+			progressInterval = defaultSampleProgressInterval(cfg.Common.GrainRate, xferBatch)
+		}
+		if progressInterval <= 0 {
+			progressInterval = 2 * time.Millisecond
+		}
 	}
 	// Zero means "not configured" and takes the default, which is
 	// itself negative; a negative fraction is how pacing is turned off,
@@ -781,7 +797,17 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 		}
 		return rt.HeadIndex, nil
 	}
-	progressFn := initiator.MakeProgressNonBlocking
+	// EFA reports completions through its own event queue, so a
+	// non-blocking poll is the right call. The verbs provider does
+	// not: fi_cq_read returns -EAGAIN when no completion has landed,
+	// and the send queue fills before the next tick drains it.
+	// MakeProgressBlocking parks on the completion queue for a
+	// bounded timeout, giving the NIC time to finish the DMA and
+	// free the send slot. The timeout matches the target-side
+	// read timeout (targetReadTimeout) rather than the tick: a
+	// tick-aligned timeout would return before a slow completion
+	// landed, and the queue would fill anyway.
+	progressFn := progressFuncFor(initiator, provider)
 
 	if audio {
 		// Resolved on the first transfer and reused: the width is fixed
@@ -1047,8 +1073,8 @@ func runTransferLoop(
 // The cgo-dependent calls are injected as functions so the state
 // machine stays testable without libmxl-fabrics. Production binds
 // probeRuntime to mxl.Reader.Runtime().HeadIndex, transferSamples to
-// Initiator.TransferSamples, and makeProgress to
-// Initiator.MakeProgressNonBlocking.
+// Initiator.TransferSamples, and makeProgress to the provider-specific
+// variant selected by progressFuncFor.
 // sampleFrameBytes is the payload one sample of a continuous flow
 // occupies across all its channels.
 //
@@ -1848,6 +1874,59 @@ func (r *SourceReconciler) flowToMirrors(ctx context.Context, obj client.Object)
 // where the head is re-read and the wedge becomes visible as a stalled
 // lastSent.
 const maxSampleTransferRetries = 8
+
+// defaultProgressTimeout caps how long a blocking MakeProgress call
+// parks on the completion queue before returning. The verbs provider
+// needs this: fi_cq_read returns -EAGAIN when no completion has
+// landed, and a non-blocking poll returns before the NIC finishes
+// the DMA, so the send queue fills and the next TransferSamples
+// call returns EAGAIN. Blocking for the timeout gives the NIC time
+// to complete the write and free the send slot. EFA does not need
+// it: its completion queue drains on the provider's own event
+// queue, and a blocking poll adds latency without improving
+// throughput. The timeout matches targetReadTimeout rather than
+// the tick interval: a tick-aligned timeout would return before a
+// slow completion landed, and the queue would fill anyway.
+const defaultProgressTimeout = 10 * time.Millisecond
+
+// defaultSampleProgressInterval returns the progress interval a
+// continuous (audio) flow uses when the operator has not configured
+// one. It is the time spanned by one xferBatch of samples at the
+// flow's grain (sample) rate: ~10 ms at 48 kHz with a 480-sample
+// batch, matching the natural commit cadence the reference transfer
+// loop uses. Zero when the rate or batch is unusable, so the caller
+// falls back to the 2 ms video default.
+func defaultSampleProgressInterval(rate mxl.Rational, xferBatch uint64) time.Duration {
+	if xferBatch == 0 || rate.Den <= 0 || rate.Num <= 0 {
+		return 0
+	}
+	return time.Duration(int64(time.Second) * int64(rate.Den) * int64(xferBatch) / int64(rate.Num))
+}
+
+// progressBlocking reports whether the provider's completion queue
+// needs a blocking MakeProgress call. EFA drains its completion queue
+// on the provider's own event queue, so a non-blocking poll is
+// correct. The verbs provider does not: fi_cq_read returns -EAGAIN
+// when no completion has landed, and a non-blocking poll returns
+// before the NIC finishes the DMA, so the send queue fills and the
+// next transfer call returns EAGAIN. A blocking call parks on the
+// completion queue for defaultProgressTimeout, giving the NIC time
+// to complete the write and free the send slot.
+func progressBlocking(provider fabrics.Provider) bool {
+	return provider != fabrics.ProviderEFA
+}
+
+// progressFuncFor selects the MakeProgress variant the transfer loop
+// drives, keyed on the fabric provider. See progressBlocking for the
+// rationale.
+func progressFuncFor(initiator *fabrics.Initiator, provider fabrics.Provider) ProgressFunc {
+	if !progressBlocking(provider) {
+		return initiator.MakeProgressNonBlocking
+	}
+	return func() error {
+		return initiator.MakeProgress(defaultProgressTimeout)
+	}
+}
 
 // logSampleTransferFailure renders a TransferSamples failure at a level
 // that matches what it means. A full send queue that outlived its

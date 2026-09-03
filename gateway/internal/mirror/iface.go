@@ -58,8 +58,9 @@ type TransferFunc func(idx uint64, paced bool) (skipped bool, err error)
 type TransferSlicesFunc func(idx uint64, start, end uint16) error
 
 // ProgressFunc drives libmxl-fabrics's event/completion queues.
-// Production calls Initiator.MakeProgressNonBlocking; the loop
-// tolerates fabrics.ErrNotReady silently.
+// Production selects the blocking or non-blocking variant per
+// provider (see progressFuncFor); the loop tolerates
+// fabrics.ErrNotReady silently.
 type ProgressFunc func() error
 
 // ReadGrainFunc waits for the target side to report an arrived grain.
