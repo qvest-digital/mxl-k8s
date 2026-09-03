@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.0-rc.14](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.13...api/v1.0.0-rc.14) (2026-09-03)
+
+
+### Features
+
+* **gateway:** report RDMA devices missing from the provider probe ([#307](https://github.com/qvest-digital/mxl-k8s/issues/307)) ([1a7f82d](https://github.com/qvest-digital/mxl-k8s/commit/1a7f82dddf54336abe140e5975f5817fe27a21bb))
+
+
+### Dependencies
+
+* **gomod:** update go modules to v0.37.0 ([#306](https://github.com/qvest-digital/mxl-k8s/issues/306)) ([bc5ae4a](https://github.com/qvest-digital/mxl-k8s/commit/bc5ae4a104632bd54477e04d8d13d70759a1ec7b))
+
 ## [1.0.0-rc.13](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.12...api/v1.0.0-rc.13) (2026-08-27)
 
 

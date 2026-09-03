@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.1.0-rc.8](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.7...v1.1.0-rc.8) (2026-09-03)
+
+
+### Features
+
+* **gateway:** report RDMA devices missing from the provider probe ([#307](https://github.com/qvest-digital/mxl-k8s/issues/307)) ([1a7f82d](https://github.com/qvest-digital/mxl-k8s/commit/1a7f82dddf54336abe140e5975f5817fe27a21bb))
+
+
+### Bug Fixes
+
+* **gateway:** degrade a wedged target-side mirror instead of deadlocking ([#309](https://github.com/qvest-digital/mxl-k8s/issues/309)) ([d54b5d8](https://github.com/qvest-digital/mxl-k8s/commit/d54b5d89de810c2e36e9d9de7100c6838c80a042))
+
+
+### Dependencies
+
+* **gomod:** update go modules to v0.37.0 ([#306](https://github.com/qvest-digital/mxl-k8s/issues/306)) ([bc5ae4a](https://github.com/qvest-digital/mxl-k8s/commit/bc5ae4a104632bd54477e04d8d13d70759a1ec7b))
+
+
+### Build System
+
+* **deps:** bump go-mxl to v1.1.0-rc.2 ([#310](https://github.com/qvest-digital/mxl-k8s/issues/310)) ([53eec9a](https://github.com/qvest-digital/mxl-k8s/commit/53eec9a1c1c75e23b9b0007fbd62d0ccc7ad1cea))
+
 ## [1.1.0-rc.7](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.6...v1.1.0-rc.7) (2026-08-27)
 
 
