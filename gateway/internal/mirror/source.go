@@ -711,9 +711,10 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 
 	// A continuous (audio) flow moves samples, not grains; pick the
 	// transfer path from the flow's data format. maxBatch is the
-	// reader's max readable sample run, used as the catch-up window;
-	// xferBatch caps a single TransferSamples call, which the fabric
-	// rejects when the count is over-large.
+	// reader's max readable sample run, which caps xferBatch so a
+	// single TransferSamples never exceeds the target's bounce-buffer
+	// entry; xferBatch is one natural commit batch (~10 ms of audio)
+	// and also sizes the transfer tick and the catch-up bound.
 	cfg, err := reader.Config()
 	if err != nil {
 		_ = info.Close()
@@ -824,7 +825,7 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 			entry.bytes.Add(uint64(count) * frameBytes)
 			return nil
 		}
-		go runSampleTransferLoop(loopCtx, done, flowID, runtimeFn, transferSamplesFn, progressFn, maxBatch, xferBatch, progressInterval, entry)
+		go runSampleTransferLoop(loopCtx, done, flowID, runtimeFn, transferSamplesFn, progressFn, xferBatch, progressInterval, entry)
 	} else {
 		// The pacer is keyed on flow plus target so two mirrors of one
 		// flow, and mirrors of different flows, get different phase
@@ -1065,10 +1066,13 @@ func runTransferLoop(
 // continuous flow's head advances by many samples between ticks, so
 // the loop transfers the (lastSent, head] delta in chunks of at most
 // xferBatch samples (the fabric rejects an over-large single transfer).
-// If the source falls more than maxBatch (the reader's max readable
-// sample run) behind the writer the oldest samples have left the
-// readable window; the loop skips ahead to head-maxBatch and signals
-// the tracker so the reconciler can publish SourceProgress=ReaderAgedOut.
+// The catch-up is bounded: a mirror that fell behind transfers at most
+// maxSampleCatchUp (a small multiple of xferBatch) per tick and skips
+// anything older, signalling the tracker so the reconciler can publish
+// SourceProgress=ReaderAgedOut. A continuous flow is consumed at its
+// own sample rate, so a backlog can never be drained faster than real
+// time; attempting it floods the send queue and starves every mirror
+// sharing the fabric.
 //
 // The cgo-dependent calls are injected as functions so the state
 // machine stays testable without libmxl-fabrics. Production binds
@@ -1107,7 +1111,6 @@ func runSampleTransferLoop(
 	probeRuntime RuntimeProbe,
 	transferSamples SampleTransferFunc,
 	makeProgress ProgressFunc,
-	maxBatch uint64,
 	xferBatch uint64,
 	interval time.Duration,
 	tracker progressTracker,
@@ -1115,6 +1118,15 @@ func runSampleTransferLoop(
 	defer close(done)
 
 	l := ctrl.Log.WithName("sample-transfer").WithValues("flowID", flowID)
+
+	// catchUp bounds how far behind the live head one tick may reach.
+	// Two batches keeps one batch of slack for a late-arriving head
+	// probe without opening a burst; anything older is skipped as
+	// aged out.
+	catchUp := 2 * xferBatch
+	if catchUp == 0 {
+		catchUp = maxSampleCatchUpFallback
+	}
 
 	// Discover the current head and tail the live flow from there,
 	// rather than replaying samples the producer may already have aged
@@ -1155,17 +1167,26 @@ func runSampleTransferLoop(
 			tracker.recordHead(head, time.Now())
 		}
 		if head > lastSent {
-			// Fell behind: the samples between lastSent+1 and
-			// head-maxBatch have left the readable window. Skip them
-			// and signal the tracker so the reconciler can publish the
-			// SourceProgress=ReaderAgedOut condition.
-			if maxBatch > 0 && head-lastSent > maxBatch {
+			// A continuous flow can only be consumed at its own
+			// sample rate: one xferBatch per tick is real time, and
+			// no fabric drains a backlog faster than that. A mirror
+			// that falls behind therefore cannot catch up by bursting
+			// -- attempting it transfers up to the whole readable
+			// window (hundreds of xferBatch writes) in one tick,
+			// which floods the send queue and wedges the fabric for
+			// every mirror sharing it. Cap the catch-up at a small
+			// multiple of one batch and treat anything older as
+			// aged out, matching the reference transfer loop, which
+			// transfers one batch per grain instant and, on falling
+			// behind, jumps to the live head rather than replaying
+			// the gap.
+			if head-lastSent > catchUp {
 				l.Info("reader fell behind writer, skipping samples",
 					"fromIndex", lastSent+1, "toIndex", head)
 				if tracker != nil {
 					tracker.recordAgedOut(time.Now())
 				}
-				lastSent = head - maxBatch
+				lastSent = head - catchUp
 			}
 			// Transfer the remaining (lastSent, head] delta in chunks
 			// of at most xferBatch samples, each ending at the chunk's
@@ -1874,6 +1895,12 @@ func (r *SourceReconciler) flowToMirrors(ctx context.Context, obj client.Object)
 // where the head is re-read and the wedge becomes visible as a stalled
 // lastSent.
 const maxSampleTransferRetries = 8
+
+// maxSampleCatchUpFallback is the per-tick catch-up bound used when
+// xferBatch is zero, which cannot happen in production (the open path
+// defaults it to one sample at minimum) but keeps the loop's bound
+// non-zero on its own terms.
+const maxSampleCatchUpFallback = 2
 
 // defaultProgressTimeout caps how long a blocking MakeProgress call
 // parks on the completion queue before returning. The verbs provider

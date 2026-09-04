@@ -59,7 +59,7 @@ func TestRunSampleTransferLoop_RetriesAFullSendQueueWithinTheTick(t *testing.T) 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go runSampleTransferLoop(ctx, done, "f", probe, transfer, progress,
-		4800, 480, time.Millisecond, nil)
+		480, time.Millisecond, nil)
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
@@ -83,12 +83,12 @@ func TestRunSampleTransferLoop_RetriesAFullSendQueueWithinTheTick(t *testing.T) 
 func TestRunSampleTransferLoop_BackpressureDoesNotReportReaderAgedOut(t *testing.T) {
 	// The producer writes one chunk per tick and the send queue refuses
 	// two attempts out of every three. Retrying in place clears a chunk
-	// per tick and keeps pace. One attempt per tick clears a chunk every
-	// third tick, falls behind 320 samples a tick, crosses the 4800
-	// readable window in about fifteen, and then skips samples and
-	// publishes ReaderAgedOut for a queue that was merely busy. That is
-	// the live symptom: a mirror pinned at ReaderAgedOut whose reader
-	// was never at fault.
+	// per tick and keeps pace, so the lag never grows past one chunk and
+	// no aged-out is recorded. Abandoning each refused chunk until the
+	// next tick instead would let the lag grow past the catch-up bound,
+	// and the loop would skip samples and publish ReaderAgedOut for a
+	// queue that was merely busy. That is the live symptom: a mirror
+	// pinned at ReaderAgedOut whose reader was never at fault.
 	var probes atomic.Uint64
 	probe := func() (uint64, error) { return 1000 + probes.Add(480), nil }
 
@@ -104,7 +104,7 @@ func TestRunSampleTransferLoop_BackpressureDoesNotReportReaderAgedOut(t *testing
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go runSampleTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil },
-		4800, 480, time.Millisecond, tr)
+		480, time.Millisecond, tr)
 
 	// Well past the ~15 ticks it takes to cross the window unretried.
 	require.Eventually(t, func() bool { return tr.transfers() >= 60 }, 3*time.Second, time.Millisecond,
@@ -137,7 +137,7 @@ func TestRunSampleTransferLoop_BoundsRetriesSoAWedgedFabricYieldsTheTick(t *test
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go runSampleTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil },
-		4800, 480, 20*time.Millisecond, nil)
+		480, 20*time.Millisecond, nil)
 
 	// Two ticks' worth of time. With the bound, attempts stay near
 	// 2 * (1 + maxSampleTransferRetries); without it the loop would
@@ -171,7 +171,7 @@ func TestRunSampleTransferLoop_NonIdleErrorBreaksImmediately(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go runSampleTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil },
-		4800, 480, 20*time.Millisecond, nil)
+		480, 20*time.Millisecond, nil)
 
 	time.Sleep(100 * time.Millisecond)
 	cancel()
@@ -201,7 +201,7 @@ func TestRunSampleTransferLoop_StillSkipsWhenGenuinelyLapped(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go runSampleTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil },
-		4800, 480, time.Millisecond, tr)
+		480, time.Millisecond, tr)
 
 	require.Eventually(t, func() bool { return tr.agedOut() > 0 }, time.Second, time.Millisecond,
 		"a producer that lapped the readable window is still ReaderAgedOut")
