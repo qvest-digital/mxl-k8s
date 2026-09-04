@@ -1278,6 +1278,14 @@ func (r *TargetReconciler) dispatchRecovery(key types.NamespacedName) {
 // TargetInfo is published to mirror.status so the source side picks
 // up the rotation through its existing watch.
 //
+// The TargetInfo publish is part of the rebuild's success criteria,
+// not an afterthought: a source initiator holding the pre-rebuild
+// address keeps posting against an endpoint nobody answers, which
+// wedges its send queue until it is reopened. A publish that cannot
+// be completed therefore drops the entry rather than returning with
+// a live fabric side the source will never reach, and the next
+// Reconcile rebuilds target and publish together.
+//
 // Must be invoked from a goroutine other than the progress loop
 // itself: we wait on the loop's done channel before touching the
 // entry's resources.
@@ -1288,6 +1296,18 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 	entry := r.targets[key]
 	r.mu.Unlock()
 	if entry == nil {
+		return
+	}
+
+	// One recovery is one attempt against the shared budget, whoever
+	// spawned it: the watchdog adds nothing of its own, so a loop that
+	// dies fatally on every rebuild runs out here rather than cycling
+	// forever. recordCommit resets the budget once a fresh commit
+	// lands, so only consecutive failures accumulate.
+	if attempts := entry.recoveryAttempts.Add(1); attempts > maxStuckRebuilds {
+		l.Info("fatal recovery cap reached; dropping entry",
+			"attempts", attempts)
+		r.dropFailedEntry(key, entry)
 		return
 	}
 
@@ -1390,19 +1410,73 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 		if !apierrors.IsNotFound(err) {
 			l.Error(err, "get mirror during recovery")
 		}
+		// The mirror is gone or unreadable: nothing to publish the
+		// fresh TargetInfo to, so the fabric side just opened will
+		// never be dialed. Drop the entry rather than stranding it.
+		r.dropFailedEntry(key, entry)
 		return
 	}
 	// The rebuilt fabric side has a fresh descriptor; the source side
-	// picks the rotation up through its watch on this field.
+	// picks the rotation up through its watch on this field. A source
+	// still holding the pre-rebuild address posts against an endpoint
+	// nobody answers and its send queue never drains, so the publish
+	// is the rebuild's success criteria: on failure the entry drops
+	// and the next Reconcile rebuilds fabric side and publish together.
 	if err := r.applyTargetInfo(ctx, mirror, s); err != nil {
 		l.Error(err, "publish rebuilt TargetInfo")
+		r.dropFailedEntry(key, entry)
 		return
 	}
 	if err := r.applyTargetStatus(ctx, mirror, mxlv1alpha1.MxlFlowMirrorReady, nil, nil); err != nil {
-		l.Error(err, "publish rebuilt TargetInfo")
+		l.Error(err, "publish rebuilt status")
+		r.dropFailedEntry(key, entry)
 		return
 	}
-	l.Info("rebuilt fabric side after fatal ReadGrain")
+	l.Info("rebuilt fabric side after fatal read")
+}
+
+// dropFailedEntry removes an entry whose fabric side cannot serve its
+// mirror: the recovery cap is spent, the rebuild failed, or the
+// rebuilt TargetInfo could not be published. It publishes Failed so
+// an operator sees a dead state instead of whatever the flusher last
+// wrote, tears the entry down the way the recovery failure path does
+// (the writer closes too, invalidating consumer FlowReaders), and
+// wakes the next Reconcile through the status write so the whole
+// target side is rebuilt from scratch rather than left in memory
+// with nothing driving it.
+//
+// Not closeEntry: the flusher must not be waited on from here when
+// this runs on the flusher goroutine's own spawn chain. The
+// flusher's cap branch already tears down without waiting; this path
+// matches it for every other caller.
+func (r *TargetReconciler) dropFailedEntry(key types.NamespacedName, entry *targetEntry) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if mirror, err := r.fetchMirror(ctx, key); err == nil {
+		_ = r.applyTargetStatus(ctx, mirror, mxlv1alpha1.MxlFlowMirrorFailed, nil, &metav1.Condition{
+			Type:               mxlv1alpha1.ConditionTypeTargetProgress,
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonStuckHandshakeCapReached,
+			Message:            fmt.Sprintf("fabric side unrecoverable after %d attempts", maxStuckRebuilds),
+			LastTransitionTime: metav1.Now(),
+		})
+	}
+	r.mu.Lock()
+	if r.targets[key] == entry {
+		delete(r.targets, key)
+	}
+	r.mu.Unlock()
+	// The progress loop must release its libmxl handles before the
+	// writer closes underneath it. A loop parked inside libmxl-fabrics
+	// never returns, so the wait is bounded and a loop that outlasts
+	// the grace keeps the writer: an orphaned handle beats a double
+	// free.
+	if !entry.stopProgressLoop(r.teardownGrace()) {
+		return
+	}
+	if writer := entry.abandon(); writer != nil {
+		_ = writer.Close()
+	}
 }
 
 // fetchMirror reads the freshest cached MxlFlowMirror so the SSA
@@ -1872,9 +1946,12 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 					entry.recovering.Store(false)
 					continue
 				}
-				attempt := entry.recoveryAttempts.Add(1)
+				// recoverFromFatalError counts the attempt: it owns
+				// the budget so the watchdog and a fatally-exited
+				// loop's onFatal spawn count against one shared cap
+				// instead of each other.
 				log.FromContext(ctx).Info("stuck handshake; triggering recovery",
-					"mirror", key, "attempt", attempt)
+					"mirror", key, "attempt", entry.recoveryAttempts.Load()+1)
 				go r.dispatchRecovery(key)
 			}
 			// Skip the Degraded write this tick: publishing it would
