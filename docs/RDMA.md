@@ -271,6 +271,25 @@ The condition is absent on a gateway whose `--providers` admits no
 RDMA provider: such a node advertises none by instruction rather than
 by measurement, so the host device list contradicts nothing.
 
+`--rdma-enumeration-liveness` asks the kubelet to perform that restart
+rather than waiting for somebody to read the condition. It fails the
+liveness probe once the discrepancy has held for
+`--rdma-enumeration-grace`, and only for `HostDevicesUnenumerated`:
+`HostDevicesUnreadable` withdraws the cross-check rather than a
+provider, and a host with no RDMA hardware reports
+`HostDevicesRepresented`. Neither fails the probe, and a gateway that
+has not completed a probe has observed nothing to fail on.
+
+It is off by default because one condition covers two outcomes: a
+gateway that enumerated too early, which a restart clears, and a node
+whose devices the built providers never drive, which a restart
+repeats. The grace separates a discrepancy that outlasts several
+enumerations from one seen once, so it is set in multiples of
+`--probe-period`. The check is registered on `/healthz` rather than
+`/readyz` deliberately -- readiness withdraws the pod from its
+Service, which stops the per-mirror counters being collected without
+revisiting the enumeration that caused it.
+
 `version` is unset on every entry: libmxl-fabrics exposes no
 per-provider version through its C API.
 

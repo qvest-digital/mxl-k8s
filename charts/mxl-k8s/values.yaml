@@ -422,6 +422,19 @@ gateway:
     # last result. Each enumeration sweeps every provider libfabric was
     # built with and warns about those it finds no device for.
     probePeriod: 5m
+    # -- Fail the liveness probe while the host exposes RDMA devices
+    # that no enumerated provider accounts for. libfabric fixes a
+    # provider's device list at the first enumeration, so a gateway
+    # that started before the hardware was usable never revisits it
+    # and only a restart does. Off by default: a node whose devices
+    # the built providers cannot drive reports the same discrepancy,
+    # and there a restart loops instead of recovering. The
+    # RDMADevicesEnumerated condition reports the state either way.
+    rdmaEnumerationLiveness: false
+    # -- How long that discrepancy holds before the probe fails.
+    # Measured across consecutive enumerations, so it spans several
+    # probePeriod rather than letting one decide it.
+    rdmaEnumerationGrace: 10m
     # -- Grain-commit inactivity after which the target gateway
     # demotes a mirror to Degraded. Same threshold gates the
     # Reconcile fast-path so a stale Ready status falls through to

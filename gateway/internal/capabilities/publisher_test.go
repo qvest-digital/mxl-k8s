@@ -734,3 +734,59 @@ func TestRefresh_UnreadableHostDeviceListIsUnknown(t *testing.T) {
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions,
 		mxlv1alpha1.ConditionTypeProbed), "the probe itself still succeeded")
 }
+
+// recordingObserver captures what the publisher hands its host-device
+// observer, which is the seam a health gate hangs on.
+type recordingObserver struct {
+	conds   []metav1.Condition
+	applies []bool
+}
+
+func (r *recordingObserver) Observe(c metav1.Condition, applies bool) {
+	r.conds = append(r.conds, c)
+	r.applies = append(r.applies, applies)
+}
+
+// The gate cannot read the resource it would be judging, so the
+// publisher has to hand it every comparison it makes.
+func TestRefresh_HandsTheComparisonToTheObserver(t *testing.T) {
+	l := &fakeLister{out: []fabrics.InterfaceConfig{
+		iface(fabrics.ProviderTCP, "198.51.100.7", "eth0"),
+	}}
+	obs := &recordingObserver{}
+	p := &Publisher{
+		Client:             newClient(t, existingCR()).Build(),
+		NodeName:           "n1",
+		Providers:          []fabrics.Provider{fabrics.ProviderAny},
+		Lister:             l,
+		HostDevices:        fakeHostDevices{out: []string{"dev0"}},
+		HostDeviceObserver: obs,
+	}
+	require.NoError(t, p.Refresh(context.Background()))
+
+	require.Len(t, obs.conds, 1)
+	assert.True(t, obs.applies[0])
+	assert.Equal(t, mxlv1alpha1.ReasonHostDevicesUnenumerated, obs.conds[0].Reason)
+}
+
+// A comparison that stops applying has to reach the observer too. Left
+// unsaid, a gateway that loses its host device list would keep whatever
+// verdict it was last given and restart on a comparison nothing is
+// making any more.
+func TestRefresh_TellsTheObserverWhenNoComparisonApplies(t *testing.T) {
+	l := &fakeLister{out: []fabrics.InterfaceConfig{
+		iface(fabrics.ProviderTCP, "198.51.100.7", "eth0"),
+	}}
+	obs := &recordingObserver{}
+	p := &Publisher{
+		Client:             newClient(t, existingCR()).Build(),
+		NodeName:           "n1",
+		Providers:          []fabrics.Provider{fabrics.ProviderAny},
+		Lister:             l,
+		HostDeviceObserver: obs,
+	}
+	require.NoError(t, p.Refresh(context.Background()))
+
+	require.Len(t, obs.applies, 1)
+	assert.False(t, obs.applies[0], "no host device list means no comparison ran")
+}
