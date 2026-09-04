@@ -36,7 +36,7 @@ func newAddBackoffFixture(t *testing.T, targetInfo string) *addBackoffFixture {
 		Build()
 
 	opener := &fakeOpener{
-		openFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
+		attachFn: func(*sharedSource, string) (*fabrics.TargetInfo, error) {
 			return nil, errors.Join(errAddTargetFailed, errors.New("connect: target offline"))
 		},
 	}
@@ -78,7 +78,7 @@ func TestSource_AddTargetBackoffGatesRepeatedAttempts(t *testing.T) {
 	res, err := f.r.Reconcile(ctx, f.req)
 	require.NoError(t, err)
 	require.Positive(t, res.RequeueAfter)
-	require.Equal(t, int32(1), f.opener.calls.Load())
+	require.Equal(t, int32(1), f.opener.opens.Load())
 
 	settled := f.mirror(t)
 	require.Equal(t, int32(1), settled.Status.AttemptCount)
@@ -89,8 +89,8 @@ func TestSource_AddTargetBackoffGatesRepeatedAttempts(t *testing.T) {
 		assert.Positive(t, res.RequeueAfter)
 	}
 
-	assert.Equal(t, int32(1), f.opener.calls.Load(),
-		"inside the backoff the initiator must not be rebuilt")
+	assert.Equal(t, int32(1), f.opener.opens.Load(),
+		"inside the backoff the reader and initiator must not be rebuilt")
 
 	after := f.mirror(t)
 	assert.Equal(t, int32(1), after.Status.AttemptCount,
@@ -102,7 +102,7 @@ func TestSource_AddTargetBackoffGatesRepeatedAttempts(t *testing.T) {
 	f.advance(backoffFor(1))
 	_, err = f.r.Reconcile(ctx, f.req)
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), f.opener.calls.Load(),
+	assert.Equal(t, int32(2), f.opener.opens.Load(),
 		"the retry must happen once the backoff has elapsed")
 	assert.Equal(t, int32(2), f.mirror(t).Status.AttemptCount)
 }
@@ -117,11 +117,11 @@ func TestSource_AddTargetBackoffReleasedWhenTargetInfoRotates(t *testing.T) {
 
 	_, err := f.r.Reconcile(ctx, f.req)
 	require.NoError(t, err)
-	require.Equal(t, int32(1), f.opener.calls.Load())
+	require.Equal(t, int32(1), f.opener.opens.Load())
 
 	_, err = f.r.Reconcile(ctx, f.req)
 	require.NoError(t, err)
-	require.Equal(t, int32(1), f.opener.calls.Load(),
+	require.Equal(t, int32(1), f.opener.opens.Load(),
 		"the same endpoint inside the backoff stays gated")
 
 	m := f.mirror(t)
@@ -130,6 +130,6 @@ func TestSource_AddTargetBackoffReleasedWhenTargetInfoRotates(t *testing.T) {
 
 	_, err = f.r.Reconcile(ctx, f.req)
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), f.opener.calls.Load(),
+	assert.Equal(t, int32(2), f.opener.opens.Load(),
 		"a rotated TargetInfo must be attempted at once")
 }

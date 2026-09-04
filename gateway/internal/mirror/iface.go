@@ -17,18 +17,37 @@ import "github.com/qvest-digital/go-mxl/fabrics"
 // stay where they were, and only their parameter list changed.
 
 // initiatorOpener is the source reconciler's seam onto the
-// cgo-dependent libmxl-fabrics Initiator setup path. Production
-// binds it to libmxlOpener, which is a thin struct wrapping the
-// existing FlowReader + Initiator + AddTarget sequence.
-// Tests bind it to an inline fake whose open method returns canned
-// sourceEntry values without touching libmxl or libmxl-fabrics.
+// cgo-dependent libmxl-fabrics Initiator paths. Production binds it to
+// libmxlOpener, a thin struct wrapping the FlowReader + Initiator +
+// AddTarget calls. Tests bind it to an inline fake that returns canned
+// values without touching libmxl or libmxl-fabrics.
+//
+// The split between open and attach is the shape of the API it wraps:
+// an initiator fans a transfer out to every target added to it, so the
+// reader, the initiator and the transfer loop are per flow, and only
+// AddTarget is per mirror.
 //
 // The interface keeps the production binary free of a swappable
 // function pointer that a malicious or buggy caller could redirect
 // at runtime: the field on SourceReconciler is an interface value
 // the constructor sets once and never reassigns.
 type initiatorOpener interface {
-	open(flowID, targetInfoStr string, provider fabrics.Provider) (*sourceEntry, error)
+	// open builds the per-flow half: a FlowReader on flowID, an
+	// Initiator set up against it on an interface the provider can
+	// carry, and the transfer goroutine feeding one into the other. It
+	// adds no target, so nothing is transferred until attach runs.
+	open(flowID string, provider fabrics.Provider) (*sharedSource, error)
+
+	// attach adds one target to an already-open shared initiator and
+	// returns the handle detach needs. An AddTarget failure is wrapped
+	// in errAddTargetFailed so the reconciler can back off without
+	// rebuilding the reader.
+	attach(s *sharedSource, targetInfoStr string) (*fabrics.TargetInfo, error)
+
+	// detach removes one target and closes its handle, leaving the
+	// shared reader, initiator and transfer loop running for the
+	// targets that remain.
+	detach(s *sharedSource, info *fabrics.TargetInfo)
 }
 
 // RuntimeProbe asks the source-side flow reader for the current head

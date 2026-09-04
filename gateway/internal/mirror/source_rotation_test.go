@@ -48,8 +48,8 @@ func TestReconcile_FlowOriginRotation_DetectedAfterStaleOpen(t *testing.T) {
 		Build()
 
 	opener := &fakeOpener{
-		openFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
-			return &sourceEntry{infoStr: "info-1"}, nil
+		openFn: func(string, fabrics.Provider) (*sharedSource, error) {
+			return &sharedSource{}, nil
 		},
 	}
 	r := &SourceReconciler{
@@ -69,7 +69,7 @@ func TestReconcile_FlowOriginRotation_DetectedAfterStaleOpen(t *testing.T) {
 	// records no origin observation.
 	_, err := r.Reconcile(context.Background(), req)
 	require.NoError(t, err)
-	require.Equal(t, int32(1), opener.calls.Load())
+	require.Equal(t, int32(1), opener.opens.Load())
 	t.Cleanup(func() { r.closeEntry(key) })
 
 	// Writer restarts: the agent publishes Origin with a fresh
@@ -83,7 +83,7 @@ func TestReconcile_FlowOriginRotation_DetectedAfterStaleOpen(t *testing.T) {
 
 	_, err = r.Reconcile(context.Background(), req)
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), opener.calls.Load(),
+	assert.Equal(t, int32(2), opener.opens.Load(),
 		"an Origin observation newer than the running reader must reopen "+
 			"it even when the reader was opened during a Stale/nil window: "+
 			"a nil baseline that never re-arms leaves the reader on a dead "+

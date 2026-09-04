@@ -7,6 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/qvest-digital/go-mxl/fabrics"
+
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -17,7 +19,7 @@ func TestObservedStateReportsTransfersNotLanding(t *testing.T) {
 	// healthy and leaves the mirror there for good.
 	const stall = 20 * time.Second
 
-	entry := &sourceEntry{openedAt: time.Now().Add(-time.Minute)}
+	entry := &sourceEntry{shared: testShared("flow-1", fabrics.ProviderTCP), openedAt: time.Now().Add(-time.Minute)}
 	entry.lastHead.Store(4242)
 	advanced := time.Now()
 	entry.headAdvancedAt.Store(&advanced)
@@ -30,7 +32,7 @@ func TestObservedStateReportsTransfersNotLanding(t *testing.T) {
 
 	// A mirror still inside the window has legitimately delivered
 	// nothing yet and must not be called wedged.
-	fresh := &sourceEntry{openedAt: time.Now()}
+	fresh := &sourceEntry{shared: testShared("flow-1", fabrics.ProviderTCP), openedAt: time.Now()}
 	fresh.lastHead.Store(7)
 	fresh.headAdvancedAt.Store(&advanced)
 	require.Equal(t, mxlv1alpha1.ReasonHandshakeComplete,
@@ -38,7 +40,7 @@ func TestObservedStateReportsTransfersNotLanding(t *testing.T) {
 
 	// Once a transfer lands after the open, the wedge reading has to
 	// clear on its own.
-	delivered := &sourceEntry{openedAt: time.Now().Add(-time.Minute)}
+	delivered := &sourceEntry{shared: testShared("flow-1", fabrics.ProviderTCP), openedAt: time.Now().Add(-time.Minute)}
 	delivered.lastHead.Store(4242)
 	delivered.headAdvancedAt.Store(&advanced)
 	sent := time.Now().Add(-time.Second)

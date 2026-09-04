@@ -1,9 +1,11 @@
 package mirror
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -177,49 +179,136 @@ type SourceReconciler struct {
 	// question is not what they are exercising.
 	writerLiveFn func(flowID string) (bool, error)
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// sources holds the per-mirror half, keyed by MxlFlowMirror;
+	// shared holds the per-flow half every mirror of one flow on one
+	// provider transfers through.
 	sources  map[types.NamespacedName]*sourceEntry
+	shared   map[sourceKey]*sharedSource
 	attempts attemptTable[sourceAddInputs]
-	// rebuilds counts consecutive reader reopens per mirror. It
-	// outlives the sourceEntry the watchdog tears down, which is the
+	// rebuilds counts consecutive reader reopens per shared source. It
+	// outlives the sharedSource the watchdog tears down, which is the
 	// point: the budget has to survive the reopen it is bounding.
-	rebuilds map[types.NamespacedName]uint32
+	//
+	// Keyed by shared source rather than by mirror because that is what
+	// the watchdog now tears down. A per-mirror budget would let a flow
+	// mirrored to N nodes spend N times maxReaderRebuilds reopens on the
+	// one reader they share, so the cap that is meant to stop a gateway
+	// reopening a dead ring forever would scale with fan-out.
+	rebuilds map[sourceKey]uint32
 }
 
-// sourceEntry holds the live libmxl + fabrics handles and the
-// transfer-loop control plumbing for one source-side mirror.
-type sourceEntry struct {
+// sourceKey identifies one shared source: the libmxl FlowReader on a
+// flow and the libmxl-fabrics Initiator pinned to it.
+//
+// The provider is part of the key because an initiator is set up
+// against one interface, and resolveInterface picks that interface per
+// provider. Two mirrors of the same flow that ask for different
+// providers therefore cannot share an initiator, and get one shared
+// source each.
+type sourceKey struct {
+	flowID   string
+	provider fabrics.Provider
+}
+
+// sharedSource owns what the source side has per flow rather than per
+// mirror: one FlowReader on the local flow, one Initiator pinned to
+// it, and the transfer goroutine that pumps one into the other.
+//
+// libmxl-fabrics fans a transfer out to every target added to an
+// initiator: one TransferGrain or TransferSamples call enqueues the
+// payload to all of them. Mirroring one flow to N nodes is therefore N
+// AddTarget calls on one initiator, not N initiators. Opening one per
+// mirror read the same ring N times and posted N copies of every grain
+// to the NIC.
+type sharedSource struct {
+	key sourceKey
+
 	reader    *mxl.Reader
 	initiator *fabrics.Initiator
-	info      *fabrics.TargetInfo
-	// infoStr is the serialized TargetInfo the initiator was set up
-	// with. We keep it so a later reconcile can detect that the
-	// target has rotated its info (e.g. the target-side gateway pod
-	// restarted and re-opened the FlowWriter) and reopen the
-	// initiator against the fresh address before the source's writes
-	// keep getting refused.
+
+	// mirrors is the attached set, written under the reconciler's mutex.
+	// fanout is the same set as an immutable slice the transfer
+	// goroutine reads without taking any lock, so accounting a grain
+	// never contends with a reconcile and the transfer path never blocks
+	// on a mutex Reconcile also holds.
+	mirrors map[types.NamespacedName]*sourceEntry
+	fanout  atomic.Pointer[[]*sourceEntry]
+
+	// lastHead is the most recent head index the transfer loop probed
+	// off the FlowReader; headAdvancedAt is when that value last
+	// changed. Fanned out to every attached mirror so each flusher can
+	// tell a wedged reader from one still waiting on its first grain.
+	//
+	// openedAt is the wall-clock time this FlowReader was opened, and
+	// lastObservedOriginAt the MxlFlow status.locations entry's
+	// AppearedAt timestamp for r.NodeName at that moment. A subsequent
+	// reconcile that sees a newer timestamp tears the reader down and
+	// reopens it so the gateway tails the freshly rebound writer. May be
+	// nil (the location carried no AppearedAt at open time); see
+	// originRotated for how that case is handled. Per flow, not per
+	// mirror: the reader is what rotates.
+	openedAt             time.Time
+	lastObservedOriginAt atomic.Pointer[time.Time]
+
+	// rebuilding is set by the reader-stall watchdog before it hands
+	// the source to the reopen goroutine, so a second flusher tick --
+	// this mirror's or any other attached mirror's -- cannot spawn a
+	// competing rebuild for the same reader.
+	rebuilding atomic.Bool
+
+	// cancel stops the transfer goroutine; done is closed when it
+	// returns.
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// sourceEntry is one MxlFlowMirror's share of a sharedSource: the
+// fabrics target it added, and the counters its own status flusher and
+// the throughput collector read.
+//
+// The counters stay per mirror even though one transfer feeds them
+// all. That is not an approximation: a TransferGrain call really does
+// enqueue the grain to every added target, so every attached mirror
+// really did move those bytes and really is at that index. Collapsing
+// them onto the shared source would cost the per-peer label the
+// throughput collector separates its series by.
+type sourceEntry struct {
+	// key is this entry's MxlFlowMirror. A teardown that starts from
+	// the shared source needs it to find its way back to r.sources.
+	key types.NamespacedName
+
+	// shared is the (flow, provider) source this mirror is a target of.
+	shared *sharedSource
+
+	// info is the fabrics target added to the shared initiator for this
+	// mirror, and the handle RemoveTarget needs to take it off again.
+	info *fabrics.TargetInfo
+
+	// infoStr is the serialized TargetInfo the target was added with.
+	// We keep it so a later reconcile can detect that the target has
+	// rotated its info (e.g. the target-side gateway pod restarted and
+	// re-opened the FlowWriter) and re-add it against the fresh address
+	// before the source's writes keep getting refused.
 	infoStr string
 
-	// progress counts grains the transfer loop has successfully
-	// handed to TransferGrain. lastSentAt records the wall-clock
-	// time of the most recent successful transfer. Both feed the
-	// per-mirror status flusher.
+	// peerNode labels this mirror's byte counter, and is what keeps the
+	// label set unique when one node mirrors the same flow to several
+	// targets. Immutable for the life of the entry, so the collector
+	// reads it without the entry's atomics.
+	peerNode string
+
+	// progress counts grains the transfer loop has successfully handed
+	// to TransferGrain. lastSentAt records the wall-clock time of the
+	// most recent successful transfer. Both feed the status flusher.
 	progress   atomic.Uint64
 	lastSentAt atomic.Pointer[time.Time]
 
-	// bytes counts payload actually handed to the fabric for this
-	// mirror, read by the throughput collector at scrape time. A
-	// counter rather than a rate: the scrape interval is the
-	// collector's business, not the transfer loop's.
+	// bytes counts payload handed to the fabric for this mirror, read
+	// by the throughput collector at scrape time. A counter rather than
+	// a rate: the scrape interval is the collector's business, not the
+	// transfer loop's.
 	bytes atomic.Uint64
-
-	// flowID, peerNode and provider label that counter. Immutable for
-	// the life of the entry, so the collector reads them without the
-	// entry's atomics. peerNode is what keeps the label set unique
-	// when one node mirrors the same flow to several targets.
-	flowID   string
-	peerNode string
-	provider fabrics.Provider
 
 	// agedOutAt records the wall-clock of the most recent
 	// reader-aged-out skip the transfer loop has had to perform.
@@ -229,10 +318,8 @@ type sourceEntry struct {
 	// the ring.
 	agedOutAt atomic.Pointer[time.Time]
 
-	// lastHead is the most recent head index the transfer loop probed
-	// off the FlowReader; headAdvancedAt is when that value last
-	// changed. The flusher reads both to tell a wedged reader from one
-	// still waiting on its first grain.
+	// lastHead and headAdvancedAt carry the shared reader's head
+	// observations, fanned out on every probe.
 	lastHead       atomic.Uint64
 	headAdvancedAt atomic.Pointer[time.Time]
 
@@ -242,35 +329,83 @@ type sourceEntry struct {
 	addTargetAttempts atomic.Uint32
 	lastError         atomic.Pointer[string]
 
-	// lastObservedOriginAt records the MxlFlow status.locations
-	// entry's AppearedAt timestamp for r.NodeName at the moment
-	// the FlowReader was opened. A subsequent reconcile that sees
-	// a newer timestamp tears the reader down and reopens it so
-	// the gateway tails the freshly rebound writer. May be nil (the
-	// location carried no LastObserved at open time); see
-	// originRotated for how that case is handled.
-	lastObservedOriginAt atomic.Pointer[time.Time]
-
-	// openedAt is the wall-clock time this entry's FlowReader was
-	// opened. Read-only after construction, set before the entry is
-	// published into r.sources under r.mu -- safe to read from
-	// Reconcile without its own synchronization, same as infoStr.
+	// openedAt is the wall-clock time this mirror's target was added.
+	// Read-only after construction, set before the entry is published
+	// into r.sources under r.mu -- safe to read from Reconcile without
+	// its own synchronization, same as infoStr.
 	openedAt time.Time
-
-	// rebuilding is set by the reader-stall watchdog before it hands
-	// the entry to the reopen goroutine, so a second flusher tick
-	// cannot spawn a competing rebuild for the same entry.
-	rebuilding atomic.Bool
-
-	// cancel stops the per-flow transfer goroutine; done is closed
-	// when the goroutine returns.
-	cancel context.CancelFunc
-	done   chan struct{}
 
 	// flusherCancel stops the per-mirror status flusher; flusherDone
 	// is closed when it returns.
 	flusherCancel context.CancelFunc
 	flusherDone   chan struct{}
+}
+
+// sourceKey reports the shared source this mirror transfers through.
+func (e *sourceEntry) sourceKey() sourceKey {
+	if e.shared == nil {
+		return sourceKey{}
+	}
+	return e.shared.key
+}
+
+func (e *sourceEntry) flowID() string { return e.sourceKey().flowID }
+
+func (e *sourceEntry) provider() fabrics.Provider { return e.sourceKey().provider }
+
+// attach adds e to the fanout set. Callers hold the reconciler mutex.
+func (s *sharedSource) attach(e *sourceEntry) {
+	if s.mirrors == nil {
+		s.mirrors = make(map[types.NamespacedName]*sourceEntry)
+	}
+	s.mirrors[e.key] = e
+	s.republish()
+}
+
+// detach drops key from the fanout set and reports whether the set is
+// now empty, which is the only point at which the shared handles may
+// be closed. Callers hold the reconciler mutex.
+func (s *sharedSource) detach(key types.NamespacedName) bool {
+	delete(s.mirrors, key)
+	s.republish()
+	return len(s.mirrors) == 0
+}
+
+// detachAll empties the fanout set and returns what was in it, so a
+// caller tearing the whole source down can stop each mirror's flusher
+// and remove each mirror's target. Callers hold the reconciler mutex.
+func (s *sharedSource) detachAll() []*sourceEntry {
+	out := make([]*sourceEntry, 0, len(s.mirrors))
+	for _, e := range s.mirrors {
+		out = append(out, e)
+	}
+	slices.SortFunc(out, func(a, b *sourceEntry) int {
+		return cmp.Or(
+			cmp.Compare(a.key.Namespace, b.key.Namespace),
+			cmp.Compare(a.key.Name, b.key.Name),
+		)
+	})
+	s.mirrors = nil
+	s.republish()
+	return out
+}
+
+// republish rebuilds the immutable slice the transfer goroutine reads.
+func (s *sharedSource) republish() {
+	list := make([]*sourceEntry, 0, len(s.mirrors))
+	for _, e := range s.mirrors {
+		list = append(list, e)
+	}
+	s.fanout.Store(&list)
+}
+
+// attached returns the current fanout snapshot. Safe to call from the
+// transfer goroutine: the slice is never mutated once stored.
+func (s *sharedSource) attached() []*sourceEntry {
+	if p := s.fanout.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors,verbs=get;list;watch;update;patch
@@ -338,9 +473,9 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	if mirror.Spec.SourceNode != r.NodeName {
 		// spec.sourceNode used to name this node and was mutated to
-		// another; the in-memory sources map keeps an RCInitiator open
+		// another; the in-memory sources map keeps an initiator open
 		// against a producer-less .mxl-flow until the pod is bounced.
-		// closeEntry is a no-op when key absent (def at line 592).
+		// closeEntry is a no-op when the key holds nothing.
 		r.closeEntry(req.NamespacedName)
 		return r.reapOrphanedFinalizer(ctx, &mirror)
 	}
@@ -384,41 +519,10 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	// originAt is the MxlFlow's most recent AppearedAt timestamp
 	// for the Origin location on this node. It is read once here so
-	// the fast-path comparison below and the openInitiator handoff
-	// both observe the same value, and a later rotation is detected
+	// the rotation comparison below and the openShared handoff both
+	// observe the same value, and a later rotation is detected
 	// even if the MxlFlow watch fires before status propagates.
 	originAt := r.observedOriginAt(ctx, mirror.Spec.FlowID)
-
-	// Already set up against this exact target info?
-	r.mu.Lock()
-	existing := r.sources[req.NamespacedName]
-	r.mu.Unlock()
-	if existing != nil {
-		// MxlFlow Origin location for this node has rotated since
-		// the FlowReader was opened (the writer-side agent
-		// re-registered the flow, typically after a pod restart).
-		// Tear down + reopen so the reader tails the fresh writer
-		// instead of holding a handle on a now-invalid ring.
-		if originRotated(existing.lastObservedOriginAt.Load(), originAt, existing.openedAt) {
-			l.Info("flow origin rotated, reopening reader")
-			r.closeEntry(req.NamespacedName)
-		} else if existing.infoStr == mirror.Status.TargetInfo {
-			return ctrl.Result{}, nil
-		} else {
-			// TargetInfo rotated under us (typically: target gateway
-			// restarted and rebuilt the writer on a fresh ephemeral
-			// port). Tear down the stale initiator so we re-open
-			// against the new address. The target side also lands
-			// here after recoverFromFatalError republishes
-			// status.targetInfo via SSA on its Ready transition --
-			// the infoStr comparison above is the source initiator's
-			// only wake-up signal for that rotation, so do not add a
-			// spec-only predicate to the MxlFlowMirror watch or
-			// recovery wakes will be silently dropped.
-			l.Info("target info rotated, rebuilding initiator")
-			r.closeEntry(req.NamespacedName)
-		}
-	}
 
 	provider, err := providerForSetup(&mirror)
 	if err != nil {
@@ -434,6 +538,75 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		l.Info("refusing source setup: mirror provider is unresolved", "error", err.Error())
 		return ctrl.Result{}, nil
+	}
+
+	// Resolved before the fast path rather than after it, because the
+	// provider is half the identity of the shared source this mirror
+	// belongs to.
+	skey := sourceKey{flowID: mirror.Spec.FlowID, provider: provider}
+
+	r.mu.Lock()
+	existing := r.sources[req.NamespacedName]
+	r.mu.Unlock()
+
+	// spec.provider rotated under a running mirror. An initiator is set
+	// up against one provider's interface and cannot serve another, so
+	// this mirror leaves the source it was sharing and joins the one
+	// for its new provider.
+	if existing != nil && existing.sourceKey() != skey {
+		l.Info("mirror provider rotated, moving to a fresh initiator")
+		r.closeEntry(req.NamespacedName)
+		existing = nil
+	}
+
+	r.mu.Lock()
+	shared := r.shared[skey]
+	r.mu.Unlock()
+
+	// The MxlFlow Origin location for this node has rotated since the
+	// FlowReader was opened (the writer-side agent re-registered the
+	// flow, typically after a pod restart). Tear down + reopen so the
+	// reader tails the fresh writer instead of holding a handle on a
+	// now-invalid ring.
+	//
+	// Judged against the shared source rather than against this
+	// mirror's entry, because the reader is what rotates: a mirror
+	// attaching to a source that was opened before the rotation would
+	// otherwise inherit the dead ring and never look again.
+	if shared != nil && originRotated(shared.lastObservedOriginAt.Load(), originAt, shared.openedAt) {
+		l.Info("flow origin rotated, reopening reader")
+		for _, k := range r.closeSharedSource(skey) {
+			if k == req.NamespacedName {
+				continue
+			}
+			// Every mirror that shared the reader lost it. Driving
+			// them here rather than waiting for a watch keeps the
+			// reopen self-contained, for the same reason
+			// rebuildWedgedReader drives its own: the events that
+			// would wake them stop precisely when the producer is in
+			// trouble.
+			r.reopenEvicted(ctx, k)
+		}
+		existing = nil
+	}
+
+	if existing != nil {
+		if existing.infoStr == mirror.Status.TargetInfo {
+			return ctrl.Result{}, nil
+		}
+		// TargetInfo rotated under us (typically: target gateway
+		// restarted and rebuilt the writer on a fresh ephemeral
+		// port). Take this mirror's target off the shared initiator
+		// so it is re-added against the new address; the other
+		// mirrors on this flow keep transferring throughout. The
+		// target side also lands here after recoverFromFatalError
+		// republishes status.targetInfo via SSA on its Ready
+		// transition -- the infoStr comparison above is the source
+		// initiator's only wake-up signal for that rotation, so do
+		// not add a spec-only predicate to the MxlFlowMirror watch or
+		// recovery wakes will be silently dropped.
+		l.Info("target info rotated, re-adding target")
+		r.closeEntry(req.NamespacedName)
 	}
 
 	// Seed the in-memory AddTarget attempts counter from the persisted
@@ -475,18 +648,33 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{RequeueAfter: writerAbsentRetry}, nil
 	}
 
-	entry, err := r.opener.open(mirror.Spec.FlowID, mirror.Status.TargetInfo, provider)
+	// Reuses the source the fast path looked up when it is still
+	// live, and opens one when this is the flow's first mirror or the
+	// origin rotation above tore the previous one down.
+	shared, err = r.openShared(skey, originAt)
 	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("open initiator: %w", err)
+	}
+
+	// The only per-mirror libmxl-fabrics work there is. A source that
+	// already carries other mirrors of this flow takes just this call:
+	// no second reader, no second initiator, no second transfer loop.
+	info, err := r.opener.attach(shared, mirror.Status.TargetInfo)
+	if err != nil {
+		r.releaseIfUnused(shared)
 		if errors.Is(err, errAddTargetFailed) {
 			return r.handleAddTargetFailure(ctx, req.NamespacedName, inputs, err)
 		}
-		return ctrl.Result{}, fmt.Errorf("open initiator: %w", err)
+		return ctrl.Result{}, fmt.Errorf("add target: %w", err)
 	}
-	entry.openedAt = time.Now()
-	entry.peerNode = mirror.Spec.TargetNode
-	if originAt != nil {
-		t := *originAt
-		entry.lastObservedOriginAt.Store(&t)
+
+	entry := &sourceEntry{
+		key:      req.NamespacedName,
+		shared:   shared,
+		info:     info,
+		infoStr:  mirror.Status.TargetInfo,
+		peerNode: mirror.Spec.TargetNode,
+		openedAt: time.Now(),
 	}
 	// Carry the published lastSentAt onto the fresh entry: a rebuilt
 	// entry has no transfers of its own, and an omitted field is one
@@ -500,20 +688,83 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	r.mu.Lock()
 	if dup := r.sources[req.NamespacedName]; dup != nil {
 		r.mu.Unlock()
-		closeSourceHandles(entry)
+		r.opener.detach(shared, info)
+		r.releaseIfUnused(shared)
 		return ctrl.Result{}, nil
 	}
 	r.sources[req.NamespacedName] = entry
+	shared.attach(entry)
 	delete(r.attempts, req.NamespacedName)
 	r.mu.Unlock()
 
-	r.startFlusher(req.NamespacedName, entry)
+	r.startFlusher(entry)
 
-	l.Info("initiator running",
+	l.Info("target added",
 		"flowID", mirror.Spec.FlowID,
 		"targetNode", mirror.Spec.TargetNode,
-		"provider", provider.String())
+		"provider", provider.String(),
+		"targets", len(shared.attached()))
 	return ctrl.Result{}, nil
+}
+
+// openShared returns the shared source for skey, opening one if this
+// is the first mirror to want it. The libmxl work happens outside the
+// reconciler's mutex, so a concurrent opener can win the race; the
+// loser closes what it built and takes the winner's source.
+func (r *SourceReconciler) openShared(skey sourceKey, originAt *time.Time) (*sharedSource, error) {
+	r.mu.Lock()
+	if r.shared == nil {
+		r.shared = make(map[sourceKey]*sharedSource)
+	}
+	s := r.shared[skey]
+	r.mu.Unlock()
+	if s != nil {
+		return s, nil
+	}
+
+	s, err := r.opener.open(skey.flowID, skey.provider)
+	if err != nil {
+		return nil, err
+	}
+	s.key = skey
+	s.openedAt = time.Now()
+	if originAt != nil {
+		t := *originAt
+		s.lastObservedOriginAt.Store(&t)
+	}
+
+	r.mu.Lock()
+	if dup := r.shared[skey]; dup != nil {
+		r.mu.Unlock()
+		closeShared(s)
+		return dup, nil
+	}
+	r.shared[skey] = s
+	r.mu.Unlock()
+	return s, nil
+}
+
+// releaseIfUnused closes a shared source no mirror is attached to.
+// The open path leaves one behind whenever the AddTarget that would
+// have been its first target fails, and a reader on a flow no mirror
+// transfers keeps libmxl from ever reclaiming that flow.
+func (r *SourceReconciler) releaseIfUnused(s *sharedSource) {
+	r.mu.Lock()
+	if len(s.mirrors) > 0 || r.shared[s.key] != s {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.shared, s.key)
+	r.mu.Unlock()
+	closeShared(s)
+}
+
+// reopenEvicted drives a mirror whose shared source was torn down back
+// through Reconcile so it opens or re-attaches against a fresh reader.
+func (r *SourceReconciler) reopenEvicted(ctx context.Context, key types.NamespacedName) {
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		ctrl.Log.WithName("source").Error(err, "reopen source mirror", "mirror", key)
+	}
 }
 
 // handleAddTargetFailure records the failed AddTarget attempt and
@@ -663,7 +914,7 @@ type libmxlOpener struct {
 	PacingChunks     int
 }
 
-func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provider) (*sourceEntry, error) {
+func (o *libmxlOpener) open(flowID string, provider fabrics.Provider) (*sharedSource, error) {
 	mxlInst := o.Handles.MXL()
 	if mxlInst == nil {
 		return nil, fmt.Errorf("mxl instance closed")
@@ -696,18 +947,6 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 		_ = reader.Close()
 		return nil, fmt.Errorf("Initiator.Setup: %w", err)
 	}
-	info, err := fabrics.ParseTargetInfo(targetInfoStr)
-	if err != nil {
-		_ = initiator.Close()
-		_ = reader.Close()
-		return nil, fmt.Errorf("ParseTargetInfo: %w", err)
-	}
-	if err := initiator.AddTarget(info); err != nil {
-		_ = info.Close()
-		_ = initiator.Close()
-		_ = reader.Close()
-		return nil, fmt.Errorf("%w: %w", errAddTargetFailed, err)
-	}
 
 	// A continuous (audio) flow moves samples, not grains; pick the
 	// transfer path from the flow's data format. maxBatch is the
@@ -717,7 +956,6 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 	// and also sizes the transfer tick and the catch-up bound.
 	cfg, err := reader.Config()
 	if err != nil {
-		_ = info.Close()
 		_ = initiator.Close()
 		_ = reader.Close()
 		return nil, fmt.Errorf("Reader.Config: %w", err)
@@ -727,7 +965,6 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 	if audio {
 		maxBatch, err = reader.GetMaxReadLengthSamples()
 		if err != nil {
-			_ = info.Close()
 			_ = initiator.Close()
 			_ = reader.Close()
 			return nil, fmt.Errorf("GetMaxReadLengthSamples: %w", err)
@@ -749,15 +986,12 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 
 	loopCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	entry := &sourceEntry{
+	s := &sharedSource{
+		key:       sourceKey{flowID: flowID, provider: provider},
 		reader:    reader,
 		initiator: initiator,
-		info:      info,
-		infoStr:   targetInfoStr,
 		cancel:    cancel,
 		done:      done,
-		flowID:    flowID,
-		provider:  provider,
 	}
 
 	progressInterval := o.ProgressInterval
@@ -822,17 +1056,20 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 			if frameBytes == 0 {
 				frameBytes = sampleFrameBytes(reader, headIndex)
 			}
-			entry.bytes.Add(uint64(count) * frameBytes)
+			s.addBytes(uint64(count) * frameBytes)
 			return nil
 		}
-		go runSampleTransferLoop(loopCtx, done, flowID, runtimeFn, transferSamplesFn, progressFn, xferBatch, progressInterval, entry)
+		go runSampleTransferLoop(loopCtx, done, flowID, runtimeFn, transferSamplesFn, progressFn, xferBatch, progressInterval, s)
 	} else {
-		// The pacer is keyed on flow plus target so two mirrors of one
-		// flow, and mirrors of different flows, get different phase
-		// offsets. Flows sharing an edit rate advance their heads on
-		// the same MXL clock instants, so without the offset every
-		// mirror on this node would hand its chunks over in lockstep.
-		p := newPacer(cfg.Common.GrainRate, pacingFraction, pacingChunks, flowID+"\x00"+targetInfoStr)
+		// The pacer is keyed on flow plus provider so two shared
+		// sources -- of the same flow on different providers, or of
+		// different flows -- get different phase offsets. Flows sharing
+		// an edit rate advance their heads on the same MXL clock
+		// instants, so without the offset every source on this node
+		// would hand its chunks over in lockstep. Keyed per flow rather
+		// than per target because there is now one transfer stream per
+		// flow, whatever its fan-out.
+		p := newPacer(cfg.Common.GrainRate, pacingFraction, pacingChunks, flowID+"\x00"+provider.String())
 		l := ctrl.Log.WithName("transfer").WithValues("flowID", flowID)
 		transferSlices := func(idx uint64, start, end uint16) error {
 			return initiator.TransferGrain(idx, start, end)
@@ -862,20 +1099,55 @@ func (o *libmxlOpener) open(flowID, targetInfoStr string, provider fabrics.Provi
 				if err := initiator.TransferGrain(idx, 0, grain.TotalSlices); err != nil {
 					return false, err
 				}
-				entry.bytes.Add(uint64(grain.GrainSize))
+				s.addBytes(uint64(grain.GrainSize))
 				return false, nil
 			}
 			if err := transferPaced(loopCtx, realClock{}, p.plan(grain.TotalSlices), idx,
 				transferSlices, betweenChunks); err != nil {
 				return false, err
 			}
-			entry.bytes.Add(uint64(grain.GrainSize))
+			s.addBytes(uint64(grain.GrainSize))
 			return false, nil
 		}
-		go runTransferLoop(loopCtx, done, flowID, runtimeFn, transferFn, progressFn, progressInterval, entry)
+		go runTransferLoop(loopCtx, done, flowID, runtimeFn, transferFn, progressFn, progressInterval, s)
 	}
 
-	return entry, nil
+	return s, nil
+}
+
+// attach parses the target's serialized info and adds it to the shared
+// initiator. This is the whole of the per-mirror libmxl-fabrics work:
+// libmxl-fabrics enqueues every subsequent transfer to all targets an
+// initiator holds, so a second mirror of a flow costs one AddTarget
+// rather than a second reader, initiator and transfer loop.
+func (o *libmxlOpener) attach(s *sharedSource, targetInfoStr string) (*fabrics.TargetInfo, error) {
+	info, err := fabrics.ParseTargetInfo(targetInfoStr)
+	if err != nil {
+		return nil, fmt.Errorf("ParseTargetInfo: %w", err)
+	}
+	if err := s.initiator.AddTarget(info); err != nil {
+		_ = info.Close()
+		return nil, fmt.Errorf("%w: %w", errAddTargetFailed, err)
+	}
+	return info, nil
+}
+
+// detach takes one target off the shared initiator and closes its
+// info handle. The initiator, its reader and the transfer loop stay
+// up for whatever targets remain.
+func (o *libmxlOpener) detach(s *sharedSource, info *fabrics.TargetInfo) {
+	if info == nil {
+		return
+	}
+	if s != nil && s.initiator != nil {
+		if err := s.initiator.RemoveTarget(info); err != nil {
+			// The target is going away either way: a failure here is
+			// worth recording but leaves nothing for a caller to do.
+			ctrl.Log.WithName("source").V(1).Info("RemoveTarget",
+				"flowID", s.key.flowID, "error", err.Error())
+		}
+	}
+	_ = info.Close()
 }
 
 const (
@@ -896,9 +1168,16 @@ const (
 // sides of a mirror describe a wedge over the same period.
 const defaultReaderStallAfter = 20 * time.Second
 
-// progressTracker is the subset of sourceEntry the transfer loop
-// updates. Defined as an interface so tests can inject a stub
-// without constructing a full sourceEntry.
+// progressTracker is the subset of a source the transfer loop updates.
+// Defined as an interface so tests can inject a stub without
+// constructing a full entry.
+//
+// Production binds it to the sharedSource, which fans every call out
+// to the mirrors currently attached to it. That is not an
+// approximation: one TransferGrain or TransferSamples call enqueues
+// the payload to every target the initiator holds, so every attached
+// mirror really did move it and really is at that index, and the
+// per-mirror status conditions and byte counters stay exact.
 type progressTracker interface {
 	recordTransfer(idx uint64, at time.Time)
 	recordAgedOut(at time.Time)
@@ -926,6 +1205,33 @@ func (e *sourceEntry) recordHead(head uint64, at time.Time) {
 	e.lastHead.Store(head)
 	t := at
 	e.headAdvancedAt.Store(&t)
+}
+
+func (s *sharedSource) recordTransfer(idx uint64, at time.Time) {
+	for _, e := range s.attached() {
+		e.recordTransfer(idx, at)
+	}
+}
+
+func (s *sharedSource) recordAgedOut(at time.Time) {
+	for _, e := range s.attached() {
+		e.recordAgedOut(at)
+	}
+}
+
+func (s *sharedSource) recordHead(head uint64, at time.Time) {
+	for _, e := range s.attached() {
+		e.recordHead(head, at)
+	}
+}
+
+// addBytes credits one transfer's payload to every attached mirror.
+// Kept off progressTracker because it is added at the call site that
+// knows the payload size rather than by the loop.
+func (s *sharedSource) addBytes(n uint64) {
+	for _, e := range s.attached() {
+		e.bytes.Add(n)
+	}
 }
 
 // runTransferLoop pumps grains that appear on the source flow into
@@ -1238,38 +1544,130 @@ func isReaderAgedOut(err error) bool {
 	return err != nil && strings.Contains(err.Error(), readerAgedOutMarker)
 }
 
+// closeEntry detaches one mirror: RemoveTarget for its target only,
+// its status flusher stopped, and the reader, initiator and transfer
+// goroutine left running for whatever other mirrors of the flow are
+// still attached. Only the last mirror to leave closes the shared
+// half. A no-op when key holds nothing.
 func (r *SourceReconciler) closeEntry(key types.NamespacedName) {
 	r.mu.Lock()
 	entry := r.sources[key]
 	delete(r.sources, key)
+	var orphan *sharedSource
+	if entry != nil && entry.shared != nil {
+		s := entry.shared
+		if s.detach(key) && r.shared[s.key] == s {
+			delete(r.shared, s.key)
+			orphan = s
+		}
+	}
 	r.mu.Unlock()
 	if entry == nil {
 		return
 	}
-	closeSourceHandles(entry)
+	// Both outside r.mu: stopFlusher waits on a goroutine that takes
+	// r.mu itself, and detach crosses into libmxl-fabrics.
+	stopFlusher(entry)
+	r.detachTarget(entry)
+	closeShared(orphan)
 }
 
-func closeSourceHandles(e *sourceEntry) {
+// closeSharedSource tears the whole shared source down -- every
+// target, the transfer goroutine, the initiator and the reader -- and
+// returns the mirrors that were attached so the caller can drive them
+// back through Reconcile against a fresh reader. Used by the paths
+// that invalidate the reader itself: an origin rotation and the
+// reader-stall rebuild.
+func (r *SourceReconciler) closeSharedSource(skey sourceKey) []types.NamespacedName {
+	r.mu.Lock()
+	s := r.shared[skey]
+	if s == nil {
+		r.mu.Unlock()
+		return nil
+	}
+	delete(r.shared, skey)
+	entries := s.detachAll()
+	keys := make([]types.NamespacedName, 0, len(entries))
+	for _, e := range entries {
+		if r.sources[e.key] == e {
+			delete(r.sources, e.key)
+		}
+		keys = append(keys, e.key)
+	}
+	r.mu.Unlock()
+
+	// The loop stops before the targets come off, so it never ticks
+	// against an initiator holding none: libmxl-fabrics reports that as
+	// an error on every MakeProgress call.
+	s.stopLoop()
+	for _, e := range entries {
+		stopFlusher(e)
+		r.detachTarget(e)
+	}
+	closeShared(s)
+	return keys
+}
+
+// closeMirrorSource tears down the shared source key transfers
+// through and returns every mirror that was on it, key included.
+func (r *SourceReconciler) closeMirrorSource(key types.NamespacedName) []types.NamespacedName {
+	r.mu.Lock()
+	entry := r.sources[key]
+	r.mu.Unlock()
+	if entry == nil || entry.shared == nil {
+		r.closeEntry(key)
+		return []types.NamespacedName{key}
+	}
+	keys := r.closeSharedSource(entry.shared.key)
+	if !slices.Contains(keys, key) {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// detachTarget removes one mirror's target from the shared initiator.
+func (r *SourceReconciler) detachTarget(e *sourceEntry) {
+	if e.info == nil || r.opener == nil {
+		return
+	}
+	r.opener.detach(e.shared, e.info)
+}
+
+// stopFlusher stops one mirror's status flusher and waits for it.
+func stopFlusher(e *sourceEntry) {
 	if e.flusherCancel != nil {
 		e.flusherCancel()
 	}
 	if e.flusherDone != nil {
 		<-e.flusherDone
 	}
-	if e.cancel != nil {
-		e.cancel()
+}
+
+// stopLoop cancels the transfer goroutine and waits for it to return.
+// Idempotent: a second call cancels an already-canceled context and
+// receives from an already-closed channel.
+func (s *sharedSource) stopLoop() {
+	if s.cancel != nil {
+		s.cancel()
 	}
-	if e.done != nil {
-		<-e.done
+	if s.done != nil {
+		<-s.done
 	}
-	if e.info != nil {
-		_ = e.info.Close()
+}
+
+// closeShared stops the transfer goroutine and releases the libmxl
+// and libmxl-fabrics handles one flow's source is built on. Only ever
+// called once no mirror is attached.
+func closeShared(s *sharedSource) {
+	if s == nil {
+		return
 	}
-	if e.initiator != nil {
-		_ = e.initiator.Close()
+	s.stopLoop()
+	if s.initiator != nil {
+		_ = s.initiator.Close()
 	}
-	if e.reader != nil {
-		_ = e.reader.Close()
+	if s.reader != nil {
+		_ = s.reader.Close()
 	}
 }
 
@@ -1352,7 +1750,7 @@ func (r *SourceReconciler) publishSourceProgress(ctx context.Context, key types.
 // ticks at r.FlushInterval and publishes SourceProgress only when
 // the observed state has transitioned, so a steady-state mirror
 // produces zero status writes.
-func (r *SourceReconciler) startFlusher(key types.NamespacedName, entry *sourceEntry) {
+func (r *SourceReconciler) startFlusher(entry *sourceEntry) {
 	if entry.flusherCancel != nil {
 		return
 	}
@@ -1364,14 +1762,15 @@ func (r *SourceReconciler) startFlusher(key types.NamespacedName, entry *sourceE
 	done := make(chan struct{})
 	entry.flusherCancel = cancel
 	entry.flusherDone = done
-	go r.runFlusher(ctx, done, key, entry, interval)
+	go r.runFlusher(ctx, done, entry, interval)
 }
 
 // runFlusher is the per-mirror status flusher loop. Tracks the most
 // recently published condition so a steady stream of grains does
 // not turn into a steady stream of API writes.
-func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, key types.NamespacedName, entry *sourceEntry, interval time.Duration) {
+func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, entry *sourceEntry, interval time.Duration) {
 	defer close(done)
+	key := entry.key
 	t := time.NewTicker(interval)
 	defer t.Stop()
 
@@ -1406,7 +1805,7 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// TransfersNotLanding is the state a source reaches without
 		// asking for a reopen, and it pins the flow exactly as the
 		// wedge states do.
-		if state.status == metav1.ConditionFalse && r.writerGone(entry.flowID) {
+		if state.status == metav1.ConditionFalse && r.writerGone(entry.flowID()) {
 			state.status = metav1.ConditionFalse
 			state.reason = mxlv1alpha1.ReasonSourceWriterGone
 			state.message = "flow has no live writer; releasing the source reader so the flow can be reclaimed"
@@ -1416,7 +1815,7 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 			}
 			ctrl.Log.WithName("source-flush").Info(
 				"flow has no live writer; releasing source reader",
-				"mirror", key, "flowID", entry.flowID)
+				"mirror", key, "flowID", entry.flowID())
 			// Returning first for the same reason the reopen path does:
 			// closeSourceHandles waits on flusherDone, which this
 			// goroutine closes.
@@ -1426,12 +1825,12 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 
 		if state.rebuildReader {
 			switch {
-			case r.readerRebuildsExhausted(key):
+			case r.readerRebuildsExhausted(entry.sourceKey()):
 				state.reason = ReasonReaderRebuildCapReached
 				state.message = fmt.Sprintf("%s; unresolved across %d reopens",
 					state.message, maxReaderRebuilds)
-			case entry.rebuilding.CompareAndSwap(false, true):
-				attempt := r.bumpReaderRebuilds(key)
+			case entry.beginRebuild():
+				attempt := r.bumpReaderRebuilds(entry.sourceKey())
 				if err := r.publishSourceProgress(ctx, key, state); err != nil {
 					ctrl.Log.WithName("source-flush").Error(err, "publish",
 						"mirror", key, "reason", state.reason)
@@ -1451,7 +1850,7 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		}
 		if state.status == metav1.ConditionTrue &&
 			state.reason == mxlv1alpha1.ReasonRecovered {
-			r.clearReaderRebuilds(key)
+			r.clearReaderRebuilds(entry.sourceKey())
 		}
 
 		if !first && sourceStateEqual(state, last) {
@@ -1467,16 +1866,27 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 	}
 }
 
-// bumpReaderRebuilds records one more consecutive reopen for key and
-// returns the new count.
-func (r *SourceReconciler) bumpReaderRebuilds(key types.NamespacedName) uint32 {
+// bumpReaderRebuilds records one more consecutive reopen of the shared
+// source and returns the new count.
+func (r *SourceReconciler) bumpReaderRebuilds(skey sourceKey) uint32 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.rebuilds == nil {
-		r.rebuilds = make(map[types.NamespacedName]uint32)
+		r.rebuilds = make(map[sourceKey]uint32)
 	}
-	r.rebuilds[key]++
-	return r.rebuilds[key]
+	r.rebuilds[skey]++
+	return r.rebuilds[skey]
+}
+
+// beginRebuild claims the reader rebuild for this mirror's shared
+// source, so a second flusher tick -- this mirror's or that of any
+// other mirror attached to the same reader -- cannot spawn a competing
+// reopen of the one reader they share.
+func (e *sourceEntry) beginRebuild() bool {
+	if e.shared == nil {
+		return true
+	}
+	return e.shared.rebuilding.CompareAndSwap(false, true)
 }
 
 // writerGone reports whether the flow has no live writer. A nil seam,
@@ -1518,21 +1928,21 @@ func sourceProgressReads(mirror *mxlv1alpha1.MxlFlowMirror, reason string) bool 
 	return cond != nil && cond.Reason == reason
 }
 
-// readerRebuildsExhausted reports whether key has used its reopen
-// budget.
-func (r *SourceReconciler) readerRebuildsExhausted(key types.NamespacedName) bool {
+// readerRebuildsExhausted reports whether the shared source has used
+// its reopen budget.
+func (r *SourceReconciler) readerRebuildsExhausted(skey sourceKey) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.rebuilds[key] >= maxReaderRebuilds
+	return r.rebuilds[skey] >= maxReaderRebuilds
 }
 
-// clearReaderRebuilds returns key's full reopen budget. Called once
-// grains flow again, so a mirror that wedges later is not judged on
-// a stall it already recovered from.
-func (r *SourceReconciler) clearReaderRebuilds(key types.NamespacedName) {
+// clearReaderRebuilds returns the shared source's full reopen budget.
+// Called once grains flow again, so a reader that wedges later is not
+// judged on a stall it already recovered from.
+func (r *SourceReconciler) clearReaderRebuilds(skey sourceKey) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.rebuilds, key)
+	delete(r.rebuilds, skey)
 }
 
 func (r *SourceReconciler) dispatchReaderRebuild(key types.NamespacedName) {
@@ -1554,10 +1964,16 @@ func (r *SourceReconciler) dispatchReaderRebuild(key types.NamespacedName) {
 // would otherwise wake the reconciler (origin Lease renewals, MxlFlow
 // status writes) all stop precisely when the producer is in trouble.
 func (r *SourceReconciler) rebuildWedgedReader(ctx context.Context, key types.NamespacedName) {
-	r.closeEntry(key)
-	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
-		ctrl.Log.WithName("source-flush").Error(err, "reopen source reader",
-			"mirror", key)
+	// The whole shared source goes, not just this mirror's target: the
+	// wedge is in the reader, and every mirror of the flow transfers
+	// through that one reader. Each of them is then driven back through
+	// Reconcile, which re-opens the source once and re-adds the rest of
+	// the targets to it.
+	for _, k := range r.closeMirrorSource(key) {
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: k}); err != nil {
+			ctrl.Log.WithName("source-flush").Error(err, "reopen source reader",
+				"mirror", k)
+		}
 	}
 }
 
@@ -1742,11 +2158,14 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.sources == nil {
 		r.sources = make(map[types.NamespacedName]*sourceEntry)
 	}
+	if r.shared == nil {
+		r.shared = make(map[sourceKey]*sharedSource)
+	}
 	if r.attempts == nil {
 		r.attempts = make(attemptTable[sourceAddInputs])
 	}
 	if r.rebuilds == nil {
-		r.rebuilds = make(map[types.NamespacedName]uint32)
+		r.rebuilds = make(map[sourceKey]uint32)
 	}
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()

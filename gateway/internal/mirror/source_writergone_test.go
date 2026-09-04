@@ -24,7 +24,6 @@ import (
 func notLandingEntry() *sourceEntry {
 	e := stalledEntry(42, ptrTime(time.Now()), 0, time.Time{})
 	e.openedAt = time.Now().Add(-defaultReaderStallAfter - time.Second)
-	e.flowID = "flow-1"
 	return e
 }
 
@@ -54,13 +53,14 @@ func TestRunFlusher_ReleasesReaderWhenWriterGoneWithoutARebuildState(t *testing.
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	entry := notLandingEntry()
+	entry.key = key
 	r := &SourceReconciler{
 		Client:       c,
 		Scheme:       scheme,
 		NodeName:     "node-a",
 		sources:      map[types.NamespacedName]*sourceEntry{key: entry},
 		attempts:     attemptTable[sourceAddInputs]{},
-		rebuilds:     map[types.NamespacedName]uint32{},
+		rebuilds:     map[sourceKey]uint32{},
 		writerLiveFn: func(string) (bool, error) { return false, nil },
 		rebuildFn: func(types.NamespacedName) {
 			t.Error("a flow with no writer must be released, not reopened")
@@ -70,7 +70,7 @@ func TestRunFlusher_ReleasesReaderWhenWriterGoneWithoutARebuildState(t *testing.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go r.runFlusher(ctx, done, key, entry, time.Millisecond)
+	go r.runFlusher(ctx, done, entry, time.Millisecond)
 
 	select {
 	case <-done:
@@ -104,19 +104,20 @@ func TestRunFlusher_KeepsReaderWhileTheWriterIsLive(t *testing.T) {
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	entry := notLandingEntry()
+	entry.key = key
 	r := &SourceReconciler{
 		Client:       c,
 		Scheme:       scheme,
 		NodeName:     "node-a",
 		sources:      map[types.NamespacedName]*sourceEntry{key: entry},
 		attempts:     attemptTable[sourceAddInputs]{},
-		rebuilds:     map[types.NamespacedName]uint32{},
+		rebuilds:     map[sourceKey]uint32{},
 		writerLiveFn: func(string) (bool, error) { return true, nil },
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go r.runFlusher(ctx, done, key, entry, time.Millisecond)
+	go r.runFlusher(ctx, done, entry, time.Millisecond)
 
 	require.Eventually(t, func() bool {
 		var m mxlv1alpha1.MxlFlowMirror
@@ -150,9 +151,9 @@ func TestReconcile_DoesNotOpenAReaderWhileTheWriterIsGone(t *testing.T) {
 		Build()
 
 	opener := &fakeOpener{
-		openFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
+		openFn: func(string, fabrics.Provider) (*sharedSource, error) {
 			t.Error("no reader may be opened on a flow with no writer")
-			return &sourceEntry{infoStr: "info-1"}, nil
+			return &sharedSource{}, nil
 		},
 	}
 	events := record.NewFakeRecorder(10)
@@ -173,7 +174,7 @@ func TestReconcile_DoesNotOpenAReaderWhileTheWriterIsGone(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, writerAbsentRetry, res.RequeueAfter,
 		"the mirror has to ask again, because a writer that re-attaches to a surviving flow directory rotates nothing")
-	assert.Zero(t, opener.calls.Load())
+	assert.Zero(t, opener.opens.Load())
 
 	var got mxlv1alpha1.MxlFlowMirror
 	require.NoError(t, c.Get(context.Background(), key, &got))
@@ -197,8 +198,8 @@ func TestReconcile_OpensAReaderOnceTheWriterIsBack(t *testing.T) {
 		Build()
 
 	opener := &fakeOpener{
-		openFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
-			return &sourceEntry{infoStr: "info-1"}, nil
+		openFn: func(string, fabrics.Provider) (*sharedSource, error) {
+			return &sharedSource{}, nil
 		},
 	}
 	live := false
@@ -216,13 +217,13 @@ func TestReconcile_OpensAReaderOnceTheWriterIsBack(t *testing.T) {
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	_, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
 	require.NoError(t, err)
-	require.Zero(t, opener.calls.Load())
+	require.Zero(t, opener.opens.Load())
 
 	live = true
 	_, err = r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
 	require.NoError(t, err)
 	t.Cleanup(func() { r.closeEntry(key) })
-	assert.Equal(t, int32(1), opener.calls.Load(),
+	assert.Equal(t, int32(1), opener.opens.Load(),
 		"a returning producer must get its mirror back without an operator")
 }
 
@@ -249,7 +250,7 @@ func TestReconcile_ParksAMirrorWhoseFlowIsNotInTheDomain(t *testing.T) {
 	// What libmxl answers on both paths for a flow that is not in the
 	// domain, wrapped the way the production callers wrap it.
 	opener := &fakeOpener{
-		openFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
+		openFn: func(string, fabrics.Provider) (*sharedSource, error) {
 			return nil, fmt.Errorf("NewReader: %w", mxl.ErrFlowNotFound)
 		},
 	}
@@ -274,7 +275,7 @@ func TestReconcile_ParksAMirrorWhoseFlowIsNotInTheDomain(t *testing.T) {
 		"a flow that is not here is a state to report, not a failure to retry")
 	assert.Equal(t, writerAbsentRetry, res.RequeueAfter,
 		"the mirror has to ask again: a producer landing on this node fires no event here")
-	assert.Zero(t, opener.calls.Load(),
+	assert.Zero(t, opener.opens.Load(),
 		"opening a reader on a flow libmxl cannot find can only fail")
 
 	var got mxlv1alpha1.MxlFlowMirror
@@ -287,6 +288,6 @@ func TestReconcile_ParksAMirrorWhoseFlowIsNotInTheDomain(t *testing.T) {
 	res, err = r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
 	require.NoError(t, err)
 	assert.Equal(t, writerAbsentRetry, res.RequeueAfter)
-	assert.Zero(t, opener.calls.Load())
+	assert.Zero(t, opener.opens.Load())
 	assert.Len(t, events.Events, 1, "a parked mirror must emit one event, not one per retry")
 }
