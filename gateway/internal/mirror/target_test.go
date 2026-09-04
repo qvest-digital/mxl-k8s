@@ -1348,6 +1348,9 @@ func TestRunFlusher_RecoveryGate_NoDoubleSpawnUnderRace(t *testing.T) {
 	// never runs again, regardless of how many ticks elapse.
 	f.r.recoverFn = func(types.NamespacedName) {
 		f.spawnCh <- struct{}{}
+		// Count the attempt the way the real recoverFromFatalError
+		// does as its first action; the budget lives in the recovery.
+		f.entry.recoveryAttempts.Add(1)
 		// Intentionally do NOT clear recovering: simulates a slow
 		// recovery still in flight when the next flusher tick fires.
 	}
