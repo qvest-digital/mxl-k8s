@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.12](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.11...v1.1.0-rc.12) (2026-09-04)
+
+
+### Bug Fixes
+
+* **gateway:** recover sample-mirror wedges instead of pinning them ([#319](https://github.com/qvest-digital/mxl-k8s/issues/319)) ([78f335d](https://github.com/qvest-digital/mxl-k8s/commit/78f335d067de1ab5777fa0a893993bb40369a5b4))
+
 ## [1.1.0-rc.11](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.10...v1.1.0-rc.11) (2026-09-04)
 
 
