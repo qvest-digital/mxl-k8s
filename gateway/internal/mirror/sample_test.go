@@ -240,6 +240,89 @@ func TestRunSampleTransferLoop_NeverBurstsBeyondCatchUpPerTick(t *testing.T) {
 		"a frozen head must not produce further transfers, got %d", len(snap))
 }
 
+func TestRunSampleTransferLoop_ExitsAfterSustainedRefusal(t *testing.T) {
+	// A send queue that refuses every chunk while the writer keeps
+	// producing is a connection that will not drain on its own. The
+	// loop must stop after maxSampleRefusedTicks consecutive
+	// refusing ticks rather than skip-retrying forever: a live loop
+	// keeps probing the head, so the flusher's stale-head watchdog
+	// never fires and nothing else on the source side breaks the
+	// state. Exiting stops the head probes, which the flusher reads
+	// as ReaderNotAdvancing and rebuilds the source end to end.
+	const xferBatch = 480
+	var probes atomic.Uint64
+	probe := func() (uint64, error) {
+		// The head advances one batch per tick so every tick finds
+		// new samples to refuse.
+		return probes.Add(xferBatch), nil
+	}
+	transfer := func(uint64, int) error {
+		return fabrics.ErrNotReady
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	tracker := &recordingTracker{}
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, xferBatch, time.Millisecond, tracker)
+
+	select {
+	case <-done:
+		// The loop exited on its own: the sustained-refusal bound fired.
+	case <-time.After(5 * time.Second):
+		t.Fatal("loop did not exit under sustained refusal; the wedge would persist forever")
+	}
+
+	// Every tick refused, so nothing landed and the loop kept
+	// skipping: the exit must not have recorded a transfer.
+	transfers, _ := tracker.snapshot()
+	assert.Empty(t, transfers, "a refused queue must never be recorded as delivered")
+	// The head probes ran for at least the bound's worth of ticks
+	// before the exit, proving the loop tolerated the full window
+	// before giving up rather than exiting on the first refusal.
+	assert.GreaterOrEqual(t, probes.Load(), uint64(maxSampleRefusedTicks*xferBatch),
+		"the loop must tolerate the whole refusal window before exiting")
+}
+
+func TestRunSampleTransferLoop_RefusalCountResetsOnDelivery(t *testing.T) {
+	// A busy queue that intermittently refuses but delivers before
+	// the refusal window elapses must run forever: the exit bound
+	// counts only *consecutive* refusing ticks, and clearing it on
+	// delivery keeps a healthy backpressure episode from being
+	// mistaken for a dead connection.
+	const xferBatch = 480
+	var probes atomic.Uint64
+	var calls atomic.Int32
+	probe := func() (uint64, error) {
+		return probes.Add(xferBatch), nil
+	}
+	transfer := func(uint64, int) error {
+		// Refuse heavily, but land every few attempts.
+		if calls.Add(1)%10 != 0 {
+			return fabrics.ErrNotReady
+		}
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	tracker := &recordingTracker{}
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, xferBatch, time.Millisecond, tracker)
+
+	// Far longer than the refusal window: if the counter were not
+	// reset by deliveries the loop would have exited inside it.
+	time.Sleep(2 * time.Second)
+	select {
+	case <-done:
+		t.Fatal("loop exited despite regular deliveries; the refusal counter is not reset on delivery")
+	default:
+	}
+	cancel()
+	<-done
+	transfers, _ := tracker.snapshot()
+	assert.NotEmpty(t, transfers, "an intermittently delivering queue must have landed chunks")
+}
+
 func TestRunSampleTransferLoop_TransferErrorBreaksTickAndRetries(t *testing.T) {
 	// A transferSamples error (e.g. the fabric briefly not ready) must
 	// not exit the loop or advance lastSent past the failed run: the

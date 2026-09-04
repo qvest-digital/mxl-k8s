@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
@@ -929,6 +930,11 @@ func newTargetWatchdogFixture(t *testing.T, spawnBufLen int) *targetWatchdogFixt
 		targets:             map[types.NamespacedName]*targetEntry{key: entry},
 		recoverFn: func(types.NamespacedName) {
 			spawnCh <- struct{}{}
+			// Count the attempt the way the real recoverFromFatalError
+			// does as its first action: the budget lives in the
+			// recovery, so the watchdog and a fatally-exited loop's
+			// onFatal spawn share one cap.
+			entry.recoveryAttempts.Add(1)
 			// Re-arm the watchdog for the next tick: clear recovering
 			// so CompareAndSwap can succeed again, and stamp
 			// fabricOpenedAt back into the past so the wedge condition
@@ -1208,6 +1214,9 @@ func TestRunFlusher_CapResetsAfterCommit(t *testing.T) {
 	// test injects the commit in between bursts.
 	f.r.recoverFn = func(types.NamespacedName) {
 		f.spawnCh <- struct{}{}
+		// Count the attempt the way the real recoverFromFatalError
+		// does as its first action.
+		f.entry.recoveryAttempts.Add(1)
 		past := time.Now().Add(-time.Hour)
 		f.entry.fabricOpenedAt.Store(&past)
 		f.entry.recovering.Store(false)
@@ -1339,6 +1348,9 @@ func TestRunFlusher_RecoveryGate_NoDoubleSpawnUnderRace(t *testing.T) {
 	// never runs again, regardless of how many ticks elapse.
 	f.r.recoverFn = func(types.NamespacedName) {
 		f.spawnCh <- struct{}{}
+		// Count the attempt the way the real recoverFromFatalError
+		// does as its first action; the budget lives in the recovery.
+		f.entry.recoveryAttempts.Add(1)
 		// Intentionally do NOT clear recovering: simulates a slow
 		// recovery still in flight when the next flusher tick fires.
 	}
@@ -1481,6 +1493,9 @@ func TestRunFlusher_PostHandshakeWedge_RespectsCapAndPublishesFailed(t *testing.
 	// would race the flusher's fetchMirror on the fake client).
 	f.r.recoverFn = func(types.NamespacedName) {
 		f.spawnCh <- struct{}{}
+		// Count the attempt the way the real recoverFromFatalError
+		// does as its first action.
+		f.entry.recoveryAttempts.Add(1)
 		now := time.Now()
 		openedAt := now.Add(-100 * time.Millisecond)
 		f.entry.fabricOpenedAt.Store(&openedAt)
@@ -1528,4 +1543,153 @@ func TestRunFlusher_PostHandshakeWedge_RespectsCapAndPublishesFailed(t *testing.
 		"post-handshake cap must carry reason StuckHandshakeCapReached so "+
 			"operators see the same terminal signal whether the handshake "+
 			"never landed or only landed once before wedging")
+}
+
+func TestTarget_RecoveryCapsFatalDrivenRebuilds(t *testing.T) {
+	// A progress loop that dies fatally on every rebuild would cycle
+	// recoverFromFatalError forever: each rebuild succeeds, the new
+	// loop dies, onFatal spawns the next recovery. The recovery
+	// itself owns the budget now, so the (maxStuckRebuilds+1)th
+	// invocation drops the entry and publishes Failed rather than
+	// rebuilding again. The Failed phase is what wakes Reconcile and
+	// forces a full reopen with a fresh TargetInfo publish, which is
+	// the only path a source wedged against the old address recovers
+	// through.
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithFinalizer("m1", "ns1", "node-z", "flow-1", "info-1")
+	mirror.Spec.TargetNode = "node-a"
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+
+	loopCtx, loopCancel := context.WithCancel(context.Background())
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		<-loopCtx.Done()
+	}()
+	entry := &targetEntry{writer: &mxl.Writer{}}
+	entry.cancel = loopCancel
+	entry.done = loopDone
+	entry.recoveryAttempts.Store(maxStuckRebuilds)
+
+	rebuilt := make(chan struct{}, 1)
+	r := &TargetReconciler{
+		Client:        c,
+		Scheme:        scheme,
+		NodeName:      "node-a",
+		TeardownGrace: 2 * time.Second,
+		targets:       map[types.NamespacedName]*targetEntry{key: entry},
+		attempts:      attemptTable[targetOpenInputs]{},
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+			rebuilt <- struct{}{}
+			return &fabrics.Target{}, nil, "info-2", nil
+		},
+	}
+
+	r.recoverFromFatalError(key)
+
+	select {
+	case <-rebuilt:
+		t.Fatal("a capped recovery must not rebuild the fabric side again")
+	default:
+	}
+
+	r.mu.Lock()
+	_, live := r.targets[key]
+	r.mu.Unlock()
+	assert.False(t, live,
+		"the capped recovery must drop the entry so the next Reconcile reopens it")
+
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &got))
+	assert.Equal(t, mxlv1alpha1.MxlFlowMirrorFailed, got.Status.Phase,
+		"the capped recovery must publish Failed so the stale last state does not stand")
+	foundCond := false
+	for _, cond := range got.Status.Conditions {
+		if cond.Type == mxlv1alpha1.ConditionTypeTargetProgress &&
+			cond.Reason == ReasonStuckHandshakeCapReached {
+			foundCond = true
+			break
+		}
+	}
+	assert.True(t, foundCond,
+		"the terminal condition must say why the entry was dropped")
+
+	select {
+	case <-loopDone:
+	default:
+		t.Fatal("the dropped entry's progress loop must be cancelled and waited for")
+	}
+	assert.True(t, entry.closed,
+		"the dropped entry must be marked closed so no later rebuild installs handles on it")
+}
+
+func TestTarget_RecoveryDropsEntryWhenTargetInfoPublishFails(t *testing.T) {
+	// The TargetInfo publish is the rebuild's success criteria: a
+	// source initiator holding the pre-rebuild address posts against
+	// an endpoint nobody answers and its send queue never drains. A
+	// publish that fails must drop the entry -- publishing Failed and
+	// waking Reconcile -- rather than leave a live fabric side the
+	// source will never dial.
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithFinalizer("m1", "ns1", "node-z", "flow-1", "info-1")
+	mirror.Spec.TargetNode = "node-a"
+
+	failInfoWrites := func(ctx context.Context, cl client.Client, sub string,
+		obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption,
+	) error {
+		o := &client.SubResourcePatchOptions{}
+		for _, opt := range opts {
+			opt.ApplyToSubResourcePatch(o)
+		}
+		if o.FieldManager == targetInfoFieldOwner {
+			return errors.New("apiserver rejected the field-manager write")
+		}
+		return cl.Status().Patch(ctx, obj, patch, opts...)
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		WithInterceptorFuncs(interceptor.Funcs{SubResourcePatch: failInfoWrites}).
+		Build()
+
+	// An already-exited progress loop so the recovery passes its
+	// stop-and-wait and reaches the rebuild and its publish.
+	loopDone := make(chan struct{})
+	close(loopDone)
+	entry := &targetEntry{writer: &mxl.Writer{}}
+	entry.done = loopDone
+
+	r := &TargetReconciler{
+		Client:        c,
+		Scheme:        scheme,
+		NodeName:      "node-a",
+		TeardownGrace: 2 * time.Second,
+		targets:       map[types.NamespacedName]*targetEntry{key: entry},
+		attempts:      attemptTable[targetOpenInputs]{},
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+			return &fabrics.Target{}, nil, "info-2", nil
+		},
+	}
+
+	r.recoverFromFatalError(key)
+
+	r.mu.Lock()
+	_, live := r.targets[key]
+	r.mu.Unlock()
+	assert.False(t, live,
+		"a rebuild whose TargetInfo cannot be published must drop the entry")
+	assert.True(t, entry.closed,
+		"the dropped entry must be marked closed so its handles are not reused")
+
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &got))
+	assert.Equal(t, mxlv1alpha1.MxlFlowMirrorFailed, got.Status.Phase,
+		"the dropped entry must publish Failed so the stale prior state does not stand")
 }

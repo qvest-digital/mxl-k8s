@@ -1451,6 +1451,19 @@ func runSampleTransferLoop(
 	defer t.Stop()
 	// Throttles MakeProgress while it keeps failing; see progress.go.
 	var progress progressThrottle
+	// refusals counts consecutive ticks in which the writer produced
+	// new samples but not one chunk landed. MakeProgress is blocking
+	// for the verbs provider, so every retry parks on the completion
+	// queue; a queue that never yields a completion parks forever,
+	// and the loop degrades into an aged-out skip every tick -- real
+	// time in, nothing out -- while the fabric slot it holds never
+	// recovers on its own. Bounded here because no other part of the
+	// source side will break the state: the reader is healthy (the
+	// head advances), so the stall watchdog that reopens wedged
+	// readers never fires. Exiting lets headAdvancedAt go stale,
+	// which the flusher reads as ReaderNotAdvancing and rebuilds
+	// the source end to end -- fresh initiator, fresh connection.
+	refusals := 0
 
 	for {
 		select {
@@ -1509,6 +1522,7 @@ func runSampleTransferLoop(
 			// samples and published ReaderAgedOut for what was really a
 			// momentarily full queue.
 			retries := 0
+			landed := false
 			for lastSent < head {
 				count := head - lastSent
 				if xferBatch > 0 && count > xferBatch {
@@ -1526,10 +1540,22 @@ func runSampleTransferLoop(
 					break
 				}
 				retries = 0
+				landed = true
 				if tracker != nil {
 					tracker.recordTransfer(end, time.Now())
 				}
 				lastSent = end
+			}
+			if !landed {
+				refusals++
+				if refusals >= maxSampleRefusedTicks {
+					l.Error(nil, "sample transfers refused across ticks; exiting so the source is rebuilt",
+						"refusedTicks", refusals,
+						"lastSent", lastSent, "head", head)
+					return
+				}
+			} else {
+				refusals = 0
 			}
 		}
 
@@ -2314,6 +2340,17 @@ func (r *SourceReconciler) flowToMirrors(ctx context.Context, obj client.Object)
 // where the head is re-read and the wedge becomes visible as a stalled
 // lastSent.
 const maxSampleTransferRetries = 8
+
+// maxSampleRefusedTicks bounds how many consecutive ticks the sample
+// loop may find new samples but land none. A send queue that refuses
+// every chunk while MakeProgress parks on an empty completion queue
+// is a connection that will not recover on its own, and the loop's
+// per-tick retry bound alone would keep it alive forever. At the
+// default grain-rate interval one tick is ~10 ms of audio, so the
+// window is a few seconds of absolute refusal: far longer than any
+// healthy backpressure episode and short enough that the rebuild the
+// exit triggers outruns an operator noticing.
+const maxSampleRefusedTicks = 200
 
 // maxSampleCatchUpFallback is the per-tick catch-up bound used when
 // xferBatch is zero, which cannot happen in production (the open path
