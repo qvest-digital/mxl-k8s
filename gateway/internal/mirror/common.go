@@ -11,9 +11,13 @@
 //   - SourceReconciler is the sending half. For mirrors whose
 //     sourceNode is this gateway's node and that already carry a
 //     status.targetInfo, it opens a FlowReader on the local flow,
-//     builds a fabrics.Initiator + AddTarget(targetInfo), and runs a
-//     per-flow goroutine that calls TransferGrain on every grain the
-//     reader sees and MakeProgress on a tick.
+//     builds a fabrics.Initiator over it, and runs a per-flow
+//     goroutine that calls TransferGrain on every grain the reader
+//     sees and MakeProgress on a tick. The reader, the initiator and
+//     the goroutine are shared by every mirror of one flow on one
+//     provider: libmxl-fabrics enqueues a transfer to every target an
+//     initiator holds, so a mirror costs one AddTarget rather than a
+//     second copy of all three.
 //
 // The two reconcilers operate on disjoint mirror sets (one mirror has
 // a single targetNode and a single sourceNode, only one of which can

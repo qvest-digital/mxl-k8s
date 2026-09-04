@@ -75,15 +75,21 @@ func (c *ThroughputCollector) Collect(ch chan<- prometheus.Metric) {
 
 // Throughput reports what each mirror this node sources has put on the
 // fabric.
+//
+// Still one entry per mirror although the mirrors of one flow share an
+// initiator: a transfer is enqueued to every target that initiator
+// holds, so the bytes really did go to each peer, and folding them
+// onto the flow would drop the peer_node label the series are told
+// apart by.
 func (r *SourceReconciler) Throughput() []Throughput {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]Throughput, 0, len(r.sources))
 	for _, e := range r.sources {
 		out = append(out, Throughput{
-			FlowID:   e.flowID,
+			FlowID:   e.flowID(),
 			PeerNode: e.peerNode,
-			Provider: e.provider.String(),
+			Provider: e.provider().String(),
 			Bytes:    e.bytes.Load(),
 		})
 	}

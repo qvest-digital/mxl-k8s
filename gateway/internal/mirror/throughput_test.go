@@ -17,7 +17,7 @@ func TestThroughputCollectorReportsBothDirections(t *testing.T) {
 	// "what is this node pushing over verbs" by aggregation rather
 	// than by a second metric.
 	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
-	sent := &sourceEntry{flowID: "flow-a", peerNode: "n02", provider: fabrics.ProviderVerbs}
+	sent := &sourceEntry{shared: testShared("flow-a", fabrics.ProviderVerbs), peerNode: "n02"}
 	sent.bytes.Store(5529600)
 	src.sources[types.NamespacedName{Namespace: "p", Name: "a"}] = sent
 
@@ -47,7 +47,7 @@ func TestThroughputCollectorForgetsClosedMirrors(t *testing.T) {
 	// than one that is gone.
 	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
 	key := types.NamespacedName{Namespace: "p", Name: "a"}
-	e := &sourceEntry{flowID: "flow-a", peerNode: "n02", provider: fabrics.ProviderVerbs}
+	e := &sourceEntry{shared: testShared("flow-a", fabrics.ProviderVerbs), peerNode: "n02"}
 	e.bytes.Store(1024)
 	src.sources[key] = e
 
@@ -68,7 +68,7 @@ func TestThroughputCollectorSurvivesOneFlowMirroredTwice(t *testing.T) {
 	// scraped at all.
 	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
 	for _, peer := range []string{"n02", "n03"} {
-		e := &sourceEntry{flowID: "flow-a", peerNode: peer, provider: fabrics.ProviderVerbs}
+		e := &sourceEntry{shared: testShared("flow-a", fabrics.ProviderVerbs), peerNode: peer}
 		e.bytes.Store(1000)
 		src.sources[types.NamespacedName{Namespace: "p", Name: "flow-a--" + peer}] = e
 	}
@@ -82,7 +82,7 @@ mxl_gateway_mirror_transmitted_bytes_total{flow_id="flow-a",node="n01",peer_node
 
 	// Same flow and same peer in two namespaces cannot be separated by
 	// labels at all, so the fold has to carry it.
-	dup := &sourceEntry{flowID: "flow-a", peerNode: "n02", provider: fabrics.ProviderVerbs}
+	dup := &sourceEntry{shared: testShared("flow-a", fabrics.ProviderVerbs), peerNode: "n02"}
 	dup.bytes.Store(500)
 	src.sources[types.NamespacedName{Namespace: "other", Name: "flow-a--n02"}] = dup
 	require.Equal(t, 2, testutil.CollectAndCount(c),

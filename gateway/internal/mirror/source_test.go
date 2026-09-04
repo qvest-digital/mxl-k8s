@@ -3,6 +3,7 @@ package mirror
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -492,19 +493,90 @@ func TestRunTransferLoop_TracksProgressAndLastSentAt(t *testing.T) {
 }
 
 // fakeOpener is the inline initiatorOpener used by the Reconcile
-// tests. openFn is whatever the scenario wants the call to return;
-// calls counts every invocation so tests can assert reopen / fast-
-// path branching without inspecting the entry. Mirrors the style of
-// the operator's fakeLeaseChecker - an inline test fake instead of
-// a mockery-generated mock.
+// tests. openFn and attachFn are whatever the scenario wants the calls
+// to return; the counters and the added / removed logs let a test
+// assert how much libmxl-fabrics work a reconcile did without
+// inspecting the entries. Mirrors the style of the operator's
+// fakeLeaseChecker - an inline test fake instead of a
+// mockery-generated mock.
+//
+// opens is the counter that answers "how many readers and initiators
+// does this node hold", which is the whole point of sharing them:
+// several mirrors of one flow must drive attaches without driving
+// opens.
 type fakeOpener struct {
-	openFn func(flowID, targetInfoStr string, provider fabrics.Provider) (*sourceEntry, error)
-	calls  atomic.Int32
+	openFn   func(flowID string, provider fabrics.Provider) (*sharedSource, error)
+	attachFn func(s *sharedSource, targetInfoStr string) (*fabrics.TargetInfo, error)
+
+	opens    atomic.Int32
+	attaches atomic.Int32
+	detaches atomic.Int32
+
+	mu      sync.Mutex
+	names   map[*fabrics.TargetInfo]string
+	added   []string
+	removed []string
 }
 
-func (f *fakeOpener) open(flowID, targetInfoStr string, provider fabrics.Provider) (*sourceEntry, error) {
-	f.calls.Add(1)
-	return f.openFn(flowID, targetInfoStr, provider)
+func (f *fakeOpener) open(flowID string, provider fabrics.Provider) (*sharedSource, error) {
+	f.opens.Add(1)
+	if f.openFn != nil {
+		return f.openFn(flowID, provider)
+	}
+	return &sharedSource{}, nil
+}
+
+func (f *fakeOpener) attach(s *sharedSource, targetInfoStr string) (*fabrics.TargetInfo, error) {
+	f.attaches.Add(1)
+	info := &fabrics.TargetInfo{}
+	if f.attachFn != nil {
+		var err error
+		if info, err = f.attachFn(s, targetInfoStr); err != nil {
+			return nil, err
+		}
+	}
+	// The pointer is the identity a detach is asserted against. A
+	// zero-valued handle is never dereferenced: nothing in these tests
+	// calls into libmxl-fabrics through it.
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.names == nil {
+		f.names = make(map[*fabrics.TargetInfo]string)
+	}
+	f.names[info] = targetInfoStr
+	f.added = append(f.added, targetInfoStr)
+	return info, nil
+}
+
+func (f *fakeOpener) detach(_ *sharedSource, info *fabrics.TargetInfo) {
+	f.detaches.Add(1)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removed = append(f.removed, f.names[info])
+}
+
+// addedTargets and removedTargets report the target infos AddTarget
+// and RemoveTarget were called with, in call order.
+func (f *fakeOpener) addedTargets() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.added)
+}
+
+func (f *fakeOpener) removedTargets() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.removed)
+}
+
+// testFlowKey is the shared source the entry helpers below hang off,
+// for tests that need an entry attached to something without opening
+// libmxl handles.
+var testFlowKey = sourceKey{flowID: "flow-1", provider: fabrics.ProviderTCP}
+
+// testShared builds a sharedSource carrying no libmxl handles.
+func testShared(flowID string, provider fabrics.Provider) *sharedSource {
+	return &sharedSource{key: sourceKey{flowID: flowID, provider: provider}}
 }
 
 func newSourceTestScheme(t *testing.T) *runtime.Scheme {
@@ -560,7 +632,7 @@ func TestReconcile_AddTargetFailureSurfacesConditionAndCapsBackoffAt30s(t *testi
 		Scheme:   scheme,
 		NodeName: "node-a",
 		opener: &fakeOpener{
-			openFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
+			attachFn: func(*sharedSource, string) (*fabrics.TargetInfo, error) {
 				return nil, errors.Join(errAddTargetFailed, addErr)
 			},
 		},
@@ -639,12 +711,12 @@ func TestReconcile_FlowOriginRotationReopensReader(t *testing.T) {
 		Build()
 
 	opener := &fakeOpener{
-		openFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
+		openFn: func(string, fabrics.Provider) (*sharedSource, error) {
 			// A real opener would spawn the transfer goroutine and
-			// hand it the entry as tracker. The test never wires that
-			// up, so the entry stays inert and closeSourceHandles
+			// hand it the source as tracker. The test never wires
+			// that up, so the source stays inert and closeShared
 			// below is a no-op.
-			return &sourceEntry{infoStr: "info-1"}, nil
+			return &sharedSource{}, nil
 		},
 	}
 
@@ -664,13 +736,13 @@ func TestReconcile_FlowOriginRotationReopensReader(t *testing.T) {
 	// First reconcile: opens the initiator, records the origin timestamp.
 	_, err := r.Reconcile(context.Background(), req)
 	require.NoError(t, err)
-	require.Equal(t, int32(1), opener.calls.Load())
+	require.Equal(t, int32(1), opener.opens.Load())
 	t.Cleanup(func() { r.closeEntry(key) })
 
 	// Same timestamp on the MxlFlow: no rotation, no reopen.
 	_, err = r.Reconcile(context.Background(), req)
 	require.NoError(t, err)
-	assert.Equal(t, int32(1), opener.calls.Load(),
+	assert.Equal(t, int32(1), opener.opens.Load(),
 		"a Reconcile with no origin rotation must hit the fast path; "+
 			"opening the initiator twice would tear down the live transfer "+
 			"goroutine every controller-runtime tick")
@@ -685,7 +757,7 @@ func TestReconcile_FlowOriginRotationReopensReader(t *testing.T) {
 
 	_, err = r.Reconcile(context.Background(), req)
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), opener.calls.Load(),
+	assert.Equal(t, int32(2), opener.opens.Load(),
 		"a fresher Origin AppearedAt must reopen the FlowReader so the "+
 			"gateway tails the rebound writer instead of the stale handle")
 }
@@ -729,7 +801,7 @@ func TestReconcile_SourceNodeMutatedAwayClosesEntry(t *testing.T) {
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 
 	// Pre-seed: a previous reconcile (when spec.sourceNode == selfNode)
-	// installed an entry on this node. closeSourceHandles is nil-safe
+	// installed an entry on this node. The teardown is nil-safe
 	// for every field, so a zero-value entry is enough to detect the
 	// removal without spinning up real fabrics handles.
 	r.sources[key] = &sourceEntry{}
@@ -768,7 +840,7 @@ func TestSource_SeedAttemptsFromStatus(t *testing.T) {
 		Scheme:   scheme,
 		NodeName: "node-a",
 		opener: &fakeOpener{
-			openFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
+			attachFn: func(*sharedSource, string) (*fabrics.TargetInfo, error) {
 				return nil, errors.Join(errAddTargetFailed, errors.New("offline"))
 			},
 		},
@@ -1127,7 +1199,7 @@ func TestSource_FlusherSuppressesIdenticalTicksAfterFirstTransfer(t *testing.T) 
 		attempts:      attemptTable[sourceAddInputs]{},
 	}
 
-	entry := &sourceEntry{}
+	entry := &sourceEntry{key: key, shared: testShared("flow-1", fabrics.ProviderTCP)}
 	entry.progress.Store(1)
 	transferAt := time.Now()
 	entry.lastSentAt.Store(&transferAt)
@@ -1135,7 +1207,7 @@ func TestSource_FlusherSuppressesIdenticalTicksAfterFirstTransfer(t *testing.T) 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go r.runFlusher(ctx, done, key, entry, 2*time.Millisecond)
+	go r.runFlusher(ctx, done, entry, 2*time.Millisecond)
 
 	// Wait for the first publish so the assertion has a known
 	// baseline ResourceVersion to compare against.

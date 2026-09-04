@@ -20,7 +20,9 @@ import (
 // and which has delivered transfers grains, the last of them at
 // sentAt. A zero sentAt leaves the entry with no delivery on record.
 func stalledEntry(head uint64, headAt *time.Time, transfers uint64, sentAt time.Time) *sourceEntry {
-	e := &sourceEntry{}
+	// Attached to a handle-less shared source: the flusher reads the
+	// reader rebuild budget and the writer-liveness seam through it.
+	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}}
 	e.lastHead.Store(head)
 	if headAt != nil {
 		t := *headAt
@@ -290,8 +292,8 @@ func TestReconcile_PreservesLastSentAtAcrossReopen(t *testing.T) {
 		Build()
 
 	opener := &fakeOpener{
-		openFn: func(string, string, fabrics.Provider) (*sourceEntry, error) {
-			return &sourceEntry{infoStr: "info-1"}, nil
+		openFn: func(string, fabrics.Provider) (*sharedSource, error) {
+			return &sharedSource{}, nil
 		},
 	}
 	r := &SourceReconciler{
@@ -345,7 +347,7 @@ func TestRunFlusher_ReopensWedgedReader(t *testing.T) {
 		NodeName: "node-a",
 		sources:  map[types.NamespacedName]*sourceEntry{},
 		attempts: attemptTable[sourceAddInputs]{},
-		rebuilds: map[types.NamespacedName]uint32{},
+		rebuilds: map[sourceKey]uint32{},
 		rebuildFn: func(key types.NamespacedName) {
 			rebuilt <- key
 		},
@@ -357,7 +359,8 @@ func TestRunFlusher_ReopensWedgedReader(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go r.runFlusher(ctx, done, key, entry, time.Millisecond)
+	entry.key = key
+	go r.runFlusher(ctx, done, entry, time.Millisecond)
 
 	select {
 	case got := <-rebuilt:
@@ -372,7 +375,7 @@ func TestRunFlusher_ReopensWedgedReader(t *testing.T) {
 		t.Fatal("the flusher must return before the reopen tears the entry down")
 	}
 
-	assert.Equal(t, uint32(1), r.rebuilds[key],
+	assert.Equal(t, uint32(1), r.rebuilds[testFlowKey],
 		"the reopen must consume exactly one unit of budget")
 
 	var got mxlv1alpha1.MxlFlowMirror
@@ -404,7 +407,7 @@ func TestRunFlusher_ReopensReaderStuckOutsideTheRing(t *testing.T) {
 		NodeName: "node-a",
 		sources:  map[types.NamespacedName]*sourceEntry{},
 		attempts: attemptTable[sourceAddInputs]{},
-		rebuilds: map[types.NamespacedName]uint32{},
+		rebuilds: map[sourceKey]uint32{},
 		rebuildFn: func(key types.NamespacedName) {
 			rebuilt <- key
 		},
@@ -420,7 +423,8 @@ func TestRunFlusher_ReopensReaderStuckOutsideTheRing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go r.runFlusher(ctx, done, key, entry, time.Millisecond)
+	entry.key = key
+	go r.runFlusher(ctx, done, entry, time.Millisecond)
 
 	select {
 	case got := <-rebuilt:
@@ -454,7 +458,7 @@ func TestRunFlusher_StopsReopeningAtCap(t *testing.T) {
 		NodeName: "node-a",
 		sources:  map[types.NamespacedName]*sourceEntry{},
 		attempts: attemptTable[sourceAddInputs]{},
-		rebuilds: map[types.NamespacedName]uint32{key: maxReaderRebuilds},
+		rebuilds: map[sourceKey]uint32{testFlowKey: maxReaderRebuilds},
 		rebuildFn: func(types.NamespacedName) {
 			t.Error("no reopen may be spawned once the budget is spent")
 		},
@@ -463,7 +467,8 @@ func TestRunFlusher_StopsReopeningAtCap(t *testing.T) {
 	entry := stalledEntry(42, ptrTime(time.Now().Add(-time.Minute)), 0, time.Time{})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go r.runFlusher(ctx, done, key, entry, time.Millisecond)
+	entry.key = key
+	go r.runFlusher(ctx, done, entry, time.Millisecond)
 
 	require.Eventually(t, func() bool {
 		var got mxlv1alpha1.MxlFlowMirror
@@ -497,18 +502,19 @@ func TestRunFlusher_ClearsRebuildBudgetOnProgress(t *testing.T) {
 		NodeName: "node-a",
 		sources:  map[types.NamespacedName]*sourceEntry{},
 		attempts: attemptTable[sourceAddInputs]{},
-		rebuilds: map[types.NamespacedName]uint32{key: 3},
+		rebuilds: map[sourceKey]uint32{testFlowKey: 3},
 	}
 
 	entry := stalledEntry(42, ptrTime(time.Now()), 5, time.Now())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go r.runFlusher(ctx, done, key, entry, time.Millisecond)
+	entry.key = key
+	go r.runFlusher(ctx, done, entry, time.Millisecond)
 
 	require.Eventually(t, func() bool {
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		_, still := r.rebuilds[key]
+		_, still := r.rebuilds[testFlowKey]
 		return !still
 	}, 5*time.Second, 10*time.Millisecond)
 

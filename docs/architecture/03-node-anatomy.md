@@ -215,7 +215,16 @@ Three details from the diagram are worth pulling out:
   on-disk flow definition and any consumer `FlowReader` handles
   point at it. The new `TargetInfo` is published into status; the
   source side detects the rotation through its existing watch and
-  reopens its initiator.
+  swaps that one target on its initiator.
+- **One initiator per flow on the source side.** libmxl-fabrics
+  enqueues each `TransferGrain` / `TransferSamples` call to every
+  target added to an initiator, so a flow mirrored from this node to
+  several others is one `FlowReader`, one `Initiator` and one
+  transfer goroutine, with one `AddTarget` per mirror. Per-mirror
+  state is the target handle and the status counters; the reader,
+  the initiator and the loop are keyed on (flow, provider), because
+  an initiator is set up against one interface and that interface is
+  chosen per provider.
 
 There is no application-level backpressure on the source side: the
 transfer goroutine forwards every grain it sees in
