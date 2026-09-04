@@ -61,19 +61,22 @@ echo "  bouncing ${gateway_pod} on ${reader_node} (target side of the audio mirr
 "${KUBECTL[@]}" -n "$NAMESPACE" delete "pod/${gateway_pod}" --wait=false \
   || fail "deleting ${gateway_pod} failed"
 
-# The DaemonSet replaces the pod immediately; wait for the
-# replacement to run on the same node before watching the index, so
-# the recovery clock starts from a live target side.
+# The DaemonSet replaces the pod, but until the old object is fully
+# gone it still reports phase=Running; wait for a *different* gateway
+# pod to run on the node before watching the index, so the recovery
+# clock starts from a live replacement rather than the dying original.
 deadline=$(( $(date +%s) + ROLLOUT_TIMEOUT_SECS ))
+replacement=""
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  if [ -n "$(daemonset_pod_on gateway "$reader_node")" ]; then
+  replacement="$(daemonset_pod_on gateway "$reader_node")"
+  if [ -n "$replacement" ] && [ "$replacement" != "$gateway_pod" ]; then
     break
   fi
   sleep 2
 done
-[ -n "$(daemonset_pod_on gateway "$reader_node")" ] \
-  || fail "no gateway pod came back up on ${reader_node}"
-echo "  replacement gateway running on ${reader_node}"
+[ -n "$replacement" ] && [ "$replacement" != "$gateway_pod" ] \
+  || fail "no replacement gateway pod came up on ${reader_node}"
+echo "  replacement gateway ${replacement} running on ${reader_node}"
 
 # Poll until a full window delivers at rate. Sampling the index twice
 # per attempt bounds each check to WINDOW_SECS; the outer deadline
