@@ -163,16 +163,16 @@ func TestRunSampleTransferLoop_FellBehindSkipsToBoundedCatchUpAndSignals(t *test
 	tracker := &recordingTracker{}
 	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, xferBatch, time.Millisecond, tracker)
 
-	require.Eventually(t, func() bool { return len(xfersSnap()) == 1 },
-		time.Second, time.Millisecond, "expected the clamped final run to transfer")
+	require.Eventually(t, func() bool { return len(xfersSnap()) == 2 },
+		time.Second, time.Millisecond, "expected the bounded catch-up to transfer as two full batches")
 
 	cancel()
 	<-done
 
-	assert.Equal(t, []sampleXfer{{head: 2000, count: 2 * xferBatch}}, xfersSnap(),
+	assert.Equal(t, []sampleXfer{{head: 1520, count: xferBatch}, {head: 2000, count: xferBatch}}, xfersSnap(),
 		"after falling behind, the loop must transfer only the bounded catch-up ending at head")
 	transfers, agedOuts := tracker.snapshot()
-	assert.Equal(t, []uint64{2000}, transfers)
+	assert.Equal(t, []uint64{1520, 2000}, transfers)
 	assert.Equal(t, 1, agedOuts,
 		"falling more than the catch-up bound behind must record exactly one aged-out skip so the "+
 			"reconciler can publish SourceProgress=ReaderAgedOut")
