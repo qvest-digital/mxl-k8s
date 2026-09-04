@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.11](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.10...v1.1.0-rc.11) (2026-09-04)
+
+
+### Features
+
+* **chart:** make the domain's SELinux context configurable ([#317](https://github.com/qvest-digital/mxl-k8s/issues/317)) ([fadf5da](https://github.com/qvest-digital/mxl-k8s/commit/fadf5da145404fce7d2092bd187209c04446ecd9))
+
 ## [1.1.0-rc.10](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.9...v1.1.0-rc.10) (2026-09-04)
 
 
