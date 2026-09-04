@@ -147,21 +147,27 @@ func run(args []string) error {
 		Target:   targetReconciler,
 	})
 
+	// Built whether or not it gates anything, so the publisher's
+	// observer wiring does not depend on the flag; only the health
+	// check registration below does.
+	enumerationGate := &capabilities.EnumerationGate{Grace: cfg.RDMAEnumerationGrace}
+
 	// MxlNodeCapabilities publisher runs as a Manager Runnable so it
 	// joins the leader-election / shutdown lifecycle and only fires
 	// once the cache has synced.
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		pub := &capabilities.Publisher{
-			Client:      mgr.GetClient(),
-			APIReader:   mgr.GetAPIReader(),
-			Recorder:    mgr.GetEventRecorderFor("mxl-node-capabilities"),
-			NodeName:    cfg.NodeName,
-			Providers:   cfg.Providers,
-			Lister:      handles.Fabrics(),
-			Selector:    selector,
-			HostDevices: rdma.Inventory{},
-			BindAddress: cfg.BindAddress,
-			ProbePeriod: cfg.ProbePeriod,
+			Client:             mgr.GetClient(),
+			APIReader:          mgr.GetAPIReader(),
+			Recorder:           mgr.GetEventRecorderFor("mxl-node-capabilities"),
+			NodeName:           cfg.NodeName,
+			Providers:          cfg.Providers,
+			Lister:             handles.Fabrics(),
+			Selector:           selector,
+			HostDevices:        rdma.Inventory{},
+			HostDeviceObserver: enumerationGate,
+			BindAddress:        cfg.BindAddress,
+			ProbePeriod:        cfg.ProbePeriod,
 		}
 		if err := pub.EnsureExists(ctx); err != nil {
 			return err
@@ -193,6 +199,15 @@ func run(args []string) error {
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("register healthz: %w", err)
 	}
+	// Registered on healthz rather than readyz because the remedy is a
+	// restart: the enumeration is fixed for the life of the process,
+	// and withdrawing the pod from its Service would stop its counters
+	// being collected without revisiting it.
+	if cfg.RDMAEnumerationLiveness {
+		if err := mgr.AddHealthzCheck("rdma-enumeration", enumerationGate.Check); err != nil {
+			return fmt.Errorf("register rdma enumeration healthz: %w", err)
+		}
+	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return fmt.Errorf("register readyz: %w", err)
 	}
@@ -208,7 +223,9 @@ func run(args []string) error {
 		"probeAddr", cfg.ProbeAddr,
 		"pprofAddr", cfg.PprofAddr,
 		"resyncPeriod", cfg.ResyncPeriod,
-		"probePeriod", cfg.ProbePeriod)
+		"probePeriod", cfg.ProbePeriod,
+		"rdmaEnumerationLiveness", cfg.RDMAEnumerationLiveness,
+		"rdmaEnumerationGrace", cfg.RDMAEnumerationGrace)
 
 	return mgr.Start(ctrl.SetupSignalHandler())
 }

@@ -76,6 +76,18 @@ type Config struct {
 	// enumerations. The status still refreshes on ResyncPeriod.
 	ProbePeriod time.Duration
 
+	// RDMAEnumerationLiveness fails the liveness probe once the host
+	// exposes RDMA devices the enumerated providers do not account
+	// for. Off by default: the restart it asks for clears a gateway
+	// that enumerated before the hardware was usable, and loops on a
+	// node whose devices the built providers never drive.
+	RDMAEnumerationLiveness bool
+
+	// RDMAEnumerationGrace is how long that discrepancy holds before
+	// the probe fails. Measured across consecutive enumerations, so
+	// it wants to span several ProbePeriod.
+	RDMAEnumerationGrace time.Duration
+
 	// PacingFraction is how much of a grain's own edit-rate interval
 	// the source gateway spreads that grain's transmission over. It
 	// caps peak rate at the flow's own rate divided by this, and costs
@@ -173,6 +185,17 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 			"still refreshes every --resync-period from the last result. Each enumeration "+
 			"sweeps every provider libfabric was built with and warns about those it finds "+
 			"no device for.")
+	fs.BoolVar(&c.RDMAEnumerationLiveness, "rdma-enumeration-liveness", false,
+		"Fail the liveness probe while the host exposes RDMA devices that no enumerated "+
+			"provider accounts for. libfabric fixes a provider's device list at the first "+
+			"enumeration, so a gateway that started before the hardware was usable never "+
+			"revisits it and a restart is the only thing that does. Off by default: the "+
+			"same discrepancy is reported by a node whose devices the built providers "+
+			"cannot drive, where restarting loops instead of recovering.")
+	fs.DurationVar(&c.RDMAEnumerationGrace, "rdma-enumeration-grace", 10*time.Minute,
+		"How long the host device discrepancy must hold before --rdma-enumeration-liveness "+
+			"fails the probe. Spans several --probe-period so a single enumeration does not "+
+			"decide it.")
 	fs.Float64Var(&c.PacingFraction, "pacing-fraction", -1,
 		"Fraction of a grain's own interval to spread that grain's transmission over. "+
 			"Caps peak rate at the flow's rate divided by this, and costs up to this much "+

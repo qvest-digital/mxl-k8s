@@ -37,6 +37,14 @@ type HostDeviceLister interface {
 	ActiveDevices() ([]string, error)
 }
 
+// HostDeviceObserver receives each host-device comparison as it is
+// made. applies carries hostDeviceCondition's second return, so an
+// observer can tell a comparison that found nothing wrong from one
+// that never ran.
+type HostDeviceObserver interface {
+	Observe(cond metav1.Condition, applies bool)
+}
+
 // rdmaProviders are the providers that drive RDMA hardware, so the
 // ones whose absence the host device list can contradict. tcp and shm
 // need no device and never appear here.
@@ -80,6 +88,13 @@ type Publisher struct {
 	// publish the same empty entry. Nil skips the cross-check and
 	// leaves the condition unset.
 	HostDevices HostDeviceLister
+
+	// HostDeviceObserver receives every host-device comparison, with
+	// the same second value hostDeviceCondition returns: whether the
+	// comparison applied at all. It is how a health gate follows the
+	// condition without reading back the resource it lands in. Nil
+	// observes nothing.
+	HostDeviceObserver HostDeviceObserver
 
 	// BindAddress narrows the enumeration query the way a mirror
 	// setup narrows it, so a gateway pinned to one address does not
@@ -260,7 +275,15 @@ func (p *Publisher) Refresh(ctx context.Context) error {
 	// lasts until the process restarts. The condition is what carries
 	// it for as long as it holds, which is why it is set even where
 	// nothing is emitted.
-	if cond, ok := p.hostDeviceCondition(probed); ok {
+	cond, ok := p.hostDeviceCondition(probed)
+	// Observed on every pass rather than only where it applies: the
+	// observer has to see a comparison stop applying, or a gateway
+	// that loses its host device list keeps whatever verdict it was
+	// last given.
+	if p.HostDeviceObserver != nil {
+		p.HostDeviceObserver.Observe(cond, ok)
+	}
+	if ok {
 		if meta.SetStatusCondition(&obj.Status.Conditions, cond) {
 			if cond.Status == metav1.ConditionTrue {
 				l.V(1).Info("host RDMA devices are represented in the probed providers",
