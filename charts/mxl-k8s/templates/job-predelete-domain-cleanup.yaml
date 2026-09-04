@@ -31,6 +31,10 @@ spec:
     spec:
       serviceAccountName: {{ .Chart.Name }}-predelete-domain-cleanup
       restartPolicy: Never
+      {{- with .Values.cleanup.preDeleteDomainWipe.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.global.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
