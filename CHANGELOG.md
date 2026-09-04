@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.1.0-rc.10](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.9...v1.1.0-rc.10) (2026-09-04)
+
+
+### Features
+
+* **gateway:** restart on RDMA devices the providers never enumerated ([#313](https://github.com/qvest-digital/mxl-k8s/issues/313)) ([a04a968](https://github.com/qvest-digital/mxl-k8s/commit/a04a9681803aa0d46a1ce7485d37b85a5564da31))
+
+
+### Bug Fixes
+
+* **gateway:** bound sample catch-up to stop aged-out burst ([#315](https://github.com/qvest-digital/mxl-k8s/issues/315)) ([ba95868](https://github.com/qvest-digital/mxl-k8s/commit/ba95868249f7ae5aa198fca5241e95c87fc3c1d2))
+
+
+### Code Refactoring
+
+* **gateway:** share one initiator per flow on the source side ([#314](https://github.com/qvest-digital/mxl-k8s/issues/314)) ([981f522](https://github.com/qvest-digital/mxl-k8s/commit/981f522ade61984d7ebfb52cdf44e5e55a0af7a6))
+
 ## [1.1.0-rc.9](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.8...v1.1.0-rc.9) (2026-09-03)
 
 
