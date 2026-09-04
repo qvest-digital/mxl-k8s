@@ -76,6 +76,13 @@ cleanup:
     # @schema
     # -- Per-pod completion timeout.
     timeoutSeconds: 120
+    # -- Pod-level security context for the cleanup Job, rendered into
+    # the pod spec as given. The Job removes directories inside the
+    # domain hostPath, which is the same write an SELinux-enabled node
+    # denies the gateway, so it needs the seLinuxOptions documented on
+    # gateway.podSecurityContext. Carried separately because the Job is
+    # a helm hook and takes none of the gateway's pod settings.
+    podSecurityContext: {}
 
 # -- Operator: cluster-wide reconciler for MxlReceiver, MxlFlowMirror,
 # and related CRDs. Single Deployment.
@@ -301,6 +308,11 @@ agent:
       cpu: 25m
       memory: 32Mi
     limits: {}
+  # -- Pod-level security context, rendered into the pod spec as
+  # given. The agent mounts the same host run directory as the
+  # gateway and writes to it, so an SELinux-enabled node needs
+  # seLinuxOptions here for the reason documented on
+  # gateway.podSecurityContext.
   podSecurityContext: {}
   containerSecurityContext:
     allowPrivilegeEscalation: false
@@ -604,6 +616,24 @@ gateway:
       cpu: 100m
       memory: 128Mi
     limits: {}
+  # -- Pod-level security context, rendered into the pod spec as
+  # given.
+  #
+  # An SELinux-enabled node needs seLinuxOptions here. The domain is
+  # a hostPath, and Kubernetes never relabels one: the hostPath
+  # volume plugin reports SELinuxRelabel false and declines SELinux
+  # context mounts, so the directory keeps the type the host gives
+  # it. Under /run that is usually run_t, while the container is
+  # confined to a pod type, and every write to the domain is denied.
+  #
+  # seLinuxOptions labels the container process rather than the
+  # directory, which makes it the only lever available from a chart.
+  # Which type is accepted depends on the policy loaded on the node,
+  # so no value is correct everywhere and this stays empty.
+  #
+  # In permissive mode the write still succeeds and each denial only
+  # emits an audit record set, so the cost is invisible until the
+  # node's audit backlog overruns and records are lost.
   podSecurityContext: {}
   containerSecurityContext:
     allowPrivilegeEscalation: false
@@ -798,6 +828,10 @@ exporter:
       cpu: 25m
       memory: 64Mi
     limits: {}
+  # -- Pod-level security context, rendered into the pod spec as
+  # given. The exporter mounts the host run directory read-only and
+  # never writes into the domain, so it does not need the
+  # seLinuxOptions that gateway.podSecurityContext documents.
   podSecurityContext: {}
   containerSecurityContext:
     allowPrivilegeEscalation: false

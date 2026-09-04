@@ -223,3 +223,25 @@ tests:
     asserts:
       - hasDocuments:
           count: 0
+
+  # The Job removes directories inside the domain hostPath, which an
+  # SELinux-enabled node denies for the same reason it denies the
+  # gateway. Kubernetes never relabels a hostPath, so labelling the
+  # container process is the only lever, and the Job takes none of the
+  # gateway's pod settings.
+  - it: carries a pod security context onto the cleanup pod
+    template: templates/job-predelete-domain-cleanup.yaml
+    set:
+      cleanup.preDeleteDomainWipe.podSecurityContext:
+        seLinuxOptions:
+          type: spc_t
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.seLinuxOptions.type
+          value: spc_t
+
+  - it: omits the pod security context when none is set
+    template: templates/job-predelete-domain-cleanup.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.securityContext
