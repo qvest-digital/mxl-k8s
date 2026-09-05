@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.15](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.14...v1.1.0-rc.15) (2026-09-05)
+
+
+### Bug Fixes
+
+* **gateway:** hold only IP-addressed providers to the bind address ([#326](https://github.com/qvest-digital/mxl-k8s/issues/326)) ([5004097](https://github.com/qvest-digital/mxl-k8s/commit/50040970049ba4804c3f41f67b902cff5f527ab3))
+
 ## [1.1.0-rc.14](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.13...v1.1.0-rc.14) (2026-09-05)
 
 
