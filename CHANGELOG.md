@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.14](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.13...v1.1.0-rc.14) (2026-09-05)
+
+
+### Bug Fixes
+
+* **gateway:** count true production and drop duplicate sample arrivals ([#323](https://github.com/qvest-digital/mxl-k8s/issues/323)) ([9e56725](https://github.com/qvest-digital/mxl-k8s/commit/9e567259e56c42880ecfdd7b2a9fbbb79ddd318d))
+
 ## [1.1.0-rc.13](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.12...v1.1.0-rc.13) (2026-09-05)
 
 
