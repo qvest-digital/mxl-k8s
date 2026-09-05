@@ -45,3 +45,6 @@ kind-diagnostics/
 
 # Graphify output, rebuilt from the tree it describes
 graphify-out/
+
+# local build output of hack/flow-probe.sh
+.probe-bin/
