@@ -240,20 +240,21 @@ func TestRunSampleTransferLoop_NeverBurstsBeyondCatchUpPerTick(t *testing.T) {
 		"a frozen head must not produce further transfers, got %d", len(snap))
 }
 
-func TestRunSampleTransferLoop_ExitsAfterSustainedRefusal(t *testing.T) {
-	// A send queue that refuses every chunk while the writer keeps
-	// producing is a connection that will not drain on its own. The
-	// loop must stop after maxSampleRefusedTicks consecutive
-	// refusing ticks rather than skip-retrying forever: a live loop
-	// keeps probing the head, so the flusher's stale-head watchdog
-	// never fires and nothing else on the source side breaks the
-	// state. Exiting stops the head probes, which the flusher reads
-	// as ReaderNotAdvancing and rebuilds the source end to end.
+func TestRunSampleTransferLoop_ExitsAfterSustainedStarvation(t *testing.T) {
+	// A wedged fabric connection refuses most chunks while the writer
+	// keeps producing: a live loop keeps probing the head, so the
+	// flusher's stale-head watchdog never fires, and the occasional
+	// chunk that does land reads as delivery to every freshness-based
+	// signal. The loop must stop after maxSampleStarvedTicks
+	// consecutive ticks under a quarter of the produced samples
+	// rather than skip-retrying forever. Exiting stops the head
+	// probes, which the flusher reads as ReaderNotAdvancing and
+	// rebuilds the source end to end.
 	const xferBatch = 480
 	var probes atomic.Uint64
 	probe := func() (uint64, error) {
 		// The head advances one batch per tick so every tick finds
-		// new samples to refuse.
+		// new samples to starve.
 		return probes.Add(xferBatch), nil
 	}
 	transfer := func(uint64, int) error {
@@ -268,9 +269,9 @@ func TestRunSampleTransferLoop_ExitsAfterSustainedRefusal(t *testing.T) {
 
 	select {
 	case <-done:
-		// The loop exited on its own: the sustained-refusal bound fired.
+		// The loop exited on its own: the starvation bound fired.
 	case <-time.After(5 * time.Second):
-		t.Fatal("loop did not exit under sustained refusal; the wedge would persist forever")
+		t.Fatal("loop did not exit under sustained starvation; the wedge would persist forever")
 	}
 
 	// Every tick refused, so nothing landed and the loop kept
@@ -280,16 +281,15 @@ func TestRunSampleTransferLoop_ExitsAfterSustainedRefusal(t *testing.T) {
 	// The head probes ran for at least the bound's worth of ticks
 	// before the exit, proving the loop tolerated the full window
 	// before giving up rather than exiting on the first refusal.
-	assert.GreaterOrEqual(t, probes.Load(), uint64(maxSampleRefusedTicks*xferBatch),
-		"the loop must tolerate the whole refusal window before exiting")
+	assert.GreaterOrEqual(t, probes.Load(), uint64(maxSampleStarvedTicks*xferBatch),
+		"the loop must tolerate the whole starvation window before exiting")
 }
 
-func TestRunSampleTransferLoop_RefusalCountResetsOnDelivery(t *testing.T) {
-	// A busy queue that intermittently refuses but delivers before
-	// the refusal window elapses must run forever: the exit bound
-	// counts only *consecutive* refusing ticks, and clearing it on
-	// delivery keeps a healthy backpressure episode from being
-	// mistaken for a dead connection.
+func TestRunSampleTransferLoop_StarvationResetsOnDelivery(t *testing.T) {
+	// A busy queue that intermittently refuses but delivers most of
+	// what the writer produces must run forever: the exit bound
+	// counts only consecutive starved ticks, and a tick that lands
+	// at least a quarter of the produced samples is not starved.
 	const xferBatch = 480
 	var probes atomic.Uint64
 	var calls atomic.Int32
@@ -297,7 +297,9 @@ func TestRunSampleTransferLoop_RefusalCountResetsOnDelivery(t *testing.T) {
 		return probes.Add(xferBatch), nil
 	}
 	transfer := func(uint64, int) error {
-		// Refuse heavily, but land every few attempts.
+		// Refuse heavily, but land every few attempts: each landed
+		// chunk empties the tick's delta, so the delivered fraction
+		// is far above the starvation threshold.
 		if calls.Add(1)%10 != 0 {
 			return fabrics.ErrNotReady
 		}
@@ -309,18 +311,64 @@ func TestRunSampleTransferLoop_RefusalCountResetsOnDelivery(t *testing.T) {
 	tracker := &recordingTracker{}
 	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, xferBatch, time.Millisecond, tracker)
 
-	// Far longer than the refusal window: if the counter were not
+	// Far longer than the starvation window: if the counter were not
 	// reset by deliveries the loop would have exited inside it.
 	time.Sleep(2 * time.Second)
 	select {
 	case <-done:
-		t.Fatal("loop exited despite regular deliveries; the refusal counter is not reset on delivery")
+		t.Fatal("loop exited despite regular deliveries; the starvation counter is not reset on delivery")
 	default:
 	}
 	cancel()
 	<-done
 	transfers, _ := tracker.snapshot()
 	assert.NotEmpty(t, transfers, "an intermittently delivering queue must have landed chunks")
+}
+
+func TestRunSampleTransferLoop_TrickleDeliveryStillStarves(t *testing.T) {
+	// The wedge that defeats every freshness-based signal: the send
+	// queue drains one slot at a time, so a thin trickle of chunks
+	// lands while the bulk of each tick's production is aged out and
+	// skipped. A loop that exited only on total refusal -- or reset
+	// its bound on any delivery -- pins the wedge forever, because
+	// the trickle reads as delivery. The starvation ratio must count
+	// samples, not chunks: a tick landing under a quarter of the
+	// produced samples stays starved even though it landed something.
+	const xferBatch = 480
+	var probes atomic.Uint64
+	var calls atomic.Int32
+	probe := func() (uint64, error) {
+		// The head advances eight batches per tick, like a loop that
+		// spent the tick's budget retrying against a full queue.
+		return probes.Add(8 * xferBatch), nil
+	}
+	transfer := func(uint64, int) error {
+		// Land one chunk per tick out of eight produced: an eighth
+		// of production, above zero but far under the quarter.
+		if calls.Add(1) == 1 {
+			return nil
+		}
+		return fabrics.ErrNotReady
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	tracker := &recordingTracker{}
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, xferBatch, time.Millisecond, tracker)
+
+	select {
+	case <-done:
+		// The loop exited on its own: the trickle did not reset the
+		// starvation bound.
+	case <-time.After(5 * time.Second):
+		t.Fatal("loop did not exit under trickle delivery; the wedge would persist forever")
+	}
+
+	transfers, _ := tracker.snapshot()
+	assert.NotEmpty(t, transfers, "the trickle landed chunks before the exit")
+	assert.Less(t, len(transfers), maxSampleStarvedTicks,
+		"the loop must stop delivering the trickle once the bound fires")
 }
 
 func TestRunSampleTransferLoop_TransferErrorBreaksTickAndRetries(t *testing.T) {

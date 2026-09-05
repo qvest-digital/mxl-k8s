@@ -1451,19 +1451,20 @@ func runSampleTransferLoop(
 	defer t.Stop()
 	// Throttles MakeProgress while it keeps failing; see progress.go.
 	var progress progressThrottle
-	// refusals counts consecutive ticks in which the writer produced
-	// new samples but not one chunk landed. MakeProgress is blocking
-	// for the verbs provider, so every retry parks on the completion
-	// queue; a queue that never yields a completion parks forever,
-	// and the loop degrades into an aged-out skip every tick -- real
-	// time in, nothing out -- while the fabric slot it holds never
-	// recovers on its own. Bounded here because no other part of the
-	// source side will break the state: the reader is healthy (the
-	// head advances), so the stall watchdog that reopens wedged
-	// readers never fires. Exiting lets headAdvancedAt go stale,
-	// which the flusher reads as ReaderNotAdvancing and rebuilds
-	// the source end to end -- fresh initiator, fresh connection.
-	refusals := 0
+	// starved counts consecutive ticks in which the writer produced
+	// new samples but only a fraction of them landed. A wedged fabric
+	// connection does not refuse every chunk: the send queue drains
+	// one slot at a time, a thin trickle of small chunks lands, and
+	// the trickle resets any "delivered recently" signal while the
+	// loop ages out and skips the bulk of the flow. The starvation
+	// ratio is the trickle-proof signal: produced counts the head
+	// advance, delivered the samples actually accepted, and a tick
+	// that lands under a quarter of what the producer wrote is
+	// starved regardless of any partial success. Exiting lets
+	// headAdvancedAt go stale, which the flusher reads as
+	// ReaderNotAdvancing and rebuilds the source end to end -- fresh
+	// initiator, fresh connection.
+	starved := 0
 
 	for {
 		select {
@@ -1521,8 +1522,9 @@ func runSampleTransferLoop(
 			// producer kept writing, at which point the loop skipped
 			// samples and published ReaderAgedOut for what was really a
 			// momentarily full queue.
+			produced := head - lastSent
 			retries := 0
-			landed := false
+			delivered := uint64(0)
 			for lastSent < head {
 				count := head - lastSent
 				if xferBatch > 0 && count > xferBatch {
@@ -1540,22 +1542,23 @@ func runSampleTransferLoop(
 					break
 				}
 				retries = 0
-				landed = true
+				delivered += count
 				if tracker != nil {
 					tracker.recordTransfer(end, time.Now())
 				}
 				lastSent = end
 			}
-			if !landed {
-				refusals++
-				if refusals >= maxSampleRefusedTicks {
-					l.Error(nil, "sample transfers refused across ticks; exiting so the source is rebuilt",
-						"refusedTicks", refusals,
+			if produced > 0 && delivered*4 < produced {
+				starved++
+				if starved >= maxSampleStarvedTicks {
+					l.Error(nil, "sample transfers starving; exiting so the source is rebuilt",
+						"starvedTicks", starved,
+						"produced", produced, "delivered", delivered,
 						"lastSent", lastSent, "head", head)
 					return
 				}
 			} else {
-				refusals = 0
+				starved = 0
 			}
 		}
 
@@ -2341,16 +2344,20 @@ func (r *SourceReconciler) flowToMirrors(ctx context.Context, obj client.Object)
 // lastSent.
 const maxSampleTransferRetries = 8
 
-// maxSampleRefusedTicks bounds how many consecutive ticks the sample
-// loop may find new samples but land none. A send queue that refuses
-// every chunk while MakeProgress parks on an empty completion queue
-// is a connection that will not recover on its own, and the loop's
-// per-tick retry bound alone would keep it alive forever. At the
-// default grain-rate interval one tick is ~10 ms of audio, so the
-// window is a few seconds of absolute refusal: far longer than any
-// healthy backpressure episode and short enough that the rebuild the
-// exit triggers outruns an operator noticing.
-const maxSampleRefusedTicks = 200
+// maxSampleStarvedTicks bounds how many consecutive ticks the sample
+// loop may land under a quarter of the samples the writer produced.
+// A wedged fabric connection does not refuse every chunk: its send
+// queue drains slowly enough that a trickle of chunks keeps landing,
+// which reads as delivery to every freshness-based signal while the
+// loop ages out and skips the bulk of the flow. A quarter is far
+// below anything a healthy mirror produces even under backpressure
+// -- the queue refutes whole chunks, not sample ranges within them --
+// so only a sustained trickle trips it. At the default grain-rate
+// interval one tick is ~10 ms of audio, so the window is a few
+// seconds of starvation: long enough to ride out a burst, short
+// enough that the rebuild the exit triggers outruns an operator
+// noticing.
+const maxSampleStarvedTicks = 200
 
 // maxSampleCatchUpFallback is the per-tick catch-up bound used when
 // xferBatch is zero, which cannot happen in production (the open path

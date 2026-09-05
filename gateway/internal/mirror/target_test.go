@@ -1688,8 +1688,16 @@ func TestTarget_RecoveryDropsEntryWhenTargetInfoPublishFails(t *testing.T) {
 	assert.True(t, entry.closed,
 		"the dropped entry must be marked closed so its handles are not reused")
 
+	// The rebuild installs a progress loop before the failing publish; a
+	// zero-value fabric target makes that loop fail fatally and spawn a
+	// competing background recovery whose own publish can transiently
+	// overwrite the terminal phase. Eventually rather than an immediate
+	// read: the drop's own publish has happened by the time the entry is
+	// gone, and the transient must lose to it.
 	var got mxlv1alpha1.MxlFlowMirror
-	require.NoError(t, c.Get(context.Background(), key, &got))
-	assert.Equal(t, mxlv1alpha1.MxlFlowMirrorFailed, got.Status.Phase,
+	require.Eventually(t, func() bool {
+		require.NoError(t, c.Get(context.Background(), key, &got))
+		return got.Status.Phase == mxlv1alpha1.MxlFlowMirrorFailed
+	}, 5*time.Second, 50*time.Millisecond,
 		"the dropped entry must publish Failed so the stale prior state does not stand")
 }
