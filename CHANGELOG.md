@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.13](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.12...v1.1.0-rc.13) (2026-09-05)
+
+
+### Bug Fixes
+
+* **gateway:** starve out trickle-delivering sample loops ([#321](https://github.com/qvest-digital/mxl-k8s/issues/321)) ([a104112](https://github.com/qvest-digital/mxl-k8s/commit/a1041120f68caf03d7b299d32d6ad4476c98e56a))
+
 ## [1.1.0-rc.12](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.11...v1.1.0-rc.12) (2026-09-04)
 
 
