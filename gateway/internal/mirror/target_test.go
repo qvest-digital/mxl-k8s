@@ -1700,4 +1700,4 @@ func TestTarget_RecoveryDropsEntryWhenTargetInfoPublishFails(t *testing.T) {
 		return got.Status.Phase == mxlv1alpha1.MxlFlowMirrorFailed
 	}, 5*time.Second, 50*time.Millisecond,
 		"the dropped entry must publish Failed so the stale prior state does not stand")
-	}
+}
