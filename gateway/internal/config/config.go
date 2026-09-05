@@ -27,9 +27,12 @@ type Config struct {
 	// directory at boot and shared across all flows.
 	DomainPath string
 
-	// BindAddress is the libmxl-fabrics endpoint Node passed to each
-	// Target/Initiator Setup. Empty lets libmxl-fabrics bind to all
-	// interfaces; for in-cluster use this is typically $POD_IP.
+	// BindAddress is the one IP address this gateway's endpoints
+	// bind. It restricts the interfaces of the providers that name
+	// one by IP, tcp and verbs, to that address; efa names an
+	// interface by its EFA GID and shm by the host's name, and
+	// neither is narrowed by it. Empty considers every address
+	// libmxl-fabrics reports. For in-cluster use this is $POD_IP.
 	BindAddress string
 
 	// Providers is the upper bound on the libmxl-fabrics providers
@@ -151,7 +154,9 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.StringVar(&c.DomainPath, "domain-path", os.Getenv("MXL_DOMAIN"),
 		"Absolute path to the MXL domain directory the gateway operates on.")
 	fs.StringVar(&c.BindAddress, "bind-address", os.Getenv("POD_IP"),
-		"Local address libmxl-fabrics endpoints bind to (defaults to $POD_IP, empty for all interfaces).")
+		"Local IP address libmxl-fabrics endpoints bind to (defaults to $POD_IP, empty for all "+
+			"addresses). Narrows the tcp and verbs interfaces only: efa and shm do not address an "+
+			"interface by IP.")
 	fs.StringVar(&providers, "providers", "any",
 		"Comma-separated upper bound on the libmxl-fabrics providers to advertise and use "+
 			"(any,tcp,verbs,efa,shm; auto is an alias for any). What the node advertises is "+
@@ -290,6 +295,7 @@ func (c *Config) Selector() fabric.Selector {
 		CIDRs:        c.FabricCIDRs,
 		Devices:      c.FabricDevices,
 		MinLinkSpeed: c.FabricMinLinkSpeed,
+		BindAddress:  c.BindAddress,
 	}
 }
 

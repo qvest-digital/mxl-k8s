@@ -96,11 +96,6 @@ type Publisher struct {
 	// observes nothing.
 	HostDeviceObserver HostDeviceObserver
 
-	// BindAddress narrows the enumeration query the way a mirror
-	// setup narrows it, so a gateway pinned to one address does not
-	// advertise capacity it would never bind.
-	BindAddress string
-
 	// APIReader reads the owner Node. A cached read would need list
 	// and watch on nodes, which the gateway's ClusterRole does not
 	// grant.
@@ -406,11 +401,12 @@ func (p *Publisher) probe(ctx context.Context) ([]mxlv1alpha1.MxlFabricsProvider
 	}
 
 	// ProviderAny is the enumeration's "do not filter by provider",
-	// so one sweep answers for every provider at once.
+	// so one sweep answers for every provider at once. The query
+	// carries no address: one address cannot be right for every
+	// provider swept, and libmxl-fabrics drops a provider whose
+	// address space cannot express it. The Selector narrows to the
+	// gateway's bind address afterwards, per provider.
 	query := &fabrics.InterfaceConfig{Provider: fabrics.ProviderAny}
-	if p.BindAddress != "" {
-		query.Address.Node = p.BindAddress
-	}
 	ifaces, err := p.Lister.Interfaces(query)
 	if err != nil {
 		return nil, fmt.Errorf("query fabric interfaces: %w", err)

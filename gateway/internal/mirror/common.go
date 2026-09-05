@@ -95,25 +95,20 @@ var errNoInterface = errors.New("no usable fabric interface")
 // address and capabilities, including the maxMessageSize a caller
 // cannot otherwise learn.
 //
-// bindAddress narrows the search to one address when set, and is left
-// out of the query otherwise so every address of the provider is
-// considered. Service is not taken from the entry: the endpoint's port
-// is the caller's to choose, and an empty one means ephemeral.
+// The query names the provider and nothing else. Service is not taken
+// from the entry either: the endpoint's port is the caller's to
+// choose, and an empty one means ephemeral.
 //
-// The selector then drops what this node may not carry MXL traffic on.
-// It is the same selector the capability publisher applies, so a
-// mirror is only ever set up on an interface the node advertised, and
-// libfabric's own preference order chooses among what survives. Left
-// unfiltered, a host whose fabric is one of several NICs would hand a
-// setup whichever address the enumeration happened to return first,
-// including loopback, an ST 2110 essence NIC, or the management port.
-func resolveInterface(fi interfaceLister, sel fabric.Selector, provider fabrics.Provider, bindAddress string) (fabrics.InterfaceConfig, error) {
-	query := &fabrics.InterfaceConfig{Provider: provider}
-	if bindAddress != "" {
-		query.Address.Node = bindAddress
-	}
-
-	found, err := fi.Interfaces(query)
+// The selector then drops what this node may not carry MXL traffic on,
+// the gateway's bind address included. It is the same selector the
+// capability publisher applies, so a mirror is only ever set up on an
+// interface the node advertised, and libfabric's own preference order
+// chooses among what survives. Left unfiltered, a host whose fabric is
+// one of several NICs would hand a setup whichever address the
+// enumeration happened to return first, including loopback, an ST 2110
+// essence NIC, or the management port.
+func resolveInterface(fi interfaceLister, sel fabric.Selector, provider fabrics.Provider) (fabrics.InterfaceConfig, error) {
+	found, err := fi.Interfaces(&fabrics.InterfaceConfig{Provider: provider})
 	if err != nil {
 		return fabrics.InterfaceConfig{}, fmt.Errorf("query fabric interfaces: %w", err)
 	}
@@ -124,7 +119,7 @@ func resolveInterface(fi interfaceLister, sel fabric.Selector, provider fabrics.
 	iface, ok := fabrics.SelectInterface(ifaces, fabrics.InterfaceCapRemoteWrite)
 	if !ok {
 		return fabrics.InterfaceConfig{}, fmt.Errorf("%w for provider %s on %q: %d of %d candidate(s) excluded%s",
-			errNoInterface, provider, bindAddress, len(rejected), len(found), firstRejection(rejected))
+			errNoInterface, provider, sel.BindAddress, len(rejected), len(found), firstRejection(rejected))
 	}
 	iface.Address.Service = ""
 	return iface, nil

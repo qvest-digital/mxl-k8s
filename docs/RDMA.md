@@ -330,12 +330,16 @@ that reports neither cannot be shown to satisfy either. Since most
 interfaces with no physical NIC report no speed at all, a link
 speed floor excludes them as a side effect.
 
-`--bind-address` still narrows the enumeration to a single address
-when set, and is the simplest scoping there is on a node whose
-fabric address is known and stable. The flags above are what a
-node needs when it is not: with `bindAddress: ""`, which the
-NAD-attached pattern below requires, every interface the pod can
-see is otherwise a candidate.
+`--bind-address` still narrows to a single address when set, and
+is the simplest scoping there is on a node whose fabric address is
+known and stable. It applies to the providers that name an
+interface by IP, `tcp` and `verbs`. `efa` names one by its EFA GID
+and `shm` by the host's name, so neither is held to it and a node
+carrying an EFA adapter advertises it whatever the bind address
+is. The flags above are what a node needs when the fabric address
+is not stable: with `bindAddress: ""`, which the NAD-attached
+pattern below requires, every interface the pod can see is
+otherwise a candidate.
 
 A node that ends up advertising nothing logs the count of excluded
 interfaces and the first exclusion with its reason; the full list
