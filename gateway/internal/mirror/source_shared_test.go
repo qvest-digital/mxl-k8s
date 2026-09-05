@@ -297,7 +297,8 @@ func TestSource_AccountingLandsPerMirrorAcrossTheFanout(t *testing.T) {
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
 mxl_gateway_mirror_transmitted_bytes_total{flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
 mxl_gateway_mirror_transmitted_bytes_total{flow_id="flow-a",node="n01",peer_node="n03",provider="verbs"} 1000
-`)), "the shared transfer must still be attributed per peer")
+`), "mxl_gateway_mirror_transmitted_bytes_total"),
+		"the shared transfer must still be attributed per peer")
 }
 
 func TestSource_AgedOutSkipReachesEveryAttachedMirror(t *testing.T) {

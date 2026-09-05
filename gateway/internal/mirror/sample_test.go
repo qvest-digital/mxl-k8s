@@ -58,7 +58,7 @@ func TestRunSampleTransferLoop_TransfersDeltaSinceLastTick(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, makeProgress, 480, time.Millisecond, tracker)
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, makeProgress, func() error { return nil }, 480, testReadableWindow, time.Millisecond, tracker)
 
 	require.Eventually(t, func() bool { return len(xfersSnap()) == 1 },
 		time.Second, time.Millisecond, "expected exactly one sample-run transfer")
@@ -113,7 +113,7 @@ func TestRunSampleTransferLoop_ChunksLargeDeltaByXferBatch(t *testing.T) {
 	// The delta is larger than xferBatch but inside the catch-up
 	// bound (2*xferBatch), so it must split into full-batch runs
 	// with no aged-out skip.
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, xferBatch, time.Millisecond, tracker)
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil }, xferBatch, testReadableWindow, time.Millisecond, tracker)
 
 	require.Eventually(t, func() bool { return len(xfersSnap()) == 2 },
 		time.Second, time.Millisecond, "expected the 960-sample delta to split into 480+480")
@@ -127,14 +127,16 @@ func TestRunSampleTransferLoop_ChunksLargeDeltaByXferBatch(t *testing.T) {
 	assert.Zero(t, agedOuts, "a within-bound delta is a normal catch-up, not an aged-out skip")
 }
 
-func TestRunSampleTransferLoop_FellBehindSkipsToBoundedCatchUpAndSignals(t *testing.T) {
-	// The producer has lapped the reader far beyond one tick's
-	// catch-up. The loop must skip to head-2*xferBatch (the newest
-	// batch plus one batch of slack, not the readable-window edge),
-	// signal the tracker once, and transfer only what the bound
-	// allows. Skipping to the window edge instead would attempt the
-	// whole readable window in one tick: a burst that floods the
-	// send queue and wedges every mirror sharing the fabric.
+func TestRunSampleTransferLoop_CatchesUpInsideTheWindowRatherThanSkipping(t *testing.T) {
+	// A backlog that is still on the ring is owed to the target and
+	// must be sent, not passed over.
+	//
+	// Skipping is not the cheap option it is on the grain path. The
+	// next transfer commits at its own index, so the target's head
+	// moves across the skipped range and republishes whatever its ring
+	// already held there. Every skipped sample is a hole filled with
+	// stale audio, which is why only the readable window may end a
+	// catch-up.
 	const xferBatch = 480
 	var probeCalls atomic.Int32
 	probe := func() (uint64, error) {
@@ -163,31 +165,166 @@ func TestRunSampleTransferLoop_FellBehindSkipsToBoundedCatchUpAndSignals(t *test
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, xferBatch, time.Millisecond, tracker)
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil }, xferBatch, testReadableWindow, time.Millisecond, tracker)
 
-	require.Eventually(t, func() bool { return len(xfersSnap()) == 2 },
-		time.Second, time.Millisecond, "expected the bounded catch-up to transfer as two full batches")
+	require.Eventually(t, func() bool { return len(xfersSnap()) == 5 },
+		time.Second, time.Millisecond, "the whole 2000-sample backlog must be transferred")
 
 	cancel()
 	<-done
 
-	assert.Equal(t, []sampleXfer{{head: 1520, count: xferBatch}, {head: 2000, count: xferBatch}}, xfersSnap(),
-		"after falling behind, the loop must transfer only the bounded catch-up ending at head")
+	// Four batches in the first tick, the 80-sample remainder in the
+	// next: contiguous from zero, nothing passed over.
+	assert.Equal(t, []sampleXfer{
+		{head: 480, count: 480},
+		{head: 960, count: 480},
+		{head: 1440, count: 480},
+		{head: 1920, count: 480},
+		{head: 2000, count: 80},
+	}, xfersSnap())
 	transfers, agedOuts := tracker.snapshot()
-	assert.Equal(t, []uint64{1520, 2000}, transfers)
-	assert.Equal(t, 1, agedOuts,
-		"falling more than the catch-up bound behind must record exactly one aged-out skip so the "+
-			"reconciler can publish SourceProgress=ReaderAgedOut")
+	assert.Equal(t, []uint64{480, 960, 1440, 1920, 2000}, transfers)
+	assert.Zero(t, agedOuts, "a backlog inside the readable window is not aged out")
+	assert.Zero(t, tracker.skippedSnapshot(), "and nothing may be recorded as skipped")
+}
+
+// The pacing that keeps a multi-chunk tick from putting its writes on
+// the wire back to back. libmxl-fabrics gives an initiator an
+// eight-entry completion queue with no way to raise it, and the sample
+// ingress protocol keeps one posted receive, so a backlog drained
+// without reaping between chunks outruns both.
+//
+// The reap has to be the non-blocking call. The blocking one parks for
+// its whole timeout when nothing has landed, and that timeout is the
+// tick: pacing with it costs a tick per chunk, so the loop delivers one
+// batch per two ticks -- half real time -- and falls permanently behind
+// a live producer. That regression is what the timing assertion here
+// catches; the blocking stub sleeps like the real one.
+func TestRunSampleTransferLoop_ReapsBetweenChunksWithoutBlocking(t *testing.T) {
+	const xferBatch = 480
+	const tick = 5 * time.Millisecond
+	var probeCalls atomic.Int32
+	probe := func() (uint64, error) {
+		if probeCalls.Add(1) == 1 {
+			return 0, nil
+		}
+		return 1920, nil
+	}
+
+	var mu sync.Mutex
+	var seq []string
+	note := func(what string) {
+		mu.Lock()
+		seq = append(seq, what)
+		mu.Unlock()
+	}
+	transfer := func(uint64, int) error { note("xfer"); return nil }
+	// Blocking, exactly like progressFuncFor returns for verbs.
+	blocking := func() error { note("block"); time.Sleep(tick); return nil }
+	reap := func() error { note("reap"); return nil }
+	seqSnap := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), seq...)
+	}
+	countXfer := func() int {
+		n := 0
+		for _, s := range seqSnap() {
+			if s == "xfer" {
+				n++
+			}
+		}
+		return n
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	started := time.Now()
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, blocking, reap,
+		xferBatch, testReadableWindow, tick, &recordingTracker{})
+
+	require.Eventually(t, func() bool { return countXfer() >= 4 }, 2*time.Second, time.Millisecond,
+		"the four-batch backlog must be transferred")
+	elapsed := time.Since(started)
+	cancel()
+	<-done
+
+	// Four chunks paced with the blocking call would cost at least four
+	// ticks of sleeping on top of the tick they start on.
+	assert.Less(t, elapsed, 4*tick,
+		"the backlog must clear inside a tick or two; pacing with the blocking call would take at least four")
+
+	// And no blocking call may appear between the first and the fourth
+	// chunk -- only reaps.
+	snap := seqSnap()
+	var first, fourth, seen int
+	for i, s := range snap {
+		if s == "xfer" {
+			seen++
+			if seen == 1 {
+				first = i
+			}
+			if seen == 4 {
+				fourth = i
+				break
+			}
+		}
+	}
+	require.Equal(t, 4, seen)
+	var reaps, blocks int
+	for _, s := range snap[first:fourth] {
+		switch s {
+		case "reap":
+			reaps++
+		case "block":
+			blocks++
+		}
+	}
+	assert.GreaterOrEqual(t, reaps, 3, "every chunk but the last must be followed by a reap")
+	assert.Zero(t, blocks, "the blocking MakeProgress must not be what paces the chunks")
+}
+
+func TestRunSampleTransferLoop_RecordsSkippedSamplesWhenLapped(t *testing.T) {
+	// The counter behind mxl_gateway_mirror_skipped_samples_total. It
+	// is the only signal separating "the target received this" from
+	// "the target's head moved over it", and those two are identical in
+	// every byte and freshness measure the gateway keeps.
+	const xferBatch = 480
+	const window = uint64(48000)
+	var probeCalls atomic.Int32
+	probe := func() (uint64, error) {
+		if probeCalls.Add(1) == 1 {
+			return 0, nil
+		}
+		return 100000, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	tracker := &recordingTracker{}
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe,
+		func(uint64, int) error { return nil }, func() error { return nil }, func() error { return nil },
+		xferBatch, window, time.Millisecond, tracker)
+
+	require.Eventually(t, func() bool { return tracker.skippedSnapshot() > 0 },
+		time.Second, time.Millisecond)
+	cancel()
+	<-done
+
+	// The window less one batch of slack stays readable, so everything
+	// before head-(window-xferBatch) is abandoned.
+	assert.Equal(t, 100000-(window-xferBatch), tracker.skippedSnapshot())
+	_, agedOuts := tracker.snapshot()
+	assert.Positive(t, agedOuts)
 }
 
 func TestRunSampleTransferLoop_NeverBurstsBeyondCatchUpPerTick(t *testing.T) {
-	// A mirror that has fallen far behind must not attempt the
-	// whole backlog in one tick: at most two xferBatch chunks are
-	// transferable per tick, and only while the lag stays inside the
-	// bound. This is what keeps a 48 kHz mirror from posting a burst
-	// of hundreds of writes -- one per readable-window batch --
-	// against the fabric. The loop transfers the bounded catch-up
-	// and leaves the rest for the next tick; it does not spin.
+	// A mirror that has fallen far behind must not attempt the whole
+	// backlog in one tick: at most sampleCatchUpBatches chunks are
+	// transferable per tick. This is what keeps a 48 kHz mirror from
+	// posting a burst of hundreds of writes -- one per readable-window
+	// batch -- against the fabric. The loop transfers the bounded
+	// catch-up and leaves the rest for the next tick; it does not spin.
 	const xferBatch = 480
 	var probes atomic.Uint64
 	probe := func() (uint64, error) {
@@ -216,7 +353,7 @@ func TestRunSampleTransferLoop_NeverBurstsBeyondCatchUpPerTick(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, xferBatch, time.Millisecond, tracker)
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil }, xferBatch, testReadableWindow, time.Millisecond, tracker)
 
 	require.Eventually(t, func() bool { return len(xfersSnap()) >= 1 },
 		time.Second, time.Millisecond, "the bounded catch-up must transfer")
@@ -232,13 +369,13 @@ func TestRunSampleTransferLoop_NeverBurstsBeyondCatchUpPerTick(t *testing.T) {
 	for i, x := range snap {
 		assert.LessOrEqualf(t, x.count, int(xferBatch), "chunk %d: a single write must never exceed xferBatch", i)
 		if i > 0 {
-			assert.LessOrEqualf(t, snap[i].head-snap[i-1].head, uint64(2*xferBatch),
-				"chunk %d: consecutive transfers within a tick must not exceed the catch-up bound", i)
+			assert.LessOrEqualf(t, snap[i].head-snap[i-1].head, uint64(xferBatch),
+				"chunk %d: consecutive transfers must advance by at most one batch", i)
 		}
 	}
-	// The first tick is the only one that skips to the bound; with
-	// the head frozen afterwards nothing more transfers.
-	assert.LessOrEqualf(t, len(snap), 2,
+	// 2000 samples of backlog is five chunks; with the head frozen
+	// afterwards nothing more transfers.
+	assert.LessOrEqualf(t, len(snap), 5,
 		"a frozen head must not produce further transfers, got %d", len(snap))
 }
 
@@ -267,7 +404,7 @@ func TestRunSampleTransferLoop_ExitsAfterSustainedStarvation(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, xferBatch, time.Millisecond, tracker)
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil }, xferBatch, testReadableWindow, time.Millisecond, tracker)
 
 	select {
 	case <-done:
@@ -311,7 +448,7 @@ func TestRunSampleTransferLoop_StarvationResetsOnDelivery(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, xferBatch, time.Millisecond, tracker)
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil }, xferBatch, testReadableWindow, time.Millisecond, tracker)
 
 	// Far longer than the starvation window: if the counter were not
 	// reset by deliveries the loop would have exited inside it.
@@ -360,7 +497,7 @@ func TestRunSampleTransferLoop_TrickleDeliveryStillStarves(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, xferBatch, time.Millisecond, tracker)
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil }, xferBatch, testReadableWindow, time.Millisecond, tracker)
 
 	select {
 	case <-done:
@@ -409,7 +546,7 @@ func TestRunSampleTransferLoop_TransferErrorBreaksTickAndRetries(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, 480, time.Millisecond, &recordingTracker{})
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil }, 480, testReadableWindow, time.Millisecond, &recordingTracker{})
 
 	require.Eventually(t, func() bool { return xfersLen() >= 1 },
 		time.Second, time.Millisecond, "a transfer error must not wedge the loop; the next tick must retry")
@@ -433,7 +570,7 @@ func TestRunSampleTransferLoop_CtxCancelExitsDuringIdle(t *testing.T) {
 	done := make(chan struct{})
 	go runSampleTransferLoop(ctx, done, "flow-audio", probe,
 		func(uint64, int) error { t.Error("no transfer expected on an idle flow"); return nil },
-		func() error { return nil }, 480, time.Millisecond, &recordingTracker{})
+		func() error { return nil }, func() error { return nil }, 480, testReadableWindow, time.Millisecond, &recordingTracker{})
 
 	cancel()
 	select {

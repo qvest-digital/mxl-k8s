@@ -10,6 +10,10 @@ type Throughput struct {
 	PeerNode string
 	Provider string
 	Bytes    uint64
+
+	// SkippedSamples is meaningful on the source half of a continuous
+	// flow only, and is zero everywhere else.
+	SkippedSamples uint64
 }
 
 var (
@@ -21,6 +25,12 @@ var (
 	descReceived = prometheus.NewDesc(
 		"mxl_gateway_mirror_received_bytes_total",
 		"Payload bytes committed to the local flow for a mirror this node is the target of.",
+		[]string{"flow_id", "node", "peer_node", "provider"}, nil)
+
+	descSkipped = prometheus.NewDesc(
+		"mxl_gateway_mirror_skipped_samples_total",
+		"Samples the source half advanced past without sending, having left the readable window. "+
+			"The target's head still moves over them, so each is published as stale ring content.",
 		[]string{"flow_id", "node", "peer_node", "provider"}, nil)
 )
 
@@ -45,6 +55,7 @@ type ThroughputCollector struct {
 func (c *ThroughputCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descTransmitted
 	ch <- descReceived
+	ch <- descSkipped
 }
 
 // Collect folds the live entries onto their label set before emitting.
@@ -71,6 +82,17 @@ func (c *ThroughputCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	emit(descTransmitted, c.Source)
 	emit(descReceived, c.Target)
+
+	if c.Source != nil {
+		skipped := map[key]uint64{}
+		for _, t := range c.Source.Throughput() {
+			skipped[key{t.FlowID, t.PeerNode, t.Provider}] += t.SkippedSamples
+		}
+		for k, n := range skipped {
+			ch <- prometheus.MustNewConstMetric(descSkipped, prometheus.CounterValue,
+				float64(n), k.flowID, c.NodeName, k.peerNode, k.provider)
+		}
+	}
 }
 
 // Throughput reports what each mirror this node sources has put on the
@@ -91,6 +113,8 @@ func (r *SourceReconciler) Throughput() []Throughput {
 			PeerNode: e.peerNode,
 			Provider: e.provider().String(),
 			Bytes:    e.bytes.Load(),
+
+			SkippedSamples: e.skipped.Load(),
 		})
 	}
 	return out

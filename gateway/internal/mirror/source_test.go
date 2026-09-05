@@ -303,8 +303,14 @@ type recordingTracker struct {
 	mu        sync.Mutex
 	transfers []uint64
 	agedOuts  int
+	skipped   uint64
 	heads     []uint64
 }
+
+// testReadableWindow stands in for the reader's readable window in the
+// tests that are not about ageing out. It is larger than any head they
+// reach, so nothing in them is ever old enough to abandon.
+const testReadableWindow = 1 << 20
 
 func (rt *recordingTracker) recordTransfer(idx uint64, _ time.Time) {
 	rt.mu.Lock()
@@ -318,10 +324,22 @@ func (rt *recordingTracker) recordAgedOut(_ time.Time) {
 	rt.mu.Unlock()
 }
 
+func (rt *recordingTracker) recordSkipped(samples uint64) {
+	rt.mu.Lock()
+	rt.skipped += samples
+	rt.mu.Unlock()
+}
+
 func (rt *recordingTracker) recordHead(head uint64, _ time.Time) {
 	rt.mu.Lock()
 	rt.heads = append(rt.heads, head)
 	rt.mu.Unlock()
+}
+
+func (rt *recordingTracker) skippedSnapshot() uint64 {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.skipped
 }
 
 func (rt *recordingTracker) headSnapshot() []uint64 {
