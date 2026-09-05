@@ -310,6 +310,13 @@ type sourceEntry struct {
 	// transfer loop's.
 	bytes atomic.Uint64
 
+	// skipped counts samples the transfer loop advanced past without
+	// sending, which happens only once they have left the readable
+	// window. It is not the same as loss on the wire: the target's head
+	// still moves over them, so each one is a hole its ring fills with
+	// whatever it already held. Zero is the only healthy value.
+	skipped atomic.Uint64
+
 	// agedOutAt records the wall-clock of the most recent
 	// reader-aged-out skip the transfer loop has had to perform.
 	// Used by the flusher to publish SourceProgress with reason
@@ -1059,7 +1066,7 @@ func (o *libmxlOpener) open(flowID string, provider fabrics.Provider) (*sharedSo
 			s.addBytes(uint64(count) * frameBytes)
 			return nil
 		}
-		go runSampleTransferLoop(loopCtx, done, flowID, runtimeFn, transferSamplesFn, progressFn, xferBatch, progressInterval, s)
+		go runSampleTransferLoop(loopCtx, done, flowID, runtimeFn, transferSamplesFn, progressFn, reapFuncFor(initiator), xferBatch, maxBatch, progressInterval, s)
 	} else {
 		// The pacer is keyed on flow plus provider so two shared
 		// sources -- of the same flow on different providers, or of
@@ -1182,6 +1189,7 @@ type progressTracker interface {
 	recordTransfer(idx uint64, at time.Time)
 	recordAgedOut(at time.Time)
 	recordHead(head uint64, at time.Time)
+	recordSkipped(samples uint64)
 }
 
 func (e *sourceEntry) recordTransfer(idx uint64, at time.Time) {
@@ -1216,6 +1224,16 @@ func (s *sharedSource) recordTransfer(idx uint64, at time.Time) {
 func (s *sharedSource) recordAgedOut(at time.Time) {
 	for _, e := range s.attached() {
 		e.recordAgedOut(at)
+	}
+}
+
+func (e *sourceEntry) recordSkipped(samples uint64) {
+	e.skipped.Add(samples)
+}
+
+func (s *sharedSource) recordSkipped(samples uint64) {
+	for _, e := range s.attached() {
+		e.recordSkipped(samples)
 	}
 }
 
@@ -1288,6 +1306,7 @@ func runTransferLoop(
 			l.Error(err, "Runtime")
 			continue
 		}
+
 		if tracker != nil {
 			tracker.recordHead(head, time.Now())
 		}
@@ -1417,7 +1436,9 @@ func runSampleTransferLoop(
 	probeRuntime RuntimeProbe,
 	transferSamples SampleTransferFunc,
 	makeProgress ProgressFunc,
+	reapProgress ProgressFunc,
 	xferBatch uint64,
+	maxReadable uint64,
 	interval time.Duration,
 	tracker progressTracker,
 ) {
@@ -1425,13 +1446,30 @@ func runSampleTransferLoop(
 
 	l := ctrl.Log.WithName("sample-transfer").WithValues("flowID", flowID)
 
-	// catchUp bounds how far behind the live head one tick may reach.
-	// Two batches keeps one batch of slack for a late-arriving head
-	// probe without opening a burst; anything older is skipped as
-	// aged out.
-	catchUp := 2 * xferBatch
+	// catchUp bounds how much one tick may transfer, so a backlog
+	// drains over several ticks instead of arriving as one burst of
+	// back-to-back writes. It is a pacing bound, not a skip bound:
+	// what a tick does not reach stays owed and is sent by the next
+	// one.
+	catchUp := sampleCatchUpBatches * xferBatch
 	if catchUp == 0 {
 		catchUp = maxSampleCatchUpFallback
+	}
+	// agedOut is the only distance at which samples are abandoned: the
+	// point past which the reader can no longer read them at all.
+	// Anything nearer is still on the ring and is owed to the target.
+	//
+	// Skipping is not free the way it is on the grain path. A grain the
+	// loop passes over is simply never mirrored, and the target's head
+	// stays where it was. A sample range the loop passes over still
+	// moves the target's head, because the next transfer commits at its
+	// own index -- so the target publishes whatever its ring already
+	// held between the two, as audio. Every skipped sample is a hole
+	// filled with stale content, which is why this bound is the ring
+	// and not a couple of batches.
+	agedOut := maxReadable
+	if agedOut > xferBatch {
+		agedOut -= xferBatch
 	}
 
 	// Discover the current head and tail the live flow from there,
@@ -1450,7 +1488,10 @@ func runSampleTransferLoop(
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	// Throttles MakeProgress while it keeps failing; see progress.go.
-	var progress progressThrottle
+	// Two of them: one for the per-tick call, one for the call between
+	// chunks. They fire at different rates and a shared failure history
+	// would back the tick off for a chunk's sake.
+	var progress, chunkProgress progressThrottle
 	// starved counts consecutive ticks in which the writer produced
 	// new samples but only a fraction of them landed. A wedged fabric
 	// connection does not refuse every chunk: the send queue drains
@@ -1487,61 +1528,73 @@ func runSampleTransferLoop(
 			tracker.recordHead(head, time.Now())
 		}
 		if head > lastSent {
-			// A continuous flow can only be consumed at its own
-			// sample rate: one xferBatch per tick is real time, and
-			// no fabric drains a backlog faster than that. A mirror
-			// that falls behind therefore cannot catch up by bursting
-			// -- attempting it transfers up to the whole readable
-			// window (hundreds of xferBatch writes) in one tick,
-			// which floods the send queue and wedges the fabric for
-			// every mirror sharing it. Cap the catch-up at a small
-			// multiple of one batch and treat anything older as
-			// aged out, matching the reference transfer loop, which
-			// transfers one batch per grain instant and, on falling
-			// behind, jumps to the live head rather than replaying
-			// the gap.
-			// produced is the whole delta since the last tick,
-			// measured before the skip below folds the gap: the
-			// starvation bound must see what the writer produced,
-			// not the two batches the skip leaves behind, or a
-			// one-chunk-per-tick trickle lands a quarter of the
-			// folded delta and reads as healthy.
+			// produced is the whole delta since the last tick, taken
+			// before anything below narrows it. The starvation bound
+			// asks whether the loop is keeping up with the writer, so
+			// it has to see what the writer wrote -- not the smaller
+			// figure the per-tick pacing bound chose to attempt, which
+			// a trickle would satisfy while falling further behind
+			// every tick.
 			produced := head - lastSent
-			if head-lastSent > catchUp {
+
+			// Abandon samples only once they have left the readable
+			// window. Everything nearer is still on the ring, and a
+			// skipped sample range is not a gap the target can see: the
+			// next transfer commits at its own index, so the target's
+			// head moves over the skipped range and republishes stale
+			// ring content in its place.
+			if agedOut > 0 && head-lastSent > agedOut {
 				l.Info("reader fell behind writer, skipping samples",
 					"fromIndex", lastSent+1, "toIndex", head)
 				if tracker != nil {
 					tracker.recordAgedOut(time.Now())
 				}
-				lastSent = head - catchUp
+				if skipped := (head - agedOut) - lastSent; tracker != nil {
+					tracker.recordSkipped(skipped)
+				}
+				lastSent = head - agedOut
 			}
-			// Transfer the remaining (lastSent, head] delta in chunks
-			// of at most xferBatch samples, each ending at the chunk's
-			// last index.
-			//
+			// One tick transfers at most catchUp samples. A producer
+			// that commits in lumps -- an encoder emitting whole frames,
+			// say -- leaves a backlog on the ticks between its writes,
+			// and draining it in one pass puts that many writes on the
+			// wire back to back. Spreading it over ticks keeps the
+			// number in flight bounded whatever the producer does.
+			limit := head
+			if catchUp > 0 && head-lastSent > catchUp {
+				limit = lastSent + catchUp
+			}
 			// A chunk that comes back not-ready is backpressure, not a
 			// failure: libmxl-fabrics reports the initiator's send
 			// queue being full as EAGAIN, which surfaces here as
 			// fabrics.ErrNotReady. The queue drains on MakeProgress, so
 			// the chunk is retried after driving it rather than
-			// abandoned until the next tick. Abandoning it is what let
-			// the reader slide out of the readable window while the
-			// producer kept writing, at which point the loop skipped
-			// samples and published ReaderAgedOut for what was really a
-			// momentarily full queue.
+			// abandoned until the next tick.
+			//
+			// Retries reap, they do not park. Nothing that blocks
+			// belongs inside a tick that owes real time: the tick is one
+			// batch of audio, so a blocking MakeProgress inside it makes
+			// the loop take two ticks to deliver one, and a loop running
+			// at half real time falls behind a live producer for good.
+			// A completion that has crossed a microsecond of fabric is
+			// already there for a non-blocking poll, and one that is not
+			// will be by the next tick, with the samples still owed
+			// because lastSent did not move.
 			retries := 0
 			delivered := uint64(0)
-			for lastSent < head {
-				count := head - lastSent
+			deadline := time.Now().Add(interval)
+			for lastSent < limit {
+				count := limit - lastSent
 				if xferBatch > 0 && count > xferBatch {
 					count = xferBatch
 				}
 				end := lastSent + count
 				err := transferSamples(end, int(count))
 				if err != nil {
-					if classifyFabricError(err) == fabricIdle && retries < maxSampleTransferRetries {
+					if classifyFabricError(err) == fabricIdle && retries < maxSampleTransferRetries &&
+						time.Now().Before(deadline) {
 						retries++
-						progress.runProgress(makeProgress, func(perr error) { logProgressFailure(l, perr) })
+						chunkProgress.runProgress(reapProgress, func(perr error) { logProgressFailure(l, perr) })
 						continue
 					}
 					logSampleTransferFailure(l, err, end, count)
@@ -1553,6 +1606,30 @@ func runSampleTransferLoop(
 					tracker.recordTransfer(end, time.Now())
 				}
 				lastSent = end
+				// Settle the chunk before starting the next one.
+				//
+				// One write outstanding on the initiator is not the same
+				// as one the far side can absorb. The sample egress
+				// protocol writes RDMA_WRITE_WITH_IMM, which consumes a
+				// receive on the responder, and the ingress protocol
+				// keeps exactly one posted -- it re-posts from its own
+				// read loop, after it has processed the completion.
+				// There is no credit exchange between the two, so a
+				// second write issued before the far side has come round
+				// finds an empty receive queue and falls back on RNR
+				// retry, which libfabric configures as unbounded and
+				// which irdma leaves untimed on E810.
+				//
+				// Waiting for the transfer to report itself settled is
+				// the closest the API gets to that credit, and it is
+				// what the upstream reference loop does between batches.
+				// Bounded, because a wedge must surface as a stalled
+				// lastSent on the next tick rather than as a spin here.
+				if lastSent < limit {
+					if !drainChunk(reapProgress, chunkSettleBudget) || time.Now().After(deadline) {
+						break
+					}
+				}
 			}
 			if produced > 0 && delivered*4 < produced {
 				starved++
@@ -1568,7 +1645,39 @@ func runSampleTransferLoop(
 			}
 		}
 
-		progress.runProgress(makeProgress, func(err error) { logProgressFailure(l, err) })
+		// Park on the completion queue only when the loop owes nothing.
+		// Blocking is what lets an idle mirror notice a completion
+		// promptly without spinning, but with samples still owed it is
+		// simply a tick the loop spends not delivering.
+		if lastSent < head {
+			progress.runProgress(reapProgress, func(err error) { logProgressFailure(l, err) })
+		} else {
+			progress.runProgress(makeProgress, func(err error) { logProgressFailure(l, err) })
+		}
+	}
+}
+
+// chunkSettleBudget bounds the wait for one chunk to settle before the
+// next is issued. It is a small fraction of a tick: long enough for a
+// completion that has crossed the fabric, short enough that several
+// chunks still fit in the tick they are owed in.
+const chunkSettleBudget = 500 * time.Microsecond
+
+// drainChunk polls until the initiator reports no work outstanding or
+// the budget runs out. Reports whether it settled.
+func drainChunk(reap ProgressFunc, budget time.Duration) bool {
+	deadline := time.Now().Add(budget)
+	for {
+		if err := reap(); err == nil {
+			return true
+		} else if classifyFabricError(err) != fabricIdle {
+			// A real failure, not "still working". Let the caller stop
+			// and the tick surface it.
+			return false
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
 	}
 }
 
@@ -2365,6 +2474,12 @@ const maxSampleTransferRetries = 8
 // noticing.
 const maxSampleStarvedTicks = 200
 
+// sampleCatchUpBatches is how many batches one tick may transfer. One
+// batch is real time, so four lets a mirror that fell behind close the
+// gap at three times real time while keeping the number of writes a
+// single tick puts on the wire bounded and small.
+const sampleCatchUpBatches = 4
+
 // maxSampleCatchUpFallback is the per-tick catch-up bound used when
 // xferBatch is zero, which cannot happen in production (the open path
 // defaults it to one sample at minimum) but keeps the loop's bound
@@ -2410,6 +2525,21 @@ func defaultSampleProgressInterval(rate mxl.Rational, xferBatch uint64) time.Dur
 // to complete the write and free the send slot.
 func progressBlocking(provider fabrics.Provider) bool {
 	return provider != fabrics.ProviderEFA
+}
+
+// reapFuncFor selects the MakeProgress variant used between the chunks
+// of one tick. Always the non-blocking one, whatever the provider.
+//
+// The blocking variant parks on the completion queue for its whole
+// timeout when nothing has landed, and the timeout is the tick. Calling
+// it between chunks costs a tick per chunk, so a loop that paced with
+// it delivered one batch per two ticks -- half real time -- and fell
+// permanently behind a live producer. Reaping is all this call is for:
+// the completions of a write that has already crossed a microsecond of
+// fabric are there, and a chunk that still finds the queue full takes
+// the retry path, which does block.
+func reapFuncFor(initiator *fabrics.Initiator) ProgressFunc {
+	return initiator.MakeProgressNonBlocking
 }
 
 // progressFuncFor selects the MakeProgress variant the transfer loop

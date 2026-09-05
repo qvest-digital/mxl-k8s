@@ -58,8 +58,8 @@ func TestRunSampleTransferLoop_RetriesAFullSendQueueWithinTheTick(t *testing.T) 
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runSampleTransferLoop(ctx, done, "f", probe, transfer, progress,
-		480, time.Millisecond, nil)
+	go runSampleTransferLoop(ctx, done, "f", probe, transfer, progress, func() error { return nil },
+		480, testReadableWindow, time.Millisecond, nil)
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
@@ -103,8 +103,8 @@ func TestRunSampleTransferLoop_BackpressureDoesNotReportReaderAgedOut(t *testing
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runSampleTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil },
-		480, time.Millisecond, tr)
+	go runSampleTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil }, func() error { return nil },
+		480, testReadableWindow, time.Millisecond, tr)
 
 	// Well past the ~15 ticks it takes to cross the window unretried.
 	require.Eventually(t, func() bool { return tr.transfers() >= 60 }, 3*time.Second, time.Millisecond,
@@ -136,8 +136,8 @@ func TestRunSampleTransferLoop_BoundsRetriesSoAWedgedFabricYieldsTheTick(t *test
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runSampleTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil },
-		480, 20*time.Millisecond, nil)
+	go runSampleTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil }, func() error { return nil },
+		480, testReadableWindow, 20*time.Millisecond, nil)
 
 	// Two ticks' worth of time. With the bound, attempts stay near
 	// 2 * (1 + maxSampleTransferRetries); without it the loop would
@@ -170,8 +170,8 @@ func TestRunSampleTransferLoop_NonIdleErrorBreaksImmediately(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runSampleTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil },
-		480, 20*time.Millisecond, nil)
+	go runSampleTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil }, func() error { return nil },
+		480, testReadableWindow, 20*time.Millisecond, nil)
 
 	time.Sleep(100 * time.Millisecond)
 	cancel()
@@ -200,8 +200,10 @@ func TestRunSampleTransferLoop_StillSkipsWhenGenuinelyLapped(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runSampleTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil },
-		480, time.Millisecond, tr)
+	// One second of 48 kHz audio as the readable window; the producer
+	// jumps two seconds past it.
+	go runSampleTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil }, func() error { return nil },
+		480, 48000, time.Millisecond, tr)
 
 	require.Eventually(t, func() bool { return tr.agedOut() > 0 }, time.Second, time.Millisecond,
 		"a producer that lapped the readable window is still ReaderAgedOut")
@@ -221,6 +223,8 @@ func (r *recordingSampleTracker) recordTransfer(uint64, time.Time) {
 	r.xfers++
 	r.mu.Unlock()
 }
+
+func (r *recordingSampleTracker) recordSkipped(uint64) {}
 
 func (r *recordingSampleTracker) recordAgedOut(time.Time) {
 	r.mu.Lock()

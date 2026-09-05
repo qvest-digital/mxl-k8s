@@ -36,7 +36,8 @@ mxl_gateway_mirror_received_bytes_total{flow_id="flow-b",node="n01",peer_node="n
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
 mxl_gateway_mirror_transmitted_bytes_total{flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 5529600
 `
-	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(expected)))
+	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(expected),
+		"mxl_gateway_mirror_received_bytes_total", "mxl_gateway_mirror_transmitted_bytes_total"))
 }
 
 func TestThroughputCollectorForgetsClosedMirrors(t *testing.T) {
@@ -52,10 +53,11 @@ func TestThroughputCollectorForgetsClosedMirrors(t *testing.T) {
 	src.sources[key] = e
 
 	c := &ThroughputCollector{NodeName: "n01", Source: src}
-	require.Equal(t, 1, testutil.CollectAndCount(c))
+	const transmitted = "mxl_gateway_mirror_transmitted_bytes_total"
+	require.Equal(t, 1, testutil.CollectAndCount(c, transmitted))
 
 	delete(src.sources, key)
-	require.Equal(t, 0, testutil.CollectAndCount(c),
+	require.Equal(t, 0, testutil.CollectAndCount(c, transmitted),
 		"a mirror that has been closed must leave no series behind")
 }
 
@@ -78,13 +80,33 @@ func TestThroughputCollectorSurvivesOneFlowMirroredTwice(t *testing.T) {
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
 mxl_gateway_mirror_transmitted_bytes_total{flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
 mxl_gateway_mirror_transmitted_bytes_total{flow_id="flow-a",node="n01",peer_node="n03",provider="verbs"} 1000
-`)), "one flow mirrored to two peers must yield two distinct series")
+`), "mxl_gateway_mirror_transmitted_bytes_total"),
+		"one flow mirrored to two peers must yield two distinct series")
 
 	// Same flow and same peer in two namespaces cannot be separated by
 	// labels at all, so the fold has to carry it.
 	dup := &sourceEntry{shared: testShared("flow-a", fabrics.ProviderVerbs), peerNode: "n02"}
 	dup.bytes.Store(500)
 	src.sources[types.NamespacedName{Namespace: "other", Name: "flow-a--n02"}] = dup
-	require.Equal(t, 2, testutil.CollectAndCount(c),
+	require.Equal(t, 2, testutil.CollectAndCount(c, "mxl_gateway_mirror_transmitted_bytes_total"),
 		"a label set that repeats must fold into one series, never a duplicate")
+}
+
+func TestThroughputCollectorReportsSkippedSamples(t *testing.T) {
+	// Skipped samples are invisible to every other counter the gateway
+	// keeps: the bytes it did send are counted as sent, the target's
+	// head still advances over the ones it did not, and both halves
+	// look fresh. This series is the only place the hole shows up.
+	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
+	e := &sourceEntry{shared: testShared("flow-a", fabrics.ProviderVerbs), peerNode: "n02"}
+	e.bytes.Store(1024)
+	e.skipped.Store(19200)
+	src.sources[types.NamespacedName{Namespace: "p", Name: "a"}] = e
+
+	c := &ThroughputCollector{NodeName: "n01", Source: src}
+	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(`
+# HELP mxl_gateway_mirror_skipped_samples_total Samples the source half advanced past without sending, having left the readable window. The target's head still moves over them, so each is published as stale ring content.
+# TYPE mxl_gateway_mirror_skipped_samples_total counter
+mxl_gateway_mirror_skipped_samples_total{flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 19200
+`), "mxl_gateway_mirror_skipped_samples_total"))
 }
