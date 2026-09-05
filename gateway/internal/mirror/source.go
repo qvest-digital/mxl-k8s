@@ -1500,6 +1500,13 @@ func runSampleTransferLoop(
 			// transfers one batch per grain instant and, on falling
 			// behind, jumps to the live head rather than replaying
 			// the gap.
+			// produced is the whole delta since the last tick,
+			// measured before the skip below folds the gap: the
+			// starvation bound must see what the writer produced,
+			// not the two batches the skip leaves behind, or a
+			// one-chunk-per-tick trickle lands a quarter of the
+			// folded delta and reads as healthy.
+			produced := head - lastSent
 			if head-lastSent > catchUp {
 				l.Info("reader fell behind writer, skipping samples",
 					"fromIndex", lastSent+1, "toIndex", head)
@@ -1522,7 +1529,6 @@ func runSampleTransferLoop(
 			// producer kept writing, at which point the loop skipped
 			// samples and published ReaderAgedOut for what was really a
 			// momentarily full queue.
-			produced := head - lastSent
 			retries := 0
 			delivered := uint64(0)
 			for lastSent < head {

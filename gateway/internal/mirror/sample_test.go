@@ -3,6 +3,7 @@ package mirror
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
+	"github.com/qvest-digital/go-mxl/mxl"
 )
 
 // sampleXfer records one transferSamples(headIndex, count) call so the
@@ -332,8 +334,9 @@ func TestRunSampleTransferLoop_TrickleDeliveryStillStarves(t *testing.T) {
 	// skipped. A loop that exited only on total refusal -- or reset
 	// its bound on any delivery -- pins the wedge forever, because
 	// the trickle reads as delivery. The starvation ratio must count
-	// samples, not chunks: a tick landing under a quarter of the
-	// produced samples stays starved even though it landed something.
+	// the samples the writer produced, before the skip folds the
+	// delta: one landing in eight is a starvation even though the
+	// folded delta is half delivered.
 	const xferBatch = 480
 	var probes atomic.Uint64
 	var calls atomic.Int32
@@ -343,9 +346,11 @@ func TestRunSampleTransferLoop_TrickleDeliveryStillStarves(t *testing.T) {
 		return probes.Add(8 * xferBatch), nil
 	}
 	transfer := func(uint64, int) error {
-		// Land one chunk per tick out of eight produced: an eighth
-		// of production, above zero but far under the quarter.
-		if calls.Add(1) == 1 {
+		// Land one call in ten -- the first chunk of a tick plus
+		// never a retry -- so every tick delivers one batch of the
+		// eight produced and every retry is refused, the shape of a
+		// send queue that frees a single slot per tick.
+		if calls.Add(1)%10 == 1 {
 			return nil
 		}
 		return fabrics.ErrNotReady
@@ -359,15 +364,15 @@ func TestRunSampleTransferLoop_TrickleDeliveryStillStarves(t *testing.T) {
 
 	select {
 	case <-done:
-		// The loop exited on its own: the trickle did not reset the
-		// starvation bound.
+		// The loop exited on its own: the trickle did not read as
+		// healthy against the true production.
 	case <-time.After(5 * time.Second):
 		t.Fatal("loop did not exit under trickle delivery; the wedge would persist forever")
 	}
 
 	transfers, _ := tracker.snapshot()
 	assert.NotEmpty(t, transfers, "the trickle landed chunks before the exit")
-	assert.Less(t, len(transfers), maxSampleStarvedTicks,
+	assert.LessOrEqual(t, len(transfers), maxSampleStarvedTicks,
 		"the loop must stop delivering the trickle once the bound fires")
 }
 
@@ -547,6 +552,60 @@ func TestRunTargetSampleProgressLoop_CommitErrorIsLoggedButLoopContinues(t *test
 		time.Second, time.Millisecond)
 	cancel()
 	<-done
+}
+
+func TestRunTargetSampleProgressLoop_DuplicateArrivalIsDroppedNotRetried(t *testing.T) {
+	// A source that retransmits or overlaps a range produces an
+	// arrival whose index does not strictly advance the writer's
+	// last committed index; libmxl rejects the OpenSamples with
+	// invalid argument, and the arrival's bytes are already in the
+	// ring. Parking on that arrival -- retrying a commit that can
+	// never succeed -- stalls the ingress and starves the
+	// initiator's send queue to the rate at which the loop gives up
+	// on one entry. The loop must drop the arrival and keep reading:
+	// the next arrival is the one that moves the flow.
+	var seq atomic.Int32
+	read := func() (uint64, int, error) {
+		switch seq.Add(1) {
+		case 1:
+			return 480, 480, nil // committed normally
+		case 2:
+			return 480, 480, nil // retransmission of the same range
+		case 3:
+			return 960, 480, nil // the next range: must still be read
+		default:
+			return 0, 0, fabrics.ErrNotReady
+		}
+	}
+	committed := make(chan uint64, 3)
+	commit := func(head uint64, _ int) error {
+		if head == 480 && len(committed) > 0 {
+			// The second arrival for the same range is the
+			// already-committed one: wrap the real error shape.
+			return fmt.Errorf("OpenSamples(%d,480): %w: %w", head, errSamplesAlreadyCommitted, mxl.ErrInvalidArg)
+		}
+		committed <- head
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go runTargetSampleProgressLoop(ctx, done, read, commit,
+		func() { t.Error("a duplicate arrival must not be reported as fatal") }, nil)
+
+	// The first and third arrivals commit; the duplicate between
+	// them is consumed without a commit and without exiting.
+	require.Eventually(t, func() bool { return len(committed) == 2 },
+		2*time.Second, time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("loop exited on a duplicate arrival")
+	default:
+	}
+	cancel()
+	<-done
+	assert.Equal(t, uint64(480), <-committed)
+	assert.Equal(t, uint64(960), <-committed)
 }
 
 func TestRunTargetSampleProgressLoop_CtxCancelExitsDuringIdle(t *testing.T) {
