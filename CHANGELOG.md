@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.1.0-rc.16](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.15...v1.1.0-rc.16) (2026-09-05)
+
+
+### Features
+
+* **gateway:** report how evenly a flow is delivered ([#327](https://github.com/qvest-digital/mxl-k8s/issues/327)) ([0e1206e](https://github.com/qvest-digital/mxl-k8s/commit/0e1206e78d823b88df993ca6dc1ed95f23303179))
+
+
+### Bug Fixes
+
+* **gateway:** pace sample transfers and stop skipping live samples ([#328](https://github.com/qvest-digital/mxl-k8s/issues/328)) ([1f6001a](https://github.com/qvest-digital/mxl-k8s/commit/1f6001af7af3db3b026477fd7f77e6a9bc94e1aa))
+
+
+### Build System
+
+* **deps:** bump go-mxl to v1.1.0-rc.3 ([#331](https://github.com/qvest-digital/mxl-k8s/issues/331)) ([db8a874](https://github.com/qvest-digital/mxl-k8s/commit/db8a87413b88f4a57aa16032b9253c1b7cce1188))
+
 ## [1.1.0-rc.15](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.14...v1.1.0-rc.15) (2026-09-05)
 
 
