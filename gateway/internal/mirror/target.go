@@ -1161,6 +1161,19 @@ func runTargetSampleProgressLoop(
 		switch kind := classifyFabricError(err); {
 		case err == nil:
 			if err := commit(head, count); err != nil {
+				if errors.Is(err, errSamplesAlreadyCommitted) {
+					// The arrival's range is already in the ring and
+					// the writer's head is past it: a retransmitted
+					// or overlapping chunk from the source. Dropping
+					// it is the only correct move -- retrying the
+					// commit can never succeed, and parking on the
+					// arrival stalls the ingress, which is what
+					// starves the initiator's send queue down to the
+					// rate at which this loop gives up on one entry.
+					l.V(1).Info("dropping already-committed sample arrival",
+						"headIndex", head, "count", count, "error", err.Error())
+					break
+				}
 				l.Error(err, "commit received samples", "headIndex", head, "count", count)
 				break
 			}
@@ -1203,9 +1216,21 @@ func runTargetSampleProgressLoop(
 // libmxl publishes no per-sample width, but the write access carries
 // the stride between two channels' ring buffers, which is the word
 // size times the buffer length the flow config states.
+// errSamplesAlreadyCommitted reports an arrival whose sample range
+// the writer has already committed: libmxl rejects an OpenSamples
+// whose index does not strictly advance the last committed index.
+// The remote write carrying it has already landed in the ring, so
+// the range is stale, not lost -- the mirror's source retransmitted
+// or overlapped it, and the only work left is to consume the
+// arrival so the ingress can move on.
+var errSamplesAlreadyCommitted = errors.New("samples already committed")
+
 func commitArrivedSamples(writer *mxl.Writer, head uint64, count int) (uint64, error) {
 	sa, err := writer.OpenSamples(head, count)
 	if err != nil {
+		if errors.Is(err, mxl.ErrInvalidArg) {
+			return 0, fmt.Errorf("OpenSamples(%d,%d): %w: %w", head, count, errSamplesAlreadyCommitted, err)
+		}
 		return 0, fmt.Errorf("OpenSamples(%d,%d): %w", head, count, err)
 	}
 	if err := sa.Commit(); err != nil {
