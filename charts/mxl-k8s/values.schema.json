@@ -1396,7 +1396,7 @@
           "properties": {
             "bindAddress": {
               "default": "$(POD_IP)",
-              "description": "Bind address for libmxl-fabrics endpoints. Default uses the downward-API POD_IP so each gateway binds its node IP. An explicit empty string (\"\") emits `--bind-address=` (bare equals), which suppresses the POD_IP fallback so libfabric picks the interface; useful when the gateway runs on a Multus-attached NAD and the RDMA fabric is a secondary netdev.",
+              "description": "Bind address for libmxl-fabrics endpoints. Default uses the downward-API POD_IP so each gateway binds its node IP. It narrows the providers that name an interface by IP, tcp and verbs; efa names one by its EFA GID and shm by the host's name, and neither is held to it. An explicit empty string (\"\") emits `--bind-address=` (bare equals), which suppresses the POD_IP fallback so libfabric picks the interface; useful when the gateway runs on a Multus-attached NAD and the RDMA fabric is a secondary netdev.",
               "required": [],
               "title": "bindAddress"
             },

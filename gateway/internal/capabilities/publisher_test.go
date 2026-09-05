@@ -49,7 +49,32 @@ type fakeLister struct {
 func (f *fakeLister) Interfaces(q *fabrics.InterfaceConfig) ([]fabrics.InterfaceConfig, error) {
 	f.call++
 	f.got = q
-	return f.out, f.err
+	if f.err != nil {
+		return nil, f.err
+	}
+	return filterByQueryAddress(f.out, q), nil
+}
+
+// filterByQueryAddress answers a query address the way libmxl-fabrics
+// does. The address is parsed in each provider's own address space
+// before anything is compared, and a provider that cannot express it
+// contributes nothing at all rather than reporting no match. efa
+// addresses an interface by an EFA GID and shm by the host's name, so
+// an IP address in the query removes both providers outright.
+func filterByQueryAddress(in []fabrics.InterfaceConfig, q *fabrics.InterfaceConfig) []fabrics.InterfaceConfig {
+	if q == nil || q.Address.Node == "" {
+		return in
+	}
+	var out []fabrics.InterfaceConfig
+	for _, iface := range in {
+		switch iface.Provider {
+		case fabrics.ProviderTCP, fabrics.ProviderVerbs:
+			if iface.Address.Node == q.Address.Node {
+				out = append(out, iface)
+			}
+		}
+	}
+	return out
 }
 
 func iface(provider fabrics.Provider, node, device string) fabrics.InterfaceConfig {
@@ -348,21 +373,54 @@ func TestRefresh_RewritesProvidersExactly(t *testing.T) {
 			"operator's mirror scheduling")
 }
 
-func TestRefresh_NarrowsTheQueryToTheBindAddress(t *testing.T) {
+func TestRefresh_SweepsWithoutAQueryAddress(t *testing.T) {
+	// One sweep answers for every provider, so it cannot carry an
+	// address: libmxl-fabrics parses the query address in each
+	// provider's own address space and drops the whole provider where
+	// that fails. An IPv4 address takes efa out of the answer.
 	l := &fakeLister{out: []fabrics.InterfaceConfig{iface(fabrics.ProviderTCP, "10.20.53.13", "eth0")}}
 	p := &Publisher{
-		Client:      newClient(t, existingCR()).Build(),
-		NodeName:    "n1",
-		Providers:   []fabrics.Provider{fabrics.ProviderAny},
-		Lister:      l,
-		BindAddress: "10.20.53.13",
+		Client:    newClient(t, existingCR()).Build(),
+		NodeName:  "n1",
+		Providers: []fabrics.Provider{fabrics.ProviderAny},
+		Lister:    l,
+		Selector:  fabric.Selector{BindAddress: "10.20.53.13"},
 	}
 	require.NoError(t, p.Refresh(context.Background()))
 
 	require.NotNil(t, l.got)
-	assert.Equal(t, "10.20.53.13", l.got.Address.Node,
-		"a gateway pinned to one address must not advertise capacity it would "+
-			"never bind")
+	assert.Empty(t, l.got.Address.Node,
+		"the enumeration query must not narrow by address")
+}
+
+func TestRefresh_HoldsIPProvidersToTheBindAddressAndNotEFA(t *testing.T) {
+	// A gateway pinned to one address must not advertise capacity it
+	// would never bind, and must still advertise the EFA adapter it
+	// would: efa names its interface by an EFA GID, which is never
+	// the address the gateway was given.
+	l := &fakeLister{out: []fabrics.InterfaceConfig{
+		iface(fabrics.ProviderEFA, "fe80::7a:ecff:fe8e:4f7", "efa_0"),
+		iface(fabrics.ProviderTCP, "10.20.53.13", "eth0"),
+		iface(fabrics.ProviderTCP, "10.244.3.1", "veth9f1c"),
+	}}
+	p := &Publisher{
+		Client:    newClient(t, existingCR()).Build(),
+		NodeName:  "n1",
+		Providers: []fabrics.Provider{fabrics.ProviderEFA, fabrics.ProviderTCP},
+		Lister:    l,
+		Selector:  fabric.Selector{BindAddress: "10.20.53.13"},
+	}
+	require.NoError(t, p.Refresh(context.Background()))
+
+	got := getCR(t, p)
+	require.Len(t, got.Status.Providers, 2)
+	assert.Equal(t, mxlv1alpha1.ProviderEFA, got.Status.Providers[0].Name)
+	assert.Equal(t, int32(1), got.Status.Providers[0].DeviceCount,
+		"an EFA adapter is advertised as a device, not as absent hardware")
+	assert.Equal(t, mxlv1alpha1.ProviderTCP, got.Status.Providers[1].Name)
+	require.Len(t, got.Status.Providers[1].Interfaces, 1)
+	assert.Equal(t, "10.20.53.13", got.Status.Providers[1].Interfaces[0].Address,
+		"a pod veth is not an address a mirror may be handed")
 }
 
 func TestRefresh_ErrorsWhenCRMissing(t *testing.T) {

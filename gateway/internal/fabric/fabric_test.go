@@ -29,6 +29,17 @@ const (
 		`"ep_type":"FI_EP_RDM","fi_domain_cq_cnt":1024,"fi_domain_ep_cnt":256,` +
 		`"fi_domain_mr_cnt":0,"fi_domain_name":"shm"}`
 
+	// An EFA interface names itself by its EFA GID, which renders as
+	// an IPv6 address and is not one: nothing binds it as an IP, and
+	// it is not the address the gateway was given.
+	attrEFA = `{"device_driver":"efa","device_firmware":"0.0.0.0","device_id":"0xefa1",` +
+		`"device_name":"efa_0","device_vendor_id":"0x1d0f","device_version":"6",` +
+		`"ep_addr_format":"FI_ADDR_EFA","ep_protocol":"FI_PROTO_EFA","ep_type":"FI_EP_RDM",` +
+		`"fi_domain_cq_cnt":512,"fi_domain_ep_cnt":256,"fi_domain_mr_cnt":262144,` +
+		`"fi_domain_name":"efa_0-rdm","link_address":"EFA-fe80::7a:ecff:fe8e:4f7",` +
+		`"link_speed":25000000000,"link_state":"up","link_type":"Ethernet",` +
+		`"pci_bus_id":47,"pci_device_id":0,"pci_domain_id":0,"pci_function_id":0}`
+
 	// A NIC-backed interface additionally carries the link and bus
 	// attributes libfabric reads off fid_nic.
 	attrVerbsNIC = `{"device_name":"mlx5_0","device_driver":"mlx5","link_state":"up",` +
@@ -275,4 +286,49 @@ func mustAttrs(t *testing.T, cfg fabrics.InterfaceConfig) Attributes {
 	attrs, err := ParseAttributes(cfg.Attr)
 	require.NoError(t, err)
 	return attrs
+}
+
+func TestSelectNarrowsIPProvidersToTheBindAddress(t *testing.T) {
+	// A gateway pinned to one address must not advertise, or bind,
+	// another address of the same host: the peer is handed whatever
+	// address survives here, and libfabric enumerates every netdev
+	// the node has, including one veth per pod.
+	in := []fabrics.InterfaceConfig{
+		iface(fabrics.ProviderTCP, "10.20.53.13", attrTCPeth0),
+		iface(fabrics.ProviderTCP, "10.244.3.1", attrTCPeth0),
+	}
+
+	kept, rejected := Selector{BindAddress: "10.20.53.13"}.Select(in)
+	require.Len(t, kept, 1)
+	assert.Equal(t, "10.20.53.13", kept[0].Address.Node)
+	require.Len(t, rejected, 1)
+	assert.Contains(t, rejected[0].Reason, "bind")
+}
+
+func TestSelectMatchesTheBindAddressByValue(t *testing.T) {
+	// The enumeration and the bind address reach this from different
+	// sources, so the same address can arrive in two spellings.
+	in := []fabrics.InterfaceConfig{iface(fabrics.ProviderTCP, "::ffff:10.20.53.13", attrTCPeth0)}
+
+	kept, rejected := Selector{BindAddress: "10.20.53.13"}.Select(in)
+	assert.Len(t, kept, 1)
+	assert.Empty(t, rejected)
+}
+
+func TestSelectKeepsEFAUnderABindAddress(t *testing.T) {
+	// efa names an interface by its EFA GID and shm by the host's
+	// name. Holding either to the gateway's bind address discards the
+	// only interface the provider has, and the node then advertises a
+	// provider with no device - which reads as absent hardware and
+	// drops every mirror on it to the tcp fallback.
+	in := []fabrics.InterfaceConfig{
+		iface(fabrics.ProviderEFA, "fe80::7a:ecff:fe8e:4f7", attrEFA),
+		iface(fabrics.ProviderSHM, "node-a", attrSHM),
+		iface(fabrics.ProviderTCP, "10.20.53.13", attrTCPeth0),
+	}
+
+	kept, rejected := Selector{BindAddress: "10.20.53.13"}.Select(in)
+	require.Len(t, kept, 3, "rejected: %v", rejected)
+	assert.Equal(t, fabrics.ProviderEFA, kept[0].Provider)
+	assert.Equal(t, 1, DeviceCount(kept[:1]))
 }

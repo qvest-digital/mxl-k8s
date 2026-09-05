@@ -110,10 +110,6 @@ type SourceReconciler struct {
 	// with spec.sourceNode set to a different node are ignored.
 	NodeName string
 
-	// BindAddress is the libmxl-fabrics endpoint node passed to the
-	// Initiator Setup. Empty means "bind all interfaces".
-	BindAddress string
-
 	// Selector narrows the interfaces a setup may bind to the fabric
 	// this node is allowed to carry MXL traffic on. The capability
 	// publisher applies the same one.
@@ -154,7 +150,7 @@ type SourceReconciler struct {
 
 	// opener is the seam onto the cgo-dependent libmxl-fabrics
 	// Initiator setup path. SetupWithManager binds it to a
-	// libmxlOpener built from Handles + NodeName + BindAddress;
+	// libmxlOpener built from Handles + NodeName + Selector;
 	// tests build their own inline fake. The production binary
 	// therefore never carries a swappable function pointer that a
 	// later caller could redirect.
@@ -907,7 +903,6 @@ func originRotated(baseline, observed *time.Time, openedAt time.Time) bool {
 type libmxlOpener struct {
 	Handles          *instance.Handles
 	NodeName         string
-	BindAddress      string
 	Selector         fabric.Selector
 	ProgressInterval time.Duration
 	PacingFraction   float64
@@ -933,7 +928,7 @@ func (o *libmxlOpener) open(flowID string, provider fabrics.Provider) (*sharedSo
 		_ = reader.Close()
 		return nil, fmt.Errorf("NewInitiator: %w", err)
 	}
-	iface, err := resolveInterface(fabInst, o.Selector, provider, o.BindAddress)
+	iface, err := resolveInterface(fabInst, o.Selector, provider)
 	if err != nil {
 		_ = initiator.Close()
 		_ = reader.Close()
@@ -2209,7 +2204,6 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.opener = &libmxlOpener{
 			Handles:          r.Handles,
 			NodeName:         r.NodeName,
-			BindAddress:      r.BindAddress,
 			Selector:         r.Selector,
 			ProgressInterval: r.ProgressInterval,
 			PacingFraction:   r.PacingFraction,

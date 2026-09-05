@@ -112,7 +112,6 @@ func run(args []string) error {
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 		NodeName:      cfg.NodeName,
-		BindAddress:   cfg.BindAddress,
 		Selector:      selector,
 		Handles:       handles,
 		DomainPath:    cfg.DomainPath,
@@ -126,7 +125,6 @@ func run(args []string) error {
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
 		NodeName:         cfg.NodeName,
-		BindAddress:      cfg.BindAddress,
 		Selector:         selector,
 		Handles:          handles,
 		ReaderStallAfter: cfg.ReaderStallAfter,
@@ -166,7 +164,6 @@ func run(args []string) error {
 			Selector:           selector,
 			HostDevices:        rdma.Inventory{},
 			HostDeviceObserver: enumerationGate,
-			BindAddress:        cfg.BindAddress,
 			ProbePeriod:        cfg.ProbePeriod,
 		}
 		if err := pub.EnsureExists(ctx); err != nil {

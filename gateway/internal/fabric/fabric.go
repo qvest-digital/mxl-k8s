@@ -121,6 +121,41 @@ type Selector struct {
 	// cannot be shown to clear the floor, and most interfaces with
 	// no NIC behind them report none.
 	MinLinkSpeed uint64
+
+	// BindAddress is the one IP address this gateway binds. It
+	// restricts the providers that name an interface by IP to that
+	// address, and leaves the others alone. Empty imposes no
+	// restriction.
+	//
+	// The narrowing happens here rather than as the address of the
+	// libmxl-fabrics enumeration query because that query carries one
+	// address for every provider it sweeps, and libmxl-fabrics drops
+	// a provider entirely when the query address cannot be parsed in
+	// that provider's own address space. An IPv4 address in a sweep
+	// that includes efa therefore removes efa from the answer, which
+	// is indistinguishable from a host with no EFA adapter.
+	BindAddress string
+}
+
+// ipAddressed reports whether provider names an interface by an IP
+// address, which is what makes BindAddress a filter it can be held
+// to. libmxl-fabrics builds tcp and verbs interfaces from
+// FI_SOCKADDR_IN / FI_SOCKADDR_IN6; efa names one by its EFA GID and
+// shm by the host's name, and neither is an address a gateway binds.
+func ipAddressed(provider fabrics.Provider) bool {
+	return provider == fabrics.ProviderTCP || provider == fabrics.ProviderVerbs
+}
+
+// sameAddress compares two textual addresses by value where both are
+// IP addresses, so an interface enumerated as "::ffff:10.0.0.1" and a
+// bind address given as "10.0.0.1" are one address.
+func sameAddress(a, b string) bool {
+	x, errA := netip.ParseAddr(a)
+	y, errB := netip.ParseAddr(b)
+	if errA != nil || errB != nil {
+		return a == b
+	}
+	return x.Unmap() == y.Unmap()
 }
 
 // Rejection records one interface the Selector dropped, so an operator
@@ -169,7 +204,7 @@ func (s Selector) Select(ifaces []fabrics.InterfaceConfig) ([]fabrics.InterfaceC
 			reject("no remote-write capability")
 			continue
 		}
-		if reason, ok := s.rejectAddress(iface.Address.Node); !ok {
+		if reason, ok := s.rejectAddress(iface.Provider, iface.Address.Node); !ok {
 			reject(reason)
 			continue
 		}
@@ -191,7 +226,10 @@ func (s Selector) Select(ifaces []fabrics.InterfaceConfig) ([]fabrics.InterfaceC
 }
 
 // rejectAddress applies the rules that read the interface address.
-func (s Selector) rejectAddress(node string) (string, bool) {
+func (s Selector) rejectAddress(provider fabrics.Provider, node string) (string, bool) {
+	if s.BindAddress != "" && ipAddressed(provider) && !sameAddress(node, s.BindAddress) {
+		return "address is not the one this gateway binds", false
+	}
 	addr, err := netip.ParseAddr(node)
 	if err != nil {
 		// The shm provider reports a hostname here rather than an

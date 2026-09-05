@@ -217,11 +217,6 @@ type TargetReconciler struct {
 	// with spec.targetNode set to a different node are ignored.
 	NodeName string
 
-	// BindAddress is the libmxl-fabrics endpoint node passed to each
-	// Target Setup. Empty means "bind all interfaces" per
-	// libmxl-fabrics semantics.
-	BindAddress string
-
 	// Selector narrows the interfaces a setup may bind to the fabric
 	// this node is allowed to carry MXL traffic on. The capability
 	// publisher applies the same one.
@@ -851,7 +846,7 @@ func (r *TargetReconciler) openFabricSide(writer *mxl.Writer, provider fabrics.P
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("NewTarget: %w", err)
 	}
-	iface, err := resolveInterface(fabInst, r.Selector, provider, r.BindAddress)
+	iface, err := resolveInterface(fabInst, r.Selector, provider)
 	if err != nil {
 		_ = target.Close()
 		return nil, nil, "", err
