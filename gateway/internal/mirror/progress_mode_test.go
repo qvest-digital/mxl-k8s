@@ -70,6 +70,24 @@ func TestDefaultSampleProgressInterval_OversamplesTheCommitCadence(t *testing.T)
 	}
 }
 
+// The starvation watchdog counts ticks, so its window is a tick count
+// times a tick period. Oversampling shortens the period, and if the
+// count does not grow to match, the loop stops riding out a peer
+// restart and tears itself down partway through one instead.
+func TestSampleStarvationWindow_IsIndependentOfTheTickRate(t *testing.T) {
+	rate := mxl.Rational{Num: 48000, Den: 1}
+	const batch = 480
+
+	batchSpan := time.Duration(int64(time.Second) * int64(rate.Den) * batch / int64(rate.Num))
+	window := time.Duration(maxSampleStarvedTicks) * defaultSampleProgressInterval(rate, batch)
+
+	assert.Equal(t, time.Duration(maxSampleStarvedBatches)*batchSpan, window,
+		"the starvation window must stay the same wall-clock span "+
+			"however often the loop wakes within a batch")
+	assert.Equal(t, 2*time.Second, window,
+		"48 kHz in 480-sample batches: 200 batch periods is two seconds")
+}
+
 func TestDefaultSampleProgressInterval_ZeroBatchFallsBack(t *testing.T) {
 	assert.Zero(t, defaultSampleProgressInterval(mxl.Rational{Num: 48000, Den: 1}, 0),
 		"a zero batch leaves the interval to the caller's fallback")

@@ -2461,12 +2461,18 @@ const maxSampleTransferRetries = 8
 // loop ages out and skips the bulk of the flow. A quarter is far
 // below anything a healthy mirror produces even under backpressure
 // -- the queue refutes whole chunks, not sample ranges within them --
-// so only a sustained trickle trips it. At the default grain-rate
-// interval one tick is ~10 ms of audio, so the window is a few
-// seconds of starvation: long enough to ride out a burst, short
-// enough that the rebuild the exit triggers outruns an operator
-// noticing.
-const maxSampleStarvedTicks = 200
+// so only a sustained trickle trips it. One batch period is ~10 ms of
+// audio, so the window is a few seconds of starvation: long enough to
+// ride out a burst, or a peer restarting, short enough that the
+// rebuild the exit triggers outruns an operator noticing.
+const maxSampleStarvedBatches = 200
+
+// maxSampleStarvedTicks is that same window counted in ticks. The loop
+// wakes sampleProgressOversample times per batch period, so the tick
+// bound has to scale with it: left as a bare count, shortening the tick
+// shortens the window with it, and the loop tears itself down partway
+// through a peer restart it was meant to ride out.
+const maxSampleStarvedTicks = maxSampleStarvedBatches * sampleProgressOversample
 
 // sampleCatchUpBatches is how many batches one tick may transfer. One
 // batch is real time, so four lets a mirror that fell behind close the
