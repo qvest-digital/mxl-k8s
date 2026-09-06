@@ -52,7 +52,12 @@ Two correctness details worth flagging while looking at the diagram:
 
 Every object the platform derives is collected by asking what
 justifies it, and the answer is kept on the object as a condition
-whose `lastTransitionTime` is the grace period's clock. Holding it
+whose `lastTransitionTime` is the grace period's clock. The grace is
+for a justification that vanished without saying so -- a pod that
+died, an agent that stopped renewing -- where waiting is what tells a
+rollover from a departure. A component that is alive and says it no
+longer wants something does not go through it: a receiver releasing
+its last reference to a mirror deletes it there and then. Holding it
 there rather than in the operator's memory is what makes the grace
 survive an operator restart, which would otherwise reset the timer on
 every object at once on every rollout. `--gc-grace-period` (default

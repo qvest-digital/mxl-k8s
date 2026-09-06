@@ -345,11 +345,10 @@ func TestReceiver_GCDeletesOrphanMirrorsAfterPodMove(t *testing.T) {
 		"the receiver must own the mirror it created same-namespace; without "+
 			"the OwnerReference apiserver GC has nothing to act on")
 
-	// Pod moves to a new node. The receiver drops its reference from
-	// the orphan mirror on node-a and stops there; deleting the now
-	// ownerless object is the mirror controller's, which collects it
-	// once it has been unclaimed for a grace period. Force grace=0
-	// because envtest has no kubelet to finalize the pod removal.
+	// Pod moves to a new node. The receiver was the orphan mirror's
+	// sole owner, so releasing it deletes the mirror outright. Force
+	// grace=0 because envtest has no kubelet to finalize the pod
+	// removal.
 	zero := int64(0)
 	require.NoError(t, env.Client.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: &zero}))
 	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-b", "node-b")))
@@ -360,10 +359,9 @@ func TestReceiver_GCDeletesOrphanMirrorsAfterPodMove(t *testing.T) {
 	for _, m := range mirrors.Items {
 		gotOwners[m.Spec.TargetNode] = len(m.OwnerReferences)
 	}
-	assert.Equal(t, map[string]int{"node-a": 0, "node-b": 1}, gotOwners,
-		"the receiver must release the mirror its pod has left and own the "+
-			"one on the node the pod moved to; the released mirror is then "+
-			"unclaimed, which is what the mirror controller collects on")
+	assert.Equal(t, map[string]int{"node-b": 1}, gotOwners,
+		"the mirror on the node the pod left is released by its only owner "+
+			"and goes with it; the one on the node it moved to is owned")
 }
 
 // The finalizer exists for the cross-namespace mirrors, which carry no
@@ -767,12 +765,12 @@ func clearGatewayFinalizer(c client.Client, m *mxlv1alpha1.MxlFlowMirror, finali
 	return c.Update(context.Background(), &live)
 }
 
-// A receiver that stops wanting a mirror drops its own reference and
-// stops there. Deleting the object that leaves behind is the mirror
-// controller's, which collects it once it has been unclaimed for a
-// grace period -- and a pod that returns to the node inside that
-// window gets the mirror back rather than paying to rebuild it.
-func TestGcOrphanMirrors_ReleasesTheReferenceAndLeavesTheObject(t *testing.T) {
+// A receiver that stops wanting a mirror drops its own reference, and
+// deletes the mirror when that leaves no owner at all. The mirror
+// collector's grace period is for a claimant that vanished without
+// saying so; five minutes of a stream nothing reads is not what an
+// explicit release should cost.
+func TestGcOrphanMirrors_DeletesTheMirrorItReleasedLast(t *testing.T) {
 	ctx := context.Background()
 	ns := env.NewNamespace(t)
 	r := &receiver.Reconciler{Client: env.Client, APIReader: env.Client, Scheme: env.Scheme}
@@ -794,12 +792,13 @@ func TestGcOrphanMirrors_ReleasesTheReferenceAndLeavesTheObject(t *testing.T) {
 	reconcile(t, r, ns, "r")
 
 	var live mxlv1alpha1.MxlFlowMirror
-	require.NoError(t, env.Client.Get(ctx,
-		types.NamespacedName{Namespace: ns, Name: name}, &live))
-	assert.Empty(t, live.OwnerReferences,
-		"the receiver's obligation is to stop claiming the mirror; what "+
-			"becomes of an unclaimed one is decided in one place for every "+
-			"mirror, whichever path created it")
+	err := env.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &live)
+	assert.True(t, apierrors.IsNotFound(err),
+		"a live receiver concluding it no longer wants a mirror is a "+
+			"positive statement, not a claimant that vanished, so it does "+
+			"not wait out a grace period meant to tell a rollover from a "+
+			"departure -- and apiserver GC never fires on an owner list "+
+			"emptied by an update")
 }
 
 // An owner reference to a receiver that no longer exists is not a

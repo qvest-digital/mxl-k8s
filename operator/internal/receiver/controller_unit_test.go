@@ -1129,14 +1129,12 @@ var mxlFlowMirrorGR = schema.GroupResource{
 	Resource: "mxlflowmirrors",
 }
 
-// Dropping the reference is the whole of a receiver's obligation.
-// What becomes of a mirror left with no owner at all is the mirror
-// controller's to decide, and it decides it the same way for every
-// mirror: unclaimed for longer than the grace period, then collected.
-// The resourceVersion-guarded Delete that used to live here could not
-// tell a sibling re-adding a reference from the mirror's own gateways
-// writing status, which they do continuously.
-func TestRemoveOwnerRef_DropsTheRefAndLeavesTheObject(t *testing.T) {
+// Releasing the last reference deletes the mirror. Apiserver garbage
+// collection never fires on an owner list emptied by an update, so
+// nothing else would, and leaving it to the mirror collector's grace
+// period costs the fabric five minutes of a stream nothing reads --
+// that period is for a claimant that vanished without saying so.
+func TestRemoveOwnerRef_DeletesWhenItReleasesTheLastReference(t *testing.T) {
 	ctx := context.Background()
 	recv := &mxlv1alpha1.MxlReceiver{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r", UID: "recv-uid"},
@@ -1156,8 +1154,8 @@ func TestRemoveOwnerRef_DropsTheRefAndLeavesTheObject(t *testing.T) {
 	require.NoError(t, r.removeOwnerRef(ctx, recv, mirror))
 
 	var live mxlv1alpha1.MxlFlowMirror
-	require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "m"}, &live))
-	assert.Empty(t, live.OwnerReferences)
+	err := c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "m"}, &live)
+	assert.True(t, apierrors.IsNotFound(err))
 }
 
 func TestEnsureOwnerRef_RetryOnConflict(t *testing.T) {
