@@ -27,12 +27,15 @@ GC_FLOW="fbfbfbfb-0000-4000-8000-00000000000c"
 GC_MIRROR="${GC_FLOW}--gc-test"
 GC_UNCLAIMED="${GC_FLOW}--gc-unclaimed"
 GC_LEASE="mxl-flow-fbfbfbfb-0000-4000-8000-00000000000d-node-that-left"
+# A flow id that no MxlFlow carries, on a node that is really there.
+GC_LEASE_FLOWGONE="mxl-flow-fbfbfbfb-0000-4000-8000-00000000000e-"
 
+live_node=""
 cleanup() {
   "${KUBECTL[@]}" delete mxlflow "$GC_FLOW" --ignore-not-found >/dev/null 2>&1 || true
   "${KUBECTL[@]}" -n "$NAMESPACE" delete mxlflowmirror "$GC_MIRROR" "$GC_UNCLAIMED" \
     --ignore-not-found >/dev/null 2>&1 || true
-  "${KUBECTL[@]}" -n mxl-system delete lease "$GC_LEASE" \
+  "${KUBECTL[@]}" -n mxl-system delete lease "$GC_LEASE" "${GC_LEASE_FLOWGONE}${live_node:-x}" \
     --ignore-not-found >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -246,7 +249,38 @@ EOF
 
 gone -n mxl-system "lease/$GC_LEASE" \
   || fail "an expired origin Lease naming a node that left the cluster survived. Check the operator's delete verb on coordination.k8s.io/leases"
-echo "  orphaned origin Lease collected"
+echo "  origin Lease whose holder node is gone: collected"
+
+# The other half of the rule, and the one a showcase cluster also has a
+# live instance of: expired, holder node still in the cluster, but the
+# flow it names has been collected. An agent that was down when its
+# flow went leaves exactly this, and it can never release it itself
+# because it releases by walking what is on its own disk.
+live_node=$("${KUBECTL[@]}" get nodes -o jsonpath='{.items[0].metadata.name}')
+[ -n "$live_node" ] || fail "could not read a node name"
+"${KUBECTL[@]}" -n mxl-system apply -f - <<EOF >/dev/null
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: ${GC_LEASE_FLOWGONE}${live_node}
+  namespace: mxl-system
+spec:
+  holderIdentity: $live_node
+  leaseDurationSeconds: 30
+  renewTime: "$(python3 -c '
+import datetime
+print((datetime.datetime.now(datetime.timezone.utc)
+       - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000000Z"))')"
+EOF
+
+gone -n mxl-system "lease/${GC_LEASE_FLOWGONE}${live_node}" \
+  || fail "an expired origin Lease whose flow no longer exists survived, though its holder node is still here"
+echo "  origin Lease whose flow is gone: collected"
+
+# Neither half alone is enough, and the fresh Leases still in the
+# namespace are the evidence: every one of them names a live node and a
+# flow that exists, and none was touched. A collector keying on expiry
+# alone would have taken the lot.
 
 # --- and the live ones are still there --------------------------------
 
