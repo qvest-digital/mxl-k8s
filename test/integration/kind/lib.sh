@@ -206,9 +206,15 @@ mirrors_sourced_from() {
 
 # daemonset_pod_on <ds-label-value> <node> -- name of the running
 # DaemonSet pod for the component on the node, empty when none.
+#
+# "None" is an ordinary result, not an error: a pod being replaced
+# leaves a window in which the old one already reports Succeeded and
+# its replacement is still Pending. Every caller assigns this under
+# set -e, so awk rather than grep -- it consumes the whole list and
+# exits 0 whether or not a name matched.
 daemonset_pod_on() {
   "${KUBECTL[@]}" -n "$NAMESPACE" get pods \
     --field-selector "spec.nodeName=$2,status.phase=Running" -o \
     'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}' \
-  | grep "^mxl-k8s-$1-" | head -1
+  | awk -v prefix="mxl-k8s-$1-" 'index($0, prefix) == 1 && !seen++ { print }'
 }
