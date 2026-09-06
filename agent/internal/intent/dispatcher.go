@@ -13,7 +13,6 @@ package intent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -21,12 +20,9 @@ import (
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -38,15 +34,6 @@ import (
 const (
 	defaultMaterializeTimeout = 5 * time.Second
 	defaultPollInterval       = 50 * time.Millisecond
-
-	// defaultMirrorRescanInterval is how often RunMirrorRescan
-	// re-resolves the origin behind this node's intent mirrors. Origin
-	// movement produces no event on the intent path, so this interval
-	// is the upper bound on how long a mirror keeps addressing a node
-	// the flow has left. Matches the agent's other rescan cadence: the
-	// pass costs a cluster-wide mirror List against an uncached client,
-	// which every node pays.
-	defaultMirrorRescanInterval = 30 * time.Second
 )
 
 // FlowChecker reports whether the named flow's flow_def.json is
@@ -57,9 +44,11 @@ type FlowChecker func(flowID string) bool
 // LeaseChecker is the slice of the originlease.Manager surface the
 // dispatcher needs to skip Origin locations whose Lease has expired.
 // Kept as an interface so tests can drive resolveSourceNode without
-// a coordination.k8s.io fake fixture.
+// a coordination.k8s.io fake fixture. The deadline is unused here --
+// a request-driven dispatcher schedules nothing -- and present so one
+// interface serves the operator's controllers as well.
 type LeaseChecker interface {
-	IsFresh(ctx context.Context, flowID, nodeName string) (bool, error)
+	IsFresh(ctx context.Context, flowID, nodeName string) (fresh bool, deadline time.Time, err error)
 }
 
 // Dispatcher resolves a libmxl-intent.so request into an
@@ -69,11 +58,6 @@ type Dispatcher struct {
 	Resolver   *podlookup.Resolver
 	DomainPath string
 	NodeName   string
-
-	// Recorder publishes the retarget event onto the mirror. Nil
-	// records nothing, which keeps the dispatcher usable in tests that
-	// wire no manager.
-	Recorder record.EventRecorder
 
 	// Provider is the libmxl-fabrics provider stamped onto mirrors
 	// created on demand. Empty defaults to ProviderAuto.
@@ -219,138 +203,28 @@ func (d *Dispatcher) flowExistsLocally(flowID string) bool {
 	return err == nil
 }
 
-// originResolution separates the two ways resolving an origin can
-// come up empty, so the reason handed back to the shim says which
-// one happened. Mirrors originResolution in the operator's
-// receiver package, minus the Deadline the reconciler needs for its
-// RequeueAfter and a request-driven dispatcher does not.
-type originResolution struct {
-	Node     string
-	Found    bool
-	AllStale bool
-}
-
-func (d *Dispatcher) resolveSourceNode(ctx context.Context, flowID string) (originResolution, error) {
+func (d *Dispatcher) resolveSourceNode(ctx context.Context, flowID string) (mxlv1alpha1.OriginResolution, error) {
 	var flow mxlv1alpha1.MxlFlow
 	if err := d.Client.Get(ctx, types.NamespacedName{Name: flowID}, &flow); err != nil {
 		if apierrors.IsNotFound(err) {
-			return originResolution{}, nil
+			return mxlv1alpha1.OriginResolution{}, nil
 		}
-		return originResolution{}, err
+		return mxlv1alpha1.OriginResolution{}, err
 	}
-	sawOrigin := false
-	for _, loc := range flow.Status.Locations {
-		if loc.Phase != mxlv1alpha1.MxlFlowLocationOrigin {
-			continue
-		}
-		sawOrigin = true
-		if d.Lease == nil {
-			return originResolution{Node: loc.NodeName, Found: true}, nil
-		}
-		fresh, err := d.Lease.IsFresh(ctx, flowID, loc.NodeName)
-		if err != nil {
-			return originResolution{}, err
-		}
-		if fresh {
-			return originResolution{Node: loc.NodeName, Found: true}, nil
-		}
-	}
-	return originResolution{AllStale: sawOrigin}, nil
+	return mxlv1alpha1.ResolveOrigin(&flow, d.leaseFreshness(ctx))
 }
 
-// repointMirror patches spec.sourceNode, and the provider derived
-// from it, when the flow's origin has moved since the mirror was
-// created. Mirror names do not encode the source node, so without
-// this the mirror addresses its create-time node for life and stays
-// Degraded once that node goes away. Only intent-authored mirrors
-// are touched: patchMirrorIfDrifted owns the same drift for
-// receiver-authored ones, and two writers would fight. The
-// merge-patch lists only the two spec keys, leaving the agent-owned
-// Requestor and the GC labels alone.
-func (d *Dispatcher) repointMirror(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, flowID, sourceNode string) error {
-	if _, intent := mirror.Labels[mxlv1alpha1.LabelCreatedByIntent]; !intent {
+// leaseFreshness adapts the dispatcher's LeaseChecker to the callback
+// ResolveOrigin takes. A nil checker yields a nil callback, which
+// keeps a dispatcher wired without one resolving the same origin the
+// pre-Lease code did.
+func (d *Dispatcher) leaseFreshness(ctx context.Context) mxlv1alpha1.LeaseFreshness {
+	if d.Lease == nil {
 		return nil
 	}
-	if mirror.Spec.SourceNode == sourceNode {
-		return nil
+	return func(flowID, nodeName string) (bool, time.Time, error) {
+		return d.Lease.IsFresh(ctx, flowID, nodeName)
 	}
-
-	provider, err := d.resolveProvider(ctx, flowID, sourceNode)
-	if err != nil {
-		return fmt.Errorf("resolve provider for repointed source %s: %w", sourceNode, err)
-	}
-
-	patch, err := json.Marshal(map[string]any{
-		"spec": map[string]any{
-			"sourceNode": sourceNode,
-			"provider":   string(provider),
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("marshal repoint patch: %w", err)
-	}
-	previous := mirror.Spec.SourceNode
-	if err := d.Client.Patch(ctx, mirror, client.RawPatch(types.MergePatchType, patch)); err != nil {
-		return fmt.Errorf("repoint mirror %s/%s to source %s: %w",
-			mirror.Namespace, mirror.Name, sourceNode, err)
-	}
-
-	// Record the retarget on the mirror itself. The log line below says
-	// the same thing, but only for as long as the agent's logs are
-	// retained, and a mirror that is Degraded right now is read through
-	// kubectl rather than through a log a day later. Without this,
-	// "Degraded and converging" and "Degraded and stuck" look alike on
-	// the object.
-	if err := d.recordRetarget(ctx, mirror, previous); err != nil {
-		log.FromContext(ctx).WithName("intent").Error(err, "record retarget on mirror",
-			"mirror", mirror.Namespace+"/"+mirror.Name)
-	}
-	if d.Recorder != nil {
-		d.Recorder.Eventf(mirror, corev1.EventTypeNormal, ReasonSourceRetargeted,
-			"Source repointed from %s to %s after the flow's origin moved", previous, sourceNode)
-	}
-
-	log.FromContext(ctx).WithName("intent").Info("repointed mirror to new origin",
-		"flowID", flowID,
-		"mirror", mirror.Namespace+"/"+mirror.Name,
-		"previousSourceNode", previous,
-		"sourceNode", sourceNode,
-		"provider", provider)
-	return nil
-}
-
-// Event reasons recorded on a mirror by the agent.
-const (
-	// ReasonSourceRetargeted marks a mirror repointed at a moved origin.
-	ReasonSourceRetargeted = "SourceRetargeted"
-	// ReasonOriginLocal marks a mirror deleted because the flow's origin
-	// arrived on the mirror's own target node, which makes the mirror a
-	// transfer from a node to itself. Deleting it is correct and looks
-	// identical to a mirror being lost.
-	ReasonOriginLocal = "OriginLocal"
-)
-
-// recordRetarget stamps status.sourceRetargetedAt and
-// previousSourceNode. Status is a separate subresource from the spec
-// patch above, so this is a second write; the spec change is the one
-// that matters and its failure is returned, while losing the record
-// only costs the operator the timestamp.
-func (d *Dispatcher) recordRetarget(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, previous string) error {
-	if previous == "" {
-		return nil
-	}
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var live mxlv1alpha1.MxlFlowMirror
-		if err := d.Client.Get(ctx, types.NamespacedName{
-			Namespace: mirror.Namespace, Name: mirror.Name,
-		}, &live); err != nil {
-			return client.IgnoreNotFound(err)
-		}
-		now := metav1.Now()
-		live.Status.PreviousSourceNode = previous
-		live.Status.SourceRetargetedAt = &now
-		return d.Client.Status().Update(ctx, &live)
-	})
 }
 
 // NotifyProducerAttached records that a local process opened a flow
@@ -391,127 +265,6 @@ func (d *Dispatcher) NotifyProducerAttached(ctx context.Context, pid int32, path
 	return d.Origin.ClaimOrigin(ctx, flowID)
 }
 
-// RunMirrorRescan re-resolves the origin behind every mirror this
-// node authored, on a fixed interval, until ctx is done. A zero or
-// negative interval falls back to the package default.
-//
-// Origin movement raises no event the intent path can see. Materialize
-// runs only when the shim intercepts an ENOENT, and a consumer that
-// already opened the flow never issues another one -- its directory
-// exists, so nothing faults. That leaves repointMirror unreachable for
-// the whole life of a mirror created before the producer moved, which
-// is exactly when it is needed: the mirror keeps addressing the node
-// the flow left, and the target gateway waits on a source that will
-// never publish again.
-// A pass runs before the first tick. An agent restart is the common
-// aftermath of a node being recycled, which is also when mirrors are
-// most likely to be addressing a node that is already gone; waiting a
-// full interval to look would extend the outage it exists to end.
-func (d *Dispatcher) RunMirrorRescan(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		interval = defaultMirrorRescanInterval
-	}
-	l := log.FromContext(ctx).WithName("intent.rescan")
-	if err := d.ReconcileMirrors(ctx); err != nil {
-		l.Error(err, "reconcile intent mirrors")
-	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			if err := d.ReconcileMirrors(ctx); err != nil {
-				l.Error(err, "reconcile intent mirrors")
-			}
-		}
-	}
-}
-
-// ReconcileMirrors repoints every intent-authored mirror targeting
-// this node at the flow's current origin. Nothing here deletes: the
-// target gateway's teardown closes the libmxl FlowWriter, and closing
-// it removes the on-disk flow definition the consumer is reading, so
-// a wrong deletion costs the consumer its stream with no fault to
-// re-materialize it. Mirrors this pass cannot improve are left for
-// the intent GC to collect once the requestor pod goes away.
-//
-// Mirrors the receiver reconciler owns are skipped: patchMirrorIfDrifted
-// writes the same field for those, and two writers would fight. The
-// intent label alone does not establish ownership -- the receiver's
-// ensureMirror adopts a pre-existing intent mirror by name and only
-// adds an ownerReference -- so an adopted mirror keeps the label and
-// has to be recognised by that reference.
-func (d *Dispatcher) ReconcileMirrors(ctx context.Context) error {
-	var mirrors mxlv1alpha1.MxlFlowMirrorList
-	if err := d.Client.List(ctx, &mirrors, client.MatchingLabels{
-		mxlv1alpha1.LabelCreatedByIntent: d.NodeName,
-	}); err != nil {
-		return fmt.Errorf("list intent mirrors: %w", err)
-	}
-
-	l := log.FromContext(ctx).WithName("intent.rescan")
-	origins := map[string]originResolution{}
-	var errs []error
-	for i := range mirrors.Items {
-		m := &mirrors.Items[i]
-		if m.Spec.TargetNode != d.NodeName ||
-			!m.DeletionTimestamp.IsZero() ||
-			len(m.OwnerReferences) > 0 {
-			continue
-		}
-
-		res, ok := origins[m.Spec.FlowID]
-		if !ok {
-			var err error
-			res, err = d.resolveSourceNode(ctx, m.Spec.FlowID)
-			if err != nil {
-				l.Error(err, "resolve origin", "flowID", m.Spec.FlowID)
-				errs = append(errs, err)
-				continue
-			}
-			origins[m.Spec.FlowID] = res
-		}
-
-		// No usable origin to move to. Leaving the mirror pointed at
-		// its last known source keeps the consumer's copy and the
-		// Degraded status that names the problem.
-		if !res.Found {
-			continue
-		}
-
-		// The origin is now this node, so the mirror would address a
-		// transfer from the node to itself. Removing it is safe while
-		// the local producer holds the flow: libmxl deletes a flow on
-		// release only when the departing writer can take an exclusive
-		// flock, which the producer's own shared lock denies.
-		if res.Node == d.NodeName {
-			if err := d.Client.Delete(ctx, m); err != nil && !apierrors.IsNotFound(err) {
-				l.Error(err, "delete self-targeted mirror",
-					"flowID", m.Spec.FlowID, "mirror", m.Namespace+"/"+m.Name)
-				errs = append(errs, err)
-				continue
-			}
-			if d.Recorder != nil {
-				d.Recorder.Eventf(m, corev1.EventTypeNormal, ReasonOriginLocal,
-					"Deleting: the flow's origin moved onto %s, so this node reads it directly",
-					d.NodeName)
-			}
-			l.Info("deleted mirror whose origin moved onto this node",
-				"flowID", m.Spec.FlowID, "mirror", m.Namespace+"/"+m.Name)
-			continue
-		}
-
-		if err := d.repointMirror(ctx, m, m.Spec.FlowID, res.Node); err != nil {
-			l.Error(err, "repoint mirror",
-				"flowID", m.Spec.FlowID, "mirror", m.Namespace+"/"+m.Name)
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
-}
-
 func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string, pod metav1.Object) (*mxlv1alpha1.MxlFlowMirror, error) {
 	name := MirrorName(flowID, d.NodeName)
 
@@ -524,9 +277,6 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string
 		if !existing.DeletionTimestamp.IsZero() {
 			return nil, fmt.Errorf("mirror %s/%s is terminating",
 				existing.Namespace, existing.Name)
-		}
-		if err := d.repointMirror(ctx, &existing, flowID, sourceNode); err != nil {
-			return nil, err
 		}
 		// A mirror with the same (flow, target node) name already
 		// exists. The pre-existing object is functionally

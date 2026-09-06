@@ -18,54 +18,48 @@ func TestLeaseName_Format(t *testing.T) {
 }
 
 func TestParseLeaseName_RoundTrip(t *testing.T) {
+	const flowID = "11111111-2222-3333-4444-555555555555"
 	cases := []struct {
 		name     string
-		flowID   string
 		nodeName string
 	}{
-		{
-			name:     "canonical UUID flow id",
-			flowID:   "11111111-2222-3333-4444-555555555555",
-			nodeName: "node1",
-		},
-		{
-			name:     "flow id with embedded dashes",
-			flowID:   "flow-abc-123",
-			nodeName: "node1",
-		},
-		{
-			name:     "single segment flow id",
-			flowID:   "abc",
-			nodeName: "node1",
-		},
+		{name: "bare-metal node name", nodeName: "n07"},
+		{name: "node name with dashes", nodeName: "node-a"},
+		// The case the last-dash split got wrong, and the one every
+		// AWS cluster is made of.
+		{name: "ec2 private-dns node name", nodeName: "ip-10-66-1-235"},
+		{name: "fqdn node name", nodeName: "worker-1.eu-central-1.compute.internal"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			leaseName := LeaseName(tc.flowID, tc.nodeName)
-			gotFlow, gotNode, ok := ParseLeaseName(leaseName)
+			gotFlow, gotNode, ok := ParseLeaseName(LeaseName(flowID, tc.nodeName))
 			require.True(t, ok,
 				"LeaseName output must round-trip through ParseLeaseName; "+
-					"otherwise a renamed Lease would orphan its owner")
-			assert.Equal(t, tc.flowID, gotFlow)
+					"the Lease watches enqueue whatever comes back, so a "+
+					"wrong split wakes nothing and every consumer waits out "+
+					"the renewal window instead")
+			assert.Equal(t, flowID, gotFlow)
 			assert.Equal(t, tc.nodeName, gotNode)
 		})
 	}
 }
 
 func TestParseLeaseName_Rejects(t *testing.T) {
-	// nodeName is the trailing segment after the last "-"; a name
-	// without that segment is not a valid Origin Lease name and must
-	// be rejected so callers do not silently pass an empty nodeName
-	// downstream.
+	// The first field is a canonical 8-4-4-4-12 flow id and the rest
+	// is the node name. Anything else is not an Origin Lease name and
+	// has to be rejected rather than split somewhere arbitrary, so a
+	// caller never passes an invented flow id downstream.
 	cases := []struct {
 		name  string
 		input string
 	}{
 		{name: "empty input", input: ""},
-		{name: "missing prefix", input: "lease-flow-abc-node1"},
+		{name: "missing prefix", input: "lease-flow-11111111-2222-3333-4444-555555555555-n1"},
 		{name: "prefix only", input: "mxl-flow-"},
-		{name: "no trailing dash after prefix", input: "mxl-flow-onlyone"},
-		{name: "trailing dash with empty node", input: "mxl-flow-abc-"},
+		{name: "no node name", input: "mxl-flow-11111111-2222-3333-4444-555555555555"},
+		{name: "empty node name", input: "mxl-flow-11111111-2222-3333-4444-555555555555-"},
+		{name: "first field is not a flow id", input: "mxl-flow-not-a-uuid-at-all-really-nope-n1"},
+		{name: "another component's lease", input: "mxl-flow-controller-leader-election"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

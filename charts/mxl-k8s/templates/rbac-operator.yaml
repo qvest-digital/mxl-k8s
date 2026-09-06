@@ -14,9 +14,13 @@ rules:
   - apiGroups: [""]
     resources: [nodes]
     verbs: [get, list, watch]
+  # delete collects an origin Lease once it is expired and either the
+  # node that holds it or the flow it names is gone. The agent that
+  # wrote it is the only other thing that deletes one, and a node
+  # removed from the cluster takes its agent with it.
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
-    verbs: [get, list, watch]
+    verbs: [delete, get, list, watch]
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxldomains]
     verbs: [get, list, watch]
@@ -25,8 +29,9 @@ rules:
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxlnodecapabilities]
     verbs: [delete, get, list, watch]
-  # delete collects a flow once no node holds a copy of it and no
-  # mirror needs its definition.
+  # delete collects a flow once it has read Live=False for longer than
+  # the grace period: no origin holding a renewed lease, and no mirror
+  # referencing it.
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxlflows]
     verbs: [delete, get, list, watch]

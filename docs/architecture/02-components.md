@@ -10,8 +10,9 @@ component, showing the workflow rather than a labelled rectangle.
 | CRD | Scope | Spec written by | Status written by | Watched by |
 | --- | --- | --- | --- | --- |
 | `MxlReceiver` | Namespaced | user | operator | operator |
-| `MxlFlowMirror` | Namespaced | operator (declarative) or agent (intent) | gateway (target side) | operator, gateway (target + source), agent |
-| `MxlFlow` | Cluster | agent (on first appearance) | agent | operator, gateway (source side), agent |
+| `MxlFlowMirror` | Namespaced | operator (declarative) or agent (intent), then operator (source node) | gateway (both sides), operator (`Claimed`, `Sourceable`) | operator, gateway (target + source), agent |
+| `MxlFlow` | Cluster | agent (on first appearance) | agent (`locations`), operator (everything else) | operator, gateway (source side), agent |
+| `Lease` (coordination.k8s.io, `mxl-system`) | Namespaced | agent | agent | operator, agent |
 | `MxlDomain` | Cluster (per-node) | bootstrap / agent | agent | operator (observe), agent |
 | `MxlNodeCapabilities` | Cluster (per-node) | gateway | gateway | operator (observe), gateway |
 
@@ -28,30 +29,68 @@ and
 leader-elected (`LeaderElectionID:
 "mxl-operator.mxl.qvest-digital.com"`,
 [`main.go:56`](../../operator/cmd/mxl-operator/main.go)).
-One controller-runtime Manager hosts five reconcilers; only one of
-them mutates state, and that's the one that matters here:
+One controller-runtime Manager hosts six reconcilers. `receiver`
+translates consumer intent into mirrors and is the one the diagram
+follows; `flow`, `mirror` and `leasegc` own the lifecycle of what it
+produces; `domain` and `nodecaps` observe.
 
 ![Operator: receiver.Reconciler reconcile workflow](./diagrams/02-operator.drawio.svg)
 
-The four other reconcilers (`flow`, `mirror`, `domain`, `nodecaps`)
-register at startup but log only -- they're observer code paths that
-exist to mark the reconciler scaffolding so future status-aggregation
-work has a hook. They write nothing.
-
 Two correctness details worth flagging while looking at the diagram:
 
-- The `Watches(MxlFlowMirror)` arm
-  ([`controller.go:261`](../../operator/internal/receiver/controller.go))
-  maps mirror events back to receivers by `spec.flowID`. Without it,
-  the receiver would not notice a bound mirror being deleted (manual
-  cleanup, future garbage collection) until the 10-hour cache resync.
-- `mirrorName(flowID, targetNode)`
-  ([`controller.go:214`](../../operator/internal/receiver/controller.go))
-  is byte-for-byte identical to `MirrorName` in
-  [`agent/internal/intent/dispatcher.go:238`](../../agent/internal/intent/dispatcher.go).
-  This is what makes the declarative path (operator) and the
-  on-demand path (agent) converge on a single `MxlFlowMirror` per
-  (flow, target node) instead of racing each other.
+- The `Watches(MxlFlowMirror)` arm maps mirror events back to
+  receivers by `spec.flowID`. Without it, the receiver would not
+  notice a bound mirror being deleted (manual cleanup, collection)
+  until the 10-hour cache resync.
+- `mirrorNameForReceiver` derives the same name from the same inputs
+  as `MirrorName` in `agent/internal/intent`. This is what makes the
+  declarative path (operator) and the on-demand path (agent) converge
+  on a single `MxlFlowMirror` per (flow, target node) instead of
+  racing each other.
+
+### Lifecycle and collection
+
+Every object the platform derives is collected by asking what
+justifies it, and the answer is kept on the object as a condition
+whose `lastTransitionTime` is the grace period's clock. Holding it
+there rather than in the operator's memory is what makes the grace
+survive an operator restart, which would otherwise reset the timer on
+every object at once on every rollout. `--gc-grace-period` (default
+5m) has to outlast a producer or consumer pod rolling over.
+
+- **`MxlFlowMirror`** is justified by a claim and by a source, and
+  needs both. `Claimed` reads True while an owner reference names a
+  live `MxlReceiver` or `spec.requestor` names a live pod -- the two
+  ways a mirror is asked for, both written onto the object by the
+  side that asked. `Sourceable` reads True while the target node
+  exists and the flow names an Origin whose Lease is being renewed.
+  Neither the creator labels nor `status.phase` is consulted: a label
+  can be edited off an object, and the phase says whether grains are
+  moving, which is a different question from whether anyone wants
+  them to. The same controller repoints `spec.sourceNode` when the
+  flow's origin moves, so a mirror does not spend its life addressing
+  a node the flow has left.
+- **`MxlFlow`** is justified by a live copy. `Live` reads True while
+  some Origin location holds a renewed Lease, or some surviving
+  mirror references the flow. A `Ready` location does not count on
+  its own: it is written by the node holding a mirror's target copy
+  and cleared only once that node's agent notices the directory go,
+  so counting it meant the flow cited the copy and the mirror cited
+  the flow, and neither was ever collected.
+- **`Lease`** is collected once it is expired *and* either the node
+  holding it or the flow it names is gone. Both halves are required:
+  an expired Lease whose node is still there belongs to an agent that
+  will renew or release it, and a fresh Lease whose flow is missing
+  belongs to one that is about to republish it.
+
+The agent's half of the contract is not to publish a location for a
+copy nothing writes to. A flow directory outlives its writer by up to
+one domain sweep, so before publishing one the agent asks libmxl's own
+question -- whether an exclusive lock can be taken on the flow's `data`
+file, which an attached writer holds shared. No writer means the
+location is `Stale` and the Lease is released. A writer plus a mirror
+naming this node as its target means `Ready`; a writer and no mirror
+means `Origin`.
 
 ## Gateway
 

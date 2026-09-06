@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	"regexp"
 	"strings"
 	"time"
 )
@@ -32,20 +33,40 @@ func LeaseName(flowID, nodeName string) string {
 	return leaseNamePrefix + flowID + "-" + nodeName
 }
 
+// flowIDLength is the length of the canonical 8-4-4-4-12 UUID a flow
+// id always is. It is what makes a Lease name decomposable: both
+// segments may contain dashes, so only a fixed-width first field
+// separates them unambiguously.
+const flowIDLength = 36
+
+// flowIDRE is FlowIDPattern compiled once, so ParseLeaseName rejects a
+// name whose first field is not a flow id rather than splitting it
+// somewhere arbitrary.
+var flowIDRE = regexp.MustCompile(FlowIDPattern)
+
 // ParseLeaseName reverses LeaseName: it strips the literal
-// "mxl-flow-" prefix and splits the remainder at the last "-" so a
-// flowID that contains dashes (the canonical 8-4-4-4-12 UUID form
-// always does) still parses back to the original two segments. ok is
-// false when the prefix is missing, when the remainder has no
-// trailing "-", or when either segment would be empty.
+// "mxl-flow-" prefix, takes the canonical UUID that follows as the
+// flow id, and treats the rest as the node name. ok is false when the
+// prefix is missing, when the first field is not a flow id, or when
+// no node name follows it.
+//
+// Splitting at the last dash instead is what this replaces. It reads
+// the right answer only when the node name has no dash in it, which
+// is true of a bare-metal "n07" and false of every node an AWS
+// cluster names -- "ip-10-66-1-235" parsed as node "235" belonging to
+// a flow id with "-ip-10-66-1" glued on the end. Nothing failed
+// loudly: the Lease watches simply enqueued a flow id no object had,
+// so a Lease appearing or being released woke nothing, and every
+// mirror and flow on those clusters waited out the renewal window
+// instead.
 func ParseLeaseName(name string) (flowID, nodeName string, ok bool) {
 	rest, found := strings.CutPrefix(name, leaseNamePrefix)
-	if !found {
+	if !found || len(rest) < flowIDLength+2 || rest[flowIDLength] != '-' {
 		return "", "", false
 	}
-	idx := strings.LastIndex(rest, "-")
-	if idx <= 0 || idx == len(rest)-1 {
+	flowID, nodeName = rest[:flowIDLength], rest[flowIDLength+1:]
+	if !flowIDRE.MatchString(flowID) {
 		return "", "", false
 	}
-	return rest[:idx], rest[idx+1:], true
+	return flowID, nodeName, true
 }

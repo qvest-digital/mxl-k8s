@@ -123,6 +123,18 @@ operator:
     # -- Enable leader election. Required for replicaCount > 1.
     leaderElect: false
     # @schema
+    # pattern: ^[0-9]+(ns|us|ms|s|m|h)$
+    # @schema
+    # -- How long an MxlFlow must have no live copy, and an
+    # MxlFlowMirror no claim or no source, before it is deleted. Has to
+    # outlast a producer or consumer pod rolling over: both leave the
+    # objects momentarily unjustified, and collecting inside that
+    # window costs the stream a re-materialization for no reason.
+    # Lowering it reclaims a released mirror's bandwidth sooner and
+    # narrows the window in which a returning pod gets its existing
+    # mirror back instead of paying to rebuild one.
+    gcGracePeriod: 5m
+    # @schema
     # enum: ["debug", "info", "warn", "error"]
     # @schema
     zapLogLevel: info

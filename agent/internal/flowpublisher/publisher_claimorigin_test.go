@@ -47,7 +47,7 @@ func TestClaimOrigin_PromotesReadyToOrigin(t *testing.T) {
 		Build()
 
 	lease := &fakeLease{}
-	p := &Publisher{Client: c, NodeName: "n1", Lease: lease}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, NodeName: "n1", Lease: lease}
 	require.NoError(t, p.ClaimOrigin(context.Background(), validFlowID))
 
 	var got mxlv1alpha1.MxlFlow
@@ -82,7 +82,7 @@ func TestClaimOrigin_AlreadyOriginIsNoOp(t *testing.T) {
 		Build()
 
 	lease := &fakeLease{}
-	p := &Publisher{Client: c, NodeName: "n1", Lease: lease}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, NodeName: "n1", Lease: lease}
 	require.NoError(t, p.ClaimOrigin(context.Background(), validFlowID))
 	assert.Empty(t, lease.renewed)
 }
@@ -106,7 +106,7 @@ func TestClaimOrigin_LeavesOtherNodesAlone(t *testing.T) {
 		WithObjects(flow).
 		Build()
 
-	p := &Publisher{Client: c, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, NodeName: "n1"}
 	require.NoError(t, p.ClaimOrigin(context.Background(), validFlowID))
 
 	var got mxlv1alpha1.MxlFlow
@@ -120,7 +120,7 @@ func TestClaimOrigin_LeavesOtherNodesAlone(t *testing.T) {
 // pass, which creates it and publishes the location.
 func TestClaimOrigin_UnknownFlowIsSkipped(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
-	p := &Publisher{Client: c, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, NodeName: "n1"}
 
 	require.NoError(t, p.ClaimOrigin(context.Background(), validFlowID))
 

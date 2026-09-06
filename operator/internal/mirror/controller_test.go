@@ -3,22 +3,33 @@ package mirror
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
+	utilptr "k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
+)
+
+const (
+	flowID  = "11111111-2222-3333-4444-555555555555"
+	srcNode = "n-src"
+	tgtNode = "n-target"
+	testNS  = "ns"
 )
 
 func newScheme(t *testing.T) *runtime.Scheme {
@@ -29,297 +40,521 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-func newIntentMirror(name, ns, podName, podNS, podUID string) *mxlv1alpha1.MxlFlowMirror {
-	return &mxlv1alpha1.MxlFlowMirror{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: ns,
-			Name:      name,
-			Labels: map[string]string{
-				mxlv1alpha1.LabelCreatedByIntent: "n-target",
-				mxlv1alpha1.LabelRequestorPodUID: podUID,
-			},
-		},
-		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
-			FlowID:     "11111111-2222-3333-4444-555555555555",
-			SourceNode: "n-src",
-			TargetNode: "n-target",
-			Provider:   mxlv1alpha1.ProviderAuto,
-			Requestor: &mxlv1alpha1.PodRef{
-				Name:      podName,
-				Namespace: podNS,
-				UID:       podUID,
+func node(name string) *corev1.Node {
+	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}
+}
+
+// flowOriginAt is the flow as the agent on origin publishes it.
+func flowOriginAt(origin string) *mxlv1alpha1.MxlFlow {
+	return &mxlv1alpha1.MxlFlow{
+		ObjectMeta: metav1.ObjectMeta{Name: flowID},
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: flowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{
+				{NodeName: origin, Phase: mxlv1alpha1.MxlFlowLocationOrigin},
 			},
 		},
 	}
 }
 
-func reconcileOnce(t *testing.T, r *Reconciler, ns, name string) ctrl.Result {
+type mirrorOpt func(*mxlv1alpha1.MxlFlowMirror)
+
+func newMirror(opts ...mirrorOpt) *mxlv1alpha1.MxlFlowMirror {
+	m := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: "m1"},
+		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
+			FlowID:     flowID,
+			SourceNode: srcNode,
+			TargetNode: tgtNode,
+			Provider:   mxlv1alpha1.ProviderTCP,
+		},
+	}
+	for _, o := range opts {
+		o(m)
+	}
+	return m
+}
+
+// withRequestor is the on-demand path's claim: the agent records the
+// pod whose ENOENT triggered the materialization.
+func withRequestor(name, uid string) mirrorOpt {
+	return func(m *mxlv1alpha1.MxlFlowMirror) {
+		m.Spec.Requestor = &mxlv1alpha1.PodRef{
+			Namespace: testNS, Name: name, UID: uid,
+		}
+	}
+}
+
+// withReceiverOwner is the declarative path's claim.
+func withReceiverOwner(name string, uid types.UID) mirrorOpt {
+	return func(m *mxlv1alpha1.MxlFlowMirror) {
+		m.OwnerReferences = append(m.OwnerReferences, metav1.OwnerReference{
+			APIVersion:         mxlv1alpha1.GroupVersion.String(),
+			Kind:               "MxlReceiver",
+			Name:               name,
+			UID:                uid,
+			Controller:         utilptr.To(false),
+			BlockOwnerDeletion: utilptr.To(false),
+		})
+	}
+}
+
+// withIntentLabel stamps the creator label. It is diagnostic only:
+// nothing in the lifecycle may read it, which is what these pin.
+func withIntentLabel() mirrorOpt {
+	return func(m *mxlv1alpha1.MxlFlowMirror) {
+		if m.Labels == nil {
+			m.Labels = map[string]string{}
+		}
+		m.Labels[mxlv1alpha1.LabelCreatedByIntent] = tgtNode
+	}
+}
+
+func pod(name, uid string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNS, Name: name, UID: types.UID(uid),
+		},
+		Spec: corev1.PodSpec{
+			NodeName:   tgtNode,
+			Containers: []corev1.Container{{Name: "c", Image: "pause:3.10"}},
+		},
+	}
+}
+
+func receiver(name string, uid types.UID) *mxlv1alpha1.MxlReceiver {
+	return &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: name, UID: uid},
+		Spec: mxlv1alpha1.MxlReceiverSpec{
+			FlowID:      flowID,
+			PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "c"}},
+		},
+	}
+}
+
+type fakeLease struct {
+	fresh    map[string]bool
+	deadline time.Time
+}
+
+func (f *fakeLease) IsFresh(_ context.Context, flow, nodeName string) (bool, time.Time, error) {
+	if f.fresh == nil {
+		return true, f.deadline, nil
+	}
+	return f.fresh[flow+"/"+nodeName], f.deadline, nil
+}
+
+// harness builds the reconciler with both nodes present and a lease
+// checker that considers every origin fresh unless told otherwise.
+func harness(t *testing.T, grace time.Duration, objs ...client.Object) (*Reconciler, client.Client) {
+	t.Helper()
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}, &mxlv1alpha1.MxlFlow{}).
+		WithObjects(node(srcNode), node(tgtNode)).
+		WithObjects(objs...).
+		Build()
+	return &Reconciler{
+		Client:      c,
+		Recorder:    record.NewFakeRecorder(32),
+		Lease:       &fakeLease{},
+		GracePeriod: grace,
+	}, c
+}
+
+func reconcileOnce(t *testing.T, r *Reconciler, name string) ctrl.Result {
 	t.Helper()
 	res, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: ns, Name: name},
+		NamespacedName: types.NamespacedName{Namespace: testNS, Name: name},
 	})
 	require.NoError(t, err)
 	return res
 }
 
-// TestReconcile_IntentMirror_PodGone_IsDeleted is the load-bearing
-// case for this reconciler: when the agent-created mirror's
-// requestor pod has disappeared, the mirror gets deleted so the
-// gateway tears down the libmxl-fabrics resources behind it.
-// Without this, an evicted or finished pod would leave the mirror
-// (and the bandwidth it costs) live forever.
-func TestReconcile_IntentMirror_PodGone_IsDeleted(t *testing.T) {
-	scheme := newScheme(t)
-	mirror := newIntentMirror("m", "ns", "consumer", "ns", "uid-1")
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
-		Build()
-
-	r := &Reconciler{Client: c, Scheme: scheme}
-
-	// First pass stamps the finalizer.
-	reconcileOnce(t, r, "ns", "m")
-	var stamped mxlv1alpha1.MxlFlowMirror
+func getMirror(t *testing.T, c client.Client, name string) *mxlv1alpha1.MxlFlowMirror {
+	t.Helper()
+	var m mxlv1alpha1.MxlFlowMirror
 	require.NoError(t, c.Get(context.Background(),
-		types.NamespacedName{Namespace: "ns", Name: "m"}, &stamped))
-	assert.Contains(t, stamped.Finalizers, MxlFlowMirrorIntentFinalizer,
-		"the GC must claim the mirror with a finalizer before deciding to "+
-			"delete it; otherwise a Delete call would race the API server's "+
-			"foreground GC and the cache might not converge")
+		types.NamespacedName{Namespace: testNS, Name: name}, &m))
+	return &m
+}
 
-	// Second pass observes the missing pod and deletes the mirror.
-	reconcileOnce(t, r, "ns", "m")
-
-	var after mxlv1alpha1.MxlFlowMirror
+func mirrorGone(t *testing.T, c client.Client, name string) bool {
+	t.Helper()
+	var m mxlv1alpha1.MxlFlowMirror
 	err := c.Get(context.Background(),
-		types.NamespacedName{Namespace: "ns", Name: "m"}, &after)
-	if err == nil {
-		require.False(t, after.DeletionTimestamp.IsZero(),
-			"a mirror whose requestor pod is gone must be deleted (or at "+
-				"least carry a non-zero DeletionTimestamp under the fake "+
-				"client's finalizer semantics)")
-	} else {
-		require.True(t, apierrors.IsNotFound(err),
-			"unexpected error reading mirror after GC: %v", err)
-	}
+		types.NamespacedName{Namespace: testNS, Name: name}, &m)
+	return apierrors.IsNotFound(err)
 }
 
-// TestReconcile_IntentMirror_PodUIDMismatch_IsDeleted covers the
-// pod-replacement case: a pod with the same name but a fresh UID is
-// not the pod that asked for the mirror. The mirror is bound to the
-// original UID and must be torn down so the agent on the next probe
-// can materialize a fresh one for the new pod.
-func TestReconcile_IntentMirror_PodUIDMismatch_IsDeleted(t *testing.T) {
-	scheme := newScheme(t)
-	mirror := newIntentMirror("m", "ns", "consumer", "ns", "uid-old")
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "ns",
-			Name:      "consumer",
-			UID:       "uid-new",
-		},
-	}
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror, pod).
-		Build()
-	r := &Reconciler{Client: c, Scheme: scheme}
-
-	reconcileOnce(t, r, "ns", "m")
-	reconcileOnce(t, r, "ns", "m")
-
-	var after mxlv1alpha1.MxlFlowMirror
-	err := c.Get(context.Background(),
-		types.NamespacedName{Namespace: "ns", Name: "m"}, &after)
-	if err == nil {
-		assert.False(t, after.DeletionTimestamp.IsZero(),
-			"a pod with the same name but a different UID is a fresh pod; "+
-				"the mirror tied to the old UID must be reaped")
-	} else {
-		require.True(t, apierrors.IsNotFound(err))
-	}
+func condition(t *testing.T, m *mxlv1alpha1.MxlFlowMirror, typ string) *metav1.Condition {
+	t.Helper()
+	return meta.FindStatusCondition(m.Status.Conditions, typ)
 }
 
-// TestReconcile_IntentMirror_PodAlive_IsUntouched guards the
-// happy-path: an intent mirror whose requestor pod still exists with
-// the matching UID stays in place. The finalizer is stamped but the
-// mirror is not deleted.
-func TestReconcile_IntentMirror_PodAlive_IsUntouched(t *testing.T) {
-	scheme := newScheme(t)
-	mirror := newIntentMirror("m", "ns", "consumer", "ns", "uid-1")
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "ns",
-			Name:      "consumer",
-			UID:       "uid-1",
-		},
+// backdate moves both operator-owned conditions back so a test can
+// reach the far side of the grace period without waiting it out. The
+// clock living on the object rather than in the operator's memory is
+// the point: it used to reset on every mirror at once whenever the
+// operator restarted.
+func backdate(t *testing.T, c client.Client, name string, by time.Duration) {
+	t.Helper()
+	m := getMirror(t, c, name)
+	for i := range m.Status.Conditions {
+		switch m.Status.Conditions[i].Type {
+		case mxlv1alpha1.ConditionTypeClaimed, mxlv1alpha1.ConditionTypeSourceable:
+			m.Status.Conditions[i].LastTransitionTime = metav1.NewTime(time.Now().Add(-by))
+		}
 	}
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror, pod).
-		Build()
-	r := &Reconciler{Client: c, Scheme: scheme}
-
-	reconcileOnce(t, r, "ns", "m")
-	reconcileOnce(t, r, "ns", "m")
-
-	var after mxlv1alpha1.MxlFlowMirror
-	require.NoError(t, c.Get(context.Background(),
-		types.NamespacedName{Namespace: "ns", Name: "m"}, &after))
-	assert.True(t, after.DeletionTimestamp.IsZero(),
-		"a mirror whose requestor pod is alive must not be deleted")
-	assert.Contains(t, after.Finalizers, MxlFlowMirrorIntentFinalizer)
+	require.NoError(t, c.Status().Update(context.Background(), m))
 }
 
-// TestReconcile_ReceiverOnlyMirror_IsUntouched is the contract that
-// separates the two ownership domains: a mirror stamped only with
-// LabelCreatedByReceiver belongs to the receiver reconciler. The
-// intent GC must not delete it and must not add the intent
-// finalizer to it, even when no pod with the (non-existent) name
-// in spec.requestor exists -- the field is irrelevant for
-// receiver-owned mirrors.
-func TestReconcile_ReceiverOnlyMirror_IsUntouched(t *testing.T) {
-	scheme := newScheme(t)
-	mirror := &mxlv1alpha1.MxlFlowMirror{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "ns",
-			Name:      "m",
-			Labels: map[string]string{
-				mxlv1alpha1.LabelCreatedByReceiver: "rcv",
+// --- claim -----------------------------------------------------------
+
+func TestClaim_RequestorPodGone_CollectsAfterGrace(t *testing.T) {
+	m := newMirror(withIntentLabel(), withRequestor("consumer", "uid-1"))
+	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode))
+
+	res := reconcileOnce(t, r, m.Name)
+	assert.False(t, mirrorGone(t, c, m.Name),
+		"a consumer rolling over leaves its mirror unclaimed between the "+
+			"old pod going and the new one asking again")
+	assert.Positive(t, res.RequeueAfter)
+
+	claimed := condition(t, getMirror(t, c, m.Name), mxlv1alpha1.ConditionTypeClaimed)
+	require.NotNil(t, claimed)
+	assert.Equal(t, metav1.ConditionFalse, claimed.Status)
+	assert.Equal(t, mxlv1alpha1.ReasonUnclaimed, claimed.Reason)
+
+	backdate(t, c, m.Name, 2*time.Hour)
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name),
+		"a mirror nothing asks for costs the fabric its bandwidth and "+
+			"costs its flow the ability to be collected")
+}
+
+func TestClaim_RequestorPodAlive_IsKept(t *testing.T) {
+	m := newMirror(withIntentLabel(), withRequestor("consumer", "uid-1"))
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), pod("consumer", "uid-1"))
+
+	reconcileOnce(t, r, m.Name)
+	assert.False(t, mirrorGone(t, c, m.Name))
+
+	claimed := condition(t, getMirror(t, c, m.Name), mxlv1alpha1.ConditionTypeClaimed)
+	require.NotNil(t, claimed)
+	assert.Equal(t, mxlv1alpha1.ReasonRequestorLive, claimed.Reason)
+}
+
+// A pod recreated under the same name is a different consumer. The
+// UID is what says so.
+func TestClaim_RequestorPodReplaced_IsUnclaimed(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), pod("consumer", "uid-2"))
+
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name))
+}
+
+func TestClaim_LiveReceiverOwner_IsKept(t *testing.T) {
+	m := newMirror(withReceiverOwner("recv", "recv-uid"))
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), receiver("recv", "recv-uid"))
+
+	reconcileOnce(t, r, m.Name)
+	assert.False(t, mirrorGone(t, c, m.Name))
+
+	claimed := condition(t, getMirror(t, c, m.Name), mxlv1alpha1.ConditionTypeClaimed)
+	require.NotNil(t, claimed)
+	assert.Equal(t, mxlv1alpha1.ReasonReceiverOwned, claimed.Reason)
+}
+
+// The trap the old collectors left open. A receiver that stops wanting
+// a mirror removes its owner reference rather than being deleted, and
+// apiserver garbage collection fires when an owner is deleted, not
+// when the list is emptied by an update. Nothing collected the result.
+func TestClaim_OwnerlessMirror_IsCollected(t *testing.T) {
+	m := newMirror()
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode))
+
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name))
+}
+
+// An owner reference to a receiver that no longer exists is not a
+// claim. The name may even have been reused by a different object,
+// which the UID catches.
+func TestClaim_DanglingOwnerRef_IsNotAClaim(t *testing.T) {
+	m := newMirror(withReceiverOwner("recv", "old-uid"))
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode),
+		receiver("recv", "new-uid"))
+
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name))
+}
+
+// The mirror that survived a day and a half on the showcase cluster.
+// Its creator labels had been edited off, so the label-keyed collector
+// skipped it and even stripped its own finalizer; the owner-ref-keyed
+// one never looked at it either. Its requestor pod had been gone since
+// the day before, which is the fact that should have decided it.
+func TestClaim_NoCreatorLabels_IsStillJudgedOnItsRequestor(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	m.Labels = nil
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode))
+
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name),
+		"a claim is what the requesting side wrote into spec and "+
+			"ownerReferences; a label that can be edited off must not be "+
+			"what decides whether an object can ever be collected")
+}
+
+// --- source ----------------------------------------------------------
+
+// The dev-cluster case: the producer's node was reclaimed, the flow
+// kept the mirror target's Ready location and nothing else, and the
+// mirror addressed the departed node forever. Its requestor pod was
+// alive the whole time, so the claim alone would have kept it.
+func TestSource_FlowHasNoOrigin_CollectsAfterGraceDespiteALiveClaim(t *testing.T) {
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: metav1.ObjectMeta{Name: flowID},
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: flowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{
+				{NodeName: tgtNode, Phase: mxlv1alpha1.MxlFlowLocationReady},
 			},
 		},
-		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
-			FlowID:     "11111111-2222-3333-4444-555555555555",
-			SourceNode: "n-src",
-			TargetNode: "n-target",
-			Provider:   mxlv1alpha1.ProviderTCP,
-		},
 	}
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror.DeepCopy()).
-		Build()
-	r := &Reconciler{Client: c, Scheme: scheme}
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	r, c := harness(t, time.Hour, m, flow, pod("consumer", "uid-1"))
 
-	reconcileOnce(t, r, "ns", "m")
+	reconcileOnce(t, r, m.Name)
+	live := getMirror(t, c, m.Name)
+	assert.Equal(t, metav1.ConditionTrue,
+		condition(t, live, mxlv1alpha1.ConditionTypeClaimed).Status)
+	sourceable := condition(t, live, mxlv1alpha1.ConditionTypeSourceable)
+	require.NotNil(t, sourceable)
+	assert.Equal(t, metav1.ConditionFalse, sourceable.Status)
+	assert.Equal(t, mxlv1alpha1.ReasonOriginUnresolved, sourceable.Reason)
 
-	var after mxlv1alpha1.MxlFlowMirror
-	require.NoError(t, c.Get(context.Background(),
-		types.NamespacedName{Namespace: "ns", Name: "m"}, &after))
-	assert.True(t, after.DeletionTimestamp.IsZero(),
-		"a receiver-owned mirror must not be touched by the intent GC; "+
-			"deleting it here would let the intent reconciler reap a "+
-			"mirror the receiver still needs")
-	assert.NotContains(t, after.Finalizers, MxlFlowMirrorIntentFinalizer,
-		"the intent finalizer must not be stamped on a receiver-owned "+
-			"mirror; that would block deletion the receiver reconciler "+
-			"initiated")
-	assert.Equal(t, mirror.Spec, after.Spec,
-		"the intent GC must not mutate spec on a receiver-owned mirror")
+	backdate(t, c, m.Name, 2*time.Hour)
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name),
+		"a consumer that happens to still be running is not a reason to "+
+			"keep a mirror of a flow that has no producer left")
 }
 
-// TestReconcile_MissingMirror_NoError covers the case where the
-// mirror was deleted between event enqueue and reconcile. The
-// reconciler returns cleanly without requeue.
-func TestReconcile_MissingMirror_NoError(t *testing.T) {
-	scheme := newScheme(t)
-	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	r := &Reconciler{Client: c, Scheme: scheme}
+func TestSource_FlowGone_IsUnsourceable(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	r, c := harness(t, time.Nanosecond, m, pod("consumer", "uid-1"))
 
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name))
+}
+
+func TestSource_EveryOriginLeaseExpired_IsUnsourceable(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode), pod("consumer", "uid-1"))
+	r.Lease = &fakeLease{fresh: map[string]bool{}}
+
+	reconcileOnce(t, r, m.Name)
+	sourceable := condition(t, getMirror(t, c, m.Name), mxlv1alpha1.ConditionTypeSourceable)
+	require.NotNil(t, sourceable)
+	assert.Equal(t, metav1.ConditionFalse, sourceable.Status)
+	assert.Contains(t, sourceable.Message, "expired lease")
+}
+
+// No gateway will ever open the writer: the DaemonSet pod that would
+// have done it died with the node.
+func TestSource_TargetNodeGone_IsUnsourceable(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	m.Spec.TargetNode = "reclaimed"
+	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode), pod("consumer", "uid-1"))
+
+	reconcileOnce(t, r, m.Name)
+	sourceable := condition(t, getMirror(t, c, m.Name), mxlv1alpha1.ConditionTypeSourceable)
+	require.NotNil(t, sourceable)
+	assert.Equal(t, mxlv1alpha1.ReasonTargetNodeGone, sourceable.Reason)
+
+	backdate(t, c, m.Name, 2*time.Hour)
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name))
+}
+
+// A mirror that is wanted and sourceable is left alone however badly
+// it is doing. Degraded says grains are not moving, which is a
+// data-plane fault the gateway may still recover from -- collecting on
+// it would tear down a stream that was about to come back.
+func TestCollect_DegradedButJustified_IsLeftAlone(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	m.Status.Phase = mxlv1alpha1.MxlFlowMirrorDegraded
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), pod("consumer", "uid-1"))
+
+	reconcileOnce(t, r, m.Name)
+	assert.False(t, mirrorGone(t, c, m.Name))
+}
+
+// --- repoint ---------------------------------------------------------
+
+// Mirror names do not encode the source node, so a mirror created
+// before the producer moved addresses the node it left for life. The
+// source gateway there opens a reader on a copy nothing writes to, and
+// reopening it -- the only recovery the data plane has -- yields
+// another reader on the same dead copy.
+func TestRepoint_OriginMoved_SpecFollowsIt(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	r, c := harness(t, time.Hour, m, flowOriginAt("n-moved"),
+		pod("consumer", "uid-1"), node("n-moved"))
+
+	reconcileOnce(t, r, m.Name)
+
+	got := getMirror(t, c, m.Name)
+	assert.Equal(t, "n-moved", got.Spec.SourceNode)
+	assert.Equal(t, srcNode, got.Status.PreviousSourceNode)
+	assert.NotNil(t, got.Status.SourceRetargetedAt,
+		"a mirror briefly Degraded after its producer moves is converging "+
+			"and one Degraded with no recent retarget is not; without the "+
+			"timestamp the two look alike on the object")
+	assert.Equal(t, metav1.ConditionTrue,
+		condition(t, got, mxlv1alpha1.ConditionTypeSourceable).Status)
+}
+
+// Both creation paths land on the same object, so repointing has to
+// cover both. It used to live in the agent, which only looked at
+// mirrors targeting its own node and carrying no owner reference.
+func TestRepoint_CoversReceiverOwnedMirrorsToo(t *testing.T) {
+	m := newMirror(withReceiverOwner("recv", "recv-uid"))
+	r, c := harness(t, time.Hour, m, flowOriginAt("n-moved"),
+		receiver("recv", "recv-uid"), node("n-moved"))
+
+	reconcileOnce(t, r, m.Name)
+	assert.Equal(t, "n-moved", getMirror(t, c, m.Name).Spec.SourceNode)
+}
+
+// The origin landing on the mirror's own target node makes the mirror
+// a transfer from a node to itself; the consumer reads the local copy
+// directly.
+func TestRepoint_OriginLandsOnTheTarget_MirrorIsDeleted(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	r, c := harness(t, time.Hour, m, flowOriginAt(tgtNode), pod("consumer", "uid-1"))
+
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name))
+}
+
+// --- finalizer -------------------------------------------------------
+
+// The finalizer an earlier collector added did nothing on deletion but
+// remove itself, so all it bought was a round trip and one more way
+// for a mirror to sit in Terminating while the operator was down.
+func TestLegacyIntentFinalizer_IsStripped(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	m.Finalizers = []string{legacyIntentFinalizer}
+	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode), pod("consumer", "uid-1"))
+
+	reconcileOnce(t, r, m.Name)
+	assert.NotContains(t, getMirror(t, c, m.Name).Finalizers, legacyIntentFinalizer)
+}
+
+func TestReconcile_DeletingMirror_IsLeftToTheGateway(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	m.Finalizers = []string{"gateway.mxl.qvest-digital.com/target-side"}
+	now := metav1.Now()
+	m.DeletionTimestamp = &now
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode))
+
+	res := reconcileOnce(t, r, m.Name)
+	assert.Equal(t, ctrl.Result{}, res)
+	assert.False(t, mirrorGone(t, c, m.Name),
+		"the gateway finalizers own the teardown; nothing this controller "+
+			"decides applies to an object already on its way out")
+}
+
+func TestReconcile_MissingMirror_NoError(t *testing.T) {
+	r, _ := harness(t, time.Hour)
 	res, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: "ns", Name: "missing"},
+		NamespacedName: types.NamespacedName{Namespace: testNS, Name: "absent"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, res)
 }
 
-// TestReconcile_IntentMirror_AlreadyDeleting_DropsFinalizer verifies
-// that once the mirror enters deletion (DeletionTimestamp set), the
-// intent finalizer comes off so the API server can complete the
-// delete. This is the path the GC itself walks on its second pass
-// after Delete() but it also handles externally-initiated deletes
-// (kubectl delete, gateway-driven cleanup).
-func TestReconcile_IntentMirror_AlreadyDeleting_DropsFinalizer(t *testing.T) {
-	scheme := newScheme(t)
-	now := metav1.Now()
-	mirror := newIntentMirror("m", "ns", "consumer", "ns", "uid-1")
-	mirror.DeletionTimestamp = &now
-	mirror.Finalizers = []string{
-		MxlFlowMirrorIntentFinalizer,
-		"test.mxl.qvest-digital.com/keepalive",
-	}
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
-		Build()
-	r := &Reconciler{Client: c, Scheme: scheme}
+// --- watches ---------------------------------------------------------
 
-	reconcileOnce(t, r, "ns", "m")
+func TestWatches_EnqueueTheMirrorsEachInputAffects(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"),
+		withReceiverOwner("recv", "recv-uid"))
+	r, _ := harness(t, time.Hour, m, flowOriginAt(srcNode))
+	ctx := context.Background()
 
-	var after mxlv1alpha1.MxlFlowMirror
-	require.NoError(t, c.Get(context.Background(),
-		types.NamespacedName{Namespace: "ns", Name: "m"}, &after))
-	assert.NotContains(t, after.Finalizers, MxlFlowMirrorIntentFinalizer,
-		"once the mirror is deleting, the intent reconciler's job is to "+
-			"release its finalizer so the API server can finish; the "+
-			"gateway's own finalizer is what guards the data-plane teardown")
-	assert.Contains(t, after.Finalizers, "test.mxl.qvest-digital.com/keepalive",
-		"the intent reconciler must remove only its own finalizer; other "+
-			"finalizers belong to peers (the gateway, the receiver) and "+
-			"removing them would race their teardown")
+	assert.Len(t, r.podToMirrors(ctx, pod("consumer", "uid-1")), 1)
+	assert.Empty(t, r.podToMirrors(ctx, pod("other", "uid-9")))
+
+	assert.Len(t, r.receiverToMirrors(ctx, receiver("recv", "recv-uid")), 1)
+	assert.Empty(t, r.receiverToMirrors(ctx, receiver("recv", "different-uid")))
+
+	assert.Len(t, r.flowToMirrors(ctx, flowOriginAt(srcNode)), 1)
+
+	lease := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{
+		Namespace: mxlv1alpha1.LeaseNamespace,
+		Name:      mxlv1alpha1.LeaseName(flowID, srcNode),
+	}}
+	assert.Len(t, r.leaseToMirrors(ctx, lease), 1)
+	lease.Name = "kube-controller-manager"
+	assert.Empty(t, r.leaseToMirrors(ctx, lease))
+
+	assert.Len(t, r.nodeToMirrors(ctx, node(tgtNode)), 1)
+	assert.Len(t, r.nodeToMirrors(ctx, node(srcNode)), 1)
+	assert.Empty(t, r.nodeToMirrors(ctx, node("unrelated")))
 }
 
-// TestPodPredicate_DenyKubeSystem locks in the namespace deny-list
-// on the intent GC's pod watch. Without it, churn on
-// kube-system (kube-proxy, CoreDNS, kubelet-managed static pods)
-// dominates the reconcile queue with wakeups for namespaces the
-// agent never authors mirrors in.
 func TestPodPredicate_DenyKubeSystem(t *testing.T) {
-	pred := podLifecyclePredicate()
+	p := podLifecyclePredicate()
+	sys := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Name: "p"}}
+	app := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: "p"}}
 
-	pod := func(ns string, uid string) *corev1.Pod {
-		return &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "p", UID: types.UID(uid)},
-		}
-	}
+	assert.False(t, p.Create(event.CreateEvent{Object: sys}))
+	assert.True(t, p.Create(event.CreateEvent{Object: app}))
+	assert.False(t, p.Delete(event.DeleteEvent{Object: sys}))
+	assert.True(t, p.Delete(event.DeleteEvent{Object: app}))
+	assert.False(t, p.Generic(event.GenericEvent{Object: app}))
 
-	denied := []string{"kube-system", "kube-public", "kube-node-lease"}
-	for _, ns := range denied {
-		t.Run("deny/"+ns, func(t *testing.T) {
-			obj := pod(ns, "uid-1")
-			assert.False(t, pred.Create(event.CreateEvent{Object: obj}),
-				"Create event from %s must be dropped: the agent never "+
-					"authors intent mirrors there, so wakeups from those "+
-					"namespaces are pure overhead", ns)
-			assert.False(t, pred.Delete(event.DeleteEvent{Object: obj}),
-				"Delete event from %s must be dropped", ns)
-			assert.False(t, pred.Update(event.UpdateEvent{
-				ObjectOld: pod(ns, "uid-old"),
-				ObjectNew: pod(ns, "uid-new"),
-			}), "Update event from %s must be dropped even when UID changes", ns)
-		})
-	}
-
-	allowed := []string{"mxl-system", "default", "app"}
-	for _, ns := range allowed {
-		t.Run("allow/"+ns, func(t *testing.T) {
-			obj := pod(ns, "uid-1")
-			assert.True(t, pred.Create(event.CreateEvent{Object: obj}),
-				"Create event from %s must pass", ns)
-			assert.True(t, pred.Delete(event.DeleteEvent{Object: obj}),
-				"Delete event from %s must pass", ns)
-			assert.True(t, pred.Update(event.UpdateEvent{
-				ObjectOld: pod(ns, "uid-old"),
-				ObjectNew: pod(ns, "uid-new"),
-			}), "Update event from %s with UID change must pass", ns)
-		})
-	}
+	same := app.DeepCopy()
+	assert.False(t, p.Update(event.UpdateEvent{ObjectOld: app, ObjectNew: same}),
+		"a status tick is not a change of claim")
+	replaced := app.DeepCopy()
+	replaced.UID = "different"
+	assert.True(t, p.Update(event.UpdateEvent{ObjectOld: app, ObjectNew: replaced}))
 }
 
-var _ = client.IgnoreNotFound
+func TestNodeDeletedOnly_AcceptsDeletesOnly(t *testing.T) {
+	p := nodeDeletedOnly()
+	n := node(tgtNode)
+	assert.False(t, p.Create(event.CreateEvent{Object: n}))
+	assert.False(t, p.Update(event.UpdateEvent{ObjectOld: n, ObjectNew: n}))
+	assert.False(t, p.Generic(event.GenericEvent{Object: n}))
+	assert.True(t, p.Delete(event.DeleteEvent{Object: n}))
+}
+
+// The grace has to measure from the first of the two failures rather
+// than restart on the second, so a mirror that loses its claim and
+// then its source is not given two full waits.
+func TestFailingSince_TakesTheEarlierOfTheTwo(t *testing.T) {
+	older := metav1.NewTime(time.Now().Add(-time.Hour))
+	newer := metav1.NewTime(time.Now().Add(-time.Minute))
+	m := newMirror()
+	m.Status.Conditions = []metav1.Condition{
+		{Type: mxlv1alpha1.ConditionTypeClaimed, LastTransitionTime: older},
+		{Type: mxlv1alpha1.ConditionTypeSourceable, LastTransitionTime: newer},
+	}
+
+	assert.Equal(t, older.Time, failingSince(m, false, false))
+	assert.Equal(t, newer.Time, failingSince(m, true, false))
+	assert.Equal(t, older.Time, failingSince(m, false, true))
+}
+
+// A mirror this operator has not written conditions onto yet gets a
+// full grace period rather than being collected on sight, so an
+// upgrade does not reap every collectable mirror at once.
+func TestFailingSince_NoConditionYetCountsAsJustTurned(t *testing.T) {
+	assert.WithinDuration(t, time.Now(), failingSince(newMirror(), false, false), time.Second)
+}

@@ -45,7 +45,7 @@ func TestLocalOrigins_OnlyOriginPhaseCounts(t *testing.T) {
 					mxlv1alpha1.MxlFlowLocation{NodeName: "n1", Phase: tc.phase})).
 				Build()
 
-			p := &Publisher{Client: c, NodeName: "n1"}
+			p := &Publisher{Client: c, WriterAttached: writerAttached, NodeName: "n1"}
 			got, err := p.localOrigins(context.Background())
 			require.NoError(t, err)
 
@@ -67,7 +67,7 @@ func TestLocalOrigins_IgnoresOtherNodesOrigin(t *testing.T) {
 		)).
 		Build()
 
-	p := &Publisher{Client: c, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, NodeName: "n1"}
 	got, err := p.localOrigins(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, got)
@@ -77,7 +77,7 @@ func TestLocalOrigins_IgnoresOtherNodesOrigin(t *testing.T) {
 // renew; PublishAppeared creates it and renews on the same pass.
 func TestLocalOrigins_UnknownFlowIsNotOrigin(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
-	p := &Publisher{Client: c, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, NodeName: "n1"}
 
 	got, err := p.localOrigins(context.Background())
 	require.NoError(t, err)

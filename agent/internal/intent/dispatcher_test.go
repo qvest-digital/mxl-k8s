@@ -563,9 +563,9 @@ type fakeLeaseChecker struct {
 	fresh map[string]bool
 }
 
-func (f *fakeLeaseChecker) IsFresh(_ context.Context, flowID, node string) (bool, error) {
+func (f *fakeLeaseChecker) IsFresh(_ context.Context, flowID, node string) (bool, time.Time, error) {
 	v, ok := f.fresh[flowID+"/"+node]
-	return ok && v, nil
+	return ok && v, time.Time{}, nil
 }
 
 func TestResolveSourceNode_SkipsStaleOriginByLease(t *testing.T) {

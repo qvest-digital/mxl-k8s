@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/qvest-digital/mxl-k8s/agent/internal/flowlock"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -49,6 +50,23 @@ type Publisher struct {
 	// owner has stopped renewing. Nil disables Lease publication --
 	// existing tests that don't care about Leases continue to work.
 	Lease LeaseRenewer
+
+	// WriterAttached reports whether a writer still holds the flow's
+	// directory on this node. Nil takes the flock probe in
+	// agent/internal/flowlock, which is libmxl's own test; tests
+	// inject a closure so they need no domain on disk.
+	WriterAttached func(flowID string) (bool, error)
+}
+
+// writerAttached runs the configured probe, defaulting to the flock
+// test. An error reports a writer attached, so a probe that cannot
+// answer leaves the location as it is rather than demoting a producer
+// this node may well still be hosting.
+func (p *Publisher) writerAttached(flowID string) (bool, error) {
+	if p.WriterAttached != nil {
+		return p.WriterAttached(flowID)
+	}
+	return flowlock.WriterAttached(p.DomainPath, flowID)
 }
 
 // FlowIDFromDirName extracts the flow UUID from a `<uuid>.mxl-flow`
@@ -110,6 +128,28 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 		l.Info("created MxlFlow", "flowID", flowID)
 	}
 
+	attached, err := p.writerAttached(flowID)
+	if err != nil {
+		l.Error(err, "test flow for an attached writer", "flowID", flowID)
+	}
+	if !attached {
+		// On disk with nothing writing to it. libmxl reclaims a flow
+		// directory only when the departing writer can take an
+		// exclusive lock, so one outlives its producer by up to a
+		// domain sweep and one a mirror was filling outlives the
+		// mirror's teardown the same way. Publishing either as a
+		// location claims a copy nothing feeds; publishing the second
+		// as Origin -- which is what the mirror having gone would make
+		// it -- names a mirror target as the flow's producer and
+		// resurrects a flow that was just collected.
+		l.V(1).Info("flow directory has no attached writer", "flowID", flowID)
+		return p.markStale(ctx, flowID)
+	}
+
+	// Origin unless a mirror explains the copy. The writer above is
+	// attached either way; a mirror naming this node as its target is
+	// the evidence that the writer is the gateway's rather than a
+	// local producer's.
 	phase := mxlv1alpha1.MxlFlowLocationOrigin
 	isMirror, err := p.isMirrorTarget(ctx, flowID)
 	if err != nil {
@@ -206,6 +246,17 @@ func (p *Publisher) PublishVanished(ctx context.Context, dirName string) error {
 	if !ok {
 		return nil
 	}
+	return p.markStale(ctx, flowID)
+}
+
+// markStale demotes this node's location and gives up the Lease that
+// says this node holds the flow. Shared by every path that concludes
+// the local copy is not one a consumer can be sent to: the directory
+// vanished, the rescan found it gone, or a writer is no longer
+// attached to it. Releasing the Lease is half the point -- a location
+// demoted while its Lease is still being renewed leaves the flow
+// looking live to everything that reads the Lease instead.
+func (p *Publisher) markStale(ctx context.Context, flowID string) error {
 	if _, err := p.upsertLocation(ctx, flowID, mxlv1alpha1.MxlFlowLocationStale, nil, nil); err != nil {
 		return err
 	}
@@ -320,7 +371,32 @@ func (p *Publisher) InitialSync(ctx context.Context) error {
 			log.FromContext(ctx).Error(err, "initial sync entry failed", "flowID", id)
 		}
 	}
-	return p.demoteVanishedLocalOrigins(ctx, onDisk)
+	return p.demoteVanishedLocalOrigins(ctx, p.heldFlowIDs(ctx, onDisk))
+}
+
+// heldFlowIDs narrows a set of on-disk flow ids to the ones a writer
+// is still attached to.
+//
+// Every pass that asks "what does this node hold" means this set and
+// not the directory listing. A directory whose writer has gone is a
+// copy no consumer can be routed to: no grain will ever be added to
+// it, and libmxl will reclaim it on the next domain sweep. Treating
+// the listing as the answer is what kept a producerless copy
+// published, and -- once its mirror was collected and the mirror
+// inference no longer applied -- published as an Origin.
+func (p *Publisher) heldFlowIDs(ctx context.Context, onDisk map[string]struct{}) map[string]struct{} {
+	l := log.FromContext(ctx).WithName("flowpublisher")
+	held := make(map[string]struct{}, len(onDisk))
+	for id := range onDisk {
+		attached, err := p.writerAttached(id)
+		if err != nil {
+			l.Error(err, "test flow for an attached writer", "flowID", id)
+		}
+		if attached {
+			held[id] = struct{}{}
+		}
+	}
+	return held
 }
 
 // ReleaseAll deletes the Lease for every flow currently on disk.
@@ -369,17 +445,22 @@ func (p *Publisher) localFlowIDs() (map[string]struct{}, error) {
 }
 
 // demoteVanishedLocalOrigins flips any non-Stale location this node
-// owns whose on-disk flow directory is gone. Shared between
-// InitialSync and RunLocalRescan so a missed fanotify delete and a
-// crash-recovery cold start both converge on the same fix.
-func (p *Publisher) demoteVanishedLocalOrigins(ctx context.Context, onDisk map[string]struct{}) error {
+// owns whose flow it no longer holds. Shared between InitialSync and
+// RunLocalRescan so a missed fanotify delete and a crash-recovery cold
+// start both converge on the same fix.
+//
+// held is the set of flows a writer is still attached to, so this one
+// pass covers a directory that was removed and a directory whose
+// writer has detached. The two are the same thing to a consumer and
+// telling them apart here would buy nothing.
+func (p *Publisher) demoteVanishedLocalOrigins(ctx context.Context, held map[string]struct{}) error {
 	var flows mxlv1alpha1.MxlFlowList
 	if err := p.Client.List(ctx, &flows); err != nil {
 		return fmt.Errorf("list MxlFlows: %w", err)
 	}
 	for i := range flows.Items {
 		flow := &flows.Items[i]
-		if _, present := onDisk[flow.Spec.ID]; present {
+		if _, present := held[flow.Spec.ID]; present {
 			continue
 		}
 		for _, loc := range flow.Status.Locations {
@@ -492,6 +573,10 @@ func (p *Publisher) RunRenewLoop(ctx context.Context, interval time.Duration) {
 				l.Error(err, "list local flow dirs")
 				continue
 			}
+			// Renewing for a directory whose writer has detached would
+			// keep the flow's liveness signal alive on a copy nothing
+			// feeds, which is the one thing a Lease exists to rule out.
+			ids = p.heldFlowIDs(ctx, ids)
 			origins, err := p.localOrigins(ctx)
 			if err != nil {
 				l.Error(err, "list MxlFlows for renew pass")
@@ -562,13 +647,14 @@ func (p *Publisher) RunLocalRescan(ctx context.Context, interval time.Duration) 
 				l.Error(err, "list local flow dirs")
 				continue
 			}
-			if err := p.demoteVanishedLocalOrigins(ctx, ids); err != nil {
+			held := p.heldFlowIDs(ctx, ids)
+			if err := p.demoteVanishedLocalOrigins(ctx, held); err != nil {
 				l.Error(err, "demote pass failed")
 			}
-			if err := p.promoteStaleLocalOrigins(ctx, ids); err != nil {
+			if err := p.promoteStaleLocalOrigins(ctx, held); err != nil {
 				l.Error(err, "promote pass failed")
 			}
-			if err := p.refreshLocalObservations(ctx, ids); err != nil {
+			if err := p.refreshLocalObservations(ctx, held); err != nil {
 				l.Error(err, "observation refresh failed")
 			}
 		}

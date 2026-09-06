@@ -17,8 +17,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	utilptr "k8s.io/utils/ptr"
-
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/receiver"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/testutil"
@@ -347,10 +345,10 @@ func TestReceiver_GCDeletesOrphanMirrorsAfterPodMove(t *testing.T) {
 		"the receiver must own the mirror it created same-namespace; without "+
 			"the OwnerReference apiserver GC has nothing to act on")
 
-	// Pod moves to a new node. The orphan mirror on node-a is the
-	// receiver's sole owner; removeOwnerRef drops it and then issues
-	// r.Delete because native apiserver GC does not reap a dependent
-	// whose ownerReferences becomes empty via an Update. Force grace=0
+	// Pod moves to a new node. The receiver drops its reference from
+	// the orphan mirror on node-a and stops there; deleting the now
+	// ownerless object is the mirror controller's, which collects it
+	// once it has been unclaimed for a grace period. Force grace=0
 	// because envtest has no kubelet to finalize the pod removal.
 	zero := int64(0)
 	require.NoError(t, env.Client.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: &zero}))
@@ -358,69 +356,47 @@ func TestReceiver_GCDeletesOrphanMirrorsAfterPodMove(t *testing.T) {
 	reconcile(t, r, ns, "r")
 
 	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
-	gotTargets := map[string]struct{}{}
 	gotOwners := map[string]int{}
 	for _, m := range mirrors.Items {
-		gotTargets[m.Spec.TargetNode] = struct{}{}
 		gotOwners[m.Spec.TargetNode] = len(m.OwnerReferences)
 	}
-	assert.Equal(t, map[string]struct{}{"node-b": {}}, gotTargets,
-		"the orphan mirror on node-a must be deleted by the operator once "+
-			"its last receiver owner is removed; apiserver GC will not reap "+
-			"a dependent whose ownerReferences was emptied via an update")
-	assert.Equal(t, 1, gotOwners["node-b"],
-		"the freshly-created mirror for node-b must carry the receiver as an owner")
+	assert.Equal(t, map[string]int{"node-a": 0, "node-b": 1}, gotOwners,
+		"the receiver must release the mirror its pod has left and own the "+
+			"one on the node the pod moved to; the released mirror is then "+
+			"unclaimed, which is what the mirror controller collects on")
 }
 
-func TestReceiver_FinalizerCompletesWhenOwnerRefsCleared(t *testing.T) {
+// The finalizer exists for the cross-namespace mirrors, which carry no
+// owner reference and would otherwise leak. A receiver that owns none
+// must not be held up by it.
+func TestReceiver_FinalizerCompletesWithNoCrossNsMirrors(t *testing.T) {
 	ctx := context.Background()
 	ns := env.NewNamespace(t)
-	r := &receiver.Reconciler{Client: env.Client, Scheme: env.Scheme}
+	r := &receiver.Reconciler{Client: env.Client, APIReader: env.Client, Scheme: env.Scheme}
 
 	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-a", "node-a")))
 	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-b", "node-b")))
-
 	flow := newFlow(t, "node-src")
 	rec := testutil.NewReceiver(ns, "r", testutil.WithReceiverFlowID(flow.Spec.ID))
 	require.NoError(t, env.Client.Create(ctx, rec))
-
 	reconcile(t, r, ns, "r")
 
 	live := mustGetReceiver(t, env.Client, ns, "r")
 	require.Contains(t, live.Finalizers, receiver.MxlReceiverFinalizer)
-
 	var mirrors mxlv1alpha1.MxlFlowMirrorList
 	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
-	require.Len(t, mirrors.Items, 2,
-		"setup precondition: two distinct nodes must produce two mirrors")
-	for i := range mirrors.Items {
-		require.True(t, hasOwnerUID(&mirrors.Items[i], live.UID))
-	}
+	require.Len(t, mirrors.Items, 2, "setup precondition: two nodes, two mirrors")
 
 	require.NoError(t, env.Client.Delete(ctx, live))
-
-	// One reconcile pass on a same-namespace receiver releases the
-	// owner refs and removes the finalizer. When the receiver was the
-	// sole owner of each mirror, removeOwnerRef also issues r.Delete
-	// because native apiserver GC does not reap a dependent whose
-	// ownerReferences becomes empty via an Update. The receiver itself
-	// unblocks immediately after dropping the refs -- it must not wait
-	// on the mirror Delete propagating.
 	res := reconcile(t, r, ns, "r")
-	assert.Zero(t, res.RequeueAfter,
-		"same-namespace ownership is by OwnerReferences; receiver deletion "+
-			"completes the moment the refs are gone and does not block on "+
-			"apiserver GC")
+	assert.Zero(t, res.RequeueAfter)
 
-	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
-	assert.Empty(t, mirrors.Items,
-		"the receiver was the sole owner of both mirrors; removeOwnerRef "+
-			"must have deleted them once their ownerReferences emptied")
-
-	err := env.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: "r"}, &mxlv1alpha1.MxlReceiver{})
+	var recv mxlv1alpha1.MxlReceiver
+	err := env.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: "r"}, &recv)
 	assert.True(t, apierrors.IsNotFound(err),
-		"the receiver finalizer must be gone so envtest finishes the delete; "+
-			"got %v", err)
+		"deletion completes as soon as the finalizer comes off; the mirrors "+
+			"are reaped by the apiserver cascade the dangling references "+
+			"trigger, which this receiver must not block on")
 }
 
 // hasOwnerUID reports whether the mirror lists the given UID in its
@@ -528,47 +504,46 @@ func TestReconcile_TwoReceiversSameFlowSameTarget_ShareOneMirror_TwoOwners(t *te
 	assert.Contains(t, uids, rb.UID)
 }
 
-func TestHandleDeletion_RemovesOnlyMyOwnerRef(t *testing.T) {
+// Deleting a receiver leaves its reference dangling rather than
+// removing it, which is the state apiserver garbage collection acts
+// on -- and only once every owner is in it, so a mirror a sibling
+// receiver still owns survives.
+func TestHandleDeletion_LeavesSameNsRefsForTheApiserverCascade(t *testing.T) {
 	ctx := context.Background()
 	ns := env.NewNamespace(t)
-	r := &receiver.Reconciler{Client: env.Client, Scheme: env.Scheme}
+	r := &receiver.Reconciler{Client: env.Client, APIReader: env.Client, Scheme: env.Scheme}
 
-	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-a", "node-target",
-		testutil.WithPodLabels(map[string]string{"app": "consumer-a"}))))
-	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-b", "node-target",
-		testutil.WithPodLabels(map[string]string{"app": "consumer-b"}))))
-
-	flow := newFlow(t, "node-source")
-	require.NoError(t, env.Client.Create(ctx, testutil.NewReceiver(ns, "ra",
-		testutil.WithReceiverFlowID(flow.Spec.ID),
-		testutil.WithReceiverSelector(map[string]string{"app": "consumer-a"}))))
-	require.NoError(t, env.Client.Create(ctx, testutil.NewReceiver(ns, "rb",
-		testutil.WithReceiverFlowID(flow.Spec.ID),
-		testutil.WithReceiverSelector(map[string]string{"app": "consumer-b"}))))
-
+	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-a", "node-a")))
+	flow := newFlow(t, "node-src")
+	a := testutil.NewReceiver(ns, "ra", testutil.WithReceiverFlowID(flow.Spec.ID))
+	b := testutil.NewReceiver(ns, "rb", testutil.WithReceiverFlowID(flow.Spec.ID))
+	require.NoError(t, env.Client.Create(ctx, a))
+	require.NoError(t, env.Client.Create(ctx, b))
 	reconcile(t, r, ns, "ra")
 	reconcile(t, r, ns, "rb")
 
-	rb := mustGetReceiver(t, env.Client, ns, "rb")
-	ra := mustGetReceiver(t, env.Client, ns, "ra")
-	require.NoError(t, env.Client.Delete(ctx, ra))
-
-	reconcile(t, r, ns, "ra")
-
 	var mirrors mxlv1alpha1.MxlFlowMirrorList
 	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
-	require.Len(t, mirrors.Items, 1,
-		"a sibling receiver still co-owns the mirror; the operator must not "+
-			"delete it out from under the surviving consumer")
-	mirror := mirrors.Items[0]
-	require.Len(t, mirror.OwnerReferences, 1,
-		"only one owner ref must remain after recv-a's deletion")
-	assert.Equal(t, rb.UID, mirror.OwnerReferences[0].UID,
-		"the surviving owner must be recv-b")
+	require.Len(t, mirrors.Items, 1, "two receivers on one target share one mirror")
+	require.Len(t, mirrors.Items[0].OwnerReferences, 2)
+	name := mirrors.Items[0].Name
 
-	err := env.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: "ra"}, &mxlv1alpha1.MxlReceiver{})
-	assert.True(t, apierrors.IsNotFound(err),
-		"recv-a's finalizer must be gone so envtest finishes its delete; got %v", err)
+	live := mustGetReceiver(t, env.Client, ns, "ra")
+	require.NoError(t, env.Client.Delete(ctx, live))
+	res := reconcile(t, r, ns, "ra")
+	assert.Zero(t, res.RequeueAfter,
+		"a receiver owning only same-namespace mirrors has nothing to wait "+
+			"on: its finalizer exists for the cross-namespace ones")
+
+	var recv mxlv1alpha1.MxlReceiver
+	err := env.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: "ra"}, &recv)
+	assert.True(t, apierrors.IsNotFound(err), "the finalizer must come off")
+
+	var m mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, env.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &m))
+	assert.Len(t, m.OwnerReferences, 2,
+		"the surviving receiver's claim is untouched, and the departed "+
+			"receiver's reference is what the apiserver cascade keys on")
 }
 
 func TestHandleDeletion_DeletesCrossNsMirror(t *testing.T) {
@@ -617,52 +592,6 @@ func TestHandleDeletion_DeletesCrossNsMirror(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err),
 		"the cascade must end with the receiver actually gone once the "+
 			"cross-ns mirror finalises; got %v", err)
-}
-
-func TestGcOrphanMirrors_DeletesOrphanedMirror_SameNs(t *testing.T) {
-	ctx := context.Background()
-	ns := env.NewNamespace(t)
-	r := &receiver.Reconciler{Client: env.Client, Scheme: env.Scheme}
-
-	pod := testutil.NewPod(ns, "consumer-a", "node-a")
-	require.NoError(t, env.Client.Create(ctx, pod))
-
-	flow := newFlow(t, "node-src")
-	require.NoError(t, env.Client.Create(ctx,
-		testutil.NewReceiver(ns, "r", testutil.WithReceiverFlowID(flow.Spec.ID))))
-
-	reconcile(t, r, ns, "r")
-
-	rec := mustGetReceiver(t, env.Client, ns, "r")
-	var mirrors mxlv1alpha1.MxlFlowMirrorList
-	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
-	require.Len(t, mirrors.Items, 1)
-	require.True(t, hasOwnerUID(&mirrors.Items[0], rec.UID))
-	origMirrorName := mirrors.Items[0].Name
-
-	zero := int64(0)
-	require.NoError(t, env.Client.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: &zero}))
-	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-b", "node-b")))
-	reconcile(t, r, ns, "r")
-
-	// The orphan mirror's last owning receiver is dropped by
-	// removeOwnerRef, which then issues r.Delete because native
-	// Kubernetes GC does not reap a dependent whose owner refs is
-	// emptied via update -- only when an owner is deleted does the
-	// GC controller act. The new desired mirror is created in the
-	// same reconcile pass and carries the receiver as its sole owner.
-	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
-	gotByTarget := map[string]mxlv1alpha1.MxlFlowMirror{}
-	for _, m := range mirrors.Items {
-		gotByTarget[m.Spec.TargetNode] = m
-	}
-	_, stillHasA := gotByTarget["node-a"]
-	assert.False(t, stillHasA,
-		"orphan mirror %s on node-a must be deleted once its last owner is gone", origMirrorName)
-	require.Contains(t, gotByTarget, "node-b")
-	mB := gotByTarget["node-b"]
-	assert.True(t, hasOwnerUID(&mB, rec.UID),
-		"the new-target mirror must carry the receiver as an owner")
 }
 
 func TestGcOrphanMirrors_DeletesMirror_CrossNs(t *testing.T) {
@@ -838,152 +767,79 @@ func clearGatewayFinalizer(c client.Client, m *mxlv1alpha1.MxlFlowMirror, finali
 	return c.Update(context.Background(), &live)
 }
 
-func TestReconcile_StaleOwnerRef_DroppedOnReconcile(t *testing.T) {
+// A receiver that stops wanting a mirror drops its own reference and
+// stops there. Deleting the object that leaves behind is the mirror
+// controller's, which collects it once it has been unclaimed for a
+// grace period -- and a pod that returns to the node inside that
+// window gets the mirror back rather than paying to rebuild it.
+func TestGcOrphanMirrors_ReleasesTheReferenceAndLeavesTheObject(t *testing.T) {
 	ctx := context.Background()
 	ns := env.NewNamespace(t)
-	r := &receiver.Reconciler{Client: env.Client, Scheme: env.Scheme}
+	r := &receiver.Reconciler{Client: env.Client, APIReader: env.Client, Scheme: env.Scheme}
 
-	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-a", "node-target",
-		testutil.WithPodLabels(map[string]string{"app": "consumer-a"}))))
-	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-b", "node-target",
-		testutil.WithPodLabels(map[string]string{"app": "consumer-b"}))))
-
-	flow := newFlow(t, "node-source")
-	require.NoError(t, env.Client.Create(ctx, testutil.NewReceiver(ns, "ra",
-		testutil.WithReceiverFlowID(flow.Spec.ID),
-		testutil.WithReceiverSelector(map[string]string{"app": "consumer-a"}))))
-	require.NoError(t, env.Client.Create(ctx, testutil.NewReceiver(ns, "rb",
-		testutil.WithReceiverFlowID(flow.Spec.ID),
-		testutil.WithReceiverSelector(map[string]string{"app": "consumer-b"}))))
-
-	reconcile(t, r, ns, "ra")
-	reconcile(t, r, ns, "rb")
+	pod := testutil.NewPod(ns, "consumer-a", "node-a")
+	require.NoError(t, env.Client.Create(ctx, pod))
+	flow := newFlow(t, "node-src")
+	require.NoError(t, env.Client.Create(ctx,
+		testutil.NewReceiver(ns, "r", testutil.WithReceiverFlowID(flow.Spec.ID))))
+	reconcile(t, r, ns, "r")
 
 	var mirrors mxlv1alpha1.MxlFlowMirrorList
 	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
-	require.Len(t, mirrors.Items, 1,
-		"setup precondition: ra and rb must converge on a single shared mirror")
-	mirror := mirrors.Items[0]
-	require.Len(t, mirror.OwnerReferences, 2,
-		"setup precondition: both receivers must own the shared mirror before the ghost is grafted in")
+	require.Len(t, mirrors.Items, 1)
+	name := mirrors.Items[0].Name
 
-	const ghostUID = "00000000-0000-0000-0000-000000000000"
-	mirror.OwnerReferences = append(mirror.OwnerReferences, metav1.OwnerReference{
-		APIVersion:         mxlv1alpha1.GroupVersion.String(),
-		Kind:               "MxlReceiver",
-		Name:               "ghost",
-		UID:                ghostUID,
-		Controller:         utilptr.To(false),
-		BlockOwnerDeletion: utilptr.To(false),
-	})
-	require.NoError(t, env.Client.Update(ctx, &mirror))
-
-	reconcile(t, r, ns, "ra")
+	zero := int64(0)
+	require.NoError(t, env.Client.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: &zero}))
+	reconcile(t, r, ns, "r")
 
 	var live mxlv1alpha1.MxlFlowMirror
 	require.NoError(t, env.Client.Get(ctx,
-		types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}, &live))
-
-	ra := mustGetReceiver(t, env.Client, ns, "ra")
-	rb := mustGetReceiver(t, env.Client, ns, "rb")
-	assert.True(t, hasOwnerUID(&live, ra.UID),
-		"the legitimate ra owner must survive: dropping it would orphan the "+
-			"mirror from the receiver that still wants it")
-	assert.True(t, hasOwnerUID(&live, rb.UID),
-		"the legitimate rb owner must survive: ra's reconcile must not touch "+
-			"a sibling receiver's claim on the shared mirror")
-
-	// gcOrphanMirrors now scrubs OwnerReferences whose UID does not
-	// resolve to a live MxlReceiver in the mirror's namespace. A
-	// leftover ghost would keep the mirror alive forever -- the last
-	// legitimate owner could leave and the precondition-Delete in
-	// removeOwnerRef would still see len(owners) == 1 and never fire.
-	require.False(t, hasOwnerUID(&live, ghostUID),
-		"foreign owner ref must be reaped on the next reconcile; a "+
-			"leftover ghost UID keeps the mirror alive forever")
+		types.NamespacedName{Namespace: ns, Name: name}, &live))
+	assert.Empty(t, live.OwnerReferences,
+		"the receiver's obligation is to stop claiming the mirror; what "+
+			"becomes of an unclaimed one is decided in one place for every "+
+			"mirror, whichever path created it")
 }
 
-func TestReconcile_GhostOwnerRef_AllowsDeletionWhenLastLegitimateLeaves(t *testing.T) {
+// An owner reference to a receiver that no longer exists is not a
+// claim, and the mirror controller is where that is decided -- it
+// evaluates every reference against a live MxlReceiver before counting
+// it. Scrubbing the reference here as well would be a second opinion
+// on the same question, and the apiserver's own collector already
+// deletes a dependent whose owners have all gone.
+func TestReconcile_GhostOwnerRef_IsLeftForTheApiserverCollector(t *testing.T) {
 	ctx := context.Background()
 	ns := env.NewNamespace(t)
-	r := &receiver.Reconciler{Client: env.Client, Scheme: env.Scheme}
+	r := &receiver.Reconciler{Client: env.Client, APIReader: env.Client, Scheme: env.Scheme}
 
-	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-a", "node-target",
-		testutil.WithPodLabels(map[string]string{"app": "consumer-a"}))))
-	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-b", "node-target",
-		testutil.WithPodLabels(map[string]string{"app": "consumer-b"}))))
-
-	flow := newFlow(t, "node-source")
-	require.NoError(t, env.Client.Create(ctx, testutil.NewReceiver(ns, "ra",
-		testutil.WithReceiverFlowID(flow.Spec.ID),
-		testutil.WithReceiverSelector(map[string]string{"app": "consumer-a"}))))
-	require.NoError(t, env.Client.Create(ctx, testutil.NewReceiver(ns, "rb",
-		testutil.WithReceiverFlowID(flow.Spec.ID),
-		testutil.WithReceiverSelector(map[string]string{"app": "consumer-b"}))))
-
-	reconcile(t, r, ns, "ra")
-	reconcile(t, r, ns, "rb")
+	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-a", "node-a")))
+	flow := newFlow(t, "node-src")
+	require.NoError(t, env.Client.Create(ctx,
+		testutil.NewReceiver(ns, "r", testutil.WithReceiverFlowID(flow.Spec.ID))))
+	reconcile(t, r, ns, "r")
 
 	var mirrors mxlv1alpha1.MxlFlowMirrorList
 	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
-	require.Len(t, mirrors.Items, 1,
-		"setup precondition: ra and rb must converge on a single shared mirror")
-	mirror := mirrors.Items[0]
-	require.Len(t, mirror.OwnerReferences, 2,
-		"setup precondition: both receivers must own the shared mirror before the ghost is grafted in")
+	require.Len(t, mirrors.Items, 1)
+	m := mirrors.Items[0].DeepCopy()
 
-	// Graft a ghost OwnerReference pointing at a non-existent
-	// receiver. Without the scrub, the precondition-Delete tail in
-	// removeOwnerRef would never fire: owners would walk 3 -> 2 -> 1
-	// as ra and rb left, never reaching the empty list that triggers
-	// the Delete.
-	const ghostUID = "00000000-0000-0000-0000-000000000000"
-	mirror.OwnerReferences = append(mirror.OwnerReferences, metav1.OwnerReference{
-		APIVersion:         mxlv1alpha1.GroupVersion.String(),
-		Kind:               "MxlReceiver",
-		Name:               "ghost",
-		UID:                ghostUID,
-		Controller:         utilptr.To(false),
-		BlockOwnerDeletion: utilptr.To(false),
+	// Graft on a reference to a receiver that never existed.
+	m.OwnerReferences = append(m.OwnerReferences, metav1.OwnerReference{
+		APIVersion: mxlv1alpha1.GroupVersion.String(),
+		Kind:       "MxlReceiver",
+		Name:       "ghost",
+		UID:        "ghost-uid",
 	})
-	require.NoError(t, env.Client.Update(ctx, &mirror))
+	require.NoError(t, env.Client.Update(ctx, m))
 
-	// Live-path reconcile runs gcOrphanMirrors, which scrubs the
-	// ghost UID out of the OwnerReferences slice.
-	reconcile(t, r, ns, "ra")
-
-	var live mxlv1alpha1.MxlFlowMirror
-	require.NoError(t, env.Client.Get(ctx,
-		types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}, &live))
-	require.False(t, hasOwnerUID(&live, ghostUID),
-		"the scrub in gcOrphanMirrors must drop the ghost UID on the "+
-			"first live reconcile after it is grafted in")
-	require.Len(t, live.OwnerReferences, 2,
-		"the scrub must drop only the ghost; both legitimate owner refs survive")
-
-	// Drop rb first: owners walk 2 -> 1, mirror persists.
-	rb := mustGetReceiver(t, env.Client, ns, "rb")
-	require.NoError(t, env.Client.Delete(ctx, rb))
-	reconcile(t, r, ns, "rb")
+	reconcile(t, r, ns, "r")
 
 	require.NoError(t, env.Client.Get(ctx,
-		types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}, &live))
-	require.Len(t, live.OwnerReferences, 1,
-		"rb's handleDeletion must drop only its own ref; ra still co-owns the mirror")
-
-	// Drop ra: owners walk 1 -> 0, the precondition-Delete tail in
-	// removeOwnerRef fires because the ghost is no longer there to
-	// keep the slice non-empty.
-	ra := mustGetReceiver(t, env.Client, ns, "ra")
-	require.NoError(t, env.Client.Delete(ctx, ra))
-	reconcile(t, r, ns, "ra")
-
-	err := env.Client.Get(ctx,
-		types.NamespacedName{Namespace: mirror.Namespace, Name: mirror.Name}, &live)
-	assert.True(t, apierrors.IsNotFound(err),
-		"once the last legitimate owner leaves and the scrub has already "+
-			"reaped the ghost, removeOwnerRef must issue the bare-empty "+
-			"Delete and the apiserver must surface NotFound; got %v", err)
+		types.NamespacedName{Namespace: ns, Name: m.Name}, m))
+	assert.Len(t, m.OwnerReferences, 2,
+		"the receiver polices its own reference and nothing else; a stale "+
+			"one costs nothing because neither collector counts it as a claim")
 }
 
 func TestReconcile_LegacyLabelOnlyMirror_AdoptsOwnerRef(t *testing.T) {
