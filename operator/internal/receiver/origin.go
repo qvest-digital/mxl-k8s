@@ -22,51 +22,36 @@ type LeaseChecker interface {
 	IsFresh(ctx context.Context, flowID, nodeName string) (fresh bool, deadline time.Time, err error)
 }
 
-// originResolution distinguishes the three outcomes the controller
-// has to react to differently: a fresh Origin was found (Node set,
-// Found true, Deadline = the moment the Lease falls stale), no
-// Origin location exists yet (Found false, all other fields zero),
-// or one or more Origins exist but every one has a stale or missing
-// Lease (Found false, AllStale true). The controller writes the
-// OriginFresh condition based on AllStale and schedules a
-// RequeueAfter Deadline when one is set.
-type originResolution struct {
-	Node     string
-	Found    bool
-	AllStale bool
-	Deadline time.Time
-}
-
-// resolveSourceNode walks flow.Status.Locations and returns the
-// first Origin whose Lease is still fresh, falling back to the
-// raw Origin pick when no LeaseChecker is wired. AllStale flags the
-// case where every Origin candidate was rejected by the checker so
-// the caller can surface ConditionTypeOriginFresh=False.
-func (r *Reconciler) resolveSourceNode(ctx context.Context, flowID string) (originResolution, error) {
+// resolveSourceNode reads the flow and hands it to the shared
+// resolver.
+//
+// The walk itself lives in api/v1alpha1 because the flow collector,
+// the mirror lifecycle controller and the agent's intent dispatcher
+// all have to reach the same answer as this one. When each kept its
+// own copy they did not: one treated a missing Lease as fresh and
+// another skipped the all-stale distinction, so a flow could be
+// routable from one component's view and not from another's at the
+// same instant.
+func (r *Reconciler) resolveSourceNode(ctx context.Context, flowID string) (mxlv1alpha1.OriginResolution, error) {
 	var flow mxlv1alpha1.MxlFlow
 	if err := r.Get(ctx, types.NamespacedName{Name: flowID}, &flow); err != nil {
 		if apierrors.IsNotFound(err) {
-			return originResolution{}, nil
+			return mxlv1alpha1.OriginResolution{}, nil
 		}
-		return originResolution{}, err
+		return mxlv1alpha1.OriginResolution{}, err
 	}
+	return mxlv1alpha1.ResolveOrigin(&flow, r.leaseFreshness(ctx))
+}
 
-	sawOrigin := false
-	for _, loc := range flow.Status.Locations {
-		if loc.Phase != mxlv1alpha1.MxlFlowLocationOrigin {
-			continue
-		}
-		sawOrigin = true
-		if r.Lease == nil {
-			return originResolution{Node: loc.NodeName, Found: true}, nil
-		}
-		fresh, deadline, err := r.Lease.IsFresh(ctx, flowID, loc.NodeName)
-		if err != nil {
-			return originResolution{}, err
-		}
-		if fresh {
-			return originResolution{Node: loc.NodeName, Found: true, Deadline: deadline}, nil
-		}
+// leaseFreshness adapts the reconciler's LeaseChecker to the callback
+// ResolveOrigin takes. A nil checker yields a nil callback, which is
+// what makes ResolveOrigin trust every Origin location -- the
+// pre-Lease behaviour the unit tests are built around.
+func (r *Reconciler) leaseFreshness(ctx context.Context) mxlv1alpha1.LeaseFreshness {
+	if r.Lease == nil {
+		return nil
 	}
-	return originResolution{AllStale: sawOrigin}, nil
+	return func(flowID, nodeName string) (bool, time.Time, error) {
+		return r.Lease.IsFresh(ctx, flowID, nodeName)
+	}
 }

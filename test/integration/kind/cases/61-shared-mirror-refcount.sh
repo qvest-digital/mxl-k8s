@@ -220,15 +220,15 @@ case "$block_flags" in
 esac
 echo "  owner refs: controller=${ctrl_flags:-false} blockOwnerDeletion=${block_flags:-false}"
 
-# Delete recv-a; the mirror must stay, with one owner ref pointing
-# at recv-b.
+# Delete recv-a; the mirror must stay, and its reference must be
+# patched out by the apiserver collector, leaving recv-b's.
 recv_b_uid=$("${KUBECTL[@]}" -n "$TEST_NS" get mxlreceiver/recv-b \
               -o jsonpath='{.metadata.uid}')
 "${KUBECTL[@]}" -n "$TEST_NS" delete mxlreceiver/recv-a --wait=true \
     --timeout=60s >/dev/null \
-  || { dump_diagnostics; fail "delete recv-a hung; the finalizer must release on owner-ref removal"; }
+  || { dump_diagnostics; fail "delete recv-a hung; a receiver owning only same-namespace mirrors has nothing to wait on"; }
 
-deadline=$(( $(date +%s) + POLL_TIMEOUT_SECS ))
+deadline=$(( $(date +%s) + GC_TIMEOUT_SECS ))
 ok=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
   count=$("${KUBECTL[@]}" -n "$TEST_NS" get mxlfm \
@@ -248,44 +248,23 @@ done
 if [ "$ok" != "1" ]; then
   echo "  expected mirror $mirror_name with surviving owner UID $recv_b_uid" >&2
   dump_diagnostics
-  fail "after recv-a deletion the mirror must retain only recv-b's owner ref"
+  fail "after recv-a deletion the mirror must retain only recv-b's owner ref; the apiserver collector patches a dangling reference out while a live owner remains"
 fi
 echo "  recv-a removed; mirror retains recv-b as sole owner"
 
-# Delete recv-b; first confirm the operator removed the last owner
-# ref (DeletionTimestamp non-empty as apiserver GC accepts the
-# delete), then wait for the mirror to disappear via foreground
-# propagation. 60s is comfortable for kube-controller-manager's GC
-# loop on kind.
+# Delete recv-b. With every owner now dangling the apiserver collector
+# deletes the mirror; 90s is comfortable for kube-controller-manager's
+# GC loop on kind.
 "${KUBECTL[@]}" -n "$TEST_NS" delete mxlreceiver/recv-b --wait=true \
     --timeout=60s >/dev/null \
-  || { dump_diagnostics; fail "delete recv-b hung; the finalizer must release on owner-ref removal"; }
+  || { dump_diagnostics; fail "delete recv-b hung; a receiver owning only same-namespace mirrors has nothing to wait on"; }
 
-# DeletionTimestamp check: bounded 5s window; the operator's last
-# owner-ref removal is in-process, GC reaction is in the kube-
-# controller-manager which polls.
-del_deadline=$(( $(date +%s) + 5 ))
-del_observed=0
-while [ "$(date +%s)" -lt "$del_deadline" ]; do
-  dt=$("${KUBECTL[@]}" -n "$TEST_NS" get "mxlfm/${mirror_name}" \
-        -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)
-  if [ -n "$dt" ]; then
-    del_observed=1
-    break
-  fi
-  # The mirror may have already been fully GC'd in the 5s window.
-  if ! "${KUBECTL[@]}" -n "$TEST_NS" get "mxlfm/${mirror_name}" \
-        >/dev/null 2>&1; then
-    del_observed=1
-    break
-  fi
-  sleep 1
-done
-if [ "$del_observed" != "1" ]; then
-  echo "  no deletionTimestamp on mirror within 5s of recv-b delete" >&2
-  dump_diagnostics
-  fail "operator did not release last owner ref so GC could mark the mirror for deletion"
-fi
+# No intermediate deletionTimestamp probe. It used to hold the
+# operator's own last-owner-ref removal to a 5s budget, which is a
+# reconcile racing two gateway status writers and is the one thing
+# this case was ever flaky on. Nothing in-process removes that
+# reference now, so the only assertion worth making is the outcome
+# below: with every owner dangling, the mirror goes.
 
 deadline=$(( $(date +%s) + GC_TIMEOUT_SECS ))
 gone=0

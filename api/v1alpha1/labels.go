@@ -1,14 +1,22 @@
 package v1alpha1
 
 // Label keys used to attribute MxlFlowMirror objects to the
-// controller that created them. The agent-intent path
-// garbage-collects only mirrors carrying its own label so the two
-// ownership domains never reap each other's objects. The
-// receiver-driven path expresses ownership through
-// metadata.ownerReferences on the mirror instead; its label
-// remains as a first-creator diagnostic tag and as the index key
-// for cross-namespace owner lookup, where the OwnerReferences
-// field index does not apply.
+// controller that created them.
+//
+// Diagnostic, and deliberately not part of any lifecycle decision. A
+// mirror is claimed by an owner reference to a live MxlReceiver or by
+// a spec.requestor naming a live pod, both of which the requesting
+// side writes onto the object; the collector reads those and nothing
+// else. Two collectors used to key on these labels instead, one per
+// creation path, and a mirror whose labels had been edited off
+// belonged to neither -- it sat on a showcase cluster for a day and a
+// half with two gateway finalizers and a requestor pod long gone.
+//
+// LabelCreatedByReceiver keeps one non-diagnostic use: it is the
+// cluster-wide index key for finding a receiver's cross-namespace
+// mirrors, which carry no owner reference because the apiserver
+// rejects one. Losing it there costs the receiver its own eager
+// cleanup, not the mirror's collectability.
 const (
 	// LabelCreatedByReceiver is set on mirrors created by the
 	// operator's MxlReceiver reconciler. Its value is the

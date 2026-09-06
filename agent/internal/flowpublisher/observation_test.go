@@ -58,7 +58,7 @@ func TestRefreshLocalObservations_StampsLastObservedAndLeavesAppearedAt(t *testi
 	appearedBefore := before.Status.Locations[0].AppearedAt
 	observedBefore := before.Status.Locations[0].LastObserved
 
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
 	require.NoError(t, p.refreshLocalObservations(context.Background(),
 		map[string]struct{}{validFlowID: {}}))
 
@@ -112,7 +112,7 @@ func TestRefreshLocalObservations_SkipsStaleAndForeignLocations(t *testing.T) {
 	}
 	require.NotNil(t, n2Before)
 
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
 	require.NoError(t, p.refreshLocalObservations(context.Background(),
 		map[string]struct{}{validFlowID: {}}))
 
@@ -154,7 +154,7 @@ func TestPublishVanished_ClearsAppearedAtSoTheNextAppearanceRotates(t *testing.T
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).WithObjects(existing).Build()
 
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
 	require.NoError(t, p.PublishVanished(context.Background(), validFlowID+".mxl-flow"))
 
 	var got mxlv1alpha1.MxlFlow
@@ -171,7 +171,7 @@ func TestPublishAppeared_StampsBothTimestamps(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).Build()
 
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
 	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
 
 	var got mxlv1alpha1.MxlFlow

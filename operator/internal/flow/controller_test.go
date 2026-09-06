@@ -74,7 +74,11 @@ func TestReconcile_LiveNodeLocations_AreNotMutated(t *testing.T) {
 	assert.Equal(t, flow.Status.Locations, after.Status.Locations,
 		"a location whose node is still registered belongs to that node's "+
 			"agent; writing it here would race the agent's own updates")
-	assert.Equal(t, flow.Status.Conditions, after.Status.Conditions)
+	// The conditions are the operator's own and it does write them: the
+	// Live condition's transition time is the clock the collector
+	// measures the grace period from, so it has to be on the object
+	// rather than in this process's memory.
+	assert.NotEmpty(t, after.Status.Conditions)
 }
 
 // The incident this guards: spot capacity is reclaimed, the agent

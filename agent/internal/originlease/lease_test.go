@@ -116,12 +116,16 @@ func TestManager_IsFreshReturnsFalseForExpired(t *testing.T) {
 		Build()
 	m := New(c, testNode)
 
-	fresh, err := m.IsFresh(ctx, testFlowID, testNode)
+	fresh, deadline, err := m.IsFresh(ctx, testFlowID, testNode)
 	require.NoError(t, err)
 	assert.False(t, fresh,
 		"a Lease whose RenewTime+duration is in the past must report "+
 			"unfresh; the operator relies on this to demote a partitioned "+
 			"node's Origin location")
+	assert.True(t, deadline.Before(time.Now()),
+		"the deadline is the moment freshness lapsed, and the operator "+
+			"schedules its next look from it; a zero or future value on an "+
+			"expired Lease would park the re-check forever")
 }
 
 func TestManager_IsFreshReturnsTrueForRecentRenewal(t *testing.T) {
@@ -130,11 +134,14 @@ func TestManager_IsFreshReturnsTrueForRecentRenewal(t *testing.T) {
 	m := New(c, testNode)
 	require.NoError(t, m.Renew(ctx, testFlowID))
 
-	fresh, err := m.IsFresh(ctx, testFlowID, testNode)
+	fresh, deadline, err := m.IsFresh(ctx, testFlowID, testNode)
 	require.NoError(t, err)
 	assert.True(t, fresh,
 		"a Lease renewed inside the duration window must be fresh; "+
 			"otherwise the receiver would skip every healthy Origin")
+	assert.True(t, deadline.After(time.Now()),
+		"the deadline has to name the future moment the window closes, "+
+			"which is what the operator's requeue is set from")
 }
 
 func TestManager_IsFreshMissingLeaseReturnsFalse(t *testing.T) {
@@ -142,12 +149,15 @@ func TestManager_IsFreshMissingLeaseReturnsFalse(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 	m := New(c, testNode)
 
-	fresh, err := m.IsFresh(ctx, testFlowID, testNode)
+	fresh, deadline, err := m.IsFresh(ctx, testFlowID, testNode)
 	require.NoError(t, err,
 		"a missing Lease is a normal state, not an error: the agent on the "+
 			"Origin node may not have published yet, or may have already "+
 			"Released the Lease on vanish")
 	assert.False(t, fresh)
+	assert.True(t, deadline.IsZero(),
+		"a missing Lease has no window, so there is no moment to schedule "+
+			"a re-check against")
 }
 
 // blockingClient wraps a controller-runtime client and parks every

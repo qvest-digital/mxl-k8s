@@ -68,7 +68,7 @@ func TestPublishAppeared_CreatesMxlFlowAndLocationOnFirstObservation(t *testing.
 		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
 		Build()
 
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
 
 	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
 
@@ -111,7 +111,7 @@ func TestPublishAppeared_IsIdempotent_DoesNotOverwriteExistingSpec(t *testing.T)
 		WithObjects(existing).
 		Build()
 
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
 
 	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
 
@@ -138,7 +138,7 @@ func TestPublishAppeared_RejectsInvalidJSON(t *testing.T) {
 		0o644))
 
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
 
 	err := p.PublishAppeared(context.Background(), validFlowID+".mxl-flow")
 	require.Error(t, err)
@@ -152,7 +152,7 @@ func TestPublishAppeared_MissingDefFileReturnsError(t *testing.T) {
 	require.NoError(t, os.Mkdir(filepath.Join(domain, validFlowID+".mxl-flow"), 0o755))
 
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
 
 	err := p.PublishAppeared(context.Background(), validFlowID+".mxl-flow")
 	require.Error(t, err)
@@ -161,7 +161,7 @@ func TestPublishAppeared_MissingDefFileReturnsError(t *testing.T) {
 func TestPublishAppeared_NonFlowEntryIsIgnoredQuietly(t *testing.T) {
 	scheme := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	p := &Publisher{Client: c, DomainPath: t.TempDir(), NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: t.TempDir(), NodeName: "n1"}
 
 	require.NoError(t, p.PublishAppeared(context.Background(), "not-a-flow.txt"))
 	// No CR should have been created.
@@ -187,7 +187,7 @@ func TestPublishVanished_MarksLocationStale(t *testing.T) {
 		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
 		WithObjects(existing).
 		Build()
-	p := &Publisher{Client: c, DomainPath: "/tmp", NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: "/tmp", NodeName: "n1"}
 
 	require.NoError(t, p.PublishVanished(context.Background(), validFlowID+".mxl-flow"))
 
@@ -208,7 +208,7 @@ func TestPublishVanished_MarksLocationStale(t *testing.T) {
 func TestPublishVanished_MissingMxlFlowIsNoOp(t *testing.T) {
 	scheme := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	p := &Publisher{Client: c, DomainPath: "/tmp", NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: "/tmp", NodeName: "n1"}
 
 	require.NoError(t, p.PublishVanished(context.Background(), validFlowID+".mxl-flow"),
 		"a flow that never made it to the API server is the same as "+
@@ -237,7 +237,7 @@ func TestInitialSync_WalksDomainAndPublishesEach(t *testing.T) {
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
 		Build()
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
 	require.NoError(t, p.InitialSync(context.Background()))
 
 	var list mxlv1alpha1.MxlFlowList
@@ -274,7 +274,7 @@ func TestPublishAppeared_MirrorTargetMarksReadyNotOrigin(t *testing.T) {
 		WithObjects(mirror).
 		Build()
 
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
 	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
 
 	var got mxlv1alpha1.MxlFlow
@@ -336,7 +336,7 @@ func TestPublishAppeared_MirrorTargetDoesNotDemoteAClaimedOrigin(t *testing.T) {
 		Build()
 
 	lease := &fakeLease{}
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1", Lease: lease}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1", Lease: lease}
 	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
 
 	var got mxlv1alpha1.MxlFlow
@@ -373,7 +373,7 @@ func TestInitialSync_DemotesOriginForFlowsNoLongerOnDisk(t *testing.T) {
 		WithObjects(existing).
 		Build()
 
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
 	require.NoError(t, p.InitialSync(context.Background()))
 
 	var got mxlv1alpha1.MxlFlow
@@ -419,7 +419,7 @@ func TestPromoteStaleLocalOrigins_RepublishesStaleLocation(t *testing.T) {
 		WithObjects(existing).
 		Build()
 
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
 	require.NoError(t, p.promoteStaleLocalOrigins(context.Background(),
 		map[string]struct{}{validFlowID: {}}))
 
@@ -456,7 +456,7 @@ func TestPromoteStaleLocalOrigins_RepublishesMissingLocationEntry(t *testing.T) 
 		WithObjects(existing).
 		Build()
 
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
 	require.NoError(t, p.promoteStaleLocalOrigins(context.Background(),
 		map[string]struct{}{validFlowID: {}}))
 
@@ -509,7 +509,7 @@ func TestPromoteStaleLocalOrigins_LeavesHealthyLocationUntouched(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &before))
 	beforeAppeared := before.Status.Locations[0].AppearedAt
 
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
 	require.NoError(t, p.promoteStaleLocalOrigins(context.Background(),
 		map[string]struct{}{validFlowID: {}}))
 
@@ -559,7 +559,7 @@ func TestPublisher_RenewsLeaseOnAppeared(t *testing.T) {
 		Build()
 
 	lease := &fakeLease{}
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1", Lease: lease}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1", Lease: lease}
 
 	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
 	assert.Equal(t, []string{validFlowID}, lease.renewed,
@@ -593,7 +593,7 @@ func TestPublisher_AppearedAsMirrorTargetDoesNotRenewLease(t *testing.T) {
 		Build()
 
 	lease := &fakeLease{}
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1", Lease: lease}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1", Lease: lease}
 	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
 	assert.Empty(t, lease.renewed,
 		"a mirror target's local copy is not the authoritative flow; "+
@@ -619,7 +619,7 @@ func TestPublisher_ReleasesLeaseOnVanished(t *testing.T) {
 		Build()
 
 	lease := &fakeLease{}
-	p := &Publisher{Client: c, DomainPath: "/tmp", NodeName: "n1", Lease: lease}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: "/tmp", NodeName: "n1", Lease: lease}
 
 	require.NoError(t, p.PublishVanished(context.Background(), validFlowID+".mxl-flow"))
 	assert.Equal(t, []string{validFlowID}, lease.released,

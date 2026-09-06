@@ -20,6 +20,50 @@ const (
 	// operator and written to MxlFlow status.
 	ConditionTypeOriginFresh = "OriginFresh"
 
+	// ConditionTypeLive reports whether any node still holds a copy of
+	// an MxlFlow that a consumer can be routed to. Owned by the
+	// operator and written to MxlFlow status.
+	//
+	// Its lastTransitionTime is the flow collector's clock: the flow
+	// is deleted once the condition has read False for longer than the
+	// grace period. Keeping that instant on the object rather than in
+	// the operator's memory is what makes the grace survive an
+	// operator restart, which would otherwise reset the timer on every
+	// flow at once on every rollout.
+	ConditionTypeLive = "Live"
+
+	// ConditionTypeClaimed reports whether anything still asks for an
+	// MxlFlowMirror. Owned by the operator and written to
+	// MxlFlowMirror status.
+	//
+	// A mirror is claimed by an owner reference naming a live
+	// MxlReceiver, or by spec.requestor naming a live pod. Both are
+	// statements the requesting side wrote onto the object. The
+	// creator labels are not consulted: they can be edited off an
+	// object, and a mirror that lost them was reachable by no
+	// collector at all. Neither is the phase: it says whether grains
+	// are moving, which is a different question from whether anyone
+	// wants them to.
+	ConditionTypeClaimed = "Claimed"
+
+	// ConditionTypeSourceable reports whether an MxlFlowMirror has
+	// somewhere to pull from and somewhere to put it. Owned by the
+	// operator and written to MxlFlowMirror status.
+	//
+	// False means the flow is gone, no node claims to hold it, every
+	// Origin it names has an expired lease, or the mirror's target
+	// node has left the cluster.
+	//
+	// Only the first, second and fourth make the mirror collectable.
+	// A lapsed lease says a node still claims the flow and no agent is
+	// renewing for it, which is a control-plane failure that leaves
+	// the producer and both gateways free to keep delivering; the
+	// reason distinguishes it (ReasonLeaseExpired against
+	// ReasonOriginUnresolved and ReasonTargetNodeGone) so the
+	// condition can report the fault without the collector acting on
+	// it.
+	ConditionTypeSourceable = "Sourceable"
+
 	// ConditionTypeProbed reports whether status.providers on an
 	// MxlNodeCapabilities came from a libmxl-fabrics interface
 	// enumeration. Owned by the gateway capability publisher.
@@ -109,13 +153,14 @@ const (
 	// It is distinct from ReaderNotAdvancing and TransfersNotLanding,
 	// which describe a reader that might yet recover: reopening a
 	// reader on a flow nobody writes cannot help, and holding one open
-	// is actively harmful. libmxl only reclaims a flow directory when
-	// the departing writer can take an exclusive lock, so a reader
-	// kept on a dead flow prevents the reclaim, which keeps the local
-	// agent claiming Origin and renewing the flow's Lease, which in
-	// turn keeps the flow from being collected -- a cycle in which the
-	// mirror's own reader is what preserves the flow it is failing to
-	// mirror.
+	// keeps a gateway working on a flow that will never produce
+	// another grain.
+	//
+	// It is not what keeps the directory alive. libmxl reclaims a flow
+	// only when it can take an exclusive lock on the flow's data file,
+	// and only writers hold a shared one -- a FlowReader takes no lock
+	// at all, which is what lets a domain sweep reclaim a directory
+	// out from under consumers still reading it.
 	ReasonSourceWriterGone = "SourceWriterGone"
 
 	// ReasonProviderUnresolved marks a mirror the gateway refused to
@@ -129,6 +174,57 @@ const (
 	// ReasonLeaseExpired marks an MxlFlow whose origin Lease has
 	// passed its renewal deadline.
 	ReasonLeaseExpired = "LeaseExpired"
+
+	// ReasonOriginLive marks an MxlFlow whose Origin location is
+	// backed by a Lease its agent is still renewing.
+	ReasonOriginLive = "OriginLive"
+
+	// ReasonMirrored marks an MxlFlow with no live Origin that is
+	// still referenced by at least one MxlFlowMirror.
+	//
+	// The mirror, not the Ready location, is what keeps such a flow
+	// alive. A Ready location says a copy is on disk; it is written by
+	// the node holding that copy and stays until that node's agent
+	// notices the directory go away, which a node whose gateway has
+	// already torn the mirror down can take a domain sweep to do.
+	// Reading the mirror instead asks the object whose existence is
+	// the reason for the copy, so a collected mirror makes its flow
+	// collectable in the same pass rather than at the mercy of a
+	// second, unrelated timer.
+	ReasonMirrored = "Mirrored"
+
+	// ReasonNoLiveCopy marks an MxlFlow that no node holds a routable
+	// copy of: no Origin location with a renewed Lease, and no mirror
+	// referencing it.
+	ReasonNoLiveCopy = "NoLiveCopy"
+
+	// ReasonReceiverOwned marks an MxlFlowMirror claimed by an owner
+	// reference to a live MxlReceiver.
+	ReasonReceiverOwned = "ReceiverOwned"
+
+	// ReasonRequestorLive marks an MxlFlowMirror claimed by a
+	// spec.requestor pod that is still present with the recorded UID.
+	ReasonRequestorLive = "RequestorLive"
+
+	// ReasonUnclaimed marks an MxlFlowMirror nothing asks for: no
+	// owner reference resolves to a live MxlReceiver and
+	// spec.requestor is absent or names a pod that is gone or has
+	// been replaced.
+	ReasonUnclaimed = "Unclaimed"
+
+	// ReasonOriginResolved marks an MxlFlowMirror whose flow has a
+	// live Origin to source from.
+	ReasonOriginResolved = "OriginResolved"
+
+	// ReasonOriginUnresolved marks an MxlFlowMirror whose flow names
+	// no Origin a source gateway could read from -- the flow is gone,
+	// carries no Origin location, or every Origin it names has an
+	// expired Lease.
+	ReasonOriginUnresolved = "OriginUnresolved"
+
+	// ReasonTargetNodeGone marks an MxlFlowMirror whose spec.targetNode
+	// has left the cluster, so no gateway will ever open its writer.
+	ReasonTargetNodeGone = "TargetNodeGone"
 
 	// ReasonRecovered marks a condition that previously reported a
 	// fault and has since returned to a healthy state.

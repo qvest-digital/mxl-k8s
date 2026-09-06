@@ -54,7 +54,7 @@ func TestPublishAppeared_SurvivesStatusUpdateConflict(t *testing.T) {
 		}).
 		Build()
 
-	p := &Publisher{Client: c, DomainPath: domain, NodeName: "n1"}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
 	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+FlowDirSuffix),
 		"a single optimistic-concurrency conflict must not surface to the "+
 			"dispatcher: the fanotify event fires once and its error is only "+

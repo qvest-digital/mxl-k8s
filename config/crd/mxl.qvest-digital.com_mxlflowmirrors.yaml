@@ -42,15 +42,22 @@ spec:
           MxlFlowMirror represents the desired and observed state of one
           (flow, target node) mirror.
 
-          metadata.ownerReferences acts as a per-consumer refcount: each
-          MxlReceiver (or other consumer) that requests this flow on this
-          target node is appended as a non-controller, non-blocking owner,
-          and the operator deletes the mirror when the last owner ref is
-          removed. Tear-down is driven by the operator on that transition,
-          not by Kubernetes garbage collection. Consumers must not set
-          controller=true on their owner ref; multiple owners cannot all
-          be controllers, and the owner ref does not gate GC. The current
-          set of consumers is visible via kubectl describe.
+          A mirror exists to carry one flow from the node that holds it to a
+          node that wants it, so two things justify it and both are required:
+          something still asks for it, and the flow still has a live origin to
+          pull from. status.conditions carries both answers as Claimed and
+          Sourceable, and the operator deletes the mirror once either has read
+          False for longer than the grace period.
+
+          A claim is expressed in one of two ways, and never as a label.
+          metadata.ownerReferences names each MxlReceiver that wants this flow
+          on this target node, as a non-controller, non-blocking owner --
+          consumers must not set controller=true, because multiple owners
+          cannot all be controllers. spec.requestor names the single pod
+          behind an on-demand materialization, and is what a cross-namespace
+          mirror carries, since the apiserver rejects an owner reference that
+          crosses namespaces. The current set of consumers is visible via
+          kubectl describe.
         properties:
           apiVersion:
             description: |-

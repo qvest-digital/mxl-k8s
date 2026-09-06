@@ -6,8 +6,9 @@ import (
 	"go.uber.org/goleak"
 )
 
-// The package spawns RunMirrorRescan, so a leaked ticker goroutine
-// would otherwise go unnoticed.
+// Materialize polls a mirror's status on a ticker while it waits, so a
+// path that returns without stopping it would leak a goroutine per
+// intent request and go unnoticed.
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"os"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -16,6 +17,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/operator/internal/domain"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/flow"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/leasecheck"
+	"github.com/qvest-digital/mxl-k8s/operator/internal/leasegc"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/mirror"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/nodecaps"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/receiver"
@@ -36,6 +38,7 @@ func main() {
 		metricsAddr string
 		probeAddr   string
 		leaderElect bool
+		gcGrace     time.Duration
 	)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080",
 		"The address the metric endpoint binds to.")
@@ -43,6 +46,10 @@ func main() {
 		"The address the probe endpoint binds to.")
 	flag.BoolVar(&leaderElect, "leader-elect", false,
 		"Enable leader election for the controller manager.")
+	flag.DurationVar(&gcGrace, "gc-grace-period", flow.DefaultGracePeriod,
+		"How long an MxlFlow must have no live copy, and an MxlFlowMirror "+
+			"no claim or no source, before it is deleted. Has to outlast a "+
+			"producer or consumer pod rolling over.")
 
 	zapOpts := zap.Options{Development: false}
 	zapOpts.BindFlags(flag.CommandLine)
@@ -67,15 +74,23 @@ func main() {
 	}{
 		{"MxlDomain", (&domain.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
 		{"MxlFlow", (&flow.Reconciler{
-			Client:   mgr.GetClient(),
-			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("mxlflow-controller"),
-			Lease:    &leasecheck.Checker{Client: mgr.GetClient()},
+			Client:      mgr.GetClient(),
+			Scheme:      mgr.GetScheme(),
+			Recorder:    mgr.GetEventRecorderFor("mxlflow-controller"),
+			Lease:       &leasecheck.Checker{Client: mgr.GetClient()},
+			GracePeriod: gcGrace,
 		}).SetupWithManager},
 		{"MxlFlowMirror", (&mirror.Reconciler{
-			Client:   mgr.GetClient(),
-			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("mxlflowmirror-gc"),
+			Client:      mgr.GetClient(),
+			APIReader:   mgr.GetAPIReader(),
+			Scheme:      mgr.GetScheme(),
+			Recorder:    mgr.GetEventRecorderFor("mxlflowmirror-controller"),
+			Lease:       &leasecheck.Checker{Client: mgr.GetClient()},
+			GracePeriod: gcGrace,
+		}).SetupWithManager},
+		{"OriginLease", (&leasegc.Reconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
 		}).SetupWithManager},
 		{"MxlReceiver", (&receiver.Reconciler{
 			Client:    mgr.GetClient(),

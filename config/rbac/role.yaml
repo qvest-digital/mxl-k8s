@@ -25,6 +25,7 @@ rules:
   resources:
   - leases
   verbs:
+  - delete
   - get
   - list
   - watch
