@@ -54,15 +54,19 @@ Every object the platform derives is collected by asking what
 justifies it, and the answer is kept on the object as a condition
 whose `lastTransitionTime` is the grace period's clock.
 
-The grace applies to a *source* that has gone, not to a *claim*. A
-claim names its claimant -- this receiver, this pod UID -- so the
-claimant being gone is unambiguous: a producer can come back to the
-node it left, a named pod cannot. An unclaimed mirror is therefore
-deleted at once, and that verdict is confirmed against the apiserver
-rather than the informer cache first, so it cannot race a pod created
-a moment ago. A source that has gone gets the grace, because the flow
-may be mid-republish and tearing down a working consumer's mirror for
-a producer that is restarting costs it a re-materialization. Holding it
+The grace covers one case only: a source the flow may yet republish.
+
+A claim names its claimant -- this receiver, this pod UID -- so the
+claimant being gone is unambiguous, and an unclaimed mirror is deleted
+at once. That verdict is confirmed against the apiserver rather than
+the informer cache first, so it cannot race a pod created a moment
+ago. A node that has left the cluster is equally unambiguous at either
+end of a mirror: nothing will publish on it again and no gateway will
+open a writer there, and node departure is already the one signal the
+platform treats as terminal -- it is what separates a departed node
+from a drained one. Only a flow that names no origin while its nodes
+are still present waits, because a producer that is restarting looks
+exactly like that until it republishes. Holding it
 there rather than in the operator's memory is what makes the grace
 survive an operator restart, which would otherwise reset the timer on
 every object at once on every rollout. `--gc-grace-period` (default
@@ -74,7 +78,8 @@ every object at once on every rollout. `--gc-grace-period` (default
   ways a mirror is asked for, both written onto the object by the
   side that asked. `Sourceable` reads True while the target node
   exists and the flow names an Origin whose Lease is being renewed.
-  Losing the claim collects at once; losing the source waits out
+  Losing the claim collects at once, as does either node leaving the
+  cluster; only an origin that has not republished waits out
   `--gc-grace-period`. Neither the creator labels nor `status.phase`
   is consulted: a label
   can be edited off an object, and the phase says whether grains are

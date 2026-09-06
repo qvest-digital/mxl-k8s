@@ -381,21 +381,31 @@ func TestSource_LeaseExpiredAndUnclaimed_IsStillCollected(t *testing.T) {
 }
 
 // No gateway will ever open the writer: the DaemonSet pod that would
-// have done it died with the node.
-func TestSource_TargetNodeGone_IsUnsourceable(t *testing.T) {
+// have done it died with the node. A departed node is the one signal
+// the platform already treats as terminal -- it is what separates a
+// departed node from a drained one -- so this does not wait.
+func TestSource_TargetNodeGone_CollectsAtOnce(t *testing.T) {
 	m := newMirror(withRequestor("consumer", "uid-1"))
 	m.Spec.TargetNode = "reclaimed"
 	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode), pod("consumer", "uid-1"))
 
 	reconcileOnce(t, r, m.Name)
-	sourceable := condition(t, getMirror(t, c, m.Name), mxlv1alpha1.ConditionTypeSourceable)
-	require.NotNil(t, sourceable)
-	assert.Equal(t, mxlv1alpha1.ReasonTargetNodeGone, sourceable.Reason)
-	assert.False(t, mirrorGone(t, c, m.Name),
-		"a source failure waits out the grace even when it is terminal: "+
-			"the mirror is still wanted, and the flow may be mid-republish")
+	assert.True(t, mirrorGone(t, c, m.Name))
+}
 
-	backdate(t, c, m.Name, 2*time.Hour)
+// The same at the other end. Nothing will publish on a node that has
+// left, so a mirror still sourcing from it is reporting a producer
+// that cannot exist, and waiting buys nothing while the fabric carries
+// a stream nobody can read.
+func TestSource_SourceNodeGone_CollectsAtOnce(t *testing.T) {
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: metav1.ObjectMeta{Name: flowID},
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: flowID},
+	}
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	m.Spec.SourceNode = "reclaimed"
+	r, c := harness(t, time.Hour, m, flow, pod("consumer", "uid-1"))
+
 	reconcileOnce(t, r, m.Name)
 	assert.True(t, mirrorGone(t, c, m.Name))
 }
@@ -593,9 +603,15 @@ func TestCollect_DeleteUsesTheVersionTheConditionWriteProduced(t *testing.T) {
 // precondition fail, and the requeue judges the mirror again against
 // what it now says.
 func TestCollect_StaleReadDoesNotDeleteOnAMovedResourceVersion(t *testing.T) {
+	// A flow with no Origin while both nodes are still in the cluster:
+	// a producer that may be restarting, so the mirror waits and can
+	// be read back.
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: metav1.ObjectMeta{Name: flowID},
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: flowID},
+	}
 	m := newMirror(withRequestor("consumer", "uid-1"))
-	m.Spec.TargetNode = "reclaimed"
-	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode), pod("consumer", "uid-1"))
+	r, c := harness(t, time.Hour, m, flow, pod("consumer", "uid-1"))
 	reconcileOnce(t, r, m.Name)
 	backdate(t, c, m.Name, 2*time.Hour)
 

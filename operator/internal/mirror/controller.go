@@ -227,22 +227,40 @@ type sourceJudgement struct {
 	node     string
 	deadline time.Time
 
-	// terminal marks a source failure no agent can reverse: the flow
-	// is gone, no node claims to hold it, or the target node has left
-	// the cluster. Only those make a mirror collectable.
-	//
-	// A lease that has merely lapsed is deliberately not one. The
-	// Origin location still names a node, and an agent that is down
-	// while its producer and both gateways are fine is exactly the
-	// case that produces it -- collecting there would tear down a
-	// transfer that is still delivering grains, on the evidence of a
-	// component that is not carrying them. The mirror stays, and the
-	// condition says why. The flow collector makes the opposite trade
-	// for the opposite reason: an MxlFlow is derived state its agent
-	// republishes from flow_def.json within one rescan, so collecting
-	// one early costs a rebuild rather than a stream.
-	terminal bool
+	// disposition is what the failure means for the mirror's life.
+	disposition sourceDisposition
 }
+
+// sourceDisposition grades a source failure by whether anything could
+// still undo it.
+type sourceDisposition int
+
+const (
+	// sourceKeep is a mirror that can be sourced, or one whose failure
+	// something may still reverse. A lapsed Lease is the second kind:
+	// the Origin location still names a node, and an agent that is
+	// down while its producer and both gateways are fine produces
+	// exactly this. Collecting there would tear down a transfer that
+	// is still delivering grains, on the evidence of a component that
+	// is not carrying them.
+	sourceKeep sourceDisposition = iota
+
+	// sourceWait is a failure nothing will undo on the node the flow
+	// named, but where that node is still in the cluster: the flow is
+	// gone, or no node claims to hold it. A producer restarting looks
+	// like this until it republishes, so the mirror waits out the
+	// grace period rather than costing a working consumer a
+	// re-materialization.
+	sourceWait
+
+	// sourceGone is a node that has left the cluster, at either end.
+	// Nothing will ever publish on it again and no gateway will ever
+	// open a writer there, so waiting buys nothing and costs the
+	// fabric a stream nobody can read. Node departure is the one
+	// signal the platform already treats as terminal -- it is what
+	// separates a departed node from a drained one.
+	sourceGone
+)
 
 // claim reports whether anything still asks for this mirror.
 //
@@ -337,7 +355,7 @@ func (r *Reconciler) source(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) (
 		return sourceJudgement{}, err
 	}
 	if gone {
-		return sourceJudgement{terminal: true, judgement: judgement{
+		return sourceJudgement{disposition: sourceGone, judgement: judgement{
 			reason:  mxlv1alpha1.ReasonTargetNodeGone,
 			message: fmt.Sprintf("target node %s has left the cluster", m.Spec.TargetNode),
 		}}, nil
@@ -346,7 +364,7 @@ func (r *Reconciler) source(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) (
 	var flow mxlv1alpha1.MxlFlow
 	err = r.Get(ctx, types.NamespacedName{Name: m.Spec.FlowID}, &flow)
 	if apierrors.IsNotFound(err) {
-		return sourceJudgement{terminal: true, judgement: judgement{
+		return sourceJudgement{disposition: r.unresolved(ctx, m), judgement: judgement{
 			reason:  mxlv1alpha1.ReasonOriginUnresolved,
 			message: fmt.Sprintf("MxlFlow %s does not exist", m.Spec.FlowID),
 		}}, nil
@@ -369,7 +387,7 @@ func (r *Reconciler) source(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) (
 		}}, nil
 	}
 	if !res.Found {
-		return sourceJudgement{terminal: true, judgement: judgement{
+		return sourceJudgement{disposition: r.unresolved(ctx, m), judgement: judgement{
 			reason:  mxlv1alpha1.ReasonOriginUnresolved,
 			message: "the flow names no Origin location",
 		}}, nil
@@ -383,6 +401,26 @@ func (r *Reconciler) source(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) (
 		node:     res.Node,
 		deadline: res.Deadline,
 	}, nil
+}
+
+// unresolved grades an origin that will not resolve. The node the
+// mirror was last pointed at decides it: one that has left the cluster
+// will never publish again, while one that is still there may be
+// hosting a producer that is only restarting.
+func (r *Reconciler) unresolved(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) sourceDisposition {
+	gone, err := r.nodeGone(ctx, m.Spec.SourceNode)
+	if err != nil {
+		// Unable to tell. Waiting is the conservative answer: it costs
+		// a grace period, where guessing wrong the other way costs a
+		// consumer its stream.
+		log.FromContext(ctx).Error(err, "look up source node",
+			"mxlflowmirror", client.ObjectKeyFromObject(m))
+		return sourceWait
+	}
+	if gone {
+		return sourceGone
+	}
+	return sourceWait
 }
 
 // leaseFreshness adapts the reconciler's LeaseChecker to the callback
@@ -630,7 +668,7 @@ func (r *Reconciler) collect(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, 
 	if m == nil {
 		return ctrl.Result{}, nil
 	}
-	if claimed.ok && (src.ok || !src.terminal) {
+	if claimed.ok && src.disposition == sourceKeep {
 		// Only a Lease lapsing can change the answer with no event to
 		// carry it. Pods, receivers, nodes, flows and mirrors all
 		// arrive on a watch.
@@ -654,25 +692,28 @@ func (r *Reconciler) collect(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, 
 			"Collected: %s", claimed.message)
 	}
 
-	// A source that has terminally failed does wait. The flow may be
-	// mid-republish, and tearing a working consumer's mirror down for
-	// a producer that is restarting costs it a re-materialization.
-	grace := r.GracePeriod
-	if grace <= 0 {
-		grace = DefaultGracePeriod
-	}
-	since := unsourceableSince(m)
-	if wait := grace - time.Since(since); wait > 0 {
-		return ctrl.Result{RequeueAfter: wait}, nil
+	// A node that has left the cluster is as terminal as a missing
+	// claimant: nothing will publish on it again and no gateway will
+	// open a writer there. Everything else waits, because the flow may
+	// be mid-republish and tearing a working consumer's mirror down
+	// for a producer that is restarting costs it a re-materialization.
+	if src.disposition == sourceWait {
+		grace := r.GracePeriod
+		if grace <= 0 {
+			grace = DefaultGracePeriod
+		}
+		since := unsourceableSince(m)
+		if wait := grace - time.Since(since); wait > 0 {
+			return ctrl.Result{RequeueAfter: wait}, nil
+		}
 	}
 
-	why := src.message
-	log.FromContext(ctx).Info("collected MxlFlowMirror nothing justifies",
+	log.FromContext(ctx).Info("collected MxlFlowMirror with no source",
 		"flowID", m.Spec.FlowID,
 		"mxlflowmirror", client.ObjectKeyFromObject(m),
-		"claimed", claimed.ok, "sourceable", src.ok,
-		"unjustifiedFor", time.Since(since).Truncate(time.Second))
-	return ctrl.Result{}, r.delete(ctx, m, ReasonMirrorCollected, "Collected: %s", why)
+		"reason", src.reason,
+		"unsourceableFor", time.Since(unsourceableSince(m)).Truncate(time.Second))
+	return ctrl.Result{}, r.delete(ctx, m, ReasonMirrorCollected, "Collected: %s", src.message)
 }
 
 // unsourceableSince is when the mirror last stopped being sourceable,
