@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0-rc.17](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.16...v1.1.0-rc.17) (2026-09-06)
+
+
+### Bug Fixes
+
+* **gateway:** wake the sample loop twice per committed batch ([#332](https://github.com/qvest-digital/mxl-k8s/issues/332)) ([b3e4689](https://github.com/qvest-digital/mxl-k8s/commit/b3e4689197d163d8a03761952fbad5020a499184))
+
+
+### Dependencies
+
+* **go-mxl:** update to v1.1.0-rc.4 ([#333](https://github.com/qvest-digital/mxl-k8s/issues/333)) ([bf99f28](https://github.com/qvest-digital/mxl-k8s/commit/bf99f283dc0ca10f4d3cdbe0de5b09cfb824a58a))
+
 ## [1.1.0-rc.16](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.15...v1.1.0-rc.16) (2026-09-05)
 
 
