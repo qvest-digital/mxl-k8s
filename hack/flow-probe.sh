@@ -19,7 +19,7 @@ set -euo pipefail
 
 NS=${NS:-mxl-system}
 KEEP=${KEEP:-1}
-GO_MXL_TAG=${GO_MXL_TAG:-1.1.0-rc.2}
+GO_MXL_TAG=${GO_MXL_TAG:-1.1.0-rc.4}
 BUILDER=ghcr.io/qvest-digital/go-mxl-builder:${GO_MXL_TAG}
 RUNTIME=ghcr.io/qvest-digital/go-mxl-runtime:${GO_MXL_TAG}
 DOMAIN=${DOMAIN:-/run/mxl/domain}
