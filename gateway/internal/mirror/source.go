@@ -2494,18 +2494,26 @@ const maxSampleCatchUpFallback = 2
 // slow completion landed, and the queue would fill anyway.
 const defaultProgressTimeout = 10 * time.Millisecond
 
+// sampleProgressOversample is how many times per xferBatch the sample
+// loop wakes. Ticking once per batch is two free-running clocks of the
+// same rate: they drift against each other, so one tick finds nothing
+// and the next finds two batches. Every sample still arrives, but in
+// pairs at twice the interval, which a reader sees as gaps. Waking
+// twice per batch keeps each commit in a tick of its own.
+const sampleProgressOversample = 2
+
 // defaultSampleProgressInterval returns the progress interval a
 // continuous (audio) flow uses when the operator has not configured
 // one. It is the time spanned by one xferBatch of samples at the
-// flow's grain (sample) rate: ~10 ms at 48 kHz with a 480-sample
-// batch, matching the natural commit cadence the reference transfer
-// loop uses. Zero when the rate or batch is unusable, so the caller
-// falls back to the 2 ms video default.
+// flow's grain (sample) rate, divided by sampleProgressOversample: 5 ms
+// at 48 kHz with a 480-sample batch. Zero when the rate or batch is
+// unusable, so the caller falls back to the 2 ms video default.
 func defaultSampleProgressInterval(rate mxl.Rational, xferBatch uint64) time.Duration {
 	if xferBatch == 0 || rate.Den <= 0 || rate.Num <= 0 {
 		return 0
 	}
-	return time.Duration(int64(time.Second) * int64(rate.Den) * int64(xferBatch) / int64(rate.Num))
+	batch := time.Duration(int64(time.Second) * int64(rate.Den) * int64(xferBatch) / int64(rate.Num))
+	return batch / sampleProgressOversample
 }
 
 // progressBlocking reports whether the provider's completion queue

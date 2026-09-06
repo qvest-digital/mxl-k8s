@@ -34,10 +34,40 @@ func TestProgressBlocking_PartitionsEFAFromEverythingElse(t *testing.T) {
 }
 
 func TestDefaultSampleProgressInterval_48kHz(t *testing.T) {
-	// 48000/1 with a 480-sample batch: 480/48000 s = 10 ms.
+	// 48000/1 with a 480-sample batch spans 10 ms, and the loop wakes
+	// twice within it.
 	got := defaultSampleProgressInterval(mxl.Rational{Num: 48000, Den: 1}, 480)
-	assert.Equal(t, 10*time.Millisecond, got,
-		"48 kHz with a 480-sample batch should yield a 10 ms interval")
+	assert.Equal(t, 5*time.Millisecond, got,
+		"48 kHz with a 480-sample batch should yield a 5 ms interval")
+}
+
+// A tick period equal to the batch period lets the two clocks drift
+// against each other, so one tick finds nothing and the next finds two
+// batches: every sample arrives, but in pairs at twice the interval,
+// which a reader sees as gaps. Measured across EFA that was 89.7
+// advances/s against a producer committing 100/s, with the 90th
+// percentile advance carrying two batches rather than one.
+func TestDefaultSampleProgressInterval_OversamplesTheCommitCadence(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		rate  mxl.Rational
+		batch uint64
+	}{
+		{"48kHz/480", mxl.Rational{Num: 48000, Den: 1}, 480},
+		{"48kHz/1024", mxl.Rational{Num: 48000, Den: 1}, 1024},
+		{"96kHz/480", mxl.Rational{Num: 96000, Den: 1}, 480},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			batchSpan := time.Duration(int64(time.Second) *
+				int64(tc.rate.Den) * int64(tc.batch) / int64(tc.rate.Num))
+			got := defaultSampleProgressInterval(tc.rate, tc.batch)
+
+			assert.Positive(t, got, "a usable rate and batch yield an interval")
+			assert.LessOrEqual(t, got*2, batchSpan,
+				"the loop must wake at least twice per committed batch, "+
+					"or it beats against the producer")
+		})
+	}
 }
 
 func TestDefaultSampleProgressInterval_ZeroBatchFallsBack(t *testing.T) {
