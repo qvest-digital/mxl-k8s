@@ -178,6 +178,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("resolve source node: %w", err)
 	}
+	if !res.Found {
+		// No source to point a mirror at, and no way to tell which of
+		// this receiver's mirrors are still wanted: the desired set is
+		// the targets minus the source node, and the source node is
+		// exactly what is unknown. Releasing them all on that basis is
+		// what made an agent restart cost every receiver-driven mirror
+		// in the cluster -- the origin is unresolvable for as long as
+		// the Lease is unrenewed, while the producer and both gateways
+		// carry on delivering. The mirror controller is the one that
+		// decides what an unjustified mirror becomes, and it does not
+		// act on a lapsed Lease either.
+		reason := "MxlFlow not yet known or no Origin location"
+		if res.AllStale {
+			reason = "all Origin locations have an expired Lease"
+		}
+		return r.markPending(ctx, &recv, reason)
+	}
+
 	// The desired set is the (node, namespace) pairs whose target
 	// differs from the source. Same-node consumers read the local
 	// flow directly without a mirror. The name derivation must use
@@ -186,13 +204,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// every cross-ns mirror as unwanted (key mismatch against the
 	// suffixed name ensureMirror produces) and Delete-loop it.
 	desired := map[mirrorKey]nodeTarget{}
-	if res.Found {
-		for _, t := range targets {
-			if t.node == res.Node {
-				continue
-			}
-			desired[mirrorKey{namespace: t.namespace, name: mirrorNameForReceiver(&recv, t)}] = t
+	for _, t := range targets {
+		if t.node == res.Node {
+			continue
 		}
+		desired[mirrorKey{namespace: t.namespace, name: mirrorNameForReceiver(&recv, t)}] = t
 	}
 
 	if err := r.gcOrphanMirrors(ctx, &recv, desired); err != nil {
@@ -201,13 +217,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if len(targets) == 0 {
 		return r.markPending(ctx, &recv, "no target pods scheduled yet")
-	}
-	if !res.Found {
-		reason := "MxlFlow not yet known or no Origin location"
-		if res.AllStale {
-			reason = "all Origin locations have an expired Lease"
-		}
-		return r.markPending(ctx, &recv, reason)
 	}
 
 	var primary *mxlv1alpha1.MirrorRef
@@ -703,6 +712,17 @@ func (r *Reconciler) ensureMirror(ctx context.Context, recv *mxlv1alpha1.MxlRece
 	}
 
 	sameNs := target.namespace == recv.Namespace
+	// Only a cross-namespace mirror needs one: a same-namespace mirror
+	// is claimed by the owner reference, which is shared between
+	// co-resident receivers and so outlives any one consumer pod.
+	var requestor *mxlv1alpha1.PodRef
+	if !sameNs && target.pod != nil {
+		requestor = &mxlv1alpha1.PodRef{
+			Name:      target.pod.Name,
+			Namespace: target.pod.Namespace,
+			UID:       string(target.pod.UID),
+		}
+	}
 
 	var existing mxlv1alpha1.MxlFlowMirror
 	err = r.Get(ctx, types.NamespacedName{Namespace: target.namespace, Name: name}, &existing)
@@ -716,7 +736,7 @@ func (r *Reconciler) ensureMirror(ctx context.Context, recv *mxlv1alpha1.MxlRece
 					existing.Namespace, existing.Name, err)
 			}
 		}
-		return r.patchMirrorIfDrifted(ctx, recv, &existing, sourceNode, provider)
+		return r.patchMirrorIfDrifted(ctx, recv, &existing, sourceNode, provider, requestor)
 	}
 	if !apierrors.IsNotFound(err) {
 		return nil, err
@@ -751,11 +771,7 @@ func (r *Reconciler) ensureMirror(ctx context.Context, recv *mxlv1alpha1.MxlRece
 		// mirror always comes from a podRef, so there is exactly one
 		// pod to name: a podSelector lists only the receiver's own
 		// namespace and can never produce one.
-		desired.Spec.Requestor = &mxlv1alpha1.PodRef{
-			Name:      target.pod.Name,
-			Namespace: target.pod.Namespace,
-			UID:       string(target.pod.UID),
-		}
+		desired.Spec.Requestor = requestor
 	}
 	if err := r.Create(ctx, desired); err != nil {
 		if apierrors.IsAlreadyExists(err) {
@@ -771,7 +787,7 @@ func (r *Reconciler) ensureMirror(ctx context.Context, recv *mxlv1alpha1.MxlRece
 						existing.Namespace, existing.Name, err)
 				}
 			}
-			return r.patchMirrorIfDrifted(ctx, recv, &existing, sourceNode, provider)
+			return r.patchMirrorIfDrifted(ctx, recv, &existing, sourceNode, provider, requestor)
 		}
 		return nil, err
 	}
@@ -787,18 +803,35 @@ func (r *Reconciler) ensureMirror(ctx context.Context, recv *mxlv1alpha1.MxlRece
 // not handled here: the receiver label is stamped once on Create
 // and never rewritten on Patch, so two co-resident receivers do not
 // pingpong it on every reconcile.
-func (r *Reconciler) patchMirrorIfDrifted(ctx context.Context, recv *mxlv1alpha1.MxlReceiver, mirror *mxlv1alpha1.MxlFlowMirror, sourceNode string, provider mxlv1alpha1.MxlFabricsProvider) (*mxlv1alpha1.MxlFlowMirror, error) {
+func (r *Reconciler) patchMirrorIfDrifted(ctx context.Context, recv *mxlv1alpha1.MxlReceiver, mirror *mxlv1alpha1.MxlFlowMirror, sourceNode string, provider mxlv1alpha1.MxlFabricsProvider, requestor *mxlv1alpha1.PodRef) (*mxlv1alpha1.MxlFlowMirror, error) {
 	_ = recv
-	if mirror.Spec.SourceNode == sourceNode && mirror.Spec.Provider == provider {
+	spec := map[string]any{}
+	if mirror.Spec.SourceNode != sourceNode {
+		spec["sourceNode"] = sourceNode
+	}
+	if mirror.Spec.Provider != provider {
+		spec["provider"] = string(provider)
+	}
+	// A cross-namespace mirror carries no owner reference -- the
+	// apiserver rejects one -- so spec.requestor is its only claim, and
+	// a stale one names a pod that is gone. Stamped on Create and never
+	// refreshed, it went stale the first time the consumer was replaced
+	// under the same name, and a mirror this receiver still wants would
+	// then read unclaimed and be collected. A mirror created before
+	// this field was written at all carries none, which is the same
+	// thing on the first reconcile after an upgrade.
+	if requestor != nil && !samePodRef(mirror.Spec.Requestor, requestor) {
+		spec["requestor"] = map[string]any{
+			"name":      requestor.Name,
+			"namespace": requestor.Namespace,
+			"uid":       requestor.UID,
+		}
+	}
+	if len(spec) == 0 {
 		return mirror, nil
 	}
 
-	patch := map[string]any{
-		"spec": map[string]any{
-			"sourceNode": sourceNode,
-			"provider":   string(provider),
-		},
-	}
+	patch := map[string]any{"spec": spec}
 	raw, err := json.Marshal(patch)
 	if err != nil {
 		return nil, fmt.Errorf("marshal merge patch: %w", err)
@@ -808,6 +841,14 @@ func (r *Reconciler) patchMirrorIfDrifted(ctx context.Context, recv *mxlv1alpha1
 		return nil, fmt.Errorf("patch mirror %s/%s: %w", mirror.Namespace, mirror.Name, err)
 	}
 	return mirror, nil
+}
+
+// samePodRef reports whether two PodRefs name the same pod instance.
+func samePodRef(a, b *mxlv1alpha1.PodRef) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Name == b.Name && a.Namespace == b.Namespace && a.UID == b.UID
 }
 
 // mirrorName wraps the shared api/v1alpha1 helper. The agent's

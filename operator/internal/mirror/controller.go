@@ -442,10 +442,20 @@ func (r *Reconciler) recordRetarget(ctx context.Context, m *mxlv1alpha1.MxlFlowM
 }
 
 // resolveProvider picks the libmxl-fabrics provider for a mirror
-// between sourceNode and the mirror's target node, from the two nodes'
-// MxlNodeCapabilities. The result is always concrete: the operator
-// never writes a mirror with provider auto, which libmxl-fabrics has
-// not resolved on its own since v1.1.0-beta-1.
+// between sourceNode and the mirror's target node.
+//
+// The one the mirror already carries wins whenever both nodes still
+// speak it. Whoever created the mirror may have pinned it -- the
+// agent's --provider flag forces one cluster-wide, an MxlReceiver's
+// spec.provider forces one per consumer -- and neither is recorded
+// anywhere this controller can read, so re-resolving unconditionally
+// would silently overrule an operator's choice on the first origin
+// move. A move onto a node that does not speak it is the case where
+// overruling is the only option.
+//
+// The result is always concrete: the operator never writes a mirror
+// with provider auto, which libmxl-fabrics has not resolved on its own
+// since v1.1.0-beta-1.
 func (r *Reconciler) resolveProvider(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, sourceNode string) (mxlv1alpha1.MxlFabricsProvider, error) {
 	srcCaps, err := r.nodeCapabilities(ctx, sourceNode)
 	if err != nil {
@@ -454,6 +464,9 @@ func (r *Reconciler) resolveProvider(ctx context.Context, m *mxlv1alpha1.MxlFlow
 	tgtCaps, err := r.nodeCapabilities(ctx, m.Spec.TargetNode)
 	if err != nil {
 		return "", fmt.Errorf("target node capabilities: %w", err)
+	}
+	if selection.Supported(srcCaps, tgtCaps, m.Spec.Provider) {
+		return m.Spec.Provider, nil
 	}
 	provider, rerr := selection.Resolve(srcCaps, tgtCaps)
 	if rerr != nil {
@@ -557,8 +570,15 @@ func (r *Reconciler) writeConditions(ctx context.Context, m *mxlv1alpha1.MxlFlow
 		return nil, fmt.Errorf("apply mirror conditions: %w", err)
 	}
 
+	// Carry the version the apply produced, not the one it was
+	// computed from: collect preconditions its delete on this object,
+	// and a stale version would read as somebody else having written
+	// in between and leave every collectable mirror in place.
 	out := m.DeepCopy()
 	out.Status.Conditions = conditions
+	if rv := patch.GetResourceVersion(); rv != "" {
+		out.ResourceVersion = rv
+	}
 	return out, nil
 }
 
@@ -634,12 +654,21 @@ func failingSince(m *mxlv1alpha1.MxlFlowMirror, claimed, sourceable bool) time.T
 
 // delete removes a mirror, recording why against the object so the
 // event outlives it for the event TTL.
+//
+// Preconditioned on the version the decision was taken against, so a
+// requestor pod or a receiver that appeared between the read at the
+// top of Reconcile and here keeps its mirror. The conflict returns the
+// object to the queue to be judged again against what it now says.
 func (r *Reconciler) delete(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, reason, format string, args ...any) error {
 	if !m.DeletionTimestamp.IsZero() {
 		return nil
 	}
 	r.event(m, corev1.EventTypeNormal, reason, format, args...)
-	if err := r.Delete(ctx, m); err != nil && !apierrors.IsNotFound(err) {
+	err := r.Delete(ctx, m, client.Preconditions{
+		UID:             &m.UID,
+		ResourceVersion: &m.ResourceVersion,
+	})
+	if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 		return fmt.Errorf("delete mirror %s/%s: %w", m.Namespace, m.Name, err)
 	}
 	return nil

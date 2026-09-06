@@ -228,6 +228,13 @@ func (r *Reconciler) judge(ctx context.Context, flow *mxlv1alpha1.MxlFlow, locs 
 		if mirrors.Items[i].Spec.FlowID != flow.Spec.ID {
 			continue
 		}
+		if !mirrors.Items[i].DeletionTimestamp.IsZero() {
+			// Already on its way out. A mirror wedged in Terminating
+			// behind a gateway finalizer would otherwise pin its flow
+			// for as long as the wedge lasts, which is exactly when
+			// the flow has least reason to be kept.
+			continue
+		}
 		v.Live = true
 		v.Reason = mxlv1alpha1.ReasonMirrored
 		v.Message = fmt.Sprintf("mirror %s/%s references this flow",

@@ -385,12 +385,18 @@ func (p *Publisher) InitialSync(ctx context.Context) error {
 // published, and -- once its mirror was collected and the mirror
 // inference no longer applied -- published as an Origin.
 func (p *Publisher) heldFlowIDs(ctx context.Context, onDisk map[string]struct{}) map[string]struct{} {
-	l := log.FromContext(ctx).WithName("flowpublisher")
+	// V(1) rather than Error: this runs once per flow on every rescan
+	// and every renew tick, and a probe that cannot answer stays that
+	// way -- a flow whose data file belongs to another uid reports the
+	// same failure forever. The consequence is visible on the object
+	// instead, as a location that stays published.
+	l := log.FromContext(ctx).WithName("flowpublisher").V(1)
 	held := make(map[string]struct{}, len(onDisk))
 	for id := range onDisk {
 		attached, err := p.writerAttached(id)
 		if err != nil {
-			l.Error(err, "test flow for an attached writer", "flowID", id)
+			l.Info("could not test flow for an attached writer",
+				"flowID", id, "err", err.Error())
 		}
 		if attached {
 			held[id] = struct{}{}

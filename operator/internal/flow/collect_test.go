@@ -300,3 +300,27 @@ func TestLeaseToFlow_ParsesTheFlowIDOutOfTheName(t *testing.T) {
 	assert.Empty(t, leaseToFlow(context.Background(), lease),
 		"a Lease that is not one of ours names no flow")
 }
+
+// A mirror wedged in Terminating behind a gateway finalizer is not a
+// reason to keep its flow: it is on its way out, and the flow has
+// least reason to be kept for exactly as long as the wedge lasts.
+func TestCollect_TerminatingMirrorDoesNotKeepTheFlow(t *testing.T) {
+	flow := newFlow(mxlv1alpha1.MxlFlowLocation{
+		NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationStale,
+	})
+	m := mirrorFor(flow.Spec.ID)
+	m.Finalizers = []string{"gateway.mxl.qvest-digital.com/target-side"}
+	now := metav1.Now()
+	m.DeletionTimestamp = &now
+	r, c := collector(t, time.Hour, &fakeLease{}, flow.DeepCopy(), m)
+
+	runReconcile(t, r, flow.Name)
+	cond := meta.FindStatusCondition(getFlow(t, c, flow.Name).Status.Conditions,
+		mxlv1alpha1.ConditionTypeLive)
+	require.NotNil(t, cond)
+	assert.Equal(t, mxlv1alpha1.ReasonNoLiveCopy, cond.Reason)
+
+	backdate(t, c, flow.Name, 2*time.Hour)
+	runReconcile(t, r, flow.Name)
+	assert.True(t, flowGone(t, c, flow.Name))
+}

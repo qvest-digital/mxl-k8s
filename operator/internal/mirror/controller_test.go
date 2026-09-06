@@ -587,3 +587,99 @@ func TestFailingSince_TakesTheEarlierOfTheTwo(t *testing.T) {
 func TestFailingSince_NoConditionYetCountsAsJustTurned(t *testing.T) {
 	assert.WithinDuration(t, time.Now(), failingSince(newMirror(), false, false), time.Second)
 }
+
+// --- review-driven regressions ---------------------------------------
+
+// The delete is preconditioned on the version the judgement was taken
+// against, and the condition write that precedes it moves that version
+// on. Returning the pre-apply one made every precondition fail as a
+// conflict, which is silently tolerated, so nothing was ever
+// collected -- the whole change set, disabled by one stale field.
+func TestCollect_DeleteUsesTheVersionTheConditionWriteProduced(t *testing.T) {
+	m := newMirror()
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode))
+
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name))
+}
+
+// A claim that arrives between the read and the delete keeps the
+// mirror: the precondition fails, and the requeue judges it again
+// against what it now says.
+func TestCollect_StaleReadDoesNotDeleteANewlyClaimedMirror(t *testing.T) {
+	m := newMirror()
+	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode))
+	reconcileOnce(t, r, m.Name)
+	backdate(t, c, m.Name, 2*time.Hour)
+
+	stale := getMirror(t, c, m.Name)
+
+	// Somebody writes, moving the resourceVersion on.
+	live := getMirror(t, c, m.Name)
+	live.Status.Phase = mxlv1alpha1.MxlFlowMirrorReady
+	require.NoError(t, c.Status().Update(context.Background(), live))
+
+	require.NoError(t, r.delete(context.Background(), stale,
+		ReasonMirrorCollected, "Collected: %s", "test"))
+	assert.False(t, mirrorGone(t, c, m.Name),
+		"deleting on a stale read would drop a mirror something had just "+
+			"asked for")
+}
+
+// Whoever created the mirror may have pinned the provider -- the
+// agent's --provider flag forces one cluster-wide, a receiver's
+// spec.provider per consumer -- and neither is recorded anywhere this
+// controller can read. Re-resolving on every move would silently
+// overrule that on the first origin change.
+func TestRepoint_KeepsAProviderBothNodesStillSpeak(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	m.Spec.Provider = mxlv1alpha1.ProviderTCP
+	r, c := harness(t, time.Hour, m, flowOriginAt("n-moved"),
+		pod("consumer", "uid-1"), node("n-moved"),
+		capsFor("n-moved", mxlv1alpha1.ProviderTCP, mxlv1alpha1.ProviderVerbs),
+		capsFor(tgtNode, mxlv1alpha1.ProviderTCP, mxlv1alpha1.ProviderVerbs))
+
+	reconcileOnce(t, r, m.Name)
+
+	got := getMirror(t, c, m.Name)
+	assert.Equal(t, "n-moved", got.Spec.SourceNode)
+	assert.Equal(t, mxlv1alpha1.ProviderTCP, got.Spec.Provider,
+		"both nodes speak tcp, so the recorded choice still works and "+
+			"nothing here knows better than whoever made it")
+}
+
+// A move onto a node that does not speak it is the case where
+// overruling is the only option: a mirror asking for a provider one of
+// its ends cannot build never comes up.
+func TestRepoint_ReresolvesAProviderTheNewSourceCannotSpeak(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	m.Spec.Provider = mxlv1alpha1.ProviderVerbs
+	r, c := harness(t, time.Hour, m, flowOriginAt("n-moved"),
+		pod("consumer", "uid-1"), node("n-moved"),
+		capsFor("n-moved", mxlv1alpha1.ProviderTCP),
+		capsFor(tgtNode, mxlv1alpha1.ProviderTCP, mxlv1alpha1.ProviderVerbs))
+
+	reconcileOnce(t, r, m.Name)
+	assert.Equal(t, mxlv1alpha1.ProviderTCP, getMirror(t, c, m.Name).Spec.Provider)
+}
+
+// capsFor is the MxlNodeCapabilities a probed gateway publishes for a
+// node that found a device for each named provider.
+func capsFor(node string, providers ...mxlv1alpha1.MxlFabricsProvider) *mxlv1alpha1.MxlNodeCapabilities {
+	caps := &mxlv1alpha1.MxlNodeCapabilities{
+		ObjectMeta: metav1.ObjectMeta{Name: node},
+		Status: mxlv1alpha1.MxlNodeCapabilitiesStatus{
+			Conditions: []metav1.Condition{{
+				Type:               mxlv1alpha1.ConditionTypeProbed,
+				Status:             metav1.ConditionTrue,
+				Reason:             mxlv1alpha1.ReasonProbeComplete,
+				LastTransitionTime: metav1.Now(),
+			}},
+		},
+	}
+	for _, p := range providers {
+		caps.Status.Providers = append(caps.Status.Providers,
+			mxlv1alpha1.MxlFabricsProviderCapability{Name: p, DeviceCount: 1})
+	}
+	return caps
+}

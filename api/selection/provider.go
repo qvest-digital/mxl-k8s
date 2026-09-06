@@ -105,3 +105,25 @@ func providerSet(status v1alpha1.MxlNodeCapabilitiesStatus) map[v1alpha1.MxlFabr
 	}
 	return out
 }
+
+// Supported reports whether both nodes advertise the given provider,
+// on the same membership rule Resolve intersects with. auto is never
+// supported: it is a request for resolution rather than a provider.
+//
+// It exists so a caller repointing a mirror can keep a provider that
+// still works across the new pair of nodes instead of re-resolving to
+// whatever Resolve prefers. An operator who pinned one -- through the
+// agent's --provider flag or an MxlReceiver's spec.provider -- pinned
+// it for a reason, and a move to a node that also speaks it is no
+// reason to overrule them. A move onto a node that does not is.
+func Supported(source, target v1alpha1.MxlNodeCapabilitiesStatus, provider v1alpha1.MxlFabricsProvider) bool {
+	if provider == "" || provider == v1alpha1.ProviderAuto {
+		return false
+	}
+	src, tgt := providerSet(source), providerSet(target)
+	if _, ok := src[provider]; !ok {
+		return false
+	}
+	_, ok := tgt[provider]
+	return ok
+}

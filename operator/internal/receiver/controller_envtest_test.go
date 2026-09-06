@@ -973,3 +973,103 @@ func TestReconcile_TerminatingMirror_MarksPendingUntilNameFrees(t *testing.T) {
 		"the replacement is a new object, not the resurrected tombstone")
 	assert.True(t, mirrors.Items[0].DeletionTimestamp.IsZero())
 }
+
+// An origin the receiver cannot resolve is not a statement that its
+// mirrors are unwanted. The desired set is the targets minus the
+// source node, and the source node is exactly what is unknown, so
+// reaping on it released every mirror in the cluster whenever a
+// source-side agent went a renewal window without renewing -- while
+// the producer and both gateways carried on delivering.
+func TestReconcile_UnresolvableOrigin_LeavesExistingMirrorsAlone(t *testing.T) {
+	ctx := context.Background()
+	ns := env.NewNamespace(t)
+	lease := &stubLease{fresh: true}
+	r := &receiver.Reconciler{
+		Client: env.Client, APIReader: env.Client, Scheme: env.Scheme, Lease: lease,
+	}
+
+	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer-a", "node-a")))
+	flow := newFlow(t, "node-src")
+	require.NoError(t, env.Client.Create(ctx,
+		testutil.NewReceiver(ns, "r", testutil.WithReceiverFlowID(flow.Spec.ID))))
+	reconcile(t, r, ns, "r")
+
+	var mirrors mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
+	require.Len(t, mirrors.Items, 1)
+	name := mirrors.Items[0].Name
+	require.Len(t, mirrors.Items[0].OwnerReferences, 1)
+
+	// The source node's agent stops renewing. The flow still names the
+	// Origin; only the liveness signal has lapsed.
+	lease.fresh = false
+	reconcile(t, r, ns, "r")
+
+	var live mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, env.Client.Get(ctx,
+		types.NamespacedName{Namespace: ns, Name: name}, &live))
+	assert.Len(t, live.OwnerReferences, 1,
+		"the receiver still wants this mirror; it simply cannot say where "+
+			"the flow lives right now, and releasing on that basis makes an "+
+			"agent restart cost every mirror sourced from that node")
+
+	recv := mustGetReceiver(t, env.Client, ns, "r")
+	assert.Equal(t, mxlv1alpha1.MxlReceiverPending, recv.Status.Phase)
+}
+
+// A cross-namespace mirror carries no owner reference, so
+// spec.requestor is its only claim. Stamped on Create and never
+// refreshed, it named a pod that was gone the first time the consumer
+// was replaced under the same name -- and a mirror this receiver still
+// wants would then read unclaimed and be collected.
+func TestReconcile_CrossNs_RequestorFollowsAReplacedConsumer(t *testing.T) {
+	ctx := context.Background()
+	ns := env.NewNamespace(t)
+	podNs := newSidecarNamespace(t, "pod")
+	r := &receiver.Reconciler{Client: env.Client, APIReader: env.Client, Scheme: env.Scheme}
+
+	pod := testutil.NewPod(podNs, "consumer", "node-a")
+	require.NoError(t, env.Client.Create(ctx, pod))
+	flow := newFlow(t, "node-src")
+	rec := testutil.NewReceiver(ns, "r", testutil.WithReceiverFlowID(flow.Spec.ID))
+	rec.Spec.PodSelector = nil
+	rec.Spec.PodRef = &mxlv1alpha1.PodRef{Namespace: podNs, Name: "consumer"}
+	require.NoError(t, env.Client.Create(ctx, rec))
+	reconcile(t, r, ns, "r")
+
+	var mirrors mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(podNs)))
+	require.Len(t, mirrors.Items, 1)
+	name := mirrors.Items[0].Name
+	require.NotNil(t, mirrors.Items[0].Spec.Requestor)
+	assert.Equal(t, string(pod.UID), mirrors.Items[0].Spec.Requestor.UID)
+
+	// The consumer is replaced under the same name, as a StatefulSet
+	// pod is. The mirror's name is derived from the receiver, so the
+	// same object is reused.
+	zero := int64(0)
+	require.NoError(t, env.Client.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: &zero}))
+	replacement := testutil.NewPod(podNs, "consumer", "node-a")
+	require.NoError(t, env.Client.Create(ctx, replacement))
+	reconcile(t, r, ns, "r")
+
+	var live mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, env.Client.Get(ctx,
+		types.NamespacedName{Namespace: podNs, Name: name}, &live))
+	require.NotNil(t, live.Spec.Requestor)
+	assert.Equal(t, string(replacement.UID), live.Spec.Requestor.UID,
+		"a stale requestor names a dead pod, and the mirror collector "+
+			"reads it as nothing asking for the mirror")
+}
+
+// stubLease drives the receiver's origin resolution without a
+// coordination.k8s.io fixture. fresh is flipped mid-test to model an
+// agent that stops renewing while its producer keeps writing.
+type stubLease struct{ fresh bool }
+
+func (s *stubLease) IsFresh(_ context.Context, _, _ string) (bool, time.Time, error) {
+	if !s.fresh {
+		return false, time.Time{}, nil
+	}
+	return true, time.Now().Add(30 * time.Second), nil
+}
