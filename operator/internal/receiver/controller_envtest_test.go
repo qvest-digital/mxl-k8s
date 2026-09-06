@@ -1072,3 +1072,43 @@ func (s *stubLease) IsFresh(_ context.Context, _, _ string) (bool, time.Time, er
 	}
 	return true, time.Now().Add(30 * time.Second), nil
 }
+
+// A receiver with no consumer pods left releases its mirrors even when
+// it cannot resolve the flow's origin. The desired set is empty
+// whatever the source node turns out to be, so there is nothing an
+// unknown origin could change about it -- and holding on is what keeps
+// a drained node's gateway writing a mirror nobody reads, so the node
+// never stops publishing a location for it.
+func TestReconcile_NoTargetsAndNoOrigin_StillReleases(t *testing.T) {
+	ctx := context.Background()
+	ns := env.NewNamespace(t)
+	lease := &stubLease{fresh: true}
+	r := &receiver.Reconciler{
+		Client: env.Client, APIReader: env.Client, Scheme: env.Scheme, Lease: lease,
+	}
+
+	pod := testutil.NewPod(ns, "consumer-a", "node-a")
+	require.NoError(t, env.Client.Create(ctx, pod))
+	flow := newFlow(t, "node-src")
+	require.NoError(t, env.Client.Create(ctx,
+		testutil.NewReceiver(ns, "r", testutil.WithReceiverFlowID(flow.Spec.ID))))
+	reconcile(t, r, ns, "r")
+
+	var mirrors mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
+	require.Len(t, mirrors.Items, 1)
+	name := mirrors.Items[0].Name
+
+	// The node is drained: the consumer goes with it, and the producer
+	// on the source node goes too, so the flow names no live origin.
+	zero := int64(0)
+	require.NoError(t, env.Client.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: &zero}))
+	lease.fresh = false
+	reconcile(t, r, ns, "r")
+
+	var live mxlv1alpha1.MxlFlowMirror
+	err := env.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &live)
+	assert.True(t, apierrors.IsNotFound(err),
+		"with no consumer left there is nothing to keep the mirror for, "+
+			"whatever the origin is doing")
+}

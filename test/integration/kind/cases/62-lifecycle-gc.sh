@@ -25,11 +25,12 @@ need python3
 
 GC_FLOW="fbfbfbfb-0000-4000-8000-00000000000c"
 GC_MIRROR="${GC_FLOW}--gc-test"
+GC_UNCLAIMED="${GC_FLOW}--gc-unclaimed"
 GC_LEASE="mxl-flow-fbfbfbfb-0000-4000-8000-00000000000d-node-that-left"
 
 cleanup() {
   "${KUBECTL[@]}" delete mxlflow "$GC_FLOW" --ignore-not-found >/dev/null 2>&1 || true
-  "${KUBECTL[@]}" -n "$NAMESPACE" delete mxlflowmirror "$GC_MIRROR" \
+  "${KUBECTL[@]}" -n "$NAMESPACE" delete mxlflowmirror "$GC_MIRROR" "$GC_UNCLAIMED" \
     --ignore-not-found >/dev/null 2>&1 || true
   "${KUBECTL[@]}" -n mxl-system delete lease "$GC_LEASE" \
     --ignore-not-found >/dev/null 2>&1 || true
@@ -122,7 +123,7 @@ for m in $mirrors; do
   esac
 done
 
-# --- an unjustified mirror is collected -------------------------------
+# --- a claimed mirror with no source waits, then goes ----------------
 
 # A flow with no locations at all: nothing holds a copy, which is what
 # a producer's node being reclaimed leaves behind once the departed
@@ -138,11 +139,19 @@ spec:
     id: $GC_FLOW
 EOF
 
-# A mirror nothing claims: no owner reference and no requestor. Under
-# the collectors this replaces it carried neither creator label either,
-# so no collector owned it and it would have outlived the cluster.
 node=$("${KUBECTL[@]}" get nodes -o jsonpath='{.items[0].metadata.name}')
 [ -n "$node" ] || fail "could not read a node name"
+
+# Claimed by a pod that really is running, so the mirror survives long
+# enough for its conditions to be read. Any pod will do: the collector
+# asks whether spec.requestor resolves, not what the pod is.
+claimant=$("${KUBECTL[@]}" -n mxl-system get pods \
+  -l app.kubernetes.io/component=agent \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+claimant_uid=$("${KUBECTL[@]}" -n mxl-system get "pod/${claimant}" \
+  -o jsonpath='{.metadata.uid}' 2>/dev/null)
+[ -n "$claimant" ] && [ -n "$claimant_uid" ] || fail "no agent pod to claim the test mirror"
+
 "${KUBECTL[@]}" -n "$NAMESPACE" apply -f - <<EOF >/dev/null
 apiVersion: mxl.qvest-digital.com/v1alpha1
 kind: MxlFlowMirror
@@ -153,21 +162,52 @@ spec:
   sourceNode: $node
   targetNode: $node
   provider: tcp
+  requestor:
+    name: $claimant
+    namespace: mxl-system
+    uid: $claimant_uid
 EOF
 
-wait_cond "False/Unclaimed" -n "$NAMESPACE" "mxlflowmirror/$GC_MIRROR" Claimed \
-  >/dev/null || fail "the operator did not publish Claimed=False/Unclaimed on a mirror with no owner and no requestor"
+wait_cond "True/RequestorLive" -n "$NAMESPACE" "mxlflowmirror/$GC_MIRROR" Claimed \
+  >/dev/null || fail "the operator did not publish Claimed=True on a mirror whose requestor pod is running"
 wait_cond "False/OriginUnresolved" -n "$NAMESPACE" "mxlflowmirror/$GC_MIRROR" Sourceable \
   >/dev/null || fail "the operator did not publish Sourceable=False/OriginUnresolved on a mirror whose flow names no origin"
-echo "  synthetic mirror: Claimed=False/Unclaimed Sourceable=False/OriginUnresolved"
+echo "  claimed mirror with no source: waiting out the grace period"
 
-# No backdating: an unclaimed mirror goes at once. A claim names its
-# claimant, so the claimant being gone is not the ambiguous signal a
-# missing source is, and waiting would pull a whole flow across the
-# fabric with nothing reading it.
+# Still there: a source that has gone gets the grace, because the flow
+# may be mid-republish and tearing down a working consumer's mirror for
+# a producer that is restarting costs it a re-materialization.
+"${KUBECTL[@]}" -n "$NAMESPACE" get "mxlflowmirror/$GC_MIRROR" >/dev/null 2>&1 \
+  || fail "a claimed mirror was collected before its grace period elapsed"
+
+backdate -n "$NAMESPACE" "mxlflowmirror/$GC_MIRROR"
 gone -n "$NAMESPACE" "mxlflowmirror/$GC_MIRROR" \
+  || fail "a mirror whose flow names no origin survived its grace period. Check the operator's delete verb on mxlflowmirrors"
+echo "  unsourceable mirror collected after its grace period"
+
+# --- an unclaimed mirror goes at once --------------------------------
+
+# No owner reference and no requestor. Under the collectors this
+# replaces, a mirror carrying neither creator label either was owned by
+# none of them and would have outlived the cluster.
+"${KUBECTL[@]}" -n "$NAMESPACE" apply -f - <<EOF >/dev/null
+apiVersion: mxl.qvest-digital.com/v1alpha1
+kind: MxlFlowMirror
+metadata:
+  name: $GC_UNCLAIMED
+spec:
+  flowID: $GC_FLOW
+  sourceNode: $node
+  targetNode: $node
+  provider: tcp
+EOF
+
+# No condition to observe: a claim names its claimant, so the claimant
+# being gone is unambiguous and the mirror is deleted in the same pass
+# that judges it.
+gone -n "$NAMESPACE" "mxlflowmirror/$GC_UNCLAIMED" \
   || fail "an unclaimed MxlFlowMirror survived. Check the operator's delete verb on mxlflowmirrors"
-echo "  unclaimed mirror collected"
+echo "  unclaimed mirror collected at once"
 
 # --- and then the flow it was the last reference to -------------------
 

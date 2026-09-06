@@ -178,17 +178,32 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("resolve source node: %w", err)
 	}
+	if len(targets) == 0 {
+		// No consumer anywhere. The desired set is empty whatever the
+		// source node turns out to be, so this is the one case where
+		// an unresolvable origin does not stop the receiver releasing:
+		// there is nothing to exclude the source node from.
+		//
+		// Releasing here is what lets a drained node settle. Its
+		// consumer pods are evicted but its DaemonSets are not, so the
+		// target gateway holds the mirror's writer open for as long as
+		// the mirror lives, and the node goes on publishing a location
+		// for a copy nobody reads.
+		if err := r.gcOrphanMirrors(ctx, &recv, nil); err != nil {
+			return ctrl.Result{}, fmt.Errorf("gc orphan mirrors: %w", err)
+		}
+		return r.markPending(ctx, &recv, "no target pods scheduled yet")
+	}
+
 	if !res.Found {
-		// No source to point a mirror at, and no way to tell which of
-		// this receiver's mirrors are still wanted: the desired set is
-		// the targets minus the source node, and the source node is
-		// exactly what is unknown. Releasing them all on that basis is
-		// what made an agent restart cost every receiver-driven mirror
-		// in the cluster -- the origin is unresolvable for as long as
-		// the Lease is unrenewed, while the producer and both gateways
-		// carry on delivering. The mirror controller is the one that
-		// decides what an unjustified mirror becomes, and it does not
-		// act on a lapsed Lease either.
+		// Consumers exist but there is no source to point them at, and
+		// no way to tell which of this receiver's mirrors are still
+		// wanted: the desired set is the targets minus the source node,
+		// and the source node is exactly what is unknown. Releasing
+		// them all on that basis is what made an agent restart cost
+		// every receiver-driven mirror in the cluster -- the origin is
+		// unresolvable for as long as the Lease is unrenewed, while the
+		// producer and both gateways carry on delivering.
 		reason := "MxlFlow not yet known or no Origin location"
 		if res.AllStale {
 			reason = "all Origin locations have an expired Lease"
@@ -213,10 +228,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if err := r.gcOrphanMirrors(ctx, &recv, desired); err != nil {
 		return ctrl.Result{}, fmt.Errorf("gc orphan mirrors: %w", err)
-	}
-
-	if len(targets) == 0 {
-		return r.markPending(ctx, &recv, "no target pods scheduled yet")
 	}
 
 	var primary *mxlv1alpha1.MirrorRef
