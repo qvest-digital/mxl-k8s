@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.0-rc.18](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.17...v1.1.0-rc.18) (2026-09-06)
+
+
+### Bug Fixes
+
+* **agent:** stop publishing a location for a flow nothing writes to ([#335](https://github.com/qvest-digital/mxl-k8s/issues/335)) ([41e1b95](https://github.com/qvest-digital/mxl-k8s/commit/41e1b95657d523a6a93327206b4775c00a5af900))
+* **api:** parse a Lease name whose node name contains dashes ([#335](https://github.com/qvest-digital/mxl-k8s/issues/335)) ([41e1b95](https://github.com/qvest-digital/mxl-k8s/commit/41e1b95657d523a6a93327206b4775c00a5af900))
+* **operator:** collect the flows, mirrors and leases nothing justifies ([#335](https://github.com/qvest-digital/mxl-k8s/issues/335)) ([41e1b95](https://github.com/qvest-digital/mxl-k8s/commit/41e1b95657d523a6a93327206b4775c00a5af900))
+
 ## [1.1.0-rc.17](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.16...v1.1.0-rc.17) (2026-09-06)
 
 
