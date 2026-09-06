@@ -94,9 +94,27 @@ type Reconciler struct {
 	// source the pre-Lease code did.
 	Lease LeaseChecker
 
-	// GracePeriod is how long a mirror has to stay unjustified before
-	// it is deleted. Zero means DefaultGracePeriod.
+	// GracePeriod is how long a mirror whose source has terminally
+	// failed has to wait before it is deleted. Zero means
+	// DefaultGracePeriod. It does not apply to an unclaimed mirror:
+	// see collect.
 	GracePeriod time.Duration
+
+	// APIReader bypasses the controller-runtime cache for the reads
+	// that decide a mirror is unclaimed. That verdict deletes at once,
+	// so it must not rest on a cache that has not caught up with a pod
+	// or a receiver created a moment ago. Nil falls back to the cached
+	// Client; production wires mgr.GetAPIReader().
+	APIReader client.Reader
+}
+
+// liveReader returns the APIReader when set, otherwise the cached
+// Client.
+func (r *Reconciler) liveReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // LeaseChecker reports whether the agent on nodeName still holds a
@@ -241,12 +259,28 @@ type sourceJudgement struct {
 // replaces, and sat on a showcase cluster for a day and a half with
 // two gateway finalizers and a requestor pod long gone.
 func (r *Reconciler) claim(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) (judgement, error) {
+	j, err := r.claimFrom(ctx, r.Client, m)
+	if err != nil || j.ok {
+		return j, err
+	}
+	// The cache said nothing claims this, and that verdict deletes at
+	// once. Confirm it against the apiserver: a mirror the agent
+	// created moments ago names a pod the informer may not have
+	// delivered yet, and collecting on that would take the stream from
+	// a consumer that had just asked for it.
+	if r.APIReader == nil {
+		return j, nil
+	}
+	return r.claimFrom(ctx, r.liveReader(), m)
+}
+
+func (r *Reconciler) claimFrom(ctx context.Context, reader client.Reader, m *mxlv1alpha1.MxlFlowMirror) (judgement, error) {
 	for _, or := range m.OwnerReferences {
 		if or.Kind != "MxlReceiver" || or.APIVersion != mxlv1alpha1.GroupVersion.String() {
 			continue
 		}
 		var recv mxlv1alpha1.MxlReceiver
-		err := r.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: or.Name}, &recv)
+		err := reader.Get(ctx, types.NamespacedName{Namespace: m.Namespace, Name: or.Name}, &recv)
 		switch {
 		case apierrors.IsNotFound(err):
 			continue
@@ -268,7 +302,7 @@ func (r *Reconciler) claim(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) (j
 
 	if req := m.Spec.Requestor; req != nil {
 		var pod corev1.Pod
-		err := r.Get(ctx, types.NamespacedName{Namespace: req.Namespace, Name: req.Name}, &pod)
+		err := reader.Get(ctx, types.NamespacedName{Namespace: req.Namespace, Name: req.Name}, &pod)
 		switch {
 		case err == nil:
 			if req.UID == "" || string(pod.UID) == req.UID {
@@ -603,19 +637,36 @@ func (r *Reconciler) collect(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, 
 		return requeueAt(src.deadline), nil
 	}
 
+	// An unclaimed mirror goes at once. A claim names its claimant --
+	// this receiver, this pod UID -- so the claimant being gone is not
+	// ambiguous the way a missing source is: a producer can come back
+	// to the node it left, a named pod cannot. Waiting would buy the
+	// case where a replacement consumer re-materializes onto the same
+	// mirror before the grace elapses, and pay for it by pulling a
+	// whole flow across the fabric for five minutes with nothing
+	// reading it. The verdict is confirmed against the apiserver
+	// before it is acted on; see claim.
+	if !claimed.ok {
+		log.FromContext(ctx).Info("collected unclaimed MxlFlowMirror",
+			"flowID", m.Spec.FlowID,
+			"mxlflowmirror", client.ObjectKeyFromObject(m))
+		return ctrl.Result{}, r.delete(ctx, m, ReasonMirrorCollected,
+			"Collected: %s", claimed.message)
+	}
+
+	// A source that has terminally failed does wait. The flow may be
+	// mid-republish, and tearing a working consumer's mirror down for
+	// a producer that is restarting costs it a re-materialization.
 	grace := r.GracePeriod
 	if grace <= 0 {
 		grace = DefaultGracePeriod
 	}
-	since := failingSince(m, claimed.ok, src.ok || !src.terminal)
+	since := unsourceableSince(m)
 	if wait := grace - time.Since(since); wait > 0 {
 		return ctrl.Result{RequeueAfter: wait}, nil
 	}
 
 	why := src.message
-	if !claimed.ok {
-		why = claimed.message
-	}
 	log.FromContext(ctx).Info("collected MxlFlowMirror nothing justifies",
 		"flowID", m.Spec.FlowID,
 		"mxlflowmirror", client.ObjectKeyFromObject(m),
@@ -624,32 +675,17 @@ func (r *Reconciler) collect(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, 
 	return ctrl.Result{}, r.delete(ctx, m, ReasonMirrorCollected, "Collected: %s", why)
 }
 
-// failingSince is the earliest transition time among the conditions
-// that currently read False. A condition this operator has not written
-// yet counts as having just turned, so an upgrade gives every mirror a
-// full grace period rather than collecting the collectable ones on
-// sight.
-func failingSince(m *mxlv1alpha1.MxlFlowMirror, claimed, sourceable bool) time.Time {
-	var since time.Time
-	consider := func(t string) {
-		c := meta.FindStatusCondition(m.Status.Conditions, t)
-		if c == nil || c.LastTransitionTime.IsZero() {
-			return
-		}
-		if since.IsZero() || c.LastTransitionTime.Time.Before(since) {
-			since = c.LastTransitionTime.Time
-		}
-	}
-	if !claimed {
-		consider(mxlv1alpha1.ConditionTypeClaimed)
-	}
-	if !sourceable {
-		consider(mxlv1alpha1.ConditionTypeSourceable)
-	}
-	if since.IsZero() {
+// unsourceableSince is when the mirror last stopped being sourceable,
+// taken from the Sourceable condition's transition time. A condition
+// this operator has not written yet counts as having just turned, so
+// an upgrade gives every mirror a full grace period rather than
+// collecting the collectable ones on sight.
+func unsourceableSince(m *mxlv1alpha1.MxlFlowMirror) time.Time {
+	c := meta.FindStatusCondition(m.Status.Conditions, mxlv1alpha1.ConditionTypeSourceable)
+	if c == nil || c.LastTransitionTime.IsZero() {
 		return time.Now()
 	}
-	return since
+	return c.LastTransitionTime.Time
 }
 
 // delete removes a mirror, recording why against the object so the

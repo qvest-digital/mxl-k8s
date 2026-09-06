@@ -126,13 +126,12 @@ operator:
     # pattern: ^[0-9]+(ns|us|ms|s|m|h)$
     # @schema
     # -- How long an MxlFlow must have no live copy, and an
-    # MxlFlowMirror no claim or no source, before it is deleted. Has to
-    # outlast a producer or consumer pod rolling over: both leave the
-    # objects momentarily unjustified, and collecting inside that
-    # window costs the stream a re-materialization for no reason.
-    # Lowering it reclaims a released mirror's bandwidth sooner and
-    # narrows the window in which a returning pod gets its existing
-    # mirror back instead of paying to rebuild one.
+    # MxlFlowMirror no source it could pull from, before it is deleted.
+    # Has to outlast a producer rolling over: the flow has no Origin
+    # between the old pod releasing it and the new one publishing
+    # again, and collecting inside that window costs the stream a
+    # re-materialization for no reason. It does not gate an unclaimed
+    # mirror, which goes at once.
     gcGracePeriod: 5m
     # @schema
     # enum: ["debug", "info", "warn", "error"]

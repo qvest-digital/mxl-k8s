@@ -3,13 +3,13 @@
 # justifies are actually collected, and that the live ones the demo is
 # built on are not.
 #
-# The grace period is not waited out. It is measured from the
+# The flow's grace period is not waited out. It is measured from the
 # transition time of the condition that turned, so the case backdates
 # that timestamp and lets the resulting write wake the reconciler -- the
 # same trick the unit tests use, and the reason the clock was moved onto
-# the object in the first place. Waiting five minutes per object would
-# put this case past the suite's whole runtime; shortening the grace on
-# the cluster would test a configuration nothing runs.
+# the object in the first place. Waiting five minutes would put this
+# case past the suite's whole runtime; shortening the grace on the
+# cluster would test a configuration nothing runs.
 #
 # What only a live cluster can prove is that the collectors have the
 # RBAC to delete. A missing verb on mxlflows, mxlflowmirrors or
@@ -161,10 +161,13 @@ wait_cond "False/OriginUnresolved" -n "$NAMESPACE" "mxlflowmirror/$GC_MIRROR" So
   >/dev/null || fail "the operator did not publish Sourceable=False/OriginUnresolved on a mirror whose flow names no origin"
 echo "  synthetic mirror: Claimed=False/Unclaimed Sourceable=False/OriginUnresolved"
 
-backdate -n "$NAMESPACE" "mxlflowmirror/$GC_MIRROR"
+# No backdating: an unclaimed mirror goes at once. A claim names its
+# claimant, so the claimant being gone is not the ambiguous signal a
+# missing source is, and waiting would pull a whole flow across the
+# fabric with nothing reading it.
 gone -n "$NAMESPACE" "mxlflowmirror/$GC_MIRROR" \
-  || fail "an unclaimed, unsourceable MxlFlowMirror survived its grace period. Check the operator's delete verb on mxlflowmirrors"
-echo "  unjustified mirror collected"
+  || fail "an unclaimed MxlFlowMirror survived. Check the operator's delete verb on mxlflowmirrors"
+echo "  unclaimed mirror collected"
 
 # --- and then the flow it was the last reference to -------------------
 

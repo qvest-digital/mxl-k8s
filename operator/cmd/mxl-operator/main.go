@@ -82,6 +82,7 @@ func main() {
 		}).SetupWithManager},
 		{"MxlFlowMirror", (&mirror.Reconciler{
 			Client:      mgr.GetClient(),
+			APIReader:   mgr.GetAPIReader(),
 			Scheme:      mgr.GetScheme(),
 			Recorder:    mgr.GetEventRecorderFor("mxlflowmirror-controller"),
 			Lease:       &leasecheck.Checker{Client: mgr.GetClient()},

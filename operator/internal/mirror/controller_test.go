@@ -211,26 +211,16 @@ func backdate(t *testing.T, c client.Client, name string, by time.Duration) {
 
 // --- claim -----------------------------------------------------------
 
-func TestClaim_RequestorPodGone_CollectsAfterGrace(t *testing.T) {
+// A claim names its claimant, so the claimant being gone is not the
+// ambiguous signal a missing source is: a producer can come back to
+// the node it left, a named pod cannot. Waiting would pull a whole
+// flow across the fabric for the grace period with nothing reading it.
+func TestClaim_RequestorPodGone_CollectsAtOnce(t *testing.T) {
 	m := newMirror(withIntentLabel(), withRequestor("consumer", "uid-1"))
 	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode))
 
-	res := reconcileOnce(t, r, m.Name)
-	assert.False(t, mirrorGone(t, c, m.Name),
-		"a consumer rolling over leaves its mirror unclaimed between the "+
-			"old pod going and the new one asking again")
-	assert.Positive(t, res.RequeueAfter)
-
-	claimed := condition(t, getMirror(t, c, m.Name), mxlv1alpha1.ConditionTypeClaimed)
-	require.NotNil(t, claimed)
-	assert.Equal(t, metav1.ConditionFalse, claimed.Status)
-	assert.Equal(t, mxlv1alpha1.ReasonUnclaimed, claimed.Reason)
-
-	backdate(t, c, m.Name, 2*time.Hour)
 	reconcileOnce(t, r, m.Name)
-	assert.True(t, mirrorGone(t, c, m.Name),
-		"a mirror nothing asks for costs the fabric its bandwidth and "+
-			"costs its flow the ability to be collected")
+	assert.True(t, mirrorGone(t, c, m.Name))
 }
 
 func TestClaim_RequestorPodAlive_IsKept(t *testing.T) {
@@ -380,14 +370,12 @@ func TestSource_EveryOriginLeaseExpired_IsReportedButNotCollected(t *testing.T) 
 }
 
 // A mirror that is both unclaimed and merely lease-stale is still
-// collected: the claim is the half that failed terminally.
+// collected: nothing asks for it, whatever its source is doing.
 func TestSource_LeaseExpiredAndUnclaimed_IsStillCollected(t *testing.T) {
 	m := newMirror(withRequestor("consumer", "uid-1"))
 	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode))
 	r.Lease = &fakeLease{fresh: map[string]bool{}}
 
-	reconcileOnce(t, r, m.Name)
-	backdate(t, c, m.Name, 2*time.Hour)
 	reconcileOnce(t, r, m.Name)
 	assert.True(t, mirrorGone(t, c, m.Name))
 }
@@ -403,6 +391,9 @@ func TestSource_TargetNodeGone_IsUnsourceable(t *testing.T) {
 	sourceable := condition(t, getMirror(t, c, m.Name), mxlv1alpha1.ConditionTypeSourceable)
 	require.NotNil(t, sourceable)
 	assert.Equal(t, mxlv1alpha1.ReasonTargetNodeGone, sourceable.Reason)
+	assert.False(t, mirrorGone(t, c, m.Name),
+		"a source failure waits out the grace even when it is terminal: "+
+			"the mirror is still wanted, and the flow may be mid-republish")
 
 	backdate(t, c, m.Name, 2*time.Hour)
 	reconcileOnce(t, r, m.Name)
@@ -564,28 +555,23 @@ func TestNodeDeletedOnly_AcceptsDeletesOnly(t *testing.T) {
 	assert.True(t, p.Delete(event.DeleteEvent{Object: n}))
 }
 
-// The grace has to measure from the first of the two failures rather
-// than restart on the second, so a mirror that loses its claim and
-// then its source is not given two full waits.
-func TestFailingSince_TakesTheEarlierOfTheTwo(t *testing.T) {
-	older := metav1.NewTime(time.Now().Add(-time.Hour))
-	newer := metav1.NewTime(time.Now().Add(-time.Minute))
+// The grace measures from the Sourceable condition alone; the claim
+// half does not wait at all.
+func TestUnsourceableSince_ReadsTheSourceableCondition(t *testing.T) {
+	when := metav1.NewTime(time.Now().Add(-time.Hour))
 	m := newMirror()
 	m.Status.Conditions = []metav1.Condition{
-		{Type: mxlv1alpha1.ConditionTypeClaimed, LastTransitionTime: older},
-		{Type: mxlv1alpha1.ConditionTypeSourceable, LastTransitionTime: newer},
+		{Type: mxlv1alpha1.ConditionTypeClaimed, LastTransitionTime: metav1.Now()},
+		{Type: mxlv1alpha1.ConditionTypeSourceable, LastTransitionTime: when},
 	}
-
-	assert.Equal(t, older.Time, failingSince(m, false, false))
-	assert.Equal(t, newer.Time, failingSince(m, true, false))
-	assert.Equal(t, older.Time, failingSince(m, false, true))
+	assert.Equal(t, when.Time, unsourceableSince(m))
 }
 
 // A mirror this operator has not written conditions onto yet gets a
 // full grace period rather than being collected on sight, so an
 // upgrade does not reap every collectable mirror at once.
-func TestFailingSince_NoConditionYetCountsAsJustTurned(t *testing.T) {
-	assert.WithinDuration(t, time.Now(), failingSince(newMirror(), false, false), time.Second)
+func TestUnsourceableSince_NoConditionYetCountsAsJustTurned(t *testing.T) {
+	assert.WithinDuration(t, time.Now(), unsourceableSince(newMirror()), time.Second)
 }
 
 // --- review-driven regressions ---------------------------------------
@@ -603,12 +589,13 @@ func TestCollect_DeleteUsesTheVersionTheConditionWriteProduced(t *testing.T) {
 	assert.True(t, mirrorGone(t, c, m.Name))
 }
 
-// A claim that arrives between the read and the delete keeps the
-// mirror: the precondition fails, and the requeue judges it again
-// against what it now says.
-func TestCollect_StaleReadDoesNotDeleteANewlyClaimedMirror(t *testing.T) {
-	m := newMirror()
-	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode))
+// A write that lands between the judgement and the delete makes the
+// precondition fail, and the requeue judges the mirror again against
+// what it now says.
+func TestCollect_StaleReadDoesNotDeleteOnAMovedResourceVersion(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	m.Spec.TargetNode = "reclaimed"
+	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode), pod("consumer", "uid-1"))
 	reconcileOnce(t, r, m.Name)
 	backdate(t, c, m.Name, 2*time.Hour)
 
@@ -622,8 +609,8 @@ func TestCollect_StaleReadDoesNotDeleteANewlyClaimedMirror(t *testing.T) {
 	require.NoError(t, r.delete(context.Background(), stale,
 		ReasonMirrorCollected, "Collected: %s", "test"))
 	assert.False(t, mirrorGone(t, c, m.Name),
-		"deleting on a stale read would drop a mirror something had just "+
-			"asked for")
+		"deleting on a stale read would drop a mirror whose judgement had "+
+			"already moved on")
 }
 
 // Whoever created the mirror may have pinned the provider -- the

@@ -52,12 +52,17 @@ Two correctness details worth flagging while looking at the diagram:
 
 Every object the platform derives is collected by asking what
 justifies it, and the answer is kept on the object as a condition
-whose `lastTransitionTime` is the grace period's clock. The grace is
-for a justification that vanished without saying so -- a pod that
-died, an agent that stopped renewing -- where waiting is what tells a
-rollover from a departure. A component that is alive and says it no
-longer wants something does not go through it: a receiver releasing
-its last reference to a mirror deletes it there and then. Holding it
+whose `lastTransitionTime` is the grace period's clock.
+
+The grace applies to a *source* that has gone, not to a *claim*. A
+claim names its claimant -- this receiver, this pod UID -- so the
+claimant being gone is unambiguous: a producer can come back to the
+node it left, a named pod cannot. An unclaimed mirror is therefore
+deleted at once, and that verdict is confirmed against the apiserver
+rather than the informer cache first, so it cannot race a pod created
+a moment ago. A source that has gone gets the grace, because the flow
+may be mid-republish and tearing down a working consumer's mirror for
+a producer that is restarting costs it a re-materialization. Holding it
 there rather than in the operator's memory is what makes the grace
 survive an operator restart, which would otherwise reset the timer on
 every object at once on every rollout. `--gc-grace-period` (default
@@ -69,7 +74,9 @@ every object at once on every rollout. `--gc-grace-period` (default
   ways a mirror is asked for, both written onto the object by the
   side that asked. `Sourceable` reads True while the target node
   exists and the flow names an Origin whose Lease is being renewed.
-  Neither the creator labels nor `status.phase` is consulted: a label
+  Losing the claim collects at once; losing the source waits out
+  `--gc-grace-period`. Neither the creator labels nor `status.phase`
+  is consulted: a label
   can be edited off an object, and the phase says whether grains are
   moving, which is a different question from whether anyone wants
   them to. The same controller repoints `spec.sourceNode` when the
