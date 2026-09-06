@@ -334,7 +334,10 @@ func TestSource_FlowHasNoOrigin_CollectsAfterGraceDespiteALiveClaim(t *testing.T
 	sourceable := condition(t, live, mxlv1alpha1.ConditionTypeSourceable)
 	require.NotNil(t, sourceable)
 	assert.Equal(t, metav1.ConditionFalse, sourceable.Status)
-	assert.Equal(t, mxlv1alpha1.ReasonOriginUnresolved, sourceable.Reason)
+	assert.Equal(t, mxlv1alpha1.ReasonOriginUnresolved, sourceable.Reason,
+		"no node claims to hold the flow, which is what a reclaimed "+
+			"producer node leaves once its location has been pruned; "+
+			"nothing is going to take that back")
 
 	backdate(t, c, m.Name, 2*time.Hour)
 	reconcileOnce(t, r, m.Name)
@@ -351,16 +354,42 @@ func TestSource_FlowGone_IsUnsourceable(t *testing.T) {
 	assert.True(t, mirrorGone(t, c, m.Name))
 }
 
-func TestSource_EveryOriginLeaseExpired_IsUnsourceable(t *testing.T) {
+// An expired lease says a node that still claims to hold the flow has
+// no agent renewing for it. That is a control-plane failure, and the
+// producer and both gateways may be fine and still delivering: an
+// agent stuck in CrashLoopBackOff produces exactly this. Collecting on
+// it would tear down a live transfer on the evidence of a component
+// that is not carrying it, so the condition reports the fault and the
+// mirror stays.
+func TestSource_EveryOriginLeaseExpired_IsReportedButNotCollected(t *testing.T) {
 	m := newMirror(withRequestor("consumer", "uid-1"))
-	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode), pod("consumer", "uid-1"))
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), pod("consumer", "uid-1"))
 	r.Lease = &fakeLease{fresh: map[string]bool{}}
 
 	reconcileOnce(t, r, m.Name)
 	sourceable := condition(t, getMirror(t, c, m.Name), mxlv1alpha1.ConditionTypeSourceable)
 	require.NotNil(t, sourceable)
 	assert.Equal(t, metav1.ConditionFalse, sourceable.Status)
-	assert.Contains(t, sourceable.Message, "expired lease")
+	assert.Equal(t, mxlv1alpha1.ReasonLeaseExpired, sourceable.Reason)
+
+	backdate(t, c, m.Name, 2*time.Hour)
+	reconcileOnce(t, r, m.Name)
+	assert.False(t, mirrorGone(t, c, m.Name),
+		"the grace period is not what decides this: no amount of waiting "+
+			"makes a lapsed lease evidence that the flow has no producer")
+}
+
+// A mirror that is both unclaimed and merely lease-stale is still
+// collected: the claim is the half that failed terminally.
+func TestSource_LeaseExpiredAndUnclaimed_IsStillCollected(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode))
+	r.Lease = &fakeLease{fresh: map[string]bool{}}
+
+	reconcileOnce(t, r, m.Name)
+	backdate(t, c, m.Name, 2*time.Hour)
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name))
 }
 
 // No gateway will ever open the writer: the DaemonSet pod that would

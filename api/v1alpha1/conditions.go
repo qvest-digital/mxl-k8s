@@ -50,11 +50,18 @@ const (
 	// somewhere to pull from and somewhere to put it. Owned by the
 	// operator and written to MxlFlowMirror status.
 	//
-	// False means the flow names no live Origin, or the mirror's
-	// target node has left the cluster. Neither is repairable by the
-	// data plane: a source gateway can reopen a reader as often as it
-	// likes on a node the flow no longer lives on, and a target
-	// gateway that no longer exists never opens a writer at all.
+	// False means the flow is gone, no node claims to hold it, every
+	// Origin it names has an expired lease, or the mirror's target
+	// node has left the cluster.
+	//
+	// Only the first, second and fourth make the mirror collectable.
+	// A lapsed lease says a node still claims the flow and no agent is
+	// renewing for it, which is a control-plane failure that leaves
+	// the producer and both gateways free to keep delivering; the
+	// reason distinguishes it (ReasonLeaseExpired against
+	// ReasonOriginUnresolved and ReasonTargetNodeGone) so the
+	// condition can report the fault without the collector acting on
+	// it.
 	ConditionTypeSourceable = "Sourceable"
 
 	// ConditionTypeProbed reports whether status.providers on an

@@ -201,12 +201,29 @@ type judgement struct {
 	message string
 }
 
-// sourceJudgement adds the node the mirror should pull from and the
-// moment the answer can change on its own.
+// sourceJudgement adds the node the mirror should pull from, the
+// moment the answer can change on its own, and whether the failure is
+// one nothing will undo.
 type sourceJudgement struct {
 	judgement
 	node     string
 	deadline time.Time
+
+	// terminal marks a source failure no agent can reverse: the flow
+	// is gone, no node claims to hold it, or the target node has left
+	// the cluster. Only those make a mirror collectable.
+	//
+	// A lease that has merely lapsed is deliberately not one. The
+	// Origin location still names a node, and an agent that is down
+	// while its producer and both gateways are fine is exactly the
+	// case that produces it -- collecting there would tear down a
+	// transfer that is still delivering grains, on the evidence of a
+	// component that is not carrying them. The mirror stays, and the
+	// condition says why. The flow collector makes the opposite trade
+	// for the opposite reason: an MxlFlow is derived state its agent
+	// republishes from flow_def.json within one rescan, so collecting
+	// one early costs a rebuild rather than a stream.
+	terminal bool
 }
 
 // claim reports whether anything still asks for this mirror.
@@ -286,7 +303,7 @@ func (r *Reconciler) source(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) (
 		return sourceJudgement{}, err
 	}
 	if gone {
-		return sourceJudgement{judgement: judgement{
+		return sourceJudgement{terminal: true, judgement: judgement{
 			reason:  mxlv1alpha1.ReasonTargetNodeGone,
 			message: fmt.Sprintf("target node %s has left the cluster", m.Spec.TargetNode),
 		}}, nil
@@ -295,7 +312,7 @@ func (r *Reconciler) source(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) (
 	var flow mxlv1alpha1.MxlFlow
 	err = r.Get(ctx, types.NamespacedName{Name: m.Spec.FlowID}, &flow)
 	if apierrors.IsNotFound(err) {
-		return sourceJudgement{judgement: judgement{
+		return sourceJudgement{terminal: true, judgement: judgement{
 			reason:  mxlv1alpha1.ReasonOriginUnresolved,
 			message: fmt.Sprintf("MxlFlow %s does not exist", m.Spec.FlowID),
 		}}, nil
@@ -308,14 +325,19 @@ func (r *Reconciler) source(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) (
 	if err != nil {
 		return sourceJudgement{}, fmt.Errorf("resolve origin for %s: %w", m.Spec.FlowID, err)
 	}
-	if !res.Found {
-		message := "the flow names no Origin location"
-		if res.AllStale {
-			message = "every Origin location of the flow has an expired lease"
-		}
+	if res.AllStale {
+		// Somewhere a node still claims to hold this flow and no agent
+		// is saying so. That is a control-plane failure rather than a
+		// producer's, and the data plane may well be unaffected.
 		return sourceJudgement{judgement: judgement{
+			reason:  mxlv1alpha1.ReasonLeaseExpired,
+			message: "every Origin location of the flow has an expired lease",
+		}}, nil
+	}
+	if !res.Found {
+		return sourceJudgement{terminal: true, judgement: judgement{
 			reason:  mxlv1alpha1.ReasonOriginUnresolved,
-			message: message,
+			message: "the flow names no Origin location",
 		}}, nil
 	}
 	return sourceJudgement{
@@ -554,7 +576,7 @@ func (r *Reconciler) collect(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, 
 	if m == nil {
 		return ctrl.Result{}, nil
 	}
-	if claimed.ok && src.ok {
+	if claimed.ok && (src.ok || !src.terminal) {
 		// Only a Lease lapsing can change the answer with no event to
 		// carry it. Pods, receivers, nodes, flows and mirrors all
 		// arrive on a watch.
@@ -565,7 +587,7 @@ func (r *Reconciler) collect(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, 
 	if grace <= 0 {
 		grace = DefaultGracePeriod
 	}
-	since := failingSince(m, claimed.ok, src.ok)
+	since := failingSince(m, claimed.ok, src.ok || !src.terminal)
 	if wait := grace - time.Since(since); wait > 0 {
 		return ctrl.Result{RequeueAfter: wait}, nil
 	}
