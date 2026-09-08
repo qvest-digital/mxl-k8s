@@ -6,10 +6,10 @@ require (
 	github.com/prometheus/client_golang v1.24.1
 	github.com/qvest-digital/go-mxl v1.1.0-rc.4
 	github.com/qvest-digital/mxl-k8s/api v1.0.0-rc.15 // x-release-please-version
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
 	k8s.io/apimachinery v0.37.0
 	k8s.io/client-go v0.37.0
-	sigs.k8s.io/controller-runtime v0.24.1
+	sigs.k8s.io/controller-runtime v0.25.0
 )
 
 require (
@@ -68,7 +68,7 @@ require (
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	k8s.io/api v0.37.0 // indirect
-	k8s.io/apiextensions-apiserver v0.36.0 // indirect
+	k8s.io/apiextensions-apiserver v0.37.0 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20260721132016-d427ff9ee9ad // indirect
 	k8s.io/utils v0.0.0-20260626114624-be93311217bd // indirect
