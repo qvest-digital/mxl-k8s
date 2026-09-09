@@ -442,7 +442,11 @@ gateway:
     # rejected when this is set, which includes interfaces with no
     # physical NIC behind them.
     fabricMinLinkSpeed: ""
-    resyncPeriod: 30s
+    # -- How often the gateway refreshes MxlNodeCapabilities. Every
+    # pass reads each RDMA port state out of sysfs; on irdma that
+    # read takes the kernel global rtnl lock, so this is also how
+    # often a node contends for it against pod sandbox setup.
+    resyncPeriod: 60s
     # -- Shortest interval between two libmxl-fabrics interface
     # enumerations. Status still refreshes every resyncPeriod from the
     # last result. Each enumeration sweeps every provider libfabric was

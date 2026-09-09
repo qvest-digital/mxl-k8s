@@ -1539,9 +1539,10 @@
               "title": "readerStallAfter"
             },
             "resyncPeriod": {
-              "default": "30s",
-              "title": "resyncPeriod",
-              "type": "string"
+              "default": "60s",
+              "description": "How often the gateway refreshes MxlNodeCapabilities. Every pass reads each RDMA port state out of sysfs; on irdma that read takes the kernel global rtnl lock, so this is also how often a node contends for it against pod sandbox setup.",
+              "required": [],
+              "title": "resyncPeriod"
             },
             "zapLogLevel": {
               "default": "info",
@@ -1556,9 +1557,7 @@
               "title": "zapLogLevel"
             }
           },
-          "required": [
-            "resyncPeriod"
-          ],
+          "required": [],
           "title": "flags",
           "type": "object"
         },
