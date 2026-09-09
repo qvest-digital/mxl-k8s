@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.19](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.18...v1.1.0-rc.19) (2026-09-09)
+
+
+### Bug Fixes
+
+* **chart:** raise the gateway resync period to 60s ([#339](https://github.com/qvest-digital/mxl-k8s/issues/339)) ([e78fb2a](https://github.com/qvest-digital/mxl-k8s/commit/e78fb2ab7ffa79a3c5d3db343abd116afcd913aa))
+
 ## [1.1.0-rc.18](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.17...v1.1.0-rc.18) (2026-09-06)
 
 
