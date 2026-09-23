@@ -33,6 +33,13 @@ func LeaseName(flowID, nodeName string) string {
 	return leaseNamePrefix + flowID + "-" + nodeName
 }
 
+// LeaseNameFor is LeaseName for a flow in any domain. A flow in the
+// primary domain gets the name it always had; one in another domain
+// carries the domain after the prefix, "mxl-flow-<domain>.<id>-<node>".
+func LeaseNameFor(ref FlowRef, nodeName string) string {
+	return leaseNamePrefix + ref.Name() + "-" + nodeName
+}
+
 // flowIDLength is the length of the canonical 8-4-4-4-12 UUID a flow
 // id always is. It is what makes a Lease name decomposable: both
 // segments may contain dashes, so only a fixed-width first field
@@ -69,4 +76,34 @@ func ParseLeaseName(name string) (flowID, nodeName string, ok bool) {
 		return "", "", false
 	}
 	return flowID, nodeName, true
+}
+
+// ParseLeaseNameFor reverses LeaseNameFor. The domain, when there is
+// one, runs up to the last dot before the flow id, and a flow id has
+// a fixed width, so the split is unambiguous even though domain and
+// node names may both hold dashes.
+func ParseLeaseNameFor(name string) (ref FlowRef, nodeName string, ok bool) {
+	rest, found := strings.CutPrefix(name, leaseNamePrefix)
+	if !found {
+		return FlowRef{}, "", false
+	}
+	domain := ""
+	// A domain name may hold dots and so may a node name; the domain's
+	// last dot is the one a flow id immediately follows.
+	for i := 0; i < len(rest); i++ {
+		if rest[i] != domainSeparator[0] {
+			continue
+		}
+		cand := rest[i+1:]
+		if len(cand) >= flowIDLength+2 && cand[flowIDLength] == '-' &&
+			flowIDRE.MatchString(cand[:flowIDLength]) {
+			domain, rest = rest[:i], cand
+			break
+		}
+	}
+	id, node, ok := ParseLeaseName(leaseNamePrefix + rest)
+	if !ok {
+		return FlowRef{}, "", false
+	}
+	return FlowRef{Domain: domain, ID: id}, node, true
 }

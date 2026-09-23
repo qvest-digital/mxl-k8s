@@ -56,6 +56,17 @@ spec:
                   (the contents of flow_def.json). It is stored opaquely; mxl-k8s
                   does not validate its inner structure.
                 x-kubernetes-preserve-unknown-fields: true
+              domain:
+                description: |-
+                  Domain is the MxlDomain the flow belongs to. Empty is the primary
+                  domain, the one the agent's --domain-path names; every object
+                  written before domains existed carries none. Immutable: the same
+                  id in another domain is another flow.
+                maxLength: 63
+                type: string
+                x-kubernetes-validations:
+                - message: domain is immutable
+                  rule: self == oldSelf
               id:
                 description: |-
                   ID is the MXL flow UUID, matching the "id" field in the flow's
