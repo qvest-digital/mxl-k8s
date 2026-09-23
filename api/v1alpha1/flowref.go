@@ -34,6 +34,20 @@ func (r FlowRef) Name() string {
 	return r.Domain + domainSeparator + r.ID
 }
 
+// Normalize folds the primary domain's name into the empty form.
+//
+// The primary domain is a named MxlDomain too, so a flow in it can be
+// spelled either way, and two spellings would give one flow two object
+// names and two mirrors. Every ref is compared and named in the empty
+// form; primary is the primary domain's MxlDomain name, and empty folds
+// nothing.
+func (r FlowRef) Normalize(primary string) FlowRef {
+	if primary != "" && r.Domain == primary {
+		r.Domain = ""
+	}
+	return r
+}
+
 // ParseFlowName reverses FlowRef.Name.
 func ParseFlowName(name string) FlowRef {
 	if i := strings.LastIndex(name, domainSeparator); i >= 0 {
