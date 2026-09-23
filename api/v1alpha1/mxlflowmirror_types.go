@@ -40,6 +40,15 @@ type MxlFlowMirrorSpec struct {
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 	FlowID string `json:"flowID"`
 
+	// Domain is the MxlDomain the flow belongs to. Empty is the primary
+	// domain, the one the agent's --domain-path names; every object
+	// written before domains existed carries none. Immutable: the same
+	// id in another domain is another flow.
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="domain is immutable"
+	Domain string `json:"domain,omitempty"`
+
 	// SourceNode is the Kubernetes node hosting the origin flow.
 	// +kubebuilder:validation:Required
 	SourceNode string `json:"sourceNode"`

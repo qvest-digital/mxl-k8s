@@ -66,6 +66,15 @@ type MxlFlowSpec struct {
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 	ID string `json:"id"`
 
+	// Domain is the MxlDomain the flow belongs to. Empty is the primary
+	// domain, the one the agent's --domain-path names; every object
+	// written before domains existed carries none. Immutable: the same
+	// id in another domain is another flow.
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="domain is immutable"
+	Domain string `json:"domain,omitempty"`
+
 	// Definition is the verbatim NMOS-shaped flow definition document
 	// (the contents of flow_def.json). It is stored opaquely; mxl-k8s
 	// does not validate its inner structure.

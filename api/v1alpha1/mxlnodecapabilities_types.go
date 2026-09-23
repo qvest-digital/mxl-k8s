@@ -101,6 +101,14 @@ type MxlNodeCapabilitiesStatus struct {
 	// +listMapKey=name
 	Providers []MxlFabricsProviderCapability `json:"providers,omitempty"`
 
+	// MultiDomain reports that the gateway mirrors a flow in the
+	// MxlDomain its MxlFlowMirror names rather than always in the
+	// primary one. An agent creates a mirror naming another domain
+	// only toward and from nodes that report it: a gateway without it
+	// would copy the primary domain's flow of the same id.
+	// +optional
+	MultiDomain bool `json:"multiDomain,omitempty"`
+
 	// LastSeen is the last time the gateway updated this resource.
 	// +optional
 	LastSeen *metav1.Time `json:"lastSeen,omitempty"`
