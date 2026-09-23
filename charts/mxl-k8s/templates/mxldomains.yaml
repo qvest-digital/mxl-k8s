@@ -1,0 +1,42 @@
+{{- range .Values.domains }}
+{{- $id := .id }}
+{{- if not $id }}
+{{- $existing := lookup "mxl.qvest-digital.com/v1alpha1" "MxlDomain" "" .name }}
+{{- if and $existing $existing.spec $existing.spec.id }}
+{{- $id = $existing.spec.id }}
+{{- else }}
+{{- $id = uuidv4 }}
+{{- end }}
+{{- end }}
+---
+apiVersion: mxl.qvest-digital.com/v1alpha1
+kind: MxlDomain
+metadata:
+  name: {{ required "domains[].name is required" .name }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" $ "component" "domain") | nindent 4 }}
+  annotations:
+    # The id is the domain's identity everywhere it has been published;
+    # uninstalling the chart must not take it with it.
+    helm.sh/resource-policy: keep
+spec:
+  id: {{ $id | lower | quote }}
+  directory: {{ required "domains[].directory is required" .directory | quote }}
+  {{- with .label }}
+  label: {{ . | quote }}
+  {{- end }}
+  {{- with .description }}
+  description: {{ . | quote }}
+  {{- end }}
+  {{- with .tags }}
+  tags:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .historyDuration }}
+  historyDuration: {{ . | quote }}
+  {{- end }}
+  {{- with .nodeSelector }}
+  nodeSelector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

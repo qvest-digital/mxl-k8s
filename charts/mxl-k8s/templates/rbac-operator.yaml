@@ -21,9 +21,11 @@ rules:
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [delete, get, list, watch]
+  # delete removes an MxlDomain left in the per-node shape the
+  # resource had before it described a domain.
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxldomains]
-    verbs: [get, list, watch]
+    verbs: [get, list, watch, delete]
   # delete removes the capabilities of a node that has left, for the
   # ones carrying no owner reference to be collected by.
   - apiGroups: [mxl.qvest-digital.com]
@@ -36,8 +38,11 @@ rules:
     resources: [mxlflows]
     verbs: [delete, get, list, watch]
   - apiGroups: [mxl.qvest-digital.com]
-    resources: [mxldomains/status, mxlnodecapabilities/status]
+    resources: [mxlnodecapabilities/status]
     verbs: [get]
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxldomains/status]
+    verbs: [get, update, patch]
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxlflows/status]
     verbs: [get, patch, update]

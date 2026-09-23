@@ -37,6 +37,38 @@ crds:
 rbac:
   create: true
 
+# -- MXL domains the chart creates as MxlDomain objects. Each one is
+# materialised by the agent on every selected node as a directory under
+# agent.hostPath.run carrying domain_def.json, the identity BCP-007-03
+# NMOS nodes publish as mxl_domain_id. Only the domain whose directory
+# is the base of agent.flags.domainPath has its flows tracked and
+# mirrored between nodes; any other is materialised on each node but
+# not mirrored. Set an empty list to manage MxlDomains outside the
+# chart.
+domains:
+  - # -- Object name.
+    name: default
+    # -- Directory below the runtime root. Must match the base of
+    # agent.flags.domainPath for the domain to be mirrored.
+    directory: domain
+    # -- Domain identity, a lowercase UUID. Empty keeps the id an
+    # existing object already has, and generates one on first
+    # install. Set it where it has to be known ahead of time or has
+    # to survive the object being deleted.
+    id: ""
+    # -- domain_def.json label.
+    label: ""
+    # -- domain_def.json description.
+    description: ""
+    # -- domain_def.json tags, each an array of strings.
+    tags: {}
+    # -- Ring depth libmxl gives new flows, written to options.json
+    # (e.g. "2s"). Empty leaves options.json alone.
+    historyDuration: ""
+    # -- Nodes the domain is materialised on. Empty is every agent
+    # node.
+    nodeSelector: {}
+
 # -- Pre-delete lifecycle hooks. The domain wipe removes stale
 # .mxl-flow directories under gateway.flags.domainPath at chart
 # uninstall, because they live on a hostPath and survive namespace
