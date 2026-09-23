@@ -5,6 +5,12 @@ package v1alpha1
 // entry in status.conditions; the operator and the two gateway
 // reconcilers must not overlap on the same type.
 const (
+	// ConditionTypeMaterialised reports whether every node an MxlDomain
+	// is selected on carries it as its spec describes. Owned by the
+	// operator and written to MxlDomain status; the per-node entries
+	// it summarises are the agents'.
+	ConditionTypeMaterialised = "Materialised"
+
 	// ConditionTypeSourceProgress reports whether the source-side
 	// gateway is transferring grains for a mirror. Owned by the
 	// source gateway reconciler.
