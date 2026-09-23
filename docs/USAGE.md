@@ -102,7 +102,27 @@ That installs:
   one Pod per node;
 - the five CRDs (`MxlFlow`, `MxlReceiver`, `MxlFlowMirror`,
   `MxlDomain`, `MxlNodeCapabilities`);
-- ClusterRoles and ClusterRoleBindings for the above.
+- ClusterRoles and ClusterRoleBindings for the above;
+- one `MxlDomain` per entry in `domains` (by default `default`, in
+  the `domain` directory the agent and gateway watch).
+
+### MXL domain identity
+
+Every `MxlDomain` carries an id, a lowercase UUID. The agent writes it
+into `domain_def.json` at the root of the domain directory on every
+node it selects, which is where BCP-007-03 has a media function read
+the identity it publishes as `mxl_domain_id`. The id is the same on
+every node: mxl-k8s mirrors a flow to whichever node opens it, so the
+per-node directories behave as one store.
+
+```sh
+kubectl get mxldomains
+kubectl get mxldomain default -o jsonpath='{.spec.id}'
+```
+
+The chart keeps the id of an existing object and generates one on
+first install; pin it in `domains[].id` where it has to be known ahead
+of time. Neither the id nor the directory can be changed afterwards.
 
 See [`charts/mxl-k8s/README.md`](../charts/mxl-k8s/README.md) for the
 full values reference, override examples (RDMA, private registry,

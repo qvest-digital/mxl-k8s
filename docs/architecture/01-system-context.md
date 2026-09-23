@@ -60,7 +60,9 @@ node, and then get out of the way of the data path.
   only -- they log events and write nothing.
 - **Agent** (`agent/cmd/mxl-domain-agent`) -- DaemonSet. Watches the
   node's tmpfs domain with `fanotify`, publishes `MxlFlow.status.
-  locations` and `MxlDomain.status` for this node, and serves the
+  locations`, materialises every `MxlDomain` selected for the node
+  (directory and `domain_def.json`) and reports it in the domain's
+  `status.nodes`, and serves the
   intent UDS at `/run/mxl/agent.sock`. It also drops the
   `libmxl-intent.so` it carries beside that socket, for consumers
   that preload it from there.

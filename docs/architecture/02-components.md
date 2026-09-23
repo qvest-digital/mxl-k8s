@@ -13,7 +13,7 @@ component, showing the workflow rather than a labelled rectangle.
 | `MxlFlowMirror` | Namespaced | operator (declarative) or agent (intent), then operator (source node) | gateway (both sides), operator (`Claimed`, `Sourceable`) | operator, gateway (target + source), agent |
 | `MxlFlow` | Cluster | agent (on first appearance) | agent (`locations`), operator (everything else) | operator, gateway (source side), agent |
 | `Lease` (coordination.k8s.io, `mxl-system`) | Namespaced | agent | agent | operator, agent |
-| `MxlDomain` | Cluster (per-node) | bootstrap / agent | agent | operator (observe), agent |
+| `MxlDomain` | Cluster (per domain) | user or chart (`domains`) | agent (its node's `nodes[]` entry), operator (`Materialised`) | operator, agent |
 | `MxlNodeCapabilities` | Cluster (per-node) | gateway | gateway | operator (observe), gateway |
 
 The RBAC verbs that encode this table live in

@@ -19,9 +19,14 @@ Four things matter here:
 - **`/run/mxl` is a tmpfs**, not a backed mount. The bytes live in
   page-cache RAM. Nothing survives a node reboot. mxl-k8s does not
   provision the mount -- that is left to the host's init system or a
-  privileged bootstrap step. The agent reports the state it observes
-  via `MxlDomain.status` (`capacityBytes`, `freeBytes`,
-  `fanotifyReady`), but does not create the mount itself.
+  privileged bootstrap step. Inside it the agent creates one
+  directory per `MxlDomain` selected for the node, writes the
+  domain's `domain_def.json` (its BCP-007-03 identity) and, where
+  `spec.historyDuration` is set, the history option in libmxl's
+  `options.json`. It reports each domain's state on the node in
+  `MxlDomain.status.nodes` (`ready`, `mirrored`, `capacityBytes`,
+  `freeBytes`, `fanotifyReady`). Only the directory named by
+  `--domain-path` is watched and mirrored.
 - **A flow directory's lifetime is tied to a libmxl FlowWriter
   handle.** `mxlCreateFlowWriter` creates
   `<flowID>.mxl-flow/{flow_def.json,data,grains/}`; closing the
