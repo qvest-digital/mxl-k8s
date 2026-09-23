@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -54,6 +55,10 @@ type LeaseChecker interface {
 // Dispatcher resolves a libmxl-intent.so request into an
 // MxlFlowMirror reconciliation that completes (Ready) or fails.
 type Dispatcher struct {
+	refusalMu sync.Mutex
+	refusals  map[string]time.Time
+	nowFn     func() time.Time
+
 	Client     client.Client
 	Resolver   *podlookup.Resolver
 	DomainPath string
@@ -110,9 +115,12 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 		err := d.notMirrored(path)
 		// At the default level: the consumer only sees ENOENT, so this
 		// line is where an operator learns the flow was never going to
-		// be brought here.
-		log.FromContext(ctx).WithName("intent").Info("intent request refused",
-			"pid", pid, "reason", err.Error())
+		// be brought here. Once per flow directory per window, because
+		// one refused open arrives as a burst of probes and retries.
+		if d.shouldLogRefusal(path) {
+			log.FromContext(ctx).WithName("intent").Info("intent request refused",
+				"pid", pid, "reason", err.Error())
+		}
 		return err
 	}
 
@@ -170,6 +178,39 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 	}
 	l.Info("intent request fulfilled", "sourceNode", sourceNode, "mirror", mirror.Name)
 	return nil
+}
+
+// refusalLogWindow is how long a refusal for one flow directory stays
+// logged before it is logged again.
+const refusalLogWindow = time.Minute
+
+// shouldLogRefusal reports whether a refusal for path is the first in
+// its window. Keyed by the flow directory, so the several files libmxl
+// probes for one open count once.
+func (d *Dispatcher) shouldLogRefusal(path string) bool {
+	key := path
+	if i := strings.Index(path, ".mxl-flow"); i >= 0 {
+		key = path[:i]
+	}
+	now := time.Now()
+	if d.nowFn != nil {
+		now = d.nowFn()
+	}
+	d.refusalMu.Lock()
+	defer d.refusalMu.Unlock()
+	if d.refusals == nil {
+		d.refusals = map[string]time.Time{}
+	}
+	for k, at := range d.refusals {
+		if now.Sub(at) > refusalLogWindow {
+			delete(d.refusals, k)
+		}
+	}
+	if _, seen := d.refusals[key]; seen {
+		return false
+	}
+	d.refusals[key] = now
+	return true
 }
 
 // notMirrored explains why a path outside the mirrored domain gets no

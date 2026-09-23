@@ -725,3 +725,19 @@ func TestMaterialize_UnmirroredDomain_RefusesAndSaysWhy(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a flow path")
 }
+
+// libmxl probes a missing flow through several calls, and a consumer
+// retries, so one refused open arrives as a burst of requests. Logging
+// each would bury everything else; the reason is logged once per path
+// per window, and every request is still refused.
+func TestRefusalLogIsDeduplicated(t *testing.T) {
+	d := &Dispatcher{DomainPath: "/run/mxl/domain", NodeName: "n1"}
+	now := time.Unix(1000, 0)
+	d.nowFn = func() time.Time { return now }
+
+	assert.True(t, d.shouldLogRefusal("/run/mxl/other/a.mxl-flow/data"))
+	assert.False(t, d.shouldLogRefusal("/run/mxl/other/a.mxl-flow/data"))
+	assert.True(t, d.shouldLogRefusal("/run/mxl/other/b.mxl-flow/data"), "another flow")
+	now = now.Add(refusalLogWindow + time.Second)
+	assert.True(t, d.shouldLogRefusal("/run/mxl/other/a.mxl-flow/data"), "after the window")
+}
