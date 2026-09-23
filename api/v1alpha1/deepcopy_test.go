@@ -176,7 +176,7 @@ func TestDomainIDPattern_MatchesBCP00703(t *testing.T) {
 	assert.False(t, re.MatchString("1AC254D9-A5EB-475F-A2B6-3D02A5CFBC82"), "lowercase only")
 	assert.False(t, re.MatchString("1ac254d9-a5eb-075f-a2b6-3d02a5cfbc82"), "version 0")
 	assert.False(t, re.MatchString("1ac254d9-a5eb-475f-c2b6-3d02a5cfbc82"), "variant")
-	assert.False(t, re.MatchString("n06"), "a node name is not a domain id")
+	assert.False(t, re.MatchString("node-a"), "a node name is not a domain id")
 }
 
 func TestMxlDomainSpec_Selects(t *testing.T) {

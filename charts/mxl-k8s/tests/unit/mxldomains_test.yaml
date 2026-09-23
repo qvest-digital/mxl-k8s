@@ -48,3 +48,25 @@ tests:
     asserts:
       - hasDocuments:
           count: 0
+
+  - it: keeps the id of the object already in the cluster when values set none
+    kubernetesProvider:
+      scheme:
+        "mxl.qvest-digital.com/v1alpha1/MxlDomain":
+          gvr:
+            group: mxl.qvest-digital.com
+            version: v1alpha1
+            resource: mxldomains
+          namespaced: false
+      objects:
+        - apiVersion: mxl.qvest-digital.com/v1alpha1
+          kind: MxlDomain
+          metadata:
+            name: default
+          spec:
+            id: 3310f209-9351-47c0-b9a2-14c59b6a4c23
+            directory: domain
+    asserts:
+      - equal:
+          path: spec.id
+          value: 3310f209-9351-47c0-b9a2-14c59b6a4c23

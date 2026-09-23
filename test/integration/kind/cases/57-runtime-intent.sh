@@ -35,6 +35,16 @@ cleanup() {
       --wait=false --ignore-not-found >/dev/null 2>&1 || true
   "${KUBECTL[@]}" -n "$NAMESPACE" delete configmap "$CM" --ignore-not-found >/dev/null 2>&1 || true
   "${KUBECTL[@]}" delete mxldomain "$SCRATCH_DOMAIN" --ignore-not-found >/dev/null 2>&1 || true
+  # The agent never removes a domain directory -- flows may be in it --
+  # so the one this case made is removed here, on every node.
+  if [ -n "${nodes:-}" ]; then
+    for n in $nodes; do
+      "${KUBECTL[@]}" -n "$NAMESPACE" run "mxl-scratch-rm-${n}" --restart=Never --rm -i \
+        --image="$TOOLS_IMAGE" --image-pull-policy=IfNotPresent --quiet \
+        --overrides="{\"spec\":{\"nodeName\":\"${n}\",\"volumes\":[{\"name\":\"r\",\"hostPath\":{\"path\":\"/run/mxl\"}}],\"containers\":[{\"name\":\"rm\",\"image\":\"${TOOLS_IMAGE}\",\"command\":[\"rm\",\"-rf\",\"/run/mxl/scratch\"],\"volumeMounts\":[{\"name\":\"r\",\"mountPath\":\"/run/mxl\"}]}]}}" \
+        >/dev/null 2>&1 || true
+    done
+  fi
   for f in "$FLOW_OLD" "$FLOW_NEW"; do
     "${KUBECTL[@]}" -n "$NAMESPACE" get mxlflowmirrors -o name 2>/dev/null \
       | grep "$f" | xargs -r "${KUBECTL[@]}" -n "$NAMESPACE" delete --wait=false >/dev/null 2>&1 || true
