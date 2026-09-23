@@ -83,7 +83,16 @@ spec:
                   created in the domain, written to options.json. Unset leaves
                   options.json alone, whoever wrote it. libmxl reads it when a flow
                   is created, so a change reaches only flows created after it.
+
+                  Checked by the API server: a value the schema admitted but the
+                  typed client cannot decode fails every List of MxlDomains, which
+                  stops every agent and the operator at once.
                 type: string
+                x-kubernetes-validations:
+                - message: historyDuration must be a positive duration such as 2s
+                    or 500ms
+                  rule: self.matches('^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$') &&
+                    duration(self) > duration('0s')
               id:
                 description: |-
                   ID is the domain identity written into domain_def.json and

@@ -57,7 +57,13 @@ type MxlDomainSpec struct {
 	// created in the domain, written to options.json. Unset leaves
 	// options.json alone, whoever wrote it. libmxl reads it when a flow
 	// is created, so a change reaches only flows created after it.
+	//
+	// Checked by the API server: a value the schema admitted but the
+	// typed client cannot decode fails every List of MxlDomains, which
+	// stops every agent and the operator at once.
 	// +optional
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:XValidation:rule="self.matches('^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$') && duration(self) > duration('0s')",message="historyDuration must be a positive duration such as 2s or 500ms"
 	HistoryDuration *metav1.Duration `json:"historyDuration,omitempty"`
 
 	// NodeSelector limits the nodes the domain is materialised on.
