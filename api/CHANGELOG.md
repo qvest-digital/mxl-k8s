@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.1.0-rc.20](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.15...api/v1.1.0-rc.20) (2026-09-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **api:** MxlDomain spec.nodeName and spec.hostPath, and the top-level status capacity, free-bytes, fanotify and lastSeen fields, are gone. spec.id and spec.directory are required. Objects in the old per-node shape are deleted by the operator.
+
+### Features
+
+* **agent:** materialise every MxlDomain selected for the node ([b1ac9ec](https://github.com/qvest-digital/mxl-k8s/commit/b1ac9eca2bb1ce90dedb8c5297d7778ab9161686))
+* **api:** make MxlDomain the domain and write its identity to nodes ([b1ac9ec](https://github.com/qvest-digital/mxl-k8s/commit/b1ac9eca2bb1ce90dedb8c5297d7778ab9161686))
+* **chart:** create MxlDomains from values and keep their ids ([b1ac9ec](https://github.com/qvest-digital/mxl-k8s/commit/b1ac9eca2bb1ce90dedb8c5297d7778ab9161686))
+* **operator:** summarise MxlDomain nodes and drop the per-node shape ([b1ac9ec](https://github.com/qvest-digital/mxl-k8s/commit/b1ac9eca2bb1ce90dedb8c5297d7778ab9161686))
+
+
+### Bug Fixes
+
+* **agent:** say why an intent outside the mirrored domain is refused ([b1ac9ec](https://github.com/qvest-digital/mxl-k8s/commit/b1ac9eca2bb1ce90dedb8c5297d7778ab9161686))
+
 ## [1.0.0-rc.15](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.14...api/v1.0.0-rc.15) (2026-09-06)
 
 
