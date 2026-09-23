@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,7 +29,7 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-func reconcile(t *testing.T, objs ...client.Object) client.Client {
+func runReconcile(t *testing.T, objs ...client.Object) client.Client {
 	t.Helper()
 	scheme := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).
@@ -62,14 +63,14 @@ func condition(t *testing.T, c client.Client, name string) *metav1.Condition {
 // place it would be listed as if a node were a domain.
 func TestReconcileDeletesThePerNodeShape(t *testing.T) {
 	legacy := &mxlv1alpha1.MxlDomain{ObjectMeta: metav1.ObjectMeta{Name: "n1"}}
-	c := reconcile(t, legacy)
+	c := runReconcile(t, legacy)
 
 	err := c.Get(context.Background(), types.NamespacedName{Name: "n1"}, &mxlv1alpha1.MxlDomain{})
 	assert.True(t, apierrors.IsNotFound(err))
 }
 
 func TestMaterialisedSummarisesTheNodes(t *testing.T) {
-	c := reconcile(t,
+	c := runReconcile(t, node("n1"), node("n2"),
 		domain("none"),
 		domain("half",
 			mxlv1alpha1.MxlDomainNodeStatus{NodeName: "n2", Ready: false},
@@ -97,7 +98,7 @@ func TestMaterialisedSummarisesTheNodes(t *testing.T) {
 // condition.
 func TestReconcileLeavesTheNodeEntriesAlone(t *testing.T) {
 	d := domain("studio", mxlv1alpha1.MxlDomainNodeStatus{NodeName: "n1", Ready: true, Mirrored: true})
-	c := reconcile(t, d)
+	c := runReconcile(t, node("n1"), d)
 
 	var after mxlv1alpha1.MxlDomain
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "studio"}, &after))
@@ -111,4 +112,60 @@ func TestReconcileMissingDomainIsNoError(t *testing.T) {
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "missing"}})
 	require.NoError(t, err)
+}
+
+func node(name string) *corev1.Node {
+	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}
+}
+
+// An entry is written by the node's agent, and a node that has left has
+// no agent to withdraw it. Left in place it keeps the domain reading
+// not materialised forever, and lists a node a consumer cannot be sent
+// to.
+func TestReconcilePrunesDepartedNodes(t *testing.T) {
+	d := domain("studio",
+		mxlv1alpha1.MxlDomainNodeStatus{NodeName: "n1", Ready: true, Mirrored: true},
+		mxlv1alpha1.MxlDomainNodeStatus{NodeName: "gone", Ready: false, Mirrored: true})
+	c := runReconcile(t, node("n1"), d)
+
+	var after mxlv1alpha1.MxlDomain
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "studio"}, &after))
+	require.Len(t, after.Status.Nodes, 1)
+	assert.Equal(t, "n1", after.Status.Nodes[0].NodeName)
+	cond := meta.FindStatusCondition(after.Status.Conditions, mxlv1alpha1.ConditionTypeMaterialised)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+}
+
+// A domain materialised on several nodes but not mirrored holds a
+// separate store on each, while a controller given its id will assume
+// any node reaches any of its flows. That has to be visible.
+func TestReconcileFlagsAnUnmirroredDomainAcrossNodes(t *testing.T) {
+	c := runReconcile(t, node("n1"), node("n2"),
+		domain("scratch",
+			mxlv1alpha1.MxlDomainNodeStatus{NodeName: "n1", Ready: true},
+			mxlv1alpha1.MxlDomainNodeStatus{NodeName: "n2", Ready: true}),
+		domain("local",
+			mxlv1alpha1.MxlDomainNodeStatus{NodeName: "n1", Ready: true}),
+		domain("shared",
+			mxlv1alpha1.MxlDomainNodeStatus{NodeName: "n1", Ready: true, Mirrored: true},
+			mxlv1alpha1.MxlDomainNodeStatus{NodeName: "n2", Ready: true, Mirrored: true}))
+
+	get := func(name string) *metav1.Condition {
+		var d mxlv1alpha1.MxlDomain
+		require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: name}, &d))
+		return meta.FindStatusCondition(d.Status.Conditions, mxlv1alpha1.ConditionTypeReachable)
+	}
+	scratch := get("scratch")
+	require.NotNil(t, scratch)
+	assert.Equal(t, metav1.ConditionFalse, scratch.Status)
+	assert.Equal(t, "NotMirrored", scratch.Reason)
+
+	local := get("local")
+	require.NotNil(t, local)
+	assert.Equal(t, metav1.ConditionTrue, local.Status, "one node: nothing to reach across")
+
+	shared := get("shared")
+	require.NotNil(t, shared)
+	assert.Equal(t, metav1.ConditionTrue, shared.Status)
 }

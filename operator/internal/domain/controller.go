@@ -2,7 +2,15 @@ package domain
 
 import (
 	"context"
+
 	"fmt"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sort"
 	"strings"
 
@@ -17,10 +25,12 @@ import (
 )
 
 // Reconciler summarises an MxlDomain's per-node entries into its
-// Materialised condition, and removes objects left in the per-node
+// Materialised and Reachable conditions, removes the entry of a node
+// that has left the cluster, and removes objects left in the per-node
 // shape the resource had before it described a domain.
 //
-// The per-node entries are the agents'; this never writes them.
+// A live node's entry is its agent's; this writes only the entries of
+// nodes that no longer have an agent to withdraw them.
 type Reconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -28,6 +38,7 @@ type Reconciler struct {
 
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxldomains,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxldomains/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 
 // Reconcile is the entry point for MxlDomain change events.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -47,12 +58,68 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(r.Delete(ctx, &d))
 	}
 
-	cond := materialised(&d)
-	cond.ObservedGeneration = d.Generation
-	if !meta.SetStatusCondition(&d.Status.Conditions, cond) {
+	pruned, err := r.pruneDeparted(ctx, &d)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	changed := pruned
+	for _, cond := range []metav1.Condition{materialised(&d), reachable(&d)} {
+		cond.ObservedGeneration = d.Generation
+		if meta.SetStatusCondition(&d.Status.Conditions, cond) {
+			changed = true
+		}
+	}
+	if !changed {
 		return ctrl.Result{}, nil
 	}
+	if cond := meta.FindStatusCondition(d.Status.Conditions, mxlv1alpha1.ConditionTypeReachable); cond != nil &&
+		cond.Status == metav1.ConditionFalse {
+		l.Info("MxlDomain is not reachable across its nodes", "reason", cond.Message)
+	}
 	return ctrl.Result{}, r.Status().Update(ctx, &d)
+}
+
+// pruneDeparted drops the entries of nodes that no longer exist.
+func (r *Reconciler) pruneDeparted(ctx context.Context, d *mxlv1alpha1.MxlDomain) (bool, error) {
+	var nodes corev1.NodeList
+	if err := r.List(ctx, &nodes); err != nil {
+		return false, fmt.Errorf("list nodes: %w", err)
+	}
+	present := make(map[string]bool, len(nodes.Items))
+	for i := range nodes.Items {
+		present[nodes.Items[i].Name] = true
+	}
+	kept := d.Status.Nodes[:0]
+	for _, n := range d.Status.Nodes {
+		if present[n.NodeName] {
+			kept = append(kept, n)
+		}
+	}
+	pruned := len(kept) != len(d.Status.Nodes)
+	d.Status.Nodes = kept
+	return pruned, nil
+}
+
+func reachable(d *mxlv1alpha1.MxlDomain) metav1.Condition {
+	c := metav1.Condition{Type: mxlv1alpha1.ConditionTypeReachable}
+	var unmirrored []string
+	for _, n := range d.Status.Nodes {
+		if !n.Mirrored {
+			unmirrored = append(unmirrored, n.NodeName)
+		}
+	}
+	if len(d.Status.Nodes) > 1 && len(unmirrored) > 0 {
+		sort.Strings(unmirrored)
+		c.Status, c.Reason = metav1.ConditionFalse, "NotMirrored"
+		c.Message = fmt.Sprintf("materialised on %d nodes but not mirrored on %s: "+
+			"a flow written on one of them cannot be read on another",
+			len(d.Status.Nodes), strings.Join(unmirrored, ", "))
+		return c
+	}
+	c.Status, c.Reason = metav1.ConditionTrue, "Reachable"
+	c.Message = "every flow of the domain can be read on every node it is materialised on"
+	return c
 }
 
 func materialised(d *mxlv1alpha1.MxlDomain) metav1.Condition {
@@ -83,5 +150,29 @@ func materialised(d *mxlv1alpha1.MxlDomain) metav1.Condition {
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&mxlv1alpha1.MxlDomain{}).
+		// A node leaving raises no event on the domains that list it.
+		Watches(&corev1.Node{},
+			handler.EnqueueRequestsFromMapFunc(r.allDomains),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc:  func(event.CreateEvent) bool { return false },
+				UpdateFunc:  func(event.UpdateEvent) bool { return false },
+				GenericFunc: func(event.GenericEvent) bool { return false },
+				DeleteFunc:  func(event.DeleteEvent) bool { return true },
+			})).
 		Complete(r)
+}
+
+// allDomains enqueues every MxlDomain. There are few, and any of them
+// may list the node that left.
+func (r *Reconciler) allDomains(ctx context.Context, _ client.Object) []reconcile.Request {
+	var list mxlv1alpha1.MxlDomainList
+	if err := r.List(ctx, &list); err != nil {
+		log.FromContext(ctx).Error(err, "list MxlDomains for a departed node")
+		return nil
+	}
+	out := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Name: list.Items[i].Name}})
+	}
+	return out
 }
