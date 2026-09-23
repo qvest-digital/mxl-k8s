@@ -5,6 +5,20 @@ package v1alpha1
 // entry in status.conditions; the operator and the two gateway
 // reconcilers must not overlap on the same type.
 const (
+	// ConditionTypeMaterialised reports whether every node an MxlDomain
+	// is selected on carries it as its spec describes. Owned by the
+	// operator and written to MxlDomain status; the per-node entries
+	// it summarises are the agents'.
+	ConditionTypeMaterialised = "Materialised"
+
+	// ConditionTypeReachable reports whether a flow of an MxlDomain
+	// written on any of its nodes can be read on all of them, which is
+	// what a controller given the domain's id assumes. False when the
+	// domain is materialised on more than one node without being
+	// mirrored there: each node then holds a separate store under one
+	// id. Owned by the operator.
+	ConditionTypeReachable = "Reachable"
+
 	// ConditionTypeSourceProgress reports whether the source-side
 	// gateway is transferring grains for a mirror. Owned by the
 	// source gateway reconciler.

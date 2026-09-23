@@ -17,22 +17,24 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.nodeName
-      name: Node
+    - jsonPath: .spec.id
+      name: ID
       type: string
-    - jsonPath: .spec.hostPath
-      name: Path
+    - jsonPath: .spec.directory
+      name: Directory
       type: string
-    - jsonPath: .status.fanotifyReady
-      name: Fanotify
-      type: boolean
+    - jsonPath: .spec.label
+      name: Label
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: MxlDomain represents one MXL domain directory on one node.
+        description: |-
+          MxlDomain is one MXL domain: one identity, materialised as a
+          directory carrying domain_def.json on every selected node.
         properties:
           apiVersion:
             description: |-
@@ -52,30 +54,79 @@ spec:
           metadata:
             type: object
           spec:
-            description: MxlDomainSpec defines an MXL domain on a node.
+            description: |-
+              MxlDomainSpec defines one MXL domain.
+
+              A domain is one store of flows with one identity. The agent
+              materialises it as a directory on every node it selects, and mxl-k8s
+              mirrors flows between those directories on demand, so a function on
+              any selected node opens any flow of the domain by id. That is why the
+              identity is the domain's and not the node's: it is the same on every
+              node and known before any pod is placed.
             properties:
-              hostPath:
+              description:
+                description: Description is the domain_def.json description.
+                type: string
+              directory:
                 description: |-
-                  HostPath is the absolute path on the node where the MXL domain
-                  directory is mounted, typically a tmpfs.
-                pattern: ^/.+
+                  Directory is the domain directory's name below the agent's
+                  runtime root, one path segment.
+                pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$
                 type: string
-              nodeName:
-                description: NodeName is the Kubernetes node hosting this domain.
+                x-kubernetes-validations:
+                - message: directory is immutable; flows already written live under
+                    the old one
+                  rule: self == oldSelf
+              historyDuration:
+                description: |-
+                  HistoryDuration is the ring buffer depth libmxl gives every flow
+                  created in the domain, written to options.json. Unset leaves
+                  options.json alone, whoever wrote it. libmxl reads it when a flow
+                  is created, so a change reaches only flows created after it.
+
+                  Checked by the API server: a value the schema admitted but the
+                  typed client cannot decode fails every List of MxlDomains, which
+                  stops every agent and the operator at once.
                 type: string
+                x-kubernetes-validations:
+                - message: historyDuration must be a positive duration such as 2s
+                    or 500ms
+                  rule: self.matches('^([0-9]+([.][0-9]+)?(ns|us|ms|s|m|h))+$') &&
+                    duration(self) > duration('0s')
+              id:
+                description: |-
+                  ID is the domain identity written into domain_def.json and
+                  published as mxl_domain_id by NMOS nodes. Immutable: every
+                  reference a controller holds is to this value.
+                pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[1-9a-f][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$
+                type: string
+                x-kubernetes-validations:
+                - message: id is immutable
+                  rule: self == oldSelf
+              label:
+                description: Label is the domain_def.json label.
+                type: string
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                description: |-
+                  NodeSelector limits the nodes the domain is materialised on.
+                  Empty selects every node an agent runs on.
+                type: object
+              tags:
+                additionalProperties:
+                  items:
+                    type: string
+                  type: array
+                description: Tags are the domain_def.json tags.
+                type: object
             required:
-            - hostPath
-            - nodeName
+            - directory
+            - id
             type: object
           status:
-            description: |-
-              MxlDomainStatus reports the runtime state of an MxlDomain as
-              observed by the per-node agent.
+            description: MxlDomainStatus reports where a domain is materialised.
             properties:
-              capacityBytes:
-                description: CapacityBytes is the total size of the backing filesystem.
-                format: int64
-                type: integer
               conditions:
                 description: Conditions describes the current state of the domain.
                 items:
@@ -136,21 +187,59 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              fanotifyReady:
+              nodes:
                 description: |-
-                  FanotifyReady reports whether the agent has placed a fanotify
-                  mark on the domain mount. When false, on-demand materialization
-                  is unavailable on this node.
-                type: boolean
-              freeBytes:
-                description: FreeBytes is the unused size of the backing filesystem.
-                format: int64
-                type: integer
-              lastSeen:
-                description: LastSeen is the last time the agent reported on this
-                  domain.
-                format: date-time
-                type: string
+                  Nodes has one entry per node the domain is selected on, each
+                  written by that node's agent.
+                items:
+                  description: MxlDomainNodeStatus is one node's account of a domain.
+                  properties:
+                    capacityBytes:
+                      description: |-
+                        CapacityBytes is the size of the filesystem backing the
+                        directory.
+                      format: int64
+                      type: integer
+                    fanotifyReady:
+                      description: |-
+                        FanotifyReady reports whether the agent watches the directory
+                        for flow creation. Only meaningful where Mirrored is true.
+                      type: boolean
+                    freeBytes:
+                      description: FreeBytes is the unused size of that filesystem.
+                      format: int64
+                      type: integer
+                    lastSeen:
+                      description: LastSeen is when the node's agent last reported.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message says why Ready is false.
+                      type: string
+                    mirrored:
+                      description: |-
+                        Mirrored is true when the node's agent tracks this domain's
+                        flows, which is what lets mxl-k8s mirror them to other nodes. A
+                        domain that is materialised but not mirrored is readable only on
+                        the node a flow was written on.
+                      type: boolean
+                    nodeName:
+                      description: NodeName is the node the entry describes.
+                      type: string
+                    ready:
+                      description: |-
+                        Ready is true when the directory and domain_def.json on the node
+                        match the spec.
+                      type: boolean
+                  required:
+                  - mirrored
+                  - nodeName
+                  - ready
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - nodeName
+                x-kubernetes-list-type: map
             type: object
         type: object
     served: true

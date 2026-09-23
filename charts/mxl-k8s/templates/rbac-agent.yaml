@@ -6,8 +6,12 @@ metadata:
   labels:
     {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "agent") | nindent 4 }}
 rules:
+  # The agent reads domains and writes only its node's status entry.
   - apiGroups: [mxl.qvest-digital.com]
-    resources: [mxldomains, mxlflows]
+    resources: [mxldomains]
+    verbs: [get, list, watch]
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxlflows]
     verbs: [get, list, watch, create, update, patch]
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxldomains/status, mxlflows/status]
@@ -25,6 +29,10 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch]
+  # A domain's nodeSelector is matched against the agent's own node.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get]
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]

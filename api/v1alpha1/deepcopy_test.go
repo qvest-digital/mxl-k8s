@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	"regexp"
 	"testing"
 	"time"
 
@@ -133,15 +134,18 @@ func TestDeepCopy_MxlReceiver_PodSelectorAndRefAreNotAliased(t *testing.T) {
 	assert.Equal(t, "m1", copy.Status.BoundMirror.Name)
 }
 
-func TestDeepCopy_MxlDomain_StatusIsNotAliased(t *testing.T) {
+func TestDeepCopy_MxlDomain_IsNotAliased(t *testing.T) {
 	now := metav1.NewTime(time.Now())
 	orig := &MxlDomain{
-		Spec: MxlDomainSpec{NodeName: "n1", HostPath: "/run/mxl/domain"},
+		Spec: MxlDomainSpec{
+			ID:              "1ac254d9-a5eb-475f-a2b6-3d02a5cfbc82",
+			Directory:       "domain",
+			Tags:            map[string][]string{"site": {"lab"}},
+			HistoryDuration: &metav1.Duration{Duration: time.Second},
+			NodeSelector:    map[string]string{"mxl": "yes"},
+		},
 		Status: MxlDomainStatus{
-			CapacityBytes: 1 << 30,
-			FreeBytes:     1 << 20,
-			FanotifyReady: true,
-			LastSeen:      &now,
+			Nodes: []MxlDomainNodeStatus{{NodeName: "n1", Ready: true, LastSeen: &now}},
 			Conditions: []metav1.Condition{
 				{Type: "Ready", Status: metav1.ConditionTrue},
 			},
@@ -151,11 +155,37 @@ func TestDeepCopy_MxlDomain_StatusIsNotAliased(t *testing.T) {
 	copy := orig.DeepCopy()
 	require.NotNil(t, copy)
 
-	orig.Status.LastSeen.Time = time.Time{}
+	orig.Spec.Tags["site"][0] = "mutated"
+	orig.Spec.HistoryDuration.Duration = 0
+	orig.Spec.NodeSelector["mxl"] = "no"
+	orig.Status.Nodes[0].LastSeen.Time = time.Time{}
 	orig.Status.Conditions[0].Status = metav1.ConditionFalse
 
-	assert.NotEqual(t, time.Time{}, copy.Status.LastSeen.Time)
+	assert.Equal(t, "lab", copy.Spec.Tags["site"][0])
+	assert.Equal(t, time.Second, copy.Spec.HistoryDuration.Duration)
+	assert.Equal(t, "yes", copy.Spec.NodeSelector["mxl"])
+	assert.NotEqual(t, time.Time{}, copy.Status.Nodes[0].LastSeen.Time)
 	assert.Equal(t, metav1.ConditionTrue, copy.Status.Conditions[0].Status)
+}
+
+// The CRD pattern and the Go constant are one rule written twice; the
+// constant is what consumers validate staged NMOS ids against.
+func TestDomainIDPattern_MatchesBCP00703(t *testing.T) {
+	re := regexp.MustCompile(DomainIDPattern)
+	assert.True(t, re.MatchString("1ac254d9-a5eb-475f-a2b6-3d02a5cfbc82"))
+	assert.False(t, re.MatchString("1AC254D9-A5EB-475F-A2B6-3D02A5CFBC82"), "lowercase only")
+	assert.False(t, re.MatchString("1ac254d9-a5eb-075f-a2b6-3d02a5cfbc82"), "version 0")
+	assert.False(t, re.MatchString("1ac254d9-a5eb-475f-c2b6-3d02a5cfbc82"), "variant")
+	assert.False(t, re.MatchString("node-a"), "a node name is not a domain id")
+}
+
+func TestMxlDomainSpec_Selects(t *testing.T) {
+	s := MxlDomainSpec{}
+	assert.True(t, s.Selects(nil), "empty selects every node")
+	s.NodeSelector = map[string]string{"mxl": "yes"}
+	assert.True(t, s.Selects(map[string]string{"mxl": "yes", "x": "y"}))
+	assert.False(t, s.Selects(map[string]string{"mxl": "no"}))
+	assert.False(t, s.Selects(nil))
 }
 
 func TestDeepCopy_Lists_ItemsAreNotAliased(t *testing.T) {
@@ -261,8 +291,9 @@ func TestDeepCopy_RoundTrip_Equals(t *testing.T) {
 			Status: MxlFlowMirrorStatus{Phase: MxlFlowMirrorReady, TargetInfo: "info"},
 		},
 		&MxlDomain{
-			Spec:   MxlDomainSpec{NodeName: "n", HostPath: "/run/mxl/domain"},
-			Status: MxlDomainStatus{CapacityBytes: 100, FreeBytes: 50, FanotifyReady: true},
+			Spec: MxlDomainSpec{ID: "1ac254d9-a5eb-475f-a2b6-3d02a5cfbc82", Directory: "domain"},
+			Status: MxlDomainStatus{Nodes: []MxlDomainNodeStatus{
+				{NodeName: "n", CapacityBytes: 100, FreeBytes: 50, FanotifyReady: true}}},
 		},
 		&MxlNodeCapabilities{
 			Spec: MxlNodeCapabilitiesSpec{NodeName: "n"},

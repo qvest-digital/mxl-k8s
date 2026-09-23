@@ -75,3 +75,31 @@ tests:
             apiGroups: [""]
             resources: [nodes]
             verbs: [get, list, watch]
+
+  - it: agent reads domains but writes only its status entry
+    template: templates/rbac-agent.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [mxl.qvest-digital.com]
+            resources: [mxldomains]
+            verbs: [get, list, watch]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: [nodes]
+            verbs: [get]
+
+  - it: operator can delete an MxlDomain left in the per-node shape
+    template: templates/rbac-operator.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [mxl.qvest-digital.com]
+            resources: [mxldomains]
+            verbs: [get, list, watch, delete]

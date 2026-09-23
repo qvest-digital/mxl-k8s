@@ -182,6 +182,15 @@ Kubernetes: `>=1.28-0`
 | dashboards.enabled | bool | `false` | Ship the bundled dashboards. |
 | dashboards.labels | object | `{"grafana_dashboard":"1"}` | Labels the sidecar selects on. A deployment configured with a non-empty sidecar labelValue, or selecting on a release label, sets its own here. |
 | dashboards.namespace | string | `""` | Namespace to place the ConfigMaps in. Empty uses the release namespace. The sidecar's searchNamespace defaults to the namespace Grafana runs in, so a Grafana installed elsewhere needs either that setting widened or this pointed at it. |
+| domains | list | `[{"description":"","directory":"domain","historyDuration":"","id":"","label":"","name":"default","nodeSelector":{},"tags":{}}]` | MXL domains the chart creates as MxlDomain objects. Each one is materialised by the agent on every selected node as a directory under agent.hostPath.run carrying domain_def.json, the identity BCP-007-03 NMOS nodes publish as mxl_domain_id. Only the domain whose directory is the base of agent.flags.domainPath has its flows tracked and mirrored between nodes; any other is materialised on each node but not mirrored. Set an empty list to manage MxlDomains outside the chart. |
+| domains[0].description | string | `""` | domain_def.json description. |
+| domains[0].directory | string | `"domain"` | Directory below the runtime root. Must match the base of agent.flags.domainPath for the domain to be mirrored. |
+| domains[0].historyDuration | string | `""` | Ring depth libmxl gives new flows, written to options.json (e.g. "2s"). Empty leaves options.json alone. |
+| domains[0].id | string | `""` | Domain identity, a lowercase UUID. Empty keeps the id an existing object already has, and generates one on first install. Set it where it has to be known ahead of time or has to survive the object being deleted. Also set it wherever the chart is rendered without access to the cluster (helm template, helm diff, Argo CD, a GitOps render step): there the lookup finds nothing and every render generates a new id, which the API server then refuses as a change to an immutable field. |
+| domains[0].label | string | `""` | domain_def.json label. |
+| domains[0].name | string | `"default"` | Object name. |
+| domains[0].nodeSelector | object | `{}` | Nodes the domain is materialised on. Empty is every agent node. |
+| domains[0].tags | object | `{}` | domain_def.json tags, each an array of strings. |
 | exporter.affinity | object | `{}` |  |
 | exporter.args | list | `[]` | Extra raw args appended after the rendered flags. |
 | exporter.containerSecurityContext.allowPrivilegeEscalation | bool | `false` |  |

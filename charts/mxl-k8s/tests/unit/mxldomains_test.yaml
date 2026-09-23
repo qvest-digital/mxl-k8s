@@ -1,0 +1,72 @@
+suite: mxldomains
+templates:
+  - templates/mxldomains.yaml
+tests:
+  - it: renders the default domain in the directory the agent mirrors
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: spec.directory
+          value: domain
+      - matchRegex:
+          path: spec.id
+          pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[1-9a-f][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$
+
+  - it: keeps the domain when the release goes, because its id has been published
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  - it: takes a configured id verbatim, lowercased
+    set:
+      domains:
+        - name: studio
+          directory: domain
+          id: 1AC254D9-A5EB-475F-A2B6-3D02A5CFBC82
+          label: Red Studio
+          historyDuration: 2s
+          tags: {site: [lab]}
+    asserts:
+      - equal:
+          path: spec.id
+          value: 1ac254d9-a5eb-475f-a2b6-3d02a5cfbc82
+      - equal:
+          path: spec.label
+          value: Red Studio
+      - equal:
+          path: spec.historyDuration
+          value: 2s
+      - equal:
+          path: spec.tags.site
+          value: [lab]
+
+  - it: renders nothing for an empty list
+    set:
+      domains: []
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: keeps the id of the object already in the cluster when values set none
+    kubernetesProvider:
+      scheme:
+        "mxl.qvest-digital.com/v1alpha1/MxlDomain":
+          gvr:
+            group: mxl.qvest-digital.com
+            version: v1alpha1
+            resource: mxldomains
+          namespaced: false
+      objects:
+        - apiVersion: mxl.qvest-digital.com/v1alpha1
+          kind: MxlDomain
+          metadata:
+            name: default
+          spec:
+            id: 3310f209-9351-47c0-b9a2-14c59b6a4c23
+            directory: domain
+    asserts:
+      - equal:
+          path: spec.id
+          value: 3310f209-9351-47c0-b9a2-14c59b6a4c23

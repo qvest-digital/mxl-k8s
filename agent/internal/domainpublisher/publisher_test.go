@@ -2,30 +2,36 @@ package domainpublisher
 
 import (
 	"context"
-	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/qvest-digital/mxl-k8s/agent/internal/domainfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
 // goleak checks every test in this package starts and ends with the
-// same set of goroutines. RunRefreshLoop is the only goroutine
-// producer here; the assertion catches a regression that forgot to
-// honour ctx cancellation.
+// same set of goroutines; RunSyncLoop must honour ctx cancellation.
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
+
+const (
+	idA = "1ac254d9-a5eb-475f-a2b6-3d02a5cfbc82"
+	idB = "3310f209-9351-47c0-b9a2-14c59b6a4c23"
+)
 
 func newScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -35,150 +41,135 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-func staticStats(cap, free int64) FilesystemStats {
-	return func(_ string) (int64, int64, error) { return cap, free, nil }
+func domain(name, id, dir string) *mxlv1alpha1.MxlDomain {
+	return &mxlv1alpha1.MxlDomain{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec:       mxlv1alpha1.MxlDomainSpec{ID: id, Directory: dir},
+	}
 }
 
-func TestEnsureExists_CreatesMxlDomainOnce(t *testing.T) {
-	scheme := newScheme(t)
-	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	p := &Publisher{
-		Client:        c,
-		NodeName:      "n1",
-		HostPath:      "/run/mxl/domain",
-		Stats:         staticStats(1024, 512),
-		FanotifyReady: func() bool { return true },
-	}
-
-	require.NoError(t, p.EnsureExists(context.Background()))
-
-	var got mxlv1alpha1.MxlDomain
-	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "n1"}, &got))
-	assert.Equal(t, "n1", got.Spec.NodeName)
-	assert.Equal(t, "/run/mxl/domain", got.Spec.HostPath)
-	assert.Empty(t, got.Status.LastSeen,
-		"EnsureExists only creates; status is left for Refresh, so the "+
-			"agent can split creation from periodic refresh on cold start")
-
-	// Second EnsureExists must be idempotent.
-	require.NoError(t, p.EnsureExists(context.Background()))
+func node(name string, labels map[string]string) *corev1.Node {
+	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}}
 }
 
-func TestRefresh_UpdatesStatusFromStatsAndFanotifyReady(t *testing.T) {
-	scheme := newScheme(t)
-	existing := &mxlv1alpha1.MxlDomain{
-		ObjectMeta: metav1.ObjectMeta{Name: "n1"},
-		Spec:       mxlv1alpha1.MxlDomainSpec{NodeName: "n1", HostPath: "/run/mxl/domain"},
-	}
+func setup(t *testing.T, objs ...client.Object) (client.Client, *Publisher, string) {
+	t.Helper()
 	c := fake.NewClientBuilder().
-		WithScheme(scheme).
+		WithScheme(newScheme(t)).
 		WithStatusSubresource(&mxlv1alpha1.MxlDomain{}).
-		WithObjects(existing).
+		WithObjects(objs...).
 		Build()
-
-	fanotify := false
-	p := &Publisher{
-		Client:        c,
-		NodeName:      "n1",
-		HostPath:      "/run/mxl/domain",
-		Stats:         staticStats(2048, 1024),
-		FanotifyReady: func() bool { return fanotify },
-	}
-
-	require.NoError(t, p.Refresh(context.Background()))
-
-	var got mxlv1alpha1.MxlDomain
-	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "n1"}, &got))
-	assert.Equal(t, int64(2048), got.Status.CapacityBytes)
-	assert.Equal(t, int64(1024), got.Status.FreeBytes)
-	assert.False(t, got.Status.FanotifyReady,
-		"FanotifyReady=false at the agent must surface in CR status; "+
-			"otherwise on-demand mirror materialization stays broken without "+
-			"the operator noticing")
-	require.NotNil(t, got.Status.LastSeen)
-
-	// Toggle the readiness signal and refresh again: the new value
-	// must replace the old one (no silent stickiness).
-	fanotify = true
-	require.NoError(t, p.Refresh(context.Background()))
-	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "n1"}, &got))
-	assert.True(t, got.Status.FanotifyReady)
+	root := t.TempDir()
+	p := NewFromDomainPath(c, "n1", filepath.Join(root, "domain"),
+		func(string) (int64, int64, error) { return 1024, 512, nil },
+		func() bool { return true })
+	return c, p, root
 }
 
-func TestRefresh_PropagatesStatsError(t *testing.T) {
-	scheme := newScheme(t)
-	existing := &mxlv1alpha1.MxlDomain{
-		ObjectMeta: metav1.ObjectMeta{Name: "n1"},
-	}
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&mxlv1alpha1.MxlDomain{}).
-		WithObjects(existing).
-		Build()
-
-	want := errors.New("statfs broke")
-	p := &Publisher{
-		Client:        c,
-		NodeName:      "n1",
-		HostPath:      "/run/mxl/domain",
-		Stats:         func(_ string) (int64, int64, error) { return 0, 0, want },
-		FanotifyReady: func() bool { return true },
-	}
-
-	err := p.Refresh(context.Background())
-	require.Error(t, err)
-	assert.ErrorIs(t, err, want,
-		"the underlying statfs error must be wrapped, not swallowed; "+
-			"the agent must surface 'cannot read disk' to logs so an "+
-			"alert can fire")
+func get(t *testing.T, c client.Client, name string) mxlv1alpha1.MxlDomain {
+	t.Helper()
+	var d mxlv1alpha1.MxlDomain
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: name}, &d))
+	return d
 }
 
-func TestRefresh_MissingMxlDomain_Errors(t *testing.T) {
-	scheme := newScheme(t)
-	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	p := &Publisher{
-		Client:        c,
-		NodeName:      "n1",
-		Stats:         staticStats(1, 1),
-		FanotifyReady: func() bool { return true },
+// The domain the agent tracks is written with its identity and
+// reported mirrored; a second domain is written with its own identity
+// but reported as not mirrored, because nothing tracks its flows.
+func TestSyncMaterialisesEverySelectedDomain(t *testing.T) {
+	c, p, root := setup(t, node("n1", nil),
+		domain("studio", idA, "domain"), domain("scratch", idB, "scratch"))
+
+	require.NoError(t, p.Sync(context.Background()))
+
+	for _, tc := range []struct {
+		name, id, dir string
+		mirrored      bool
+	}{{"studio", idA, "domain", true}, {"scratch", idB, "scratch", false}} {
+		def, err := domainfs.ReadDefinition(filepath.Join(root, tc.dir, "domain_def.json"))
+		require.NoError(t, err)
+		assert.Equal(t, tc.id, def.ID)
+
+		got := get(t, c, tc.name)
+		e := got.Status.Node("n1")
+		require.NotNil(t, e, tc.name)
+		assert.True(t, e.Ready, tc.name)
+		assert.Equal(t, tc.mirrored, e.Mirrored, tc.name)
+		assert.Equal(t, tc.mirrored, e.FanotifyReady, tc.name)
+		assert.EqualValues(t, 1024, e.CapacityBytes)
+		assert.NotNil(t, e.LastSeen)
 	}
-	err := p.Refresh(context.Background())
-	require.Error(t, err)
 }
 
-func TestRunRefreshLoop_CancelsOnContextDone(t *testing.T) {
-	scheme := newScheme(t)
-	existing := &mxlv1alpha1.MxlDomain{
-		ObjectMeta: metav1.ObjectMeta{Name: "n1"},
-	}
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&mxlv1alpha1.MxlDomain{}).
-		WithObjects(existing).
-		Build()
-	p := &Publisher{
-		Client:        c,
-		NodeName:      "n1",
-		HostPath:      "/run/mxl/domain",
-		Stats:         staticStats(1, 1),
-		FanotifyReady: func() bool { return true },
-	}
+// Every node writes its own entry of one list; another node's entry is
+// left as it was.
+func TestSyncKeepsOtherNodesEntries(t *testing.T) {
+	d := domain("studio", idA, "domain")
+	d.Status.Nodes = []mxlv1alpha1.MxlDomainNodeStatus{{NodeName: "n2", Ready: true, Mirrored: true}}
+	c, p, _ := setup(t, node("n1", nil), d)
 
+	require.NoError(t, p.Sync(context.Background()))
+	require.NoError(t, p.Sync(context.Background()))
+
+	got := get(t, c, "studio").Status
+	require.Len(t, got.Nodes, 2)
+	assert.NotNil(t, got.Node("n2"))
+	assert.NotNil(t, got.Node("n1"))
+}
+
+// A node outside the selector writes nothing and withdraws an entry it
+// wrote while it was still selected.
+func TestSyncHonoursTheNodeSelector(t *testing.T) {
+	d := domain("studio", idA, "studio")
+	d.Spec.NodeSelector = map[string]string{"mxl": "yes"}
+	d.Status.Nodes = []mxlv1alpha1.MxlDomainNodeStatus{{NodeName: "n1", Ready: true}}
+	c, p, root := setup(t, node("n1", map[string]string{"mxl": "no"}), d)
+
+	require.NoError(t, p.Sync(context.Background()))
+
+	assert.NoDirExists(t, filepath.Join(root, "studio"))
+	got := get(t, c, "studio")
+	assert.Nil(t, got.Status.Node("n1"))
+}
+
+// Two domains naming one directory would each overwrite the other's
+// identity; neither is written and both say why.
+func TestSyncRefusesTwoDomainsInOneDirectory(t *testing.T) {
+	c, p, root := setup(t, node("n1", nil),
+		domain("a", idA, "shared"), domain("b", idB, "shared"))
+
+	require.NoError(t, p.Sync(context.Background()))
+
+	assert.NoFileExists(t, filepath.Join(root, "shared", "domain_def.json"))
+	for _, n := range []string{"a", "b"} {
+		got := get(t, c, n)
+		e := got.Status.Node("n1")
+		require.NotNil(t, e)
+		assert.False(t, e.Ready)
+		assert.Contains(t, e.Message, "claimed by a, b")
+	}
+}
+
+// An object in the per-node shape has no id; the agent leaves it to the
+// operator rather than writing a domain_def.json with an empty id.
+func TestSyncSkipsDomainsWithoutAnID(t *testing.T) {
+	c, p, root := setup(t, node("n1", nil), domain("n1", "", "domain"))
+
+	require.NoError(t, p.Sync(context.Background()))
+
+	assert.NoFileExists(t, filepath.Join(root, "domain", "domain_def.json"))
+	assert.Empty(t, get(t, c, "n1").Status.Nodes)
+}
+
+func TestRunSyncLoopStopsOnCancel(t *testing.T) {
+	_, p, _ := setup(t, node("n1", nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() {
-		p.RunRefreshLoop(ctx, 10*time.Millisecond)
-		close(done)
-	}()
-
-	// Wait long enough for at least one tick to land, then cancel.
-	time.Sleep(50 * time.Millisecond)
+	go func() { p.RunSyncLoop(ctx, time.Hour); close(done) }()
 	cancel()
-
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("RunRefreshLoop did not return after ctx cancel")
+		t.Fatal("RunSyncLoop did not return after cancel")
 	}
-	// goleak in TestMain catches any leftover goroutine.
 }
