@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -45,10 +46,10 @@ func DefinitionFor(spec *mxlv1alpha1.MxlDomainSpec) Definition {
 	return Definition{ID: spec.ID, Label: spec.Label, Description: spec.Description, Tags: tags}
 }
 
-// ErrForeignDomain is returned when the directory already carries a
-// domain_def.json naming a different id. It is not overwritten: flows
-// in it were written under that identity, and a function that read
-// the old file has told a controller the old id.
+// ErrForeignDomain is returned when the directory carries a
+// domain_def.json naming a different id and holds flows. It is not
+// overwritten: those flows were written under that identity, and a
+// function that read the old file has told a controller the old id.
 var ErrForeignDomain = errors.New("directory holds another domain")
 
 // Result says what Apply changed.
@@ -78,12 +79,9 @@ func Apply(root string, spec *mxlv1alpha1.MxlDomainSpec) (Result, error) {
 		return res, fmt.Errorf("chmod %s: %w", dir, err)
 	}
 
-	// An unreadable or unparseable file is rewritten: nothing can have
-	// read an id out of it.
 	defPath := filepath.Join(dir, mxlv1alpha1.DomainDefFile)
-	if existing, err := ReadDefinition(defPath); err == nil && existing.ID != spec.ID {
-		return res, fmt.Errorf("%w: %s names %s, spec names %s",
-			ErrForeignDomain, defPath, existing.ID, spec.ID)
+	if err := checkIdentity(dir, defPath, spec.ID); err != nil {
+		return res, err
 	}
 
 	def, err := json.MarshalIndent(DefinitionFor(spec), "", "  ")
@@ -110,6 +108,37 @@ func Apply(root string, spec *mxlv1alpha1.MxlDomainSpec) (Result, error) {
 	}
 	return res, nil
 }
+
+// checkIdentity refuses to replace an identity flows were written
+// under.
+//
+// Only a competing id is refused, and only while the directory holds a
+// flow: an unreadable file, one naming no id, or one naming this id in
+// another case carries no identity a function could have published,
+// and an empty directory has no flow a controller could be pointing at
+// under the old id. To take over a directory refused here, remove its
+// flow directories (or domain_def.json itself, if the old identity is
+// known to be unused) and the next sync writes the new one.
+func checkIdentity(dir, defPath, want string) error {
+	existing, err := ReadDefinition(defPath)
+	if err != nil || existing.ID == "" || strings.EqualFold(existing.ID, want) {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("list %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() && strings.HasSuffix(e.Name(), flowDirSuffix) {
+			return fmt.Errorf("%w: %s names %s and holds flows; spec names %s",
+				ErrForeignDomain, defPath, existing.ID, want)
+		}
+	}
+	return nil
+}
+
+// flowDirSuffix marks a flow directory inside a domain.
+const flowDirSuffix = ".mxl-flow"
 
 // ReadDefinition parses a domain_def.json.
 func ReadDefinition(path string) (Definition, error) {

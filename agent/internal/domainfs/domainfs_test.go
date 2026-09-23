@@ -56,7 +56,7 @@ func TestApplyIsIdempotent(t *testing.T) {
 	assert.False(t, res.CreatedDir)
 }
 
-// A directory already carrying another id holds flows written under
+// A directory carrying another id and holding flows was written under
 // that identity; overwriting it would silently rename a domain a
 // controller has already been told about.
 func TestApplyRefusesAForeignDomain(t *testing.T) {
@@ -65,6 +65,8 @@ func TestApplyRefusesAForeignDomain(t *testing.T) {
 	other.ID = "3310f209-9351-47c0-b9a2-14c59b6a4c23"
 	_, err := Apply(root, &other)
 	require.NoError(t, err)
+	require.NoError(t, os.Mkdir(filepath.Join(root, "domain",
+		"4c02e7c0-ffeb-4595-8673-a265d103123a.mxl-flow"), 0o755))
 
 	_, err = Apply(root, spec())
 	require.ErrorIs(t, err, ErrForeignDomain)
@@ -101,4 +103,50 @@ func TestApplyOwnsOnlyTheHistoryOption(t *testing.T) {
 	res, err = Apply(root, s)
 	require.NoError(t, err)
 	assert.False(t, res.WroteOptions)
+}
+
+// An identity is worth protecting only while flows were written under
+// it. A directory holding no flow directory has nothing to protect, so
+// a changed id is written; one holding flows is refused.
+func TestApplyReplacesAForeignIDOnlyWithoutFlows(t *testing.T) {
+	root := t.TempDir()
+	other := *spec()
+	other.ID = "3310f209-9351-47c0-b9a2-14c59b6a4c23"
+	_, err := Apply(root, &other)
+	require.NoError(t, err)
+
+	res, err := Apply(root, spec())
+	require.NoError(t, err, "no flows under the old id")
+	assert.True(t, res.WroteDefinition)
+
+	require.NoError(t, os.Mkdir(filepath.Join(root, "domain",
+		"4c02e7c0-ffeb-4595-8673-a265d103123a.mxl-flow"), 0o755))
+	_, err = Apply(root, &other)
+	require.ErrorIs(t, err, ErrForeignDomain, "flows were written under the current id")
+}
+
+// A file that names no id, or names this id in another case, carries
+// no competing identity: it is rewritten, not refused.
+func TestApplyRewritesAFileWithoutACompetingID(t *testing.T) {
+	for name, content := range map[string]string{
+		"empty object": `{}`,
+		"unparseable":  `{"id":`,
+		"uppercase id": `{"id":"1AC254D9-A5EB-475F-A2B6-3D02A5CFBC82"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "domain")
+			require.NoError(t, os.Mkdir(dir, 0o777))
+			require.NoError(t, os.Mkdir(filepath.Join(dir,
+				"4c02e7c0-ffeb-4595-8673-a265d103123a.mxl-flow"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "domain_def.json"), []byte(content), 0o644))
+
+			res, err := Apply(root, spec())
+			require.NoError(t, err)
+			assert.True(t, res.WroteDefinition)
+			d, err := ReadDefinition(filepath.Join(dir, "domain_def.json"))
+			require.NoError(t, err)
+			assert.Equal(t, id, d.ID)
+		})
+	}
 }
