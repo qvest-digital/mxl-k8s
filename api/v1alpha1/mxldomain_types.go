@@ -63,7 +63,7 @@ type MxlDomainSpec struct {
 	// stops every agent and the operator at once.
 	// +optional
 	// +kubebuilder:validation:Type=string
-	// +kubebuilder:validation:XValidation:rule="self.matches('^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$') && duration(self) > duration('0s')",message="historyDuration must be a positive duration such as 2s or 500ms"
+	// +kubebuilder:validation:XValidation:rule="self.matches('^([0-9]+([.][0-9]+)?(ns|us|ms|s|m|h))+$') && duration(self) > duration('0s')",message="historyDuration must be a positive duration such as 2s or 500ms"
 	HistoryDuration *metav1.Duration `json:"historyDuration,omitempty"`
 
 	// NodeSelector limits the nodes the domain is materialised on.
