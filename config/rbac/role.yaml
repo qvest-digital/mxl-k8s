@@ -33,7 +33,10 @@ rules:
   - mxl.qvest-digital.com
   resources:
   - mxldomains
+  - mxlflows
+  - mxlnodecapabilities
   verbs:
+  - delete
   - get
   - list
   - watch
@@ -41,9 +44,13 @@ rules:
   - mxl.qvest-digital.com
   resources:
   - mxldomains/status
-  - mxlnodecapabilities/status
+  - mxlflowmirrors/status
+  - mxlflows/status
+  - mxlreceivers/status
   verbs:
   - get
+  - patch
+  - update
 - apiGroups:
   - mxl.qvest-digital.com
   resources:
@@ -66,23 +73,9 @@ rules:
 - apiGroups:
   - mxl.qvest-digital.com
   resources:
-  - mxlflowmirrors/status
-  - mxlflows/status
-  - mxlreceivers/status
+  - mxlnodecapabilities/status
   verbs:
   - get
-  - patch
-  - update
-- apiGroups:
-  - mxl.qvest-digital.com
-  resources:
-  - mxlflows
-  - mxlnodecapabilities
-  verbs:
-  - delete
-  - get
-  - list
-  - watch
 - apiGroups:
   - mxl.qvest-digital.com
   resources:
