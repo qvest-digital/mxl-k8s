@@ -84,15 +84,14 @@ func run(args []string) error {
 	// fanotify-readiness flag, observable by the domain publisher.
 	var ready atomic.Bool
 
-	domainPub := &domainpublisher.Publisher{
-		Client:        kClient,
-		NodeName:      cfg.NodeName,
-		HostPath:      cfg.DomainPath,
-		Stats:         statfs.Stats,
-		FanotifyReady: ready.Load,
-	}
-	if err := domainPub.EnsureExists(ctx); err != nil {
-		return err
+	domainPub := domainpublisher.NewFromDomainPath(kClient, cfg.NodeName,
+		cfg.DomainPath, statfs.Stats, ready.Load)
+	// Before the fanotify mark: the mirrored directory is one of the
+	// domains, and a fresh node has none yet. A failure here is logged,
+	// not fatal -- the sync loop retries, and the mark below fails
+	// loudly if the directory is still missing.
+	if err := domainPub.Sync(ctx); err != nil {
+		setupLog.Error(err, "initial domain sync failed")
 	}
 
 	leaseMgr := originlease.New(kClient, cfg.NodeName)
@@ -128,7 +127,7 @@ func run(args []string) error {
 
 	go runProbes(ctx, cfg.ProbeAddr, &ready)
 
-	go domainPub.RunRefreshLoop(ctx, cfg.ResyncPeriod)
+	go domainPub.RunSyncLoop(ctx, cfg.ResyncPeriod)
 
 	go flowPub.RunRenewLoop(ctx, originlease.DefaultRenewInterval)
 
