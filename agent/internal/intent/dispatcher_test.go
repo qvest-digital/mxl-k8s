@@ -2,6 +2,8 @@ package intent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -679,3 +681,47 @@ func TestEnsureMirror_ExplicitProviderBypassesResolution(t *testing.T) {
 }
 
 var _ = client.IgnoreNotFound
+
+// A flow in a second MxlDomain is materialised with its identity on
+// every node but not tracked, so no mirror can be arranged for it. The
+// shim turns the refusal into ENOENT for the consumer, which says
+// nothing about why, so the refusal itself has to name the domain and
+// the fact that it is not mirrored; and no mirror is created.
+func TestMaterialize_UnmirroredDomain_RefusesAndSaysWhy(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"domain", "scratch"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o755))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(root, "scratch", "domain_def.json"),
+		[]byte(`{"id":"3310f209-9351-47c0-b9a2-14c59b6a4c23"}`), 0o644))
+
+	scheme := newScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	d := &Dispatcher{
+		Client:      c,
+		Resolver:    &podlookup.Resolver{Client: c, NodeName: "n1"},
+		DomainPath:  filepath.Join(root, "domain"),
+		NodeName:    "n1",
+		FlowChecker: func(string) bool { return false },
+	}
+
+	path := filepath.Join(root, "scratch", flowID+".mxl-flow", "flow_def.json")
+	err := d.Materialize(context.Background(), 42, path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"scratch"`)
+	assert.Contains(t, err.Error(), "does not mirror")
+
+	err = d.NotifyProducerAttached(context.Background(), 42,
+		filepath.Join(root, "scratch", flowID+".mxl-flow", "data"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not mirror")
+
+	var list mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, c.List(context.Background(), &list))
+	assert.Empty(t, list.Items)
+
+	// A path in no domain at all is still refused, with the plain reason.
+	err = d.Materialize(context.Background(), 42, filepath.Join(root, "other", flowID+".mxl-flow"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a flow path")
+}

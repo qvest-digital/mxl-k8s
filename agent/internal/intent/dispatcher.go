@@ -107,7 +107,13 @@ type OriginClaimer interface {
 func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) error {
 	flowID, ok := FlowIDFromPath(d.DomainPath, path)
 	if !ok {
-		return fmt.Errorf("%q is not a flow_def.json under %s", path, d.DomainPath)
+		err := d.notMirrored(path)
+		// At the default level: the consumer only sees ENOENT, so this
+		// line is where an operator learns the flow was never going to
+		// be brought here.
+		log.FromContext(ctx).WithName("intent").Info("intent request refused",
+			"pid", pid, "reason", err.Error())
+		return err
 	}
 
 	if d.flowExistsLocally(flowID) {
@@ -164,6 +170,32 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 	}
 	l.Info("intent request fulfilled", "sourceNode", sourceNode, "mirror", mirror.Name)
 	return nil
+}
+
+// notMirrored explains why a path outside the mirrored domain gets no
+// mirror. The shim turns any refusal into ENOENT for the consumer, so
+// this text, in the agent log and the refusal, is the only account of
+// why a flow that exists on another node was not brought here.
+//
+// A sibling directory carrying domain_def.json is another MxlDomain:
+// materialised on this node with its identity, but its flows are not
+// tracked, so a flow written on another node cannot be found and
+// mirrored. The check reads the filesystem the agent already writes
+// rather than the API, so a refusal costs no request.
+func (d *Dispatcher) notMirrored(path string) error {
+	root := filepath.Dir(filepath.Clean(d.DomainPath))
+	if rel, err := filepath.Rel(root, filepath.Clean(path)); err == nil &&
+		!strings.HasPrefix(rel, "..") {
+		dir := strings.Split(rel, string(filepath.Separator))[0]
+		if _, err := os.Stat(filepath.Join(root, dir, mxlv1alpha1.DomainDefFile)); err == nil &&
+			dir != filepath.Base(filepath.Clean(d.DomainPath)) {
+			return fmt.Errorf("%q is in MXL domain directory %q, which mxl-k8s "+
+				"materialises on this node but does not mirror; only flows under %s "+
+				"are brought here from other nodes", path, dir, d.DomainPath)
+		}
+	}
+	return fmt.Errorf("%q is not a flow path under %s, the MXL domain mxl-k8s mirrors",
+		path, d.DomainPath)
 }
 
 // FlowIDFromPath returns the flow id if path is under
@@ -250,7 +282,7 @@ func (d *Dispatcher) leaseFreshness(ctx context.Context) mxlv1alpha1.LeaseFreshn
 func (d *Dispatcher) NotifyProducerAttached(ctx context.Context, pid int32, path string) error {
 	flowID, ok := FlowIDFromPath(d.DomainPath, path)
 	if !ok {
-		return fmt.Errorf("%q is not under %s", path, d.DomainPath)
+		return d.notMirrored(path)
 	}
 	if d.Origin == nil {
 		return nil
