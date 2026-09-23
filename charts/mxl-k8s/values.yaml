@@ -54,7 +54,11 @@ domains:
     # -- Domain identity, a lowercase UUID. Empty keeps the id an
     # existing object already has, and generates one on first
     # install. Set it where it has to be known ahead of time or has
-    # to survive the object being deleted.
+    # to survive the object being deleted. Also set it wherever the
+    # chart is rendered without access to the cluster (helm template,
+    # helm diff, Argo CD, a GitOps render step): there the lookup
+    # finds nothing and every render generates a new id, which the
+    # API server then refuses as a change to an immutable field.
     id: ""
     # -- domain_def.json label.
     label: ""

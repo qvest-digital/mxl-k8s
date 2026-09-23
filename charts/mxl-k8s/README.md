@@ -186,7 +186,7 @@ Kubernetes: `>=1.28-0`
 | domains[0].description | string | `""` | domain_def.json description. |
 | domains[0].directory | string | `"domain"` | Directory below the runtime root. Must match the base of agent.flags.domainPath for the domain to be mirrored. |
 | domains[0].historyDuration | string | `""` | Ring depth libmxl gives new flows, written to options.json (e.g. "2s"). Empty leaves options.json alone. |
-| domains[0].id | string | `""` | Domain identity, a lowercase UUID. Empty keeps the id an existing object already has, and generates one on first install. Set it where it has to be known ahead of time or has to survive the object being deleted. |
+| domains[0].id | string | `""` | Domain identity, a lowercase UUID. Empty keeps the id an existing object already has, and generates one on first install. Set it where it has to be known ahead of time or has to survive the object being deleted. Also set it wherever the chart is rendered without access to the cluster (helm template, helm diff, Argo CD, a GitOps render step): there the lookup finds nothing and every render generates a new id, which the API server then refuses as a change to an immutable field. |
 | domains[0].label | string | `""` | domain_def.json label. |
 | domains[0].name | string | `"default"` | Object name. |
 | domains[0].nodeSelector | object | `{}` | Nodes the domain is materialised on. Empty is every agent node. |
