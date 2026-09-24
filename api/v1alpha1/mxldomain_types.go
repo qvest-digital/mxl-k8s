@@ -166,6 +166,7 @@ func (s *MxlDomainSpec) Path() string {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=mxldom
+// +kubebuilder:validation:XValidation:rule="self.metadata.name.matches('^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$')",message="name must be a DNS label: flows, mirrors and leases carry it in theirs"
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name=ID,type=string,JSONPath=`.spec.id`
 // +kubebuilder:printcolumn:name=Directory,type=string,JSONPath=`.spec.directory`

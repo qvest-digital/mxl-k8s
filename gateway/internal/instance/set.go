@@ -15,9 +15,8 @@ import (
 // domain's options at instance open and a mirror in that domain may be
 // set up at any time.
 type Set struct {
-	// Primary is the domain --domain-path names. A mirror with no
-	// spec.domain, or naming the MxlDomain whose directory it is, uses
-	// it.
+	// Primary is the domain --domain-path names, which a mirror with no
+	// spec.domain uses.
 	Primary *Handles
 
 	// Directory resolves an MxlDomain name to its directory relative
@@ -43,18 +42,15 @@ func (s *Set) For(ctx context.Context, domain string) (*Handles, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve MxlDomain %s: %w", domain, err)
 	}
-	if !filepath.IsLocal(dir) || filepath.Clean(dir) != dir || dir == "." {
-		return nil, fmt.Errorf("MxlDomain %s has directory %q, not one below the runtime root", domain, dir)
+	// Only a domain at domains/<id> is named on a mirror: the primary
+	// domain is spelled empty, and one in any other directory is not
+	// mounted here. Opening the primary under its name as well would let
+	// a teardown judge the flow by an MxlFlow that does not exist and
+	// remove a local producer's flow.
+	if !filepath.IsLocal(dir) || filepath.Clean(dir) != dir || filepath.Dir(dir) != mxlv1alpha1.DomainsDir {
+		return nil, fmt.Errorf("MxlDomain %s is in %q, not below %s/, and is not mirrored by name", domain, dir, mxlv1alpha1.DomainsDir)
 	}
 	primary := s.Primary.DomainPath()
-	if dir == filepath.Base(primary) {
-		return s.Primary, nil
-	}
-	// The gateway mounts the primary domain and domains/, nothing else
-	// of the runtime root.
-	if filepath.Dir(dir) != mxlv1alpha1.DomainsDir {
-		return nil, fmt.Errorf("MxlDomain %s is in %q, not below %s/, and is not mirrored", domain, dir, mxlv1alpha1.DomainsDir)
-	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -25,20 +25,20 @@ func newTestSet(dirs map[string]string) (*Set, *[]string) {
 	return s, &opened
 }
 
-// A mirror in the primary domain names it either not at all or by the
-// MxlDomain whose directory --domain-path is; both must reach the one
-// instance the gateway opened at start, or the same flow would be
-// opened through two instances.
-func TestSetPrimaryByEmptyOrName(t *testing.T) {
+// A mirror in the primary domain carries no domain. Naming the primary's
+// MxlDomain instead is refused rather than opened: the flow would then be
+// judged by an MxlFlow "<name>.<id>" that does not exist.
+func TestSetPrimaryIsSpelledEmpty(t *testing.T) {
 	s, opened := newTestSet(map[string]string{"default": "domain"})
-	for _, name := range []string{"", "default"} {
-		h, err := s.For(context.Background(), name)
-		if err != nil || h != s.Primary {
-			t.Fatalf("For(%q) = %v, %v; want the primary", name, h, err)
-		}
+	h, err := s.For(context.Background(), "")
+	if err != nil || h != s.Primary {
+		t.Fatalf("For(\"\") = %v, %v; want the primary", h, err)
+	}
+	if _, err := s.For(context.Background(), "default"); err == nil {
+		t.Fatal("the primary domain was opened by its name")
 	}
 	if len(*opened) != 0 {
-		t.Fatalf("opened %v for the primary domain", *opened)
+		t.Fatalf("opened %v", *opened)
 	}
 }
 

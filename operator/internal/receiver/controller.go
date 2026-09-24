@@ -242,7 +242,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 				terminating = true
 				continue
 			}
-			if errors.Is(err, errNotMultiDomain) {
+			if errors.Is(err, errNotMultiDomain) || errors.Is(err, errDomainNotMirrored) {
 				// Nothing to retry until the gateway is upgraded; its
 				// MxlNodeCapabilities changing is not watched, so the
 				// pending requeue is what notices.
@@ -686,6 +686,24 @@ func (r *Reconciler) resolveProvider(ctx context.Context, recv *mxlv1alpha1.MxlR
 	return provider, nil
 }
 
+// requireMirroredDomain refuses a domain named on a receiver unless it is
+// one without a directory, at domains/<id>. The primary domain is spelled
+// empty, and naming it would look for an MxlFlow "<name>.<id>" that never
+// exists; a domain in any other directory is not mirrored.
+func (r *Reconciler) requireMirroredDomain(ctx context.Context, name string) error {
+	var d mxlv1alpha1.MxlDomain
+	if err := r.Get(ctx, types.NamespacedName{Name: name}, &d); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("MxlDomain %s: %w", name, errDomainNotMirrored)
+		}
+		return err
+	}
+	if d.Spec.Directory != "" {
+		return fmt.Errorf("MxlDomain %s has its own directory %q: %w", name, d.Spec.Directory, errDomainNotMirrored)
+	}
+	return nil
+}
+
 // requireMultiDomain refuses a mirror in a domain other than the primary
 // unless the gateway on every node it involves reports multiDomain. A
 // gateway without it ignores spec.domain and would copy the primary
@@ -732,6 +750,11 @@ var errMirrorTerminating = errors.New("mirror is terminating")
 // towards or from a gateway that mirrors only the primary domain.
 var errNotMultiDomain = errors.New("gateway mirrors only the primary MXL domain")
 
+// errDomainNotMirrored reports a receiver naming a domain whose flows are
+// not mirrored by name: the primary domain, which is spelled empty, one in
+// its own directory, or one that does not exist.
+var errDomainNotMirrored = errors.New("not a domain mirrored by name; leave spec.domain empty for the primary domain")
+
 // ensureMirror creates the MxlFlowMirror for (flow, target) if it
 // does not already exist, or merge-patches spec.sourceNode and
 // spec.provider on the existing mirror when they no longer match
@@ -745,6 +768,9 @@ var errNotMultiDomain = errors.New("gateway mirrors only the primary MXL domain"
 func (r *Reconciler) ensureMirror(ctx context.Context, recv *mxlv1alpha1.MxlReceiver, sourceNode string, target nodeTarget) (*mxlv1alpha1.MxlFlowMirror, error) {
 	name := mirrorNameForReceiver(recv, target)
 	if recv.Spec.Domain != "" {
+		if err := r.requireMirroredDomain(ctx, recv.Spec.Domain); err != nil {
+			return nil, err
+		}
 		if err := r.requireMultiDomain(ctx, sourceNode, target.node); err != nil {
 			return nil, err
 		}

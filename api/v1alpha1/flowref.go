@@ -12,7 +12,9 @@ import "strings"
 // Domain is the MxlDomain name, and empty means the primary domain,
 // the one the agent's --domain-path names. That is what every object
 // written before domains existed means, so those objects keep their
-// names and nothing has to be migrated.
+// names and nothing has to be migrated. It is the primary domain's only
+// spelling: a domain named here is one without a directory, at
+// domains/<id>.
 //
 // +kubebuilder:object:generate=false
 type FlowRef struct {
@@ -32,20 +34,6 @@ func (r FlowRef) Name() string {
 		return r.ID
 	}
 	return r.Domain + domainSeparator + r.ID
-}
-
-// Normalize folds the primary domain's name into the empty form.
-//
-// The primary domain is a named MxlDomain too, so a flow in it can be
-// spelled either way, and two spellings would give one flow two object
-// names and two mirrors. Every ref is compared and named in the empty
-// form; primary is the primary domain's MxlDomain name, and empty folds
-// nothing.
-func (r FlowRef) Normalize(primary string) FlowRef {
-	if primary != "" && r.Domain == primary {
-		r.Domain = ""
-	}
-	return r
 }
 
 // ParseFlowName reverses FlowRef.Name.

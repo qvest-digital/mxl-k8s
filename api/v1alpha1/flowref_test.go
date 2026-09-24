@@ -42,21 +42,6 @@ func TestParseLeaseNameFor_RoundTrip(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// The primary domain is a named MxlDomain as well, so a flow in it can be
-// spelled with its name or with none. Both have to be one flow: two spellings
-// would give it two object names and two mirrors.
-func TestFlowRef_ThePrimaryDomainHasOneSpelling(t *testing.T) {
-	named := FlowRef{Domain: "default", ID: refID}
-	bare := FlowRef{ID: refID}
-	assert.Equal(t, bare, named.Normalize("default"))
-	assert.Equal(t, bare, bare.Normalize("default"))
-	assert.Equal(t, bare.Name(), named.Normalize("default").Name())
-
-	other := FlowRef{Domain: "studio-b", ID: refID}
-	assert.Equal(t, other, other.Normalize("default"), "another domain keeps its name")
-	assert.Equal(t, named, named.Normalize(""), "with no primary known nothing is folded")
-}
-
 // A flow's Origin Lease is keyed by the flow's own name. For a flow in
 // another domain the bare id would name the primary domain's flow of the
 // same id, so its Lease -- live or not -- would decide the other's origin.

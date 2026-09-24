@@ -83,11 +83,14 @@ spec:
             properties:
               domain:
                 description: |-
-                  Domain is the MxlDomain the flow belongs to. Empty is the primary
-                  domain, the one the agent's --domain-path names; every object
-                  written before domains existed carries none. Immutable: the same
-                  id in another domain is another flow.
+                  Domain is the MxlDomain the flow belongs to, one without a
+                  spec.directory, whose flows live at domains/<id>. Empty is the
+                  primary domain, the one the agent's --domain-path names, and the
+                  only spelling of it; every object written before domains existed
+                  carries none. Immutable: the same id in another domain is another
+                  flow.
                 maxLength: 63
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
                 x-kubernetes-validations:
                 - message: domain is immutable

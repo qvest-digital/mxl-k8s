@@ -66,12 +66,15 @@ type MxlFlowSpec struct {
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 	ID string `json:"id"`
 
-	// Domain is the MxlDomain the flow belongs to. Empty is the primary
-	// domain, the one the agent's --domain-path names; every object
-	// written before domains existed carries none. Immutable: the same
-	// id in another domain is another flow.
+	// Domain is the MxlDomain the flow belongs to, one without a
+	// spec.directory, whose flows live at domains/<id>. Empty is the
+	// primary domain, the one the agent's --domain-path names, and the
+	// only spelling of it; every object written before domains existed
+	// carries none. Immutable: the same id in another domain is another
+	// flow.
 	// +optional
 	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="domain is immutable"
 	Domain string `json:"domain,omitempty"`
 
