@@ -96,7 +96,7 @@ func run(args []string) error {
 	primaryDir := filepath.Base(filepath.Clean(cfg.DomainPath))
 	trackers := &tracker.Manager{
 		PrimaryDir: primaryDir,
-		Start: func(ctx context.Context, name, dir string) (func(), error) {
+		Start: func(ctx context.Context, name, dir string) (tracker.Tracker, error) {
 			return startTracker(ctx, kClient, cfg.NodeName, leaseMgr, name, filepath.Join(root, dir))
 		},
 	}
@@ -174,7 +174,7 @@ func run(args []string) error {
 			Provider:           mxlv1alpha1.MxlFabricsProvider(cfg.Provider),
 			MaterializeTimeout: cfg.MaterializeTimeout,
 			Lease:              leaseMgr,
-			Origin:             flowPub,
+			Origin: originClaims{primary: flowPub, trackers: trackers},
 			Domains: func() intent.Domains {
 				domainsMu.Lock()
 				defer domainsMu.Unlock()
@@ -275,7 +275,7 @@ func runProbes(ctx context.Context, addr string, ready *atomic.Bool) {
 // It returns once the mark is in place, so a domain is reported mirrored only
 // when its flows are being tracked.
 func startTracker(ctx context.Context, c client.Client, node string,
-	lease *originlease.Manager, name, dir string) (func(), error) {
+	lease *originlease.Manager, name, dir string) (tracker.Tracker, error) {
 
 	l := ctrl.Log.WithName("tracker").WithValues("domain", name, "directory", dir)
 	fp := &flowpublisher.Publisher{
@@ -287,13 +287,13 @@ func startTracker(ctx context.Context, c client.Client, node string,
 	}
 	w, err := fanotify.New()
 	if err != nil {
-		return nil, fmt.Errorf("fanotify init: %w", err)
+		return tracker.Tracker{}, fmt.Errorf("fanotify init: %w", err)
 	}
 	if err := w.MarkInode(dir,
 		fanotify.MaskCreate|fanotify.MaskMovedTo|fanotify.MaskDelete|fanotify.MaskMovedFrom|fanotify.MaskOnDir,
 	); err != nil {
 		w.Close()
-		return nil, fmt.Errorf("fanotify mark %s: %w", dir, err)
+		return tracker.Tracker{}, fmt.Errorf("fanotify mark %s: %w", dir, err)
 	}
 	if err := fp.InitialSync(ctx); err != nil {
 		l.Error(err, "initial flow sync failed")
@@ -315,7 +315,7 @@ func startTracker(ctx context.Context, c client.Client, node string,
 	go func() { defer wg.Done(); fp.RunLocalRescan(tctx, 30*time.Second) }()
 	l.Info("tracking domain")
 
-	return func() {
+	stop := func() {
 		cancel()
 		wg.Wait()
 		w.Close()
@@ -326,5 +326,20 @@ func startTracker(ctx context.Context, c client.Client, node string,
 			l.Error(err, "releasing leases")
 		}
 		l.Info("stopped tracking domain")
-	}, nil
+	}
+	return tracker.Tracker{Stop: stop, ClaimOrigin: fp.ClaimOrigin}, nil
+}
+
+// originClaims sends a producer's claim to the publisher of its flow's
+// domain: the primary one, or the tracker of any other.
+type originClaims struct {
+	primary  *flowpublisher.Publisher
+	trackers *tracker.Manager
+}
+
+func (o originClaims) ClaimOrigin(ctx context.Context, ref mxlv1alpha1.FlowRef) error {
+	if ref.Domain == "" {
+		return o.primary.ClaimOrigin(ctx, ref.ID)
+	}
+	return o.trackers.ClaimOrigin(ctx, ref.Domain, ref.ID)
 }

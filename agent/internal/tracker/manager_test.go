@@ -13,20 +13,29 @@ type fakeStarter struct {
 	mu      sync.Mutex
 	started map[string]string
 	stopped []string
+	claimed []string
 	fail    map[string]bool
 }
 
-func (f *fakeStarter) start(_ context.Context, name, dir string) (func(), error) {
+func (f *fakeStarter) start(_ context.Context, name, dir string) (Tracker, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fail[name] {
-		return nil, errors.New("no such directory")
+		return Tracker{}, errors.New("no such directory")
 	}
 	f.started[name] = dir
-	return func() {
-		f.mu.Lock()
-		f.stopped = append(f.stopped, name)
-		f.mu.Unlock()
+	return Tracker{
+		Stop: func() {
+			f.mu.Lock()
+			f.stopped = append(f.stopped, name)
+			f.mu.Unlock()
+		},
+		ClaimOrigin: func(_ context.Context, flowID string) error {
+			f.mu.Lock()
+			f.claimed = append(f.claimed, name+"/"+flowID)
+			f.mu.Unlock()
+			return nil
+		},
 	}, nil
 }
 
@@ -80,4 +89,22 @@ func TestManagerStopsEverythingOnce(t *testing.T) {
 	m.StopAll()
 	m.StopAll()
 	assert.ElementsMatch(t, []string{"a", "b"}, f.stopped)
+}
+
+// A producer's claim reaches the tracker of its flow's domain, and a claim
+// in a domain not tracked here fails rather than landing anywhere else.
+func TestClaimOriginRoutesToTheDomainsTracker(t *testing.T) {
+	f := &fakeStarter{started: map[string]string{}}
+	m := &Manager{PrimaryDir: "domain", Start: f.start}
+	m.Sync(context.Background(), map[string]string{"a": "domains/a", "b": "domains/b"})
+
+	if err := m.ClaimOrigin(context.Background(), "b", "id1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ClaimOrigin(context.Background(), "c", "id1"); err == nil {
+		t.Fatal("claim in an untracked domain succeeded")
+	}
+	if len(f.claimed) != 1 || f.claimed[0] != "b/id1" {
+		t.Fatalf("claimed %v, want [b/id1]", f.claimed)
+	}
 }

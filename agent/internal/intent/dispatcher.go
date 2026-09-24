@@ -104,7 +104,7 @@ type Dispatcher struct {
 // package does not depend on the publisher, matching how LeaseChecker
 // keeps the Lease manager out.
 type OriginClaimer interface {
-	ClaimOrigin(ctx context.Context, flowID string) error
+	ClaimOrigin(ctx context.Context, ref mxlv1alpha1.FlowRef) error
 }
 
 // Materialize ensures that the flow referenced by path is, or will
@@ -278,7 +278,11 @@ func (d *Dispatcher) flowExistsLocally(ref mxlv1alpha1.FlowRef) bool {
 	if d.FlowChecker != nil && ref.Domain == "" {
 		return d.FlowChecker(ref.ID)
 	}
-	_, err := os.Stat(filepath.Join(d.domainDir(ref), ref.ID+".mxl-flow", "flow_def.json"))
+	dir := d.domainDir(ref)
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, ref.ID+".mxl-flow", "flow_def.json"))
 	return err == nil
 }
 
@@ -327,7 +331,7 @@ func (d *Dispatcher) leaseFreshness(ctx context.Context) mxlv1alpha1.LeaseFreshn
 // reclaimed source would look identical to a real producer and claim
 // a false Origin.
 func (d *Dispatcher) NotifyProducerAttached(ctx context.Context, pid int32, path string) error {
-	flowID, ok := FlowIDFromPath(d.DomainPath, path)
+	ref, ok := d.flowRef(path)
 	if !ok {
 		return d.notMirrored(path)
 	}
@@ -335,13 +339,13 @@ func (d *Dispatcher) NotifyProducerAttached(ctx context.Context, pid int32, path
 		return nil
 	}
 
-	l := log.FromContext(ctx).WithName("intent").WithValues("flowID", flowID, "pid", pid)
+	l := log.FromContext(ctx).WithName("intent").WithValues("flow", ref.Name(), "pid", pid)
 	if pod, err := d.Resolver.PodForPID(ctx, pid); err == nil {
 		l = l.WithValues("pod", pod.GetNamespace()+"/"+pod.GetName())
 	}
 	l.V(1).Info("producer attached to existing flow")
 
-	return d.Origin.ClaimOrigin(ctx, flowID)
+	return d.Origin.ClaimOrigin(ctx, ref)
 }
 
 func (d *Dispatcher) ensureMirror(ctx context.Context, ref mxlv1alpha1.FlowRef, sourceNode string, pod metav1.Object) (*mxlv1alpha1.MxlFlowMirror, error) {
@@ -529,18 +533,30 @@ func MirrorName(flowID, targetNode string) string {
 // flowRef is the flow a path names. With Domains set it resolves against every
 // domain materialised on the node; without, only the primary, as before
 // domains existed.
+//
+// The primary domain is resolved from DomainPath whether or not an
+// MxlDomain naming its directory is materialised yet: the registry only
+// lists domains Ready on this node, and a missed sync must not refuse
+// every request the agent served before domains existed.
 func (d *Dispatcher) flowRef(path string) (mxlv1alpha1.FlowRef, bool) {
 	if d.Domains != nil {
-		return d.Domains().FlowRefFromPath(path)
+		if ref, ok := d.Domains().FlowRefFromPath(path); ok {
+			return ref, true
+		}
 	}
 	id, ok := FlowIDFromPath(d.DomainPath, path)
 	return mxlv1alpha1.FlowRef{ID: id}, ok
 }
 
-// domainDir is the directory a flow's domain is materialised in on this node.
+// domainDir is the directory a flow's domain is materialised in on this
+// node, and empty for a domain that is not: never the primary directory,
+// which holds another flow of the same id.
 func (d *Dispatcher) domainDir(ref mxlv1alpha1.FlowRef) string {
-	if ref.Domain == "" || d.Domains == nil {
+	if ref.Domain == "" {
 		return d.DomainPath
+	}
+	if d.Domains == nil {
+		return ""
 	}
 	doms := d.Domains()
 	for dir, name := range doms.ByDir {
@@ -548,5 +564,5 @@ func (d *Dispatcher) domainDir(ref mxlv1alpha1.FlowRef) string {
 			return filepath.Join(doms.Root, dir)
 		}
 	}
-	return d.DomainPath
+	return ""
 }
