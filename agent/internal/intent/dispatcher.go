@@ -87,6 +87,11 @@ type Dispatcher struct {
 	// the operator owns the OriginFresh condition writeback.
 	Lease LeaseChecker
 
+	// Domains is the MXL domains materialised on this node, read per
+	// request because they come and go. Nil resolves only the primary
+	// domain, DomainPath.
+	Domains func() Domains
+
 	// Origin records this node as a flow's origin when a local
 	// producer attaches to a flow that already existed. Nil makes
 	// NotifyProducerAttached a no-op, which is what a dispatcher
@@ -110,7 +115,8 @@ type OriginClaimer interface {
 // pid is the host PID of the consumer process that triggered the
 // request (typically obtained via SO_PEERCRED on the UDS).
 func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) error {
-	flowID, ok := FlowIDFromPath(d.DomainPath, path)
+	ref, ok := d.flowRef(path)
+	flowID := ref.ID
 	if !ok {
 		err := d.notMirrored(path)
 		// At the default level: the consumer only sees ENOENT, so this
@@ -124,7 +130,7 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 		return err
 	}
 
-	if d.flowExistsLocally(flowID) {
+	if d.flowExistsLocally(ref) {
 		return nil
 	}
 
@@ -147,7 +153,7 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 	)
 	l.Info("intent request received")
 
-	res, err := d.resolveSourceNode(wctx, flowID)
+	res, err := d.resolveSourceNode(wctx, ref)
 	if err != nil {
 		return fmt.Errorf("resolve source node: %w", err)
 	}
@@ -168,7 +174,7 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 		return nil
 	}
 
-	mirror, err := d.ensureMirror(wctx, flowID, sourceNode, pod)
+	mirror, err := d.ensureMirror(wctx, ref, sourceNode, pod)
 	if err != nil {
 		return fmt.Errorf("ensure mirror: %w", err)
 	}
@@ -268,17 +274,17 @@ func FlowIDFromPath(domain, path string) (string, bool) {
 	return id, true
 }
 
-func (d *Dispatcher) flowExistsLocally(flowID string) bool {
-	if d.FlowChecker != nil {
-		return d.FlowChecker(flowID)
+func (d *Dispatcher) flowExistsLocally(ref mxlv1alpha1.FlowRef) bool {
+	if d.FlowChecker != nil && ref.Domain == "" {
+		return d.FlowChecker(ref.ID)
 	}
-	_, err := os.Stat(filepath.Join(d.DomainPath, flowID+".mxl-flow", "flow_def.json"))
+	_, err := os.Stat(filepath.Join(d.domainDir(ref), ref.ID+".mxl-flow", "flow_def.json"))
 	return err == nil
 }
 
-func (d *Dispatcher) resolveSourceNode(ctx context.Context, flowID string) (mxlv1alpha1.OriginResolution, error) {
+func (d *Dispatcher) resolveSourceNode(ctx context.Context, ref mxlv1alpha1.FlowRef) (mxlv1alpha1.OriginResolution, error) {
 	var flow mxlv1alpha1.MxlFlow
-	if err := d.Client.Get(ctx, types.NamespacedName{Name: flowID}, &flow); err != nil {
+	if err := d.Client.Get(ctx, types.NamespacedName{Name: ref.Name()}, &flow); err != nil {
 		if apierrors.IsNotFound(err) {
 			return mxlv1alpha1.OriginResolution{}, nil
 		}
@@ -338,8 +344,9 @@ func (d *Dispatcher) NotifyProducerAttached(ctx context.Context, pid int32, path
 	return d.Origin.ClaimOrigin(ctx, flowID)
 }
 
-func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string, pod metav1.Object) (*mxlv1alpha1.MxlFlowMirror, error) {
-	name := MirrorName(flowID, d.NodeName)
+func (d *Dispatcher) ensureMirror(ctx context.Context, ref mxlv1alpha1.FlowRef, sourceNode string, pod metav1.Object) (*mxlv1alpha1.MxlFlowMirror, error) {
+	flowID := ref.ID
+	name := mxlv1alpha1.MirrorNameFor(ref, d.NodeName)
 
 	var existing mxlv1alpha1.MxlFlowMirror
 	err := d.Client.Get(ctx, types.NamespacedName{Namespace: pod.GetNamespace(), Name: name}, &existing)
@@ -382,6 +389,7 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string
 		},
 		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
 			FlowID:     flowID,
+			Domain:     ref.Domain,
 			SourceNode: sourceNode,
 			TargetNode: d.NodeName,
 			Provider:   provider,
@@ -492,4 +500,29 @@ func (d *Dispatcher) waitReady(ctx context.Context, mirror *mxlv1alpha1.MxlFlowM
 // structural rather than a matter of two copies staying in step.
 func MirrorName(flowID, targetNode string) string {
 	return mxlv1alpha1.MirrorName(flowID, targetNode)
+}
+
+// flowRef is the flow a path names. With Domains set it resolves against every
+// domain materialised on the node; without, only the primary, as before
+// domains existed.
+func (d *Dispatcher) flowRef(path string) (mxlv1alpha1.FlowRef, bool) {
+	if d.Domains != nil {
+		return d.Domains().FlowRefFromPath(path)
+	}
+	id, ok := FlowIDFromPath(d.DomainPath, path)
+	return mxlv1alpha1.FlowRef{ID: id}, ok
+}
+
+// domainDir is the directory a flow's domain is materialised in on this node.
+func (d *Dispatcher) domainDir(ref mxlv1alpha1.FlowRef) string {
+	if ref.Domain == "" || d.Domains == nil {
+		return d.DomainPath
+	}
+	doms := d.Domains()
+	for dir, name := range doms.ByDir {
+		if name == ref.Domain {
+			return filepath.Join(doms.Root, dir)
+		}
+	}
+	return d.DomainPath
 }
