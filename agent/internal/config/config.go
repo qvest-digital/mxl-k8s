@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -113,6 +114,11 @@ func (c *Config) Validate() error {
 	}
 	if c.DomainPath[0] != '/' {
 		return fmt.Errorf("--domain-path must be absolute, got %q", c.DomainPath)
+	}
+	// Every other domain lives in domains/ beside the primary one; a
+	// primary inside it would be tracked twice, once under each name.
+	if filepath.Base(filepath.Dir(filepath.Clean(c.DomainPath))) == mxlv1alpha1.DomainsDir {
+		return fmt.Errorf("--domain-path must not be inside %s/, got %q", mxlv1alpha1.DomainsDir, c.DomainPath)
 	}
 	if c.NodeName == "" {
 		return fmt.Errorf("--node-name (or $NODE_NAME) is required")
