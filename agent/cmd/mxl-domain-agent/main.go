@@ -174,7 +174,7 @@ func run(args []string) error {
 			Provider:           mxlv1alpha1.MxlFabricsProvider(cfg.Provider),
 			MaterializeTimeout: cfg.MaterializeTimeout,
 			Lease:              leaseMgr,
-			Origin: originClaims{primary: flowPub, trackers: trackers},
+			Origin:             originClaims{primary: flowPub, trackers: trackers},
 			Domains: func() intent.Domains {
 				domainsMu.Lock()
 				defer domainsMu.Unlock()
