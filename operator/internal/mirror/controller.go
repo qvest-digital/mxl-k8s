@@ -362,15 +362,15 @@ func (r *Reconciler) source(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) (
 	}
 
 	var flow mxlv1alpha1.MxlFlow
-	err = r.Get(ctx, types.NamespacedName{Name: m.Spec.FlowID}, &flow)
+	err = r.Get(ctx, types.NamespacedName{Name: m.Ref().Name()}, &flow)
 	if apierrors.IsNotFound(err) {
 		return sourceJudgement{disposition: r.unresolved(ctx, m), judgement: judgement{
 			reason:  mxlv1alpha1.ReasonOriginUnresolved,
-			message: fmt.Sprintf("MxlFlow %s does not exist", m.Spec.FlowID),
+			message: fmt.Sprintf("MxlFlow %s does not exist", m.Ref().Name()),
 		}}, nil
 	}
 	if err != nil {
-		return sourceJudgement{}, fmt.Errorf("get MxlFlow %s: %w", m.Spec.FlowID, err)
+		return sourceJudgement{}, fmt.Errorf("get MxlFlow %s: %w", m.Ref().Name(), err)
 	}
 
 	res, err := mxlv1alpha1.ResolveOrigin(&flow, r.leaseFreshness(ctx))
@@ -885,17 +885,17 @@ func (r *Reconciler) flowToMirrors(ctx context.Context, obj client.Object) []rec
 		return nil
 	}
 	return r.mirrorsMatching(ctx, func(m *mxlv1alpha1.MxlFlowMirror) bool {
-		return m.Spec.FlowID == flow.Spec.ID
+		return m.Ref() == flow.Ref()
 	})
 }
 
 func (r *Reconciler) leaseToMirrors(ctx context.Context, obj client.Object) []reconcile.Request {
-	flowID, _, ok := mxlv1alpha1.ParseLeaseName(obj.GetName())
+	ref, _, ok := mxlv1alpha1.ParseLeaseNameFor(obj.GetName())
 	if !ok {
 		return nil
 	}
 	return r.mirrorsMatching(ctx, func(m *mxlv1alpha1.MxlFlowMirror) bool {
-		return m.Spec.FlowID == flowID
+		return m.Ref() == ref
 	})
 }
 

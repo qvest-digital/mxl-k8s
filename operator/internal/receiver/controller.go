@@ -174,7 +174,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("resolve targets: %w", err)
 	}
 
-	res, err := r.resolveSourceNode(ctx, recv.Spec.FlowID)
+	res, err := r.resolveSourceNode(ctx, recv.Ref().Name())
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("resolve source node: %w", err)
 	}
@@ -241,6 +241,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			if errors.Is(err, errMirrorTerminating) {
 				terminating = true
 				continue
+			}
+			if errors.Is(err, errNotMultiDomain) {
+				// Nothing to retry until the gateway is upgraded; its
+				// MxlNodeCapabilities changing is not watched, so the
+				// pending requeue is what notices.
+				return r.markPending(ctx, &recv, err.Error())
 			}
 			return ctrl.Result{}, fmt.Errorf("ensure mirror for %s in %s: %w", t.node, t.namespace, err)
 		}
@@ -680,6 +686,23 @@ func (r *Reconciler) resolveProvider(ctx context.Context, recv *mxlv1alpha1.MxlR
 	return provider, nil
 }
 
+// requireMultiDomain refuses a mirror in a domain other than the primary
+// unless the gateway on every node it involves reports multiDomain. A
+// gateway without it ignores spec.domain and would copy the primary
+// domain's flow of the same id.
+func (r *Reconciler) requireMultiDomain(ctx context.Context, nodes ...string) error {
+	for _, node := range nodes {
+		caps, err := r.nodeCapabilities(ctx, node)
+		if err != nil {
+			return fmt.Errorf("node %s capabilities: %w", node, err)
+		}
+		if !caps.MultiDomain {
+			return fmt.Errorf("node %s: %w", node, errNotMultiDomain)
+		}
+	}
+	return nil
+}
+
 // nodeCapabilities reads the cluster-scoped MxlNodeCapabilities the
 // gateway publishes for nodeName (named after the node). A missing
 // resource yields an empty status so the resolver falls back rather
@@ -705,6 +728,10 @@ func (r *Reconciler) nodeCapabilities(ctx context.Context, nodeName string) (mxl
 // Bound against a mirror that is already gone.
 var errMirrorTerminating = errors.New("mirror is terminating")
 
+// errNotMultiDomain reports a mirror in a domain other than the primary
+// towards or from a gateway that mirrors only the primary domain.
+var errNotMultiDomain = errors.New("gateway mirrors only the primary MXL domain")
+
 // ensureMirror creates the MxlFlowMirror for (flow, target) if it
 // does not already exist, or merge-patches spec.sourceNode and
 // spec.provider on the existing mirror when they no longer match
@@ -717,6 +744,11 @@ var errMirrorTerminating = errors.New("mirror is terminating")
 // suffix and stay unique to the receiver.
 func (r *Reconciler) ensureMirror(ctx context.Context, recv *mxlv1alpha1.MxlReceiver, sourceNode string, target nodeTarget) (*mxlv1alpha1.MxlFlowMirror, error) {
 	name := mirrorNameForReceiver(recv, target)
+	if recv.Spec.Domain != "" {
+		if err := r.requireMultiDomain(ctx, sourceNode, target.node); err != nil {
+			return nil, err
+		}
+	}
 	provider, err := r.resolveProvider(ctx, recv, sourceNode, target.node)
 	if err != nil {
 		return nil, err
@@ -767,6 +799,7 @@ func (r *Reconciler) ensureMirror(ctx context.Context, recv *mxlv1alpha1.MxlRece
 		},
 		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
 			FlowID:     recv.Spec.FlowID,
+			Domain:     recv.Spec.Domain,
 			SourceNode: sourceNode,
 			TargetNode: target.node,
 			Provider:   provider,
@@ -881,7 +914,7 @@ func mirrorName(flowID, targetNode string) string {
 // Namespace defaults to recv.Namespace is same-namespace and must
 // not gain a suffix.
 func mirrorNameForReceiver(recv *mxlv1alpha1.MxlReceiver, target nodeTarget) string {
-	base := mirrorName(recv.Spec.FlowID, target.node)
+	base := mxlv1alpha1.MirrorNameFor(recv.Ref(), target.node)
 	if target.namespace == recv.Namespace {
 		return base
 	}
@@ -1131,7 +1164,7 @@ func (r *Reconciler) setupWithManagerAgainst(mgr ctrl.Manager, target reconcile.
 			if !ok || recv.Spec.FlowID == "" {
 				return nil
 			}
-			return []string{recv.Spec.FlowID}
+			return []string{recv.Ref().Name()}
 		},
 	); err != nil {
 		return fmt.Errorf("index MxlReceiver by %s: %w", flowIDIndex, err)
@@ -1199,7 +1232,7 @@ func (r *Reconciler) mirrorToReceivers(ctx context.Context, obj client.Object) [
 	}
 	var out []reconcile.Request
 	for i := range receivers.Items {
-		if receivers.Items[i].Spec.FlowID == mirror.Spec.FlowID {
+		if receivers.Items[i].Ref() == mirror.Ref() {
 			out = append(out, reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Namespace: receivers.Items[i].Namespace,
@@ -1248,7 +1281,7 @@ func (r *Reconciler) flowToReceivers(ctx context.Context, obj client.Object) []r
 		return nil
 	}
 	var receivers mxlv1alpha1.MxlReceiverList
-	if err := r.List(ctx, &receivers, client.MatchingFields{flowIDIndex: flow.Spec.ID}); err != nil {
+	if err := r.List(ctx, &receivers, client.MatchingFields{flowIDIndex: flow.Ref().Name()}); err != nil {
 		return nil
 	}
 	out := make([]reconcile.Request, 0, len(receivers.Items))
@@ -1275,12 +1308,12 @@ func (r *Reconciler) leaseToReceivers(ctx context.Context, obj client.Object) []
 	if !ok {
 		return nil
 	}
-	flowID, _, ok := mxlv1alpha1.ParseLeaseName(lease.Name)
+	ref, _, ok := mxlv1alpha1.ParseLeaseNameFor(lease.Name)
 	if !ok {
 		return nil
 	}
 	var receivers mxlv1alpha1.MxlReceiverList
-	if err := r.List(ctx, &receivers, client.MatchingFields{flowIDIndex: flowID}); err != nil {
+	if err := r.List(ctx, &receivers, client.MatchingFields{flowIDIndex: ref.Name()}); err != nil {
 		return nil
 	}
 	out := make([]reconcile.Request, 0, len(receivers.Items))
