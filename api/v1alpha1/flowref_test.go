@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,4 +55,30 @@ func TestFlowRef_ThePrimaryDomainHasOneSpelling(t *testing.T) {
 	other := FlowRef{Domain: "studio-b", ID: refID}
 	assert.Equal(t, other, other.Normalize("default"), "another domain keeps its name")
 	assert.Equal(t, named, named.Normalize(""), "with no primary known nothing is folded")
+}
+
+// A flow's Origin Lease is keyed by the flow's own name. For a flow in
+// another domain the bare id would name the primary domain's flow of the
+// same id, so its Lease -- live or not -- would decide the other's origin.
+func TestResolveOrigin_ChecksTheLeaseOfTheFlowItsDomainNames(t *testing.T) {
+	flow := &MxlFlow{Spec: MxlFlowSpec{ID: refID, Domain: "studio-b"}}
+	flow.Status.Locations = []MxlFlowLocation{{NodeName: "n2", Phase: MxlFlowLocationOrigin}}
+
+	var asked string
+	res, err := ResolveOrigin(flow, func(name, node string) (bool, time.Time, error) {
+		asked = name
+		return true, time.Time{}, nil
+	})
+	require.NoError(t, err)
+	assert.True(t, res.Found)
+	assert.Equal(t, "studio-b."+refID, asked)
+
+	primary := &MxlFlow{Spec: MxlFlowSpec{ID: refID}}
+	primary.Status.Locations = flow.Status.Locations
+	_, err = ResolveOrigin(primary, func(name, node string) (bool, time.Time, error) {
+		asked = name
+		return true, time.Time{}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, refID, asked, "the primary domain keeps the bare id")
 }
