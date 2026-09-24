@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.1.0-rc.21](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.20...v1.1.0-rc.21) (2026-09-24)
+
+
+### Features
+
+* **agent:** mirror another domain only between multi-domain gateways ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **agent:** track and mirror the flows of every MxlDomain on the node ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **api:** name flows, mirrors and leases by domain and id ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **api:** place a domain without a directory at domains/&lt;id&gt; ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **chart:** mount domains/ in the gateway and make domain directories optional ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **gateway:** mirror a flow in the MxlDomain its mirror names ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **operator:** key receivers, mirrors and leases by domain and id ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+
+
+### Bug Fixes
+
+* **agent:** claim origin and resolve the primary domain for every path ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **agent:** refuse a primary domain path inside domains/ ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **agent:** stop a fanotify watcher that has nothing to read ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **api:** check the Origin Lease of the flow in its own domain ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **api:** spell the primary domain one way only and keep MxlDomain names DNS labels ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **gateway:** label mirror and location metrics with the domain ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+
 ## [1.1.0-rc.20](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.19...v1.1.0-rc.20) (2026-09-23)
 
 
