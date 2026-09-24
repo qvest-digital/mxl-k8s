@@ -44,6 +44,13 @@ type Publisher struct {
 	Stats         FilesystemStats
 	FanotifyReady func() bool
 
+	// Tracked reports whether this node tracks the flows of a domain in a
+	// directory other than MirroredDir, and whether that tracking is live.
+	// Nil tracks none.
+	Tracked func(name string) (running, ready bool)
+	// OnMaterialised is handed the domains written on this node, name to
+	// directory, after every Sync, so tracking can follow them.
+	OnMaterialised func(map[string]string)
 	// Apply writes a domain onto the host. Nil uses domainfs.Apply.
 	Apply func(root string, spec *mxlv1alpha1.MxlDomainSpec) (domainfs.Result, error)
 }
@@ -86,6 +93,7 @@ func (p *Publisher) Sync(ctx context.Context) error {
 	}
 
 	var errs []error
+	materialised := map[string]string{}
 	for i := range list.Items {
 		d := &list.Items[i]
 		if d.Spec.ID == "" {
@@ -99,7 +107,13 @@ func (p *Publisher) Sync(ctx context.Context) error {
 			continue
 		}
 		entry := p.materialise(ctx, d, claims[d.Spec.Directory])
+		if entry.Ready {
+			materialised[d.Name] = d.Spec.Directory
+		}
 		errs = append(errs, p.putEntry(ctx, d.Name, entry))
+	}
+	if p.OnMaterialised != nil {
+		p.OnMaterialised(materialised)
 	}
 	return errors.Join(errs...)
 }
@@ -137,6 +151,11 @@ func (p *Publisher) materialise(ctx context.Context, d *mxlv1alpha1.MxlDomain,
 	entry.Ready = true
 	if entry.Mirrored && p.FanotifyReady != nil {
 		entry.FanotifyReady = p.FanotifyReady()
+	}
+	// Another directory is mirrored once this node tracks its flows; before
+	// that, a reader routed to it would find no mirror to serve it.
+	if !entry.Mirrored && p.Tracked != nil {
+		entry.Mirrored, entry.FanotifyReady = p.Tracked(d.Name)
 	}
 	if p.Stats != nil {
 		if c, f, err := p.Stats(filepath.Join(p.Root, d.Spec.Directory)); err == nil {
