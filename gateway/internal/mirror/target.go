@@ -359,6 +359,7 @@ type targetEntry struct {
 	// flowID and peerNode label that counter alongside provider. Set
 	// once when the entry is published and never changed, so the
 	// collector reads them without the entry's atomics.
+	domain   string
 	flowID   string
 	peerNode string
 
@@ -650,6 +651,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		closeTargetHandles(entry, keepFlow, r.teardownGrace())
 		return ctrl.Result{}, nil
 	}
+	entry.domain = mirror.Spec.Domain
 	entry.flowID = mirror.Spec.FlowID
 	entry.peerNode = mirror.Spec.SourceNode
 	r.targets[req.NamespacedName] = entry

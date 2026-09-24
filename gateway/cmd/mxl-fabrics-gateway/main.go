@@ -8,6 +8,7 @@ import (
 	"net/http"
 	_ "net/http/pprof" // registers /debug/pprof handlers on http.DefaultServeMux
 	"os"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -195,7 +196,12 @@ func run(args []string) error {
 	// half of not collecting a mirror copy the target reconciler has
 	// yet to re-establish; the sweeper's own grace is the second. One
 	// sweeper per open domain, each from the moment it is opened.
+	// The sweepers are joined before the runnable returns, which is
+	// before the deferred Close releases the instances they collect
+	// through.
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		var sweepers sync.WaitGroup
+		defer sweepers.Wait()
 		domains.Watch(func(h *instance.Handles) {
 			sweeper := &domaingc.Sweeper{
 				DomainPath:    h.DomainPath(),
@@ -207,7 +213,8 @@ func run(args []string) error {
 			if inst := h.MXL(); inst != nil {
 				sweeper.Collector = inst
 			}
-			go func() { _ = sweeper.Start(ctx) }()
+			sweepers.Add(1)
+			go func() { defer sweepers.Done(); _ = sweeper.Start(ctx) }()
 		})
 		<-ctx.Done()
 		return nil

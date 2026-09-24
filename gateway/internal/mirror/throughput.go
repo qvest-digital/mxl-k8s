@@ -6,6 +6,9 @@ import (
 
 // Throughput is what one mirror half moved since this gateway started.
 type Throughput struct {
+	// Domain is the flow's MxlDomain, empty for the primary domain;
+	// the same id in two domains is two flows and two series.
+	Domain   string
 	FlowID   string
 	PeerNode string
 	Provider string
@@ -20,18 +23,18 @@ var (
 	descTransmitted = prometheus.NewDesc(
 		"mxl_gateway_mirror_transmitted_bytes_total",
 		"Payload bytes handed to the fabric for a mirror this node is the source of.",
-		[]string{"flow_id", "node", "peer_node", "provider"}, nil)
+		[]string{"domain", "flow_id", "node", "peer_node", "provider"}, nil)
 
 	descReceived = prometheus.NewDesc(
 		"mxl_gateway_mirror_received_bytes_total",
 		"Payload bytes committed to the local flow for a mirror this node is the target of.",
-		[]string{"flow_id", "node", "peer_node", "provider"}, nil)
+		[]string{"domain", "flow_id", "node", "peer_node", "provider"}, nil)
 
 	descSkipped = prometheus.NewDesc(
 		"mxl_gateway_mirror_skipped_samples_total",
 		"Samples the source half advanced past without sending, having left the readable window. "+
 			"The target's head still moves over them, so each is published as stale ring content.",
-		[]string{"flow_id", "node", "peer_node", "provider"}, nil)
+		[]string{"domain", "flow_id", "node", "peer_node", "provider"}, nil)
 )
 
 // ThroughputSource reports the live mirrors one reconciler owns.
@@ -66,18 +69,18 @@ func (c *ThroughputCollector) Describe(ch chan<- *prometheus.Desc) {
 // scrape with a 500, taking every other metric on the endpoint with it,
 // so this cannot be left to the labels alone.
 func (c *ThroughputCollector) Collect(ch chan<- prometheus.Metric) {
-	type key struct{ flowID, peerNode, provider string }
+	type key struct{ domain, flowID, peerNode, provider string }
 	emit := func(desc *prometheus.Desc, src ThroughputSource) {
 		if src == nil {
 			return
 		}
 		totals := map[key]uint64{}
 		for _, t := range src.Throughput() {
-			totals[key{t.FlowID, t.PeerNode, t.Provider}] += t.Bytes
+			totals[key{t.Domain, t.FlowID, t.PeerNode, t.Provider}] += t.Bytes
 		}
 		for k, bytes := range totals {
 			ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue,
-				float64(bytes), k.flowID, c.NodeName, k.peerNode, k.provider)
+				float64(bytes), k.domain, k.flowID, c.NodeName, k.peerNode, k.provider)
 		}
 	}
 	emit(descTransmitted, c.Source)
@@ -86,11 +89,11 @@ func (c *ThroughputCollector) Collect(ch chan<- prometheus.Metric) {
 	if c.Source != nil {
 		skipped := map[key]uint64{}
 		for _, t := range c.Source.Throughput() {
-			skipped[key{t.FlowID, t.PeerNode, t.Provider}] += t.SkippedSamples
+			skipped[key{t.Domain, t.FlowID, t.PeerNode, t.Provider}] += t.SkippedSamples
 		}
 		for k, n := range skipped {
 			ch <- prometheus.MustNewConstMetric(descSkipped, prometheus.CounterValue,
-				float64(n), k.flowID, c.NodeName, k.peerNode, k.provider)
+				float64(n), k.domain, k.flowID, c.NodeName, k.peerNode, k.provider)
 		}
 	}
 }
@@ -109,6 +112,7 @@ func (r *SourceReconciler) Throughput() []Throughput {
 	out := make([]Throughput, 0, len(r.sources))
 	for _, e := range r.sources {
 		out = append(out, Throughput{
+			Domain:   e.sourceKey().domain,
 			FlowID:   e.flowID(),
 			PeerNode: e.peerNode,
 			Provider: e.provider().String(),
@@ -128,6 +132,7 @@ func (r *TargetReconciler) Throughput() []Throughput {
 	out := make([]Throughput, 0, len(r.targets))
 	for _, e := range r.targets {
 		out = append(out, Throughput{
+			Domain:   e.domain,
 			FlowID:   e.flowID,
 			PeerNode: e.peerNode,
 			Provider: e.provider.String(),
