@@ -108,6 +108,13 @@ func TestValidate(t *testing.T) {
 			wantErr: "must be absolute",
 		},
 		{
+			// The primary would also be a domain at domains/<id>, and
+			// be tracked and mirrored under two names.
+			name:    "domain path inside domains/",
+			c:       Config{DomainPath: "/run/mxl/domains/0e1f", NodeName: "n1"},
+			wantErr: "must not be inside domains/",
+		},
+		{
 			name:    "missing node name",
 			c:       Config{DomainPath: "/run/mxl/domain"},
 			wantErr: "--node-name",

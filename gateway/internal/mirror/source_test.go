@@ -536,10 +536,10 @@ type fakeOpener struct {
 	removed []string
 }
 
-func (f *fakeOpener) open(flowID string, provider fabrics.Provider) (*sharedSource, error) {
+func (f *fakeOpener) open(key sourceKey) (*sharedSource, error) {
 	f.opens.Add(1)
 	if f.openFn != nil {
-		return f.openFn(flowID, provider)
+		return f.openFn(key.flowID, key.provider)
 	}
 	return &sharedSource{}, nil
 }
@@ -908,13 +908,7 @@ func TestBackoffFor_Schedule(t *testing.T) {
 // watch test wires the fake client with the identical key/value
 // shape and a typo in either place fails at compile time rather
 // than as a silent empty list at runtime.
-var mirrorFlowIDIndexer = func(obj client.Object) []string {
-	m, ok := obj.(*mxlv1alpha1.MxlFlowMirror)
-	if !ok || m.Spec.FlowID == "" {
-		return nil
-	}
-	return []string{m.Spec.FlowID}
-}
+var mirrorFlowIDIndexer = indexMirrorByFlow
 
 func TestSource_LeaseWatch_NodeFiltered(t *testing.T) {
 	// The Lease name encodes (flowID, nodeName). A Lease for another

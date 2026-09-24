@@ -290,7 +290,7 @@ func TestReclaimUnusableFlowDir_MissingDirectory(t *testing.T) {
 		NodeName:   "node-a",
 		DomainPath: t.TempDir(),
 	}
-	assert.False(t, r.reclaimUnusableFlowDir(context.Background(), openFailureFlowID))
+	assert.False(t, r.reclaimUnusableFlowDir(context.Background(), mxlv1alpha1.FlowRef{ID: openFailureFlowID}))
 }
 
 func TestReclaimUnusableFlowDir_UnsetDomainPath(t *testing.T) {
@@ -299,5 +299,5 @@ func TestReclaimUnusableFlowDir_UnsetDomainPath(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &TargetReconciler{Client: c, Scheme: scheme, NodeName: "node-a"}
-	assert.False(t, r.reclaimUnusableFlowDir(context.Background(), openFailureFlowID))
+	assert.False(t, r.reclaimUnusableFlowDir(context.Background(), mxlv1alpha1.FlowRef{ID: openFailureFlowID}))
 }

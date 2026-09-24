@@ -255,6 +255,7 @@ func (p *Publisher) Refresh(ctx context.Context) error {
 	}
 
 	obj.Status.Providers = probed
+	obj.Status.MultiDomain = true
 	recovered := meta.SetStatusCondition(&obj.Status.Conditions, metav1.Condition{
 		Type:    mxlv1alpha1.ConditionTypeProbed,
 		Status:  metav1.ConditionTrue,

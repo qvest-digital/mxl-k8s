@@ -62,7 +62,10 @@ func ResolveOrigin(flow *MxlFlow, fresh LeaseFreshness) (OriginResolution, error
 		if fresh == nil {
 			return OriginResolution{Node: loc.NodeName, Found: true}, nil
 		}
-		live, deadline, err := fresh(flow.Spec.ID, loc.NodeName)
+		// Keyed by the flow's name, which carries its domain: the bare id
+		// names the primary domain's flow of the same id, whose Lease says
+		// nothing about this one.
+		live, deadline, err := fresh(flow.Ref().Name(), loc.NodeName)
 		if err != nil {
 			return OriginResolution{}, err
 		}

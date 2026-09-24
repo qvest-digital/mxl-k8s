@@ -22,7 +22,7 @@ import (
 
 var descLocation = prometheus.NewDesc("mxl_flow_location_info",
 	"1 for the phase this flow is in on this node. Phase is Origin on the node the writer runs on.",
-	[]string{"flow_id", "phase"}, nil)
+	[]string{"domain", "flow_id", "phase"}, nil)
 
 // Collector exports mxl_flow_location_info for the local node.
 type Collector struct {
@@ -61,7 +61,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 				continue
 			}
 			ch <- prometheus.MustNewConstMetric(descLocation, prometheus.GaugeValue, 1,
-				flow.Spec.ID, string(loc.Phase))
+				flow.Spec.Domain, flow.Spec.ID, string(loc.Phase))
 		}
 	}
 }

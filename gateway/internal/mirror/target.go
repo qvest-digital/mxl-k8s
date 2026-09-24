@@ -222,14 +222,15 @@ type TargetReconciler struct {
 	// publisher applies the same one.
 	Selector fabric.Selector
 
-	// Handles owns the long-lived mxl + fabrics instances.
-	Handles *instance.Handles
+	// Domains holds the long-lived mxl + fabrics instances, one per
+	// MxlDomain a mirror writes into.
+	Domains *instance.Set
 
-	// DomainPath is the MXL domain directory this gateway operates on,
-	// the same path Handles was opened against. Held separately from
-	// Handles because reclaimUnusableFlowDir works on the directory
-	// with the filesystem rather than through libmxl. Empty disables
-	// the reclaim.
+	// DomainPath is the primary MXL domain directory, the same path
+	// Domains.Primary was opened against. Held separately because
+	// reclaimUnusableFlowDir works on the directory with the filesystem
+	// rather than through libmxl. Empty disables the reclaim in the
+	// primary domain.
 	DomainPath string
 
 	// FlushInterval is how often the per-mirror status flusher
@@ -311,6 +312,10 @@ type targetEntry struct {
 	// the fabric side.
 	writer *mxl.Writer
 
+	// handles is the domain instance the writer was opened through;
+	// a fabric-side rebuild has to use the same one.
+	handles *instance.Handles
+
 	// fabric-side handles, rebuilt by recoverFromFatalError when
 	// ReadGrain reports a non-recoverable error.
 	target  *fabrics.Target
@@ -354,6 +359,7 @@ type targetEntry struct {
 	// flowID and peerNode label that counter alongside provider. Set
 	// once when the entry is published and never changed, so the
 	// collector reads them without the entry's atomics.
+	domain   string
 	flowID   string
 	peerNode string
 
@@ -529,7 +535,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// does not remove finalizers either. Abandoned handles cost
 		// one node's memory until the gateway restarts, which is
 		// recoverable; an undeletable object is not.
-		if !r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Spec.FlowID)) {
+		if !r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Ref().Name())) {
 			l.Info("target-side teardown timed out; abandoning libmxl handles to let the mirror be deleted",
 				"grace", r.teardownGrace())
 		}
@@ -582,7 +588,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	// Resolve the flow definition.
 	var flow mxlv1alpha1.MxlFlow
-	if err := r.Get(ctx, types.NamespacedName{Name: mirror.Spec.FlowID}, &flow); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: mirror.Ref().Name()}, &flow); err != nil {
 		if apierrors.IsNotFound(err) {
 			if mirror.Status.Phase != mxlv1alpha1.MxlFlowMirrorMaterializing {
 				if err := r.applyTargetStatus(ctx, &mirror, mxlv1alpha1.MxlFlowMirrorMaterializing, nil, nil); err != nil {
@@ -591,7 +597,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			}
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
-		return ctrl.Result{}, fmt.Errorf("get MxlFlow %s: %w", mirror.Spec.FlowID, err)
+		return ctrl.Result{}, fmt.Errorf("get MxlFlow %s: %w", mirror.Ref().Name(), err)
 	}
 	if len(flow.Spec.Definition.Raw) == 0 {
 		// The MxlFlow exists but the producer has not published its
@@ -600,7 +606,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// error that leaves the mirror sitting at an empty phase.
 		r.surfaceTargetFailure(ctx, &mirror, mxlv1alpha1.MxlFlowMirrorMaterializing,
 			mxlv1alpha1.ReasonFlowDefinitionEmpty,
-			fmt.Sprintf("MxlFlow %s has empty spec.definition", mirror.Spec.FlowID))
+			fmt.Sprintf("MxlFlow %s has empty spec.definition", mirror.Ref().Name()))
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
@@ -632,7 +638,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
 
-	entry, err := r.openTargetDispatch(req.NamespacedName, string(flow.Spec.Definition.Raw), provider)
+	entry, err := r.openTargetDispatch(req.NamespacedName, mirror.Spec.Domain, string(flow.Spec.Definition.Raw), provider)
 	if err != nil {
 		return r.handleOpenTargetFailure(ctx, &mirror, inputs, err)
 	}
@@ -645,6 +651,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		closeTargetHandles(entry, keepFlow, r.teardownGrace())
 		return ctrl.Result{}, nil
 	}
+	entry.domain = mirror.Spec.Domain
 	entry.flowID = mirror.Spec.FlowID
 	entry.peerNode = mirror.Spec.SourceNode
 	r.targets[req.NamespacedName] = entry
@@ -654,13 +661,13 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// Publish the descriptor before the phase: a Ready mirror whose
 	// targetInfo has not landed yet is one the source side cannot dial.
 	if err := r.applyTargetInfo(ctx, &mirror, entry.infoStr); err != nil {
-		r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Spec.FlowID))
+		r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Ref().Name()))
 		return ctrl.Result{}, fmt.Errorf("publish target info: %w", err)
 	}
 	if err := r.applyTargetStatus(ctx, &mirror, mxlv1alpha1.MxlFlowMirrorReady, nil, nil); err != nil {
 		// Status update lost; close the entry so the next pass can
 		// retry cleanly.
-		r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Spec.FlowID))
+		r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Ref().Name()))
 		return ctrl.Result{}, fmt.Errorf("update status: %w", err)
 	}
 
@@ -689,8 +696,12 @@ func (r *TargetReconciler) now() time.Time {
 // progress goroutine uses it to invoke recovery if the libmxl-fabrics
 // Target dies (the writer is retained across recoveries to keep the
 // flow file valid for consumer pods).
-func (r *TargetReconciler) openTarget(key types.NamespacedName, flowDef string, provider fabrics.Provider) (*targetEntry, error) {
-	mxlInst := r.Handles.MXL()
+func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef string, provider fabrics.Provider) (*targetEntry, error) {
+	handles, err := r.Domains.For(context.Background(), domain)
+	if err != nil {
+		return nil, err
+	}
+	mxlInst := handles.MXL()
 	if mxlInst == nil {
 		return nil, fmt.Errorf("mxl instance closed")
 	}
@@ -699,7 +710,7 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, flowDef string, 
 	if err != nil {
 		return nil, fmt.Errorf("%w: NewWriter: %w", errOpenWriterFailed, err)
 	}
-	target, info, s, err := r.openFabricSideDispatch(writer, provider)
+	target, info, s, err := r.openFabricSideDispatch(handles, writer, provider)
 	if err != nil {
 		_ = writer.Close()
 		return nil, err
@@ -707,18 +718,18 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, flowDef string, 
 
 	// The entry is not in r.targets yet, so nothing can be tearing it
 	// down and the install cannot be refused.
-	entry := &targetEntry{writer: writer, provider: provider}
+	entry := &targetEntry{writer: writer, handles: handles, provider: provider}
 	r.startProgressLoop(entry, key, target, info, s)
 	return entry, nil
 }
 
 // openTargetDispatch routes the open through the test seam when set,
 // falling back to the cgo openTarget in production.
-func (r *TargetReconciler) openTargetDispatch(key types.NamespacedName, flowDef string, provider fabrics.Provider) (*targetEntry, error) {
+func (r *TargetReconciler) openTargetDispatch(key types.NamespacedName, domain, flowDef string, provider fabrics.Provider) (*targetEntry, error) {
 	if r.openTargetFn != nil {
 		return r.openTargetFn(key, flowDef, provider)
 	}
-	return r.openTarget(key, flowDef, provider)
+	return r.openTarget(key, domain, flowDef, provider)
 }
 
 // handleOpenTargetFailure records the failed open, publishes the
@@ -773,7 +784,7 @@ func (r *TargetReconciler) handleOpenTargetFailure(ctx context.Context, mirror *
 	// reclaim once the failure has repeated, so a single transient
 	// error never costs a directory.
 	if attempts >= maxTargetOpenAttempts && errors.Is(openErr, errOpenWriterFailed) {
-		if reclaimed := r.reclaimUnusableFlowDir(ctx, mirror.Spec.FlowID); reclaimed {
+		if reclaimed := r.reclaimUnusableFlowDir(ctx, mirror.Ref()); reclaimed {
 			// Materialising a fresh directory is the point of the
 			// reclaim; do not sit out the accumulated backoff first.
 			r.mu.Lock()
@@ -785,7 +796,7 @@ func (r *TargetReconciler) handleOpenTargetFailure(ctx context.Context, mirror *
 	return ctrl.Result{RequeueAfter: wait}, nil
 }
 
-// reclaimUnusableFlowDir removes the local flow directory for flowID
+// reclaimUnusableFlowDir removes the local flow directory for ref
 // so the next openTarget materialises a complete one, and reports
 // whether it removed anything.
 //
@@ -800,17 +811,26 @@ func (r *TargetReconciler) handleOpenTargetFailure(ctx context.Context, mirror *
 // it would take the producer's flow with it. Only a directory this
 // gateway owns as a mirror copy is reclaimed, which is the same
 // ownership test teardown applies.
-func (r *TargetReconciler) reclaimUnusableFlowDir(ctx context.Context, flowID string) bool {
-	l := log.FromContext(ctx).WithName("target-reclaim").WithValues("flowID", flowID)
-	if r.DomainPath == "" {
+func (r *TargetReconciler) reclaimUnusableFlowDir(ctx context.Context, ref mxlv1alpha1.FlowRef) bool {
+	l := log.FromContext(ctx).WithName("target-reclaim").WithValues("flow", ref.Name())
+	domainPath := r.DomainPath
+	if ref.Domain != "" {
+		handles, err := r.Domains.For(ctx, ref.Domain)
+		if err != nil {
+			l.Error(err, "resolve domain directory")
+			return false
+		}
+		domainPath = handles.DomainPath()
+	}
+	if domainPath == "" {
 		return false
 	}
-	if r.localFlowDisposition(ctx, flowID) == keepFlow {
+	if r.localFlowDisposition(ctx, ref.Name()) == keepFlow {
 		l.Info("leaving flow directory in place: not this node's mirror copy")
 		return false
 	}
 
-	dir := filepath.Join(r.DomainPath, flowID+flowDirSuffix)
+	dir := filepath.Join(domainPath, ref.ID+flowDirSuffix)
 	if _, err := os.Stat(dir); err != nil {
 		if !os.IsNotExist(err) {
 			l.Error(err, "stat flow directory", "path", dir)
@@ -837,8 +857,8 @@ func (r *TargetReconciler) reclaimUnusableFlowDir(ctx context.Context, flowID st
 // already-open mxl.Writer. Used both by initial openTarget and by
 // recoverFromFatalError when the fabric side died but the writer is
 // still good.
-func (r *TargetReconciler) openFabricSide(writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
-	fabInst := r.Handles.Fabrics()
+func (r *TargetReconciler) openFabricSide(handles *instance.Handles, writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+	fabInst := handles.Fabrics()
 	if fabInst == nil {
 		return nil, nil, "", fmt.Errorf("fabrics instance closed")
 	}
@@ -873,11 +893,11 @@ func (r *TargetReconciler) openFabricSide(writer *mxl.Writer, provider fabrics.P
 // production. The source reconciler routes the equivalent libmxl-
 // fabrics Initiator setup through the initiatorOpener interface
 // instead, but the seam serves the same purpose.
-func (r *TargetReconciler) openFabricSideDispatch(writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+func (r *TargetReconciler) openFabricSideDispatch(handles *instance.Handles, writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
 	if r.openFabricSideFn != nil {
 		return r.openFabricSideFn(writer, provider)
 	}
-	return r.openFabricSide(writer, provider)
+	return r.openFabricSide(handles, writer, provider)
 }
 
 // startProgressLoop publishes a freshly-opened fabric side on the
@@ -1262,9 +1282,9 @@ func (r *TargetReconciler) closeEntry(key types.NamespacedName, disp flowDisposi
 // A lookup failure answers keepFlow. Reclaiming a mirror copy late
 // costs disk on one node until the next teardown; removing a live
 // producer's flow costs the flow.
-func (r *TargetReconciler) localFlowDisposition(ctx context.Context, flowID string) flowDisposition {
+func (r *TargetReconciler) localFlowDisposition(ctx context.Context, flowName string) flowDisposition {
 	var flow mxlv1alpha1.MxlFlow
-	if err := r.Get(ctx, types.NamespacedName{Name: flowID}, &flow); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: flowName}, &flow); err != nil {
 		if apierrors.IsNotFound(err) {
 			return dropFlow
 		}
@@ -1371,7 +1391,7 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 		return
 	}
 	oldInfo, oldTarget := entry.info, entry.target
-	writer, provider := entry.writer, entry.provider
+	writer, handles, provider := entry.writer, entry.handles, entry.provider
 	entry.info, entry.target, entry.infoStr = nil, nil, ""
 	entry.lifecycle.Unlock()
 
@@ -1397,7 +1417,7 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 		}
 	}
 
-	target, info, s, err := r.openFabricSideDispatch(writer, provider)
+	target, info, s, err := r.openFabricSideDispatch(handles, writer, provider)
 	if err != nil {
 		l.Error(err, "rebuild fabric side")
 		// Drop the entry so the next Reconcile rebuilds from scratch

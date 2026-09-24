@@ -45,6 +45,13 @@ type Publisher struct {
 	DomainPath string
 	NodeName   string
 
+	// Domain is the MxlDomain whose directory DomainPath is. Empty is
+	// the primary domain, whose flows keep the object names they had
+	// before domains existed. The same flow id in another domain is
+	// another flow, so every object this publisher touches is named
+	// for the pair.
+	Domain string
+
 	// Lease publishes a coordination.k8s.io Lease per Origin flow so
 	// the operator and dispatcher can skip Origin locations whose
 	// owner has stopped renewing. Nil disables Lease publication --
@@ -57,6 +64,14 @@ type Publisher struct {
 	// inject a closure so they need no domain on disk.
 	WriterAttached func(flowID string) (bool, error)
 }
+
+// ref is the flow a directory id names in this publisher's domain.
+func (p *Publisher) ref(flowID string) mxlv1alpha1.FlowRef {
+	return mxlv1alpha1.FlowRef{Domain: p.Domain, ID: flowID}
+}
+
+// key is the MxlFlow object name, and the Lease key, for a flow id.
+func (p *Publisher) key(flowID string) string { return p.ref(flowID).Name() }
 
 // writerAttached runs the configured probe, defaulting to the flock
 // test. An error reports a writer attached, so a probe that cannot
@@ -110,9 +125,10 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 
 	now := metav1.Now()
 	desired := &mxlv1alpha1.MxlFlow{
-		ObjectMeta: metav1.ObjectMeta{Name: flowID},
+		ObjectMeta: metav1.ObjectMeta{Name: p.key(flowID)},
 		Spec: mxlv1alpha1.MxlFlowSpec{
 			ID:         flowID,
+			Domain:     p.Domain,
 			Definition: runtime.RawExtension{Raw: raw},
 		},
 	}
@@ -167,7 +183,7 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	// Only the producer side renews a Lease; a mirror target's local
 	// copy is not authoritative and must not claim Origin liveness.
 	if written == mxlv1alpha1.MxlFlowLocationOrigin && p.Lease != nil {
-		if err := p.Lease.Renew(ctx, flowID); err != nil {
+		if err := p.Lease.Renew(ctx, p.key(flowID)); err != nil {
 			l.Error(err, "renew origin lease", "flowID", flowID)
 		}
 	}
@@ -185,7 +201,7 @@ func (p *Publisher) isMirrorTarget(ctx context.Context, flowID string) (bool, er
 	}
 	for i := range mirrors.Items {
 		m := &mirrors.Items[i]
-		if m.Spec.FlowID == flowID && m.Spec.TargetNode == p.NodeName {
+		if m.Ref() == p.ref(flowID) && m.Spec.TargetNode == p.NodeName {
 			return true, nil
 		}
 	}
@@ -209,7 +225,7 @@ func (p *Publisher) ClaimOrigin(ctx context.Context, flowID string) error {
 	l := log.FromContext(ctx).WithName("flowpublisher")
 
 	var flow mxlv1alpha1.MxlFlow
-	if err := p.Client.Get(ctx, types.NamespacedName{Name: flowID}, &flow); err != nil {
+	if err := p.Client.Get(ctx, types.NamespacedName{Name: p.key(flowID)}, &flow); err != nil {
 		if apierrors.IsNotFound(err) {
 			// No MxlFlow yet: the directory this producer attached to
 			// is on disk, so the fanotify pass will publish it and the
@@ -231,7 +247,7 @@ func (p *Publisher) ClaimOrigin(ctx context.Context, flowID string) error {
 	l.Info("claimed Origin for locally attached producer", "flowID", flowID)
 
 	if p.Lease != nil {
-		if err := p.Lease.Renew(ctx, flowID); err != nil {
+		if err := p.Lease.Renew(ctx, p.key(flowID)); err != nil {
 			l.Error(err, "renew origin lease after claim", "flowID", flowID)
 		}
 	}
@@ -261,7 +277,7 @@ func (p *Publisher) markStale(ctx context.Context, flowID string) error {
 		return err
 	}
 	if p.Lease != nil {
-		if err := p.Lease.Release(ctx, flowID); err != nil {
+		if err := p.Lease.Release(ctx, p.key(flowID)); err != nil {
 			log.FromContext(ctx).WithName("flowpublisher").
 				Error(err, "release origin lease", "flowID", flowID)
 		}
@@ -291,7 +307,7 @@ func (p *Publisher) upsertLocation(ctx context.Context, flowID string, phase mxl
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		written = phase
 		var obj mxlv1alpha1.MxlFlow
-		if err := p.Client.Get(ctx, types.NamespacedName{Name: flowID}, &obj); err != nil {
+		if err := p.Client.Get(ctx, types.NamespacedName{Name: p.key(flowID)}, &obj); err != nil {
 			if apierrors.IsNotFound(err) {
 				written = ""
 				return nil
@@ -422,7 +438,7 @@ func (p *Publisher) ReleaseAll(ctx context.Context) error {
 	}
 	l := log.FromContext(ctx).WithName("flowpublisher.release")
 	for id := range ids {
-		if err := p.Lease.Release(ctx, id); err != nil {
+		if err := p.Lease.Release(ctx, p.key(id)); err != nil {
 			l.Error(err, "release lease on shutdown", "flowID", id)
 		}
 	}
@@ -466,6 +482,10 @@ func (p *Publisher) demoteVanishedLocalOrigins(ctx context.Context, held map[str
 	}
 	for i := range flows.Items {
 		flow := &flows.Items[i]
+		if flow.Spec.Domain != p.Domain {
+			// Another domain's publisher owns that flow's location.
+			continue
+		}
 		if _, present := held[flow.Spec.ID]; present {
 			continue
 		}
@@ -480,7 +500,7 @@ func (p *Publisher) demoteVanishedLocalOrigins(ctx context.Context, held map[str
 				log.FromContext(ctx).Error(err, "demote vanished local origin failed", "flowID", flow.Spec.ID)
 			}
 			if p.Lease != nil {
-				if err := p.Lease.Release(ctx, flow.Spec.ID); err != nil {
+				if err := p.Lease.Release(ctx, p.key(flow.Spec.ID)); err != nil {
 					log.FromContext(ctx).Error(err, "release vanished origin lease", "flowID", flow.Spec.ID)
 				}
 			}
@@ -527,7 +547,7 @@ func (p *Publisher) promoteStaleLocalOrigins(ctx context.Context, onDisk map[str
 	l := log.FromContext(ctx).WithName("flowpublisher.promote")
 	for id := range onDisk {
 		var flow mxlv1alpha1.MxlFlow
-		err := p.Client.Get(ctx, types.NamespacedName{Name: id}, &flow)
+		err := p.Client.Get(ctx, types.NamespacedName{Name: p.key(id)}, &flow)
 		switch {
 		case apierrors.IsNotFound(err):
 			// No MxlFlow yet; PublishAppeared below creates it.
@@ -592,7 +612,7 @@ func (p *Publisher) RunRenewLoop(ctx context.Context, interval time.Duration) {
 				if _, ok := origins[id]; !ok {
 					continue
 				}
-				if err := p.Lease.Renew(ctx, id); err != nil {
+				if err := p.Lease.Renew(ctx, p.key(id)); err != nil {
 					l.Error(err, "renew lease", "flowID", id)
 				}
 			}
@@ -621,10 +641,13 @@ func (p *Publisher) localOrigins(ctx context.Context) (map[string]struct{}, erro
 	out := make(map[string]struct{}, len(flows.Items))
 	for i := range flows.Items {
 		f := &flows.Items[i]
+		if f.Spec.Domain != p.Domain {
+			continue
+		}
 		for _, loc := range f.Status.Locations {
 			if loc.NodeName == p.NodeName {
 				if loc.Phase == mxlv1alpha1.MxlFlowLocationOrigin {
-					out[f.Name] = struct{}{}
+					out[f.Spec.ID] = struct{}{}
 				}
 				break
 			}
@@ -691,7 +714,7 @@ func (p *Publisher) refreshLocalObservations(ctx context.Context, onDisk map[str
 	for id := range onDisk {
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			var flow mxlv1alpha1.MxlFlow
-			if err := p.Client.Get(ctx, types.NamespacedName{Name: id}, &flow); err != nil {
+			if err := p.Client.Get(ctx, types.NamespacedName{Name: p.key(id)}, &flow); err != nil {
 				if apierrors.IsNotFound(err) {
 					return nil
 				}

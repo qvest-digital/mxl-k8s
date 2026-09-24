@@ -196,7 +196,7 @@ func TestMaterialize_MissingFlow_Errors(t *testing.T) {
 	// shortcut: when FlowChecker says true on second call, the
 	// dispatcher early-returns. Instead test the
 	// resolveSourceNode-missing-flow case by exercising it directly.
-	res, err := d.resolveSourceNode(context.Background(), "missing-flow")
+	res, err := d.resolveSourceNode(context.Background(), mxlv1alpha1.FlowRef{ID: "missing-flow"})
 	require.NoError(t, err)
 	assert.False(t, res.Found)
 	assert.False(t, res.AllStale,
@@ -232,7 +232,7 @@ func TestMaterialize_SourceIsLocalNode_NoOps(t *testing.T) {
 		NodeName:    "n1",
 		FlowChecker: func(string) bool { return false },
 	}
-	res, err := d.resolveSourceNode(context.Background(), flowID)
+	res, err := d.resolveSourceNode(context.Background(), mxlv1alpha1.FlowRef{ID: flowID})
 	require.NoError(t, err)
 	require.True(t, res.Found)
 	assert.Equal(t, "n1", res.Node)
@@ -366,7 +366,7 @@ func TestEnsureMirror_Idempotent(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "consumer", UID: "uid-1"},
 	}
 
-	first, err := d.ensureMirror(context.Background(), flowID, "n-src", pod)
+	first, err := d.ensureMirror(context.Background(), mxlv1alpha1.FlowRef{ID: flowID}, "n-src", pod)
 	require.NoError(t, err)
 	require.NotNil(t, first)
 	assert.Equal(t, MirrorName(flowID, "n1"), first.Name)
@@ -377,7 +377,7 @@ func TestEnsureMirror_Idempotent(t *testing.T) {
 	// Same call again must return the same name (no AlreadyExists
 	// surfacing up). The reconciler relies on this idempotence so
 	// the agent and the operator can race-create without errors.
-	second, err := d.ensureMirror(context.Background(), flowID, "n-src", pod)
+	second, err := d.ensureMirror(context.Background(), mxlv1alpha1.FlowRef{ID: flowID}, "n-src", pod)
 	require.NoError(t, err)
 	assert.Equal(t, first.Name, second.Name)
 }
@@ -406,7 +406,7 @@ func TestEnsureMirror_StampsIntentLabels(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "consumer", UID: "uid-42"},
 	}
 
-	got, err := d.ensureMirror(context.Background(), flowID, "n-src", pod)
+	got, err := d.ensureMirror(context.Background(), mxlv1alpha1.FlowRef{ID: flowID}, "n-src", pod)
 	require.NoError(t, err)
 
 	var live mxlv1alpha1.MxlFlowMirror
@@ -467,7 +467,7 @@ func TestEnsureMirror_ResolvesProviderFromCapabilities(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "consumer", UID: "uid-1"},
 	}
 
-	got, err := d.ensureMirror(context.Background(), flowID, "n-src", pod)
+	got, err := d.ensureMirror(context.Background(), mxlv1alpha1.FlowRef{ID: flowID}, "n-src", pod)
 	require.NoError(t, err)
 	assert.Equal(t, mxlv1alpha1.ProviderVerbs, got.Spec.Provider,
 		"the resolver must prefer verbs, the highest-preference provider "+
@@ -490,7 +490,7 @@ func TestEnsureMirror_FallsBackToTCPWithoutCapabilities(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "consumer", UID: "uid-1"},
 	}
 
-	got, err := d.ensureMirror(context.Background(), flowID, "n-src", pod)
+	got, err := d.ensureMirror(context.Background(), mxlv1alpha1.FlowRef{ID: flowID}, "n-src", pod)
 	require.NoError(t, err)
 	assert.Equal(t, mxlv1alpha1.ProviderTCP, got.Spec.Provider)
 	assert.NotEqual(t, mxlv1alpha1.ProviderAuto, got.Spec.Provider,
@@ -536,7 +536,7 @@ func TestEnsureMirror_ExistingReceiverMirror_LeftIntact(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "consumer", UID: "uid-7"},
 	}
 
-	got, err := d.ensureMirror(context.Background(), flowID, "n-src", pod)
+	got, err := d.ensureMirror(context.Background(), mxlv1alpha1.FlowRef{ID: flowID}, "n-src", pod)
 	require.NoError(t, err)
 	assert.Equal(t, existing.Name, got.Name)
 
@@ -599,7 +599,7 @@ func TestResolveSourceNode_SkipsStaleOriginByLease(t *testing.T) {
 		}},
 	}
 
-	res, err := d.resolveSourceNode(ctx, flowID)
+	res, err := d.resolveSourceNode(ctx, mxlv1alpha1.FlowRef{ID: flowID})
 	require.NoError(t, err)
 	assert.True(t, res.Found,
 		"a second Origin with a fresh Lease must be the dispatcher's "+
@@ -632,7 +632,7 @@ func TestResolveSourceNode_AllStaleOriginsReturnsNotOK(t *testing.T) {
 		Lease:    &fakeLeaseChecker{fresh: map[string]bool{}},
 	}
 
-	res, err := d.resolveSourceNode(ctx, flowID)
+	res, err := d.resolveSourceNode(ctx, mxlv1alpha1.FlowRef{ID: flowID})
 	require.NoError(t, err)
 	assert.False(t, res.Found,
 		"when every Origin's Lease is expired the dispatcher must report "+
@@ -669,7 +669,7 @@ func TestEnsureMirror_ExplicitProviderBypassesResolution(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "p", UID: "u"},
 	}
 
-	got, err := d.ensureMirror(context.Background(), flowID, "n-src", pod)
+	got, err := d.ensureMirror(context.Background(), mxlv1alpha1.FlowRef{ID: flowID}, "n-src", pod)
 	require.NoError(t, err)
 
 	var live mxlv1alpha1.MxlFlowMirror

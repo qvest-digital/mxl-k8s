@@ -200,10 +200,10 @@ func (r *Reconciler) judge(ctx context.Context, flow *mxlv1alpha1.MxlFlow, locs 
 				OriginFresh:   true,
 			}, nil
 		}
-		fresh, deadline, err := r.Lease.IsFresh(ctx, flow.Spec.ID, loc.NodeName)
+		fresh, deadline, err := r.Lease.IsFresh(ctx, flow.Ref().Name(), loc.NodeName)
 		if err != nil {
 			return verdict{}, fmt.Errorf("check origin lease for %s on %s: %w",
-				flow.Spec.ID, loc.NodeName, err)
+				flow.Ref().Name(), loc.NodeName, err)
 		}
 		if !fresh {
 			continue
@@ -225,7 +225,7 @@ func (r *Reconciler) judge(ctx context.Context, flow *mxlv1alpha1.MxlFlow, locs 
 		return verdict{}, fmt.Errorf("list MxlFlowMirrors: %w", err)
 	}
 	for i := range mirrors.Items {
-		if mirrors.Items[i].Spec.FlowID != flow.Spec.ID {
+		if mirrors.Items[i].Ref() != flow.Ref() {
 			continue
 		}
 		if !mirrors.Items[i].DeletionTimestamp.IsZero() {
@@ -585,7 +585,7 @@ func mirrorToFlow(_ context.Context, obj client.Object) []reconcile.Request {
 		return nil
 	}
 	return []reconcile.Request{{
-		NamespacedName: types.NamespacedName{Name: mirror.Spec.FlowID},
+		NamespacedName: types.NamespacedName{Name: mirror.Ref().Name()},
 	}}
 }
 
@@ -594,11 +594,11 @@ func mirrorToFlow(_ context.Context, obj client.Object) []reconcile.Request {
 // only prompt signal that a producer has gone; without this the flow
 // waits out the whole renewal window before anything looks at it.
 func leaseToFlow(_ context.Context, obj client.Object) []reconcile.Request {
-	flowID, _, ok := mxlv1alpha1.ParseLeaseName(obj.GetName())
+	ref, _, ok := mxlv1alpha1.ParseLeaseNameFor(obj.GetName())
 	if !ok {
 		return nil
 	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: flowID}}}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: ref.Name()}}}
 }
 
 // leaseInMxlSystem keeps the Lease watch confined to the namespace the

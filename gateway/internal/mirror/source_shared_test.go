@@ -295,8 +295,8 @@ func TestSource_AccountingLandsPerMirrorAcrossTheFanout(t *testing.T) {
 	require.NoError(t, testutil.CollectAndCompare(col, strings.NewReader(`
 # HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes handed to the fabric for a mirror this node is the source of.
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
-mxl_gateway_mirror_transmitted_bytes_total{flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
-mxl_gateway_mirror_transmitted_bytes_total{flow_id="flow-a",node="n01",peer_node="n03",provider="verbs"} 1000
+mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
+mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n03",provider="verbs"} 1000
 `), "mxl_gateway_mirror_transmitted_bytes_total"),
 		"the shared transfer must still be attributed per peer")
 }

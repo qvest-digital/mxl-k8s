@@ -188,6 +188,20 @@ func TestRefresh_PublishesWhatTheProbeFound(t *testing.T) {
 			"multiply fi_getinfo calls for the same answer")
 }
 
+// A mirror naming another domain is only created toward a gateway that
+// reports multiDomain; one that did not would copy the primary domain's
+// flow of the same id.
+func TestRefresh_ReportsMultiDomain(t *testing.T) {
+	p := &Publisher{
+		Client:    newClient(t, existingCR()).Build(),
+		NodeName:  "n1",
+		Providers: []fabrics.Provider{fabrics.ProviderAny},
+		Lister:    &fakeLister{},
+	}
+	require.NoError(t, p.Refresh(context.Background()))
+	assert.True(t, getCR(t, p).Status.MultiDomain)
+}
+
 // The mixed-hardware case from the issue: the same DaemonSet flag on
 // every node, and only the node with the adapter advertises it.
 func TestRefresh_ReportsAbsentHardwareAsZero(t *testing.T) {

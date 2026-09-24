@@ -69,11 +69,15 @@ spec:
                 type: string
               directory:
                 description: |-
-                  Directory is the domain directory's name below the agent's
-                  runtime root, one path segment.
+                  Directory is the domain directory's name directly below the
+                  agent's runtime root, one path segment. Empty places the domain
+                  at domains/<id>, which is what a domain created without a
+                  directory it has to keep gets.
                 pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$
                 type: string
                 x-kubernetes-validations:
+                - message: domains is where domains without a directory live
+                  rule: self != 'domains'
                 - message: directory is immutable; flows already written live under
                     the old one
                   rule: self == oldSelf
@@ -121,9 +125,12 @@ spec:
                 description: Tags are the domain_def.json tags.
                 type: object
             required:
-            - directory
             - id
             type: object
+            x-kubernetes-validations:
+            - message: directory is immutable; flows already written live under the
+                old one
+              rule: has(self.directory) == has(oldSelf.directory)
           status:
             description: MxlDomainStatus reports where a domain is materialised.
             properties:
@@ -242,6 +249,10 @@ spec:
                 x-kubernetes-list-type: map
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: 'name must be a DNS label: flows, mirrors and leases carry it in
+            theirs'
+          rule: self.metadata.name.matches('^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$')
     served: true
     storage: true
     subresources:

@@ -67,7 +67,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	flowID, nodeName, ok := mxlv1alpha1.ParseLeaseName(lease.Name)
+	ref, nodeName, ok := mxlv1alpha1.ParseLeaseNameFor(lease.Name)
+	flowID := ref.Name()
 	if !ok {
 		// Not one of ours. The namespace is the agent's, but nothing
 		// stops another component from putting a Lease in it.
@@ -193,7 +194,7 @@ func (r *Reconciler) flowToLeases(ctx context.Context, obj client.Object) []reco
 		return nil
 	}
 	return r.leasesMatching(ctx, func(flowID, nodeName string) bool {
-		return flowID == flow.Spec.ID
+		return flowID == flow.Ref().Name()
 	})
 }
 
@@ -205,8 +206,8 @@ func (r *Reconciler) leasesMatching(ctx context.Context, keep func(flowID, nodeN
 	}
 	var out []reconcile.Request
 	for i := range leases.Items {
-		flowID, nodeName, ok := mxlv1alpha1.ParseLeaseName(leases.Items[i].Name)
-		if !ok || !keep(flowID, nodeName) {
+		ref, nodeName, ok := mxlv1alpha1.ParseLeaseNameFor(leases.Items[i].Name)
+		if !ok || !keep(ref.Name(), nodeName) {
 			continue
 		}
 		out = append(out, reconcile.Request{

@@ -173,3 +173,28 @@ func TestRunSyncLoopStopsOnCancel(t *testing.T) {
 		t.Fatal("RunSyncLoop did not return after cancel")
 	}
 }
+
+// A domain in another directory is mirrored once this node tracks its flows,
+// and only then: reporting it mirrored before would have a controller route a
+// reader to it that no mirror serves. The domains written are handed on, so
+// the agent can start and stop tracking with them.
+func TestSyncReportsTrackedDomainsMirroredAndHandsThemOn(t *testing.T) {
+	c, p, _ := setup(t, node("n1", nil),
+		domain("studio", idA, "domain"), domain("scratch", idB, "scratch"))
+	tracked := map[string]bool{}
+	var handed map[string]string
+	p.Tracked = func(name string) (running, ready bool) { return tracked[name], tracked[name] }
+	p.OnMaterialised = func(m map[string]string) { handed = m }
+
+	require.NoError(t, p.Sync(context.Background()))
+	assert.Equal(t, map[string]string{"studio": "domain", "scratch": "scratch"}, handed)
+	scratch := get(t, c, "scratch")
+	assert.False(t, scratch.Status.Node("n1").Mirrored, "nothing tracks it yet")
+
+	tracked["scratch"] = true
+	require.NoError(t, p.Sync(context.Background()))
+	scratch = get(t, c, "scratch")
+	e := scratch.Status.Node("n1")
+	assert.True(t, e.Mirrored)
+	assert.True(t, e.FanotifyReady)
+}

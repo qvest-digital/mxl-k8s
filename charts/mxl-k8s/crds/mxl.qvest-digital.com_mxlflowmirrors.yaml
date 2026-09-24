@@ -81,6 +81,20 @@ spec:
               MxlFlowMirrorSpec defines a desired mirror of a flow onto a
               specific node.
             properties:
+              domain:
+                description: |-
+                  Domain is the MxlDomain the flow belongs to, one without a
+                  spec.directory, whose flows live at domains/<id>. Empty is the
+                  primary domain, the one the agent's --domain-path names, and the
+                  only spelling of it; every object written before domains existed
+                  carries none. Immutable: the same id in another domain is another
+                  flow.
+                maxLength: 63
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+                x-kubernetes-validations:
+                - message: domain is immutable
+                  rule: self == oldSelf
               flowID:
                 description: FlowID is the MXL flow being mirrored.
                 pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$

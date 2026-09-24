@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
+	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
 func TestThroughputCollectorReportsBothDirections(t *testing.T) {
@@ -31,10 +32,10 @@ func TestThroughputCollectorReportsBothDirections(t *testing.T) {
 	expected := `
 # HELP mxl_gateway_mirror_received_bytes_total Payload bytes committed to the local flow for a mirror this node is the target of.
 # TYPE mxl_gateway_mirror_received_bytes_total counter
-mxl_gateway_mirror_received_bytes_total{flow_id="flow-b",node="n01",peer_node="n03",provider="tcp"} 4096
+mxl_gateway_mirror_received_bytes_total{domain="",flow_id="flow-b",node="n01",peer_node="n03",provider="tcp"} 4096
 # HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes handed to the fabric for a mirror this node is the source of.
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
-mxl_gateway_mirror_transmitted_bytes_total{flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 5529600
+mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 5529600
 `
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(expected),
 		"mxl_gateway_mirror_received_bytes_total", "mxl_gateway_mirror_transmitted_bytes_total"))
@@ -78,8 +79,8 @@ func TestThroughputCollectorSurvivesOneFlowMirroredTwice(t *testing.T) {
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(`
 # HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes handed to the fabric for a mirror this node is the source of.
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
-mxl_gateway_mirror_transmitted_bytes_total{flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
-mxl_gateway_mirror_transmitted_bytes_total{flow_id="flow-a",node="n01",peer_node="n03",provider="verbs"} 1000
+mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
+mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n03",provider="verbs"} 1000
 `), "mxl_gateway_mirror_transmitted_bytes_total"),
 		"one flow mirrored to two peers must yield two distinct series")
 
@@ -107,6 +108,39 @@ func TestThroughputCollectorReportsSkippedSamples(t *testing.T) {
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(`
 # HELP mxl_gateway_mirror_skipped_samples_total Samples the source half advanced past without sending, having left the readable window. The target's head still moves over them, so each is published as stale ring content.
 # TYPE mxl_gateway_mirror_skipped_samples_total counter
-mxl_gateway_mirror_skipped_samples_total{flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 19200
+mxl_gateway_mirror_skipped_samples_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 19200
 `), "mxl_gateway_mirror_skipped_samples_total"))
+}
+
+// The same flow id in two domains is two flows. Mirrored to the same peer
+// they must be two series; folded into one, a sc dashboard would read the
+// sum as one flow's rate.
+func TestThroughputCollectorSeparatesDomains(t *testing.T) {
+	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
+	for _, domain := range []string{"", "studio"} {
+		e := &sourceEntry{
+			shared:   &sharedSource{key: sourceKey{domain: domain, flowID: "flow-a", provider: fabrics.ProviderVerbs}},
+			peerNode: "n02",
+		}
+		e.bytes.Store(1000)
+		src.sources[types.NamespacedName{Namespace: "p", Name: domain + "flow-a"}] = e
+	}
+	c := &ThroughputCollector{NodeName: "n01", Source: src}
+	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(`
+# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes handed to the fabric for a mirror this node is the source of.
+# TYPE mxl_gateway_mirror_transmitted_bytes_total counter
+mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
+mxl_gateway_mirror_transmitted_bytes_total{domain="studio",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
+`), "mxl_gateway_mirror_transmitted_bytes_total"))
+}
+
+// A Lease or MxlFlow event in one domain looks mirrors up by this index;
+// keyed by the bare id it would also wake, and judge, the mirrors of the
+// same id in another domain.
+func TestIndexMirrorByFlowCarriesTheDomain(t *testing.T) {
+	m := func(domain string) *mxlv1alpha1.MxlFlowMirror {
+		return &mxlv1alpha1.MxlFlowMirror{Spec: mxlv1alpha1.MxlFlowMirrorSpec{FlowID: "flow-a", Domain: domain}}
+	}
+	require.Equal(t, []string{"flow-a"}, indexMirrorByFlow(m("")))
+	require.Equal(t, []string{"studio.flow-a"}, indexMirrorByFlow(m("studio")))
 }
