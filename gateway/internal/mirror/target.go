@@ -356,6 +356,16 @@ type targetEntry struct {
 	// collector's business, not the progress loop's.
 	bytes atomic.Uint64
 
+	// phaseMu orders the phases a recovery publishes against the Failed a
+	// drop publishes. Two recoveries of one entry can run at once -- the
+	// watchdog's and the one a fatal progress loop spawns -- and without it
+	// one that read the entry before the other dropped it would publish
+	// Materializing or Ready over Failed, leaving a mirror that reads as
+	// rebuilding with nothing behind it. dropped is set, under phaseMu,
+	// by the drop; no recovery phase is written after it.
+	phaseMu sync.Mutex
+	dropped bool
+
 	// flowID and peerNode label that counter alongside provider. Set
 	// once when the entry is published and never changed, so the
 	// collector reads them without the entry's atomics.
@@ -1407,6 +1417,11 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 	// new progress loop records.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	entry.phaseMu.Lock()
+	if entry.dropped {
+		entry.phaseMu.Unlock()
+		return
+	}
 	if mirror, err := r.fetchMirror(ctx, key); err != nil {
 		if !apierrors.IsNotFound(err) {
 			l.Error(err, "get mirror during recovery")
@@ -1416,6 +1431,7 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 			l.Error(err, "mark Materializing during recovery")
 		}
 	}
+	entry.phaseMu.Unlock()
 
 	target, info, s, err := r.openFabricSideDispatch(handles, writer, provider)
 	if err != nil {
@@ -1467,7 +1483,14 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 		r.dropFailedEntry(key, entry)
 		return
 	}
-	if err := r.applyTargetStatus(ctx, mirror, mxlv1alpha1.MxlFlowMirrorReady, nil, nil); err != nil {
+	entry.phaseMu.Lock()
+	if entry.dropped {
+		entry.phaseMu.Unlock()
+		return
+	}
+	err = r.applyTargetStatus(ctx, mirror, mxlv1alpha1.MxlFlowMirrorReady, nil, nil)
+	entry.phaseMu.Unlock()
+	if err != nil {
 		l.Error(err, "publish rebuilt status")
 		r.dropFailedEntry(key, entry)
 		return
@@ -1492,6 +1515,8 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 func (r *TargetReconciler) dropFailedEntry(key types.NamespacedName, entry *targetEntry) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	entry.phaseMu.Lock()
+	entry.dropped = true
 	if mirror, err := r.fetchMirror(ctx, key); err == nil {
 		_ = r.applyTargetStatus(ctx, mirror, mxlv1alpha1.MxlFlowMirrorFailed, nil, &metav1.Condition{
 			Type:               mxlv1alpha1.ConditionTypeTargetProgress,
@@ -1501,6 +1526,7 @@ func (r *TargetReconciler) dropFailedEntry(key types.NamespacedName, entry *targ
 			LastTransitionTime: metav1.Now(),
 		})
 	}
+	entry.phaseMu.Unlock()
 	r.mu.Lock()
 	if r.targets[key] == entry {
 		delete(r.targets, key)
