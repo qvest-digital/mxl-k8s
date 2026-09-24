@@ -25,6 +25,7 @@ const DomainOptionsFile = "options.json"
 // any selected node opens any flow of the domain by id. That is why the
 // identity is the domain's and not the node's: it is the same on every
 // node and known before any pod is placed.
+// +kubebuilder:validation:XValidation:rule="has(self.directory) == has(oldSelf.directory)",message="directory is immutable; flows already written live under the old one"
 type MxlDomainSpec struct {
 	// ID is the domain identity written into domain_def.json and
 	// published as mxl_domain_id by NMOS nodes. Immutable: every
@@ -34,12 +35,15 @@ type MxlDomainSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="id is immutable"
 	ID string `json:"id"`
 
-	// Directory is the domain directory's name below the agent's
-	// runtime root, one path segment.
-	// +kubebuilder:validation:Required
+	// Directory is the domain directory's name directly below the
+	// agent's runtime root, one path segment. Empty places the domain
+	// at domains/<id>, which is what a domain created without a
+	// directory it has to keep gets.
+	// +optional
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`
+	// +kubebuilder:validation:XValidation:rule="self != 'domains'",message="domains is where domains without a directory live"
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="directory is immutable; flows already written live under the old one"
-	Directory string `json:"directory"`
+	Directory string `json:"directory,omitempty"`
 
 	// Label is the domain_def.json label.
 	// +optional
@@ -145,6 +149,19 @@ func (s *MxlDomainSpec) Selects(nodeLabels map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// DomainsDir is the directory below the runtime root that holds every
+// domain without a directory of its own, one per id.
+const DomainsDir = "domains"
+
+// Path is the domain's directory relative to the runtime root:
+// spec.directory, or domains/<id> when it is empty.
+func (s *MxlDomainSpec) Path() string {
+	if s.Directory != "" {
+		return s.Directory
+	}
+	return DomainsDir + "/" + s.ID
 }
 
 // +kubebuilder:object:root=true

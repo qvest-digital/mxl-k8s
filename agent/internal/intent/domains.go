@@ -22,29 +22,44 @@ type Domains struct {
 
 // FlowRefFromPath is the flow a path names: <root>/<dir>/<id>.mxl-flow, the
 // directory itself or anything in it, in a directory an MxlDomain
-// materialises here. libmxl probes the flow directory and the files in it
-// before flow_def.json, so the shim can report any of them.
+// materialises here. <dir> is one segment or domains/<id>. libmxl probes
+// the flow directory and the files in it before flow_def.json, so the shim
+// can report any of them.
 func (d Domains) FlowRefFromPath(path string) (mxlv1alpha1.FlowRef, bool) {
 	rel, err := filepath.Rel(filepath.Clean(d.Root), filepath.Clean(path))
 	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
 		return mxlv1alpha1.FlowRef{}, false
 	}
-	parts := strings.Split(rel, string(filepath.Separator))
-	if len(parts) < 2 {
-		return mxlv1alpha1.FlowRef{}, false
+	for dir, name := range d.ByDir {
+		rest, ok := strings.CutPrefix(rel, dir+string(filepath.Separator))
+		if !ok {
+			continue
+		}
+		flowDir, _, _ := strings.Cut(rest, string(filepath.Separator))
+		id, ok := strings.CutSuffix(flowDir, flowDirSuffix)
+		if !ok || id == "" {
+			return mxlv1alpha1.FlowRef{}, false
+		}
+		if dir == d.Primary {
+			name = ""
+		}
+		return mxlv1alpha1.FlowRef{Domain: name, ID: id}, true
 	}
-	name, ok := d.ByDir[parts[0]]
-	if !ok {
-		return mxlv1alpha1.FlowRef{}, false
+	return mxlv1alpha1.FlowRef{}, false
+}
+
+// Mirrored narrows the domains materialised on the node, name to directory,
+// to those mirrored between nodes: the primary domain and every domain below
+// domains/. The gateway mounts those two and nothing else of the runtime
+// root, so a domain in any other directory stays node-local.
+func Mirrored(primary string, materialised map[string]string) map[string]string {
+	out := make(map[string]string, len(materialised))
+	for name, dir := range materialised {
+		if dir == primary || filepath.Dir(dir) == mxlv1alpha1.DomainsDir {
+			out[name] = dir
+		}
 	}
-	id, ok := strings.CutSuffix(parts[1], flowDirSuffix)
-	if !ok || id == "" {
-		return mxlv1alpha1.FlowRef{}, false
-	}
-	if parts[0] == d.Primary {
-		name = ""
-	}
-	return mxlv1alpha1.FlowRef{Domain: name, ID: id}, true
+	return out
 }
 
 // flowDirSuffix marks a flow directory inside a domain.

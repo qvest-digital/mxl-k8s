@@ -89,7 +89,7 @@ func (p *Publisher) Sync(ctx context.Context) error {
 		if d.Spec.ID == "" || !d.Spec.Selects(node.Labels) {
 			continue
 		}
-		claims[d.Spec.Directory] = append(claims[d.Spec.Directory], d.Name)
+		claims[d.Spec.Path()] = append(claims[d.Spec.Path()], d.Name)
 	}
 
 	var errs []error
@@ -106,9 +106,9 @@ func (p *Publisher) Sync(ctx context.Context) error {
 			}
 			continue
 		}
-		entry := p.materialise(ctx, d, claims[d.Spec.Directory])
+		entry := p.materialise(ctx, d, claims[d.Spec.Path()])
 		if entry.Ready {
-			materialised[d.Name] = d.Spec.Directory
+			materialised[d.Name] = d.Spec.Path()
 		}
 		errs = append(errs, p.putEntry(ctx, d.Name, entry))
 	}
@@ -124,13 +124,13 @@ func (p *Publisher) materialise(ctx context.Context, d *mxlv1alpha1.MxlDomain,
 	now := metav1.Now()
 	entry := mxlv1alpha1.MxlDomainNodeStatus{
 		NodeName: p.NodeName,
-		Mirrored: d.Spec.Directory == p.MirroredDir,
+		Mirrored: d.Spec.Path() == p.MirroredDir,
 		LastSeen: &now,
 	}
 	if len(claimants) > 1 {
 		sort.Strings(claimants)
 		entry.Message = fmt.Sprintf("directory %q is claimed by %s; none is written",
-			d.Spec.Directory, strings.Join(claimants, ", "))
+			d.Spec.Path(), strings.Join(claimants, ", "))
 		return entry
 	}
 
@@ -145,7 +145,7 @@ func (p *Publisher) materialise(ctx context.Context, d *mxlv1alpha1.MxlDomain,
 	}
 	if res.CreatedDir || res.WroteDefinition || res.WroteOptions {
 		log.FromContext(ctx).Info("materialised MxlDomain", "domain", d.Name,
-			"directory", d.Spec.Directory, "createdDir", res.CreatedDir,
+			"directory", d.Spec.Path(), "createdDir", res.CreatedDir,
 			"wroteDefinition", res.WroteDefinition, "wroteOptions", res.WroteOptions)
 	}
 	entry.Ready = true
@@ -158,7 +158,7 @@ func (p *Publisher) materialise(ctx context.Context, d *mxlv1alpha1.MxlDomain,
 		entry.Mirrored, entry.FanotifyReady = p.Tracked(d.Name)
 	}
 	if p.Stats != nil {
-		if c, f, err := p.Stats(filepath.Join(p.Root, d.Spec.Directory)); err == nil {
+		if c, f, err := p.Stats(filepath.Join(p.Root, d.Spec.Path())); err == nil {
 			entry.CapacityBytes, entry.FreeBytes = c, f
 		}
 	}

@@ -59,15 +59,15 @@ type Result struct {
 	WroteOptions    bool
 }
 
-// Apply makes <root>/<spec.Directory> match the spec. Files are
+// Apply makes <root>/<spec.Path()> match the spec. Files are
 // written only when their content differs, through a rename so a
 // reader never sees half a file.
 func Apply(root string, spec *mxlv1alpha1.MxlDomainSpec) (Result, error) {
 	var res Result
-	dir := filepath.Join(root, spec.Directory)
+	dir := filepath.Join(root, spec.Path())
 
 	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
-		if err := os.Mkdir(dir, DirMode); err != nil {
+		if err := os.MkdirAll(dir, DirMode); err != nil {
 			return res, fmt.Errorf("create %s: %w", dir, err)
 		}
 		res.CreatedDir = true

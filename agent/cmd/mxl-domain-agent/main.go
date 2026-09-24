@@ -108,7 +108,8 @@ func run(args []string) error {
 	domainPub := domainpublisher.NewFromDomainPath(kClient, cfg.NodeName,
 		cfg.DomainPath, statfs.Stats, ready.Load)
 	domainPub.Tracked = trackers.Tracked
-	domainPub.OnMaterialised = func(m map[string]string) {
+	domainPub.OnMaterialised = func(all map[string]string) {
+		m := intent.Mirrored(primaryDir, all)
 		byDir := make(map[string]string, len(m))
 		for name, dir := range m {
 			byDir[dir] = name

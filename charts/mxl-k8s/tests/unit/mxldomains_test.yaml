@@ -42,6 +42,15 @@ tests:
           path: spec.tags.site
           value: [lab]
 
+  - it: leaves the directory out when none is set, so the domain lives at domains/<id>
+    set:
+      domains:
+        - name: studio
+          id: 1ac254d9-a5eb-475f-a2b6-3d02a5cfbc82
+    asserts:
+      - notExists:
+          path: spec.directory
+
   - it: renders nothing for an empty list
     set:
       domains: []

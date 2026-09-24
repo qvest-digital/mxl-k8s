@@ -82,3 +82,17 @@ func TestResolveOrigin_ChecksTheLeaseOfTheFlowItsDomainNames(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, refID, asked, "the primary domain keeps the bare id")
 }
+
+// A domain created without a directory lives at domains/<id>, so its path
+// is unique by construction and does not change while the id cannot; one
+// with a directory keeps it, which is how the primary domain keeps the
+// path every existing flow was written under.
+func TestMxlDomainSpecPath(t *testing.T) {
+	const id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	if got := (&MxlDomainSpec{ID: id}).Path(); got != "domains/"+id {
+		t.Errorf("no directory: got %q", got)
+	}
+	if got := (&MxlDomainSpec{ID: id, Directory: "domain"}).Path(); got != "domain" {
+		t.Errorf("directory: got %q", got)
+	}
+}

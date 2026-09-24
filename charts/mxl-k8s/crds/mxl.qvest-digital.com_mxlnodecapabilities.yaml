@@ -129,6 +129,14 @@ spec:
                 description: LastSeen is the last time the gateway updated this resource.
                 format: date-time
                 type: string
+              multiDomain:
+                description: |-
+                  MultiDomain reports that the gateway mirrors a flow in the
+                  MxlDomain its MxlFlowMirror names rather than always in the
+                  primary one. An agent creates a mirror naming another domain
+                  only toward and from nodes that report it: a gateway without it
+                  would copy the primary domain's flow of the same id.
+                type: boolean
               providers:
                 description: |-
                   Providers lists libmxl-fabrics providers the gateway probed on

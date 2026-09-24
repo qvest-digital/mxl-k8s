@@ -21,7 +21,9 @@ metadata:
     helm.sh/resource-policy: keep
 spec:
   id: {{ $id | lower | quote }}
-  directory: {{ required "domains[].directory is required" .directory | quote }}
+  {{- with .directory }}
+  directory: {{ . | quote }}
+  {{- end }}
   {{- with .label }}
   label: {{ . | quote }}
   {{- end }}
