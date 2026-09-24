@@ -25,6 +25,7 @@ FLOW_SHARED="${FLOW_SHARED:-58a0e5a1-0000-4000-8000-000000000001}"
 FLOW_OLD_SHIM="${FLOW_OLD_SHIM:-58a0e5a1-0000-4000-8000-000000000002}"
 ATTEMPTS="${ATTEMPTS:-6}"
 DOMAIN_DIR="/run/mxl/domains/${DOMAIN_ID}"
+NEXT_ID=58a0e5a1-0000-4000-8000-0000000000de
 WRITER=mxl-second-domain-writer
 CONSUMER=mxl-second-domain-consumer
 CM=mxl-second-domain-flows
@@ -37,13 +38,13 @@ cleanup() {
     "${KUBECTL[@]}" -n "$NAMESPACE" get mxlflowmirrors -o name 2>/dev/null \
       | grep "$f" | xargs -r "${KUBECTL[@]}" -n "$NAMESPACE" delete --wait=false >/dev/null 2>&1 || true
   done
-  "${KUBECTL[@]}" delete mxldomain "$DOMAIN" --ignore-not-found >/dev/null 2>&1 || true
+  "${KUBECTL[@]}" delete mxldomain "$DOMAIN" "${DOMAIN}-next" --ignore-not-found >/dev/null 2>&1 || true
   # The agent never removes a domain directory -- flows may be in it.
   if [ -n "${nodes:-}" ]; then
     for n in $nodes; do
       "${KUBECTL[@]}" -n "$NAMESPACE" run "mxl-domain-rm-${n}" --restart=Never --rm -i \
         --image="$TOOLS_IMAGE" --image-pull-policy=IfNotPresent --quiet \
-        --overrides="{\"spec\":{\"nodeName\":\"${n}\",\"volumes\":[{\"name\":\"r\",\"hostPath\":{\"path\":\"/run/mxl\"}}],\"containers\":[{\"name\":\"rm\",\"image\":\"${TOOLS_IMAGE}\",\"command\":[\"rm\",\"-rf\",\"${DOMAIN_DIR}\"],\"volumeMounts\":[{\"name\":\"r\",\"mountPath\":\"/run/mxl\"}]}]}}" \
+        --overrides="{\"spec\":{\"nodeName\":\"${n}\",\"volumes\":[{\"name\":\"r\",\"hostPath\":{\"path\":\"/run/mxl\"}}],\"containers\":[{\"name\":\"rm\",\"image\":\"${TOOLS_IMAGE}\",\"command\":[\"rm\",\"-rf\",\"${DOMAIN_DIR}\",\"/run/mxl/domains/${NEXT_ID}\"],\"volumeMounts\":[{\"name\":\"r\",\"mountPath\":\"/run/mxl\"}]}]}}" \
         >/dev/null 2>&1 || true
     done
   fi
@@ -216,3 +217,26 @@ if "${KUBECTL[@]}" -n "$NAMESPACE" exec "$CONSUMER" -c consumer -- \
   fail "the second domain's mirror wrote into the primary domain on ${node_b}"
 fi
 echo "   written into ${DOMAIN_DIR}; primary domain untouched"
+
+# Stopping a domain's tracker waits for its watcher. One that only woke
+# on the next event held the tracker lock indefinitely, and no domain
+# created afterwards was ever materialised.
+echo "-> a domain created after one is deleted is still materialised"
+"${KUBECTL[@]}" -n "$NAMESPACE" delete pod "$WRITER" "$CONSUMER" --wait=true --timeout=60s >/dev/null 2>&1 || true
+"${KUBECTL[@]}" delete mxldomain "$DOMAIN" --wait=true --timeout=60s >/dev/null
+NEXT="${DOMAIN}-next"
+"${KUBECTL[@]}" apply -f - <<EOT >/dev/null
+apiVersion: mxl.qvest-digital.com/v1alpha1
+kind: MxlDomain
+metadata:
+  name: ${NEXT}
+spec:
+  id: ${NEXT_ID}
+EOT
+next_ok=true
+wait_phase "mxldomain/${NEXT}" \
+  "{.status.nodes[?(@.nodeName==\"${node_b}\")].ready}/{.status.nodes[?(@.nodeName==\"${node_b}\")].mirrored}" \
+  '^true/true$' 60 >/dev/null || next_ok=false
+"${KUBECTL[@]}" delete mxldomain "$NEXT" --ignore-not-found >/dev/null 2>&1 || true
+$next_ok || fail "${NEXT} not materialised after ${DOMAIN} was deleted: a tracker stop is stuck"
+echo "   ${NEXT} materialised on ${node_b}"
