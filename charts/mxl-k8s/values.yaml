@@ -40,16 +40,18 @@ rbac:
 # -- MXL domains the chart creates as MxlDomain objects. Each one is
 # materialised by the agent on every selected node as a directory under
 # agent.hostPath.run carrying domain_def.json, the identity BCP-007-03
-# NMOS nodes publish as mxl_domain_id. Only the domain whose directory
-# is the base of agent.flags.domainPath has its flows tracked and
-# mirrored between nodes; any other is materialised on each node but
-# not mirrored. Set an empty list to manage MxlDomains outside the
-# chart.
+# NMOS nodes publish as mxl_domain_id. Flows are tracked and mirrored
+# between nodes in the domain whose directory is the base of
+# agent.flags.domainPath and in every domain without a directory, which
+# lives at domains/<id>; one in any other directory is materialised on
+# each node but not mirrored. Set an empty list to manage MxlDomains
+# outside the chart.
 domains:
   - # -- Object name.
     name: default
-    # -- Directory below the runtime root. Must match the base of
-    # agent.flags.domainPath for the domain to be mirrored.
+    # -- Directory below the runtime root, immutable. The base of
+    # agent.flags.domainPath for the primary domain; empty places the
+    # domain at domains/<id>.
     directory: domain
     # -- Domain identity, a lowercase UUID. Empty keeps the id an
     # existing object already has, and generates one on first
@@ -608,6 +610,13 @@ gateway:
     # pattern: ^/.+
     # @schema
     domain: /run/mxl/domain
+    # @schema
+    # pattern: ^/.+
+    # @schema
+    # -- Where every MxlDomain without a directory lives, one
+    # subdirectory per id. Must be domains/ below the runtime root
+    # the primary domain sits in.
+    domains: /run/mxl/domains
     # @schema
     # enum: ["DirectoryOrCreate", "Directory"]
     # @schema

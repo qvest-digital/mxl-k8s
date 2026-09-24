@@ -734,7 +734,7 @@
       "title": "dashboards"
     },
     "domains": {
-      "description": "MXL domains the chart creates as MxlDomain objects. Each one is materialised by the agent on every selected node as a directory under agent.hostPath.run carrying domain_def.json, the identity BCP-007-03 NMOS nodes publish as mxl_domain_id. Only the domain whose directory is the base of agent.flags.domainPath has its flows tracked and mirrored between nodes; any other is materialised on each node but not mirrored. Set an empty list to manage MxlDomains outside the chart.",
+      "description": "MXL domains the chart creates as MxlDomain objects. Each one is materialised by the agent on every selected node as a directory under agent.hostPath.run carrying domain_def.json, the identity BCP-007-03 NMOS nodes publish as mxl_domain_id. Flows are tracked and mirrored between nodes in the domain whose directory is the base of agent.flags.domainPath and in every domain without a directory, which lives at domains/\u003cid\u003e; one in any other directory is materialised on each node but not mirrored. Set an empty list to manage MxlDomains outside the chart.",
       "items": {
         "anyOf": [
           {
@@ -747,7 +747,7 @@
               },
               "directory": {
                 "default": "domain",
-                "description": "Directory below the runtime root. Must match the base of agent.flags.domainPath for the domain to be mirrored.",
+                "description": "Directory below the runtime root, immutable. The base of agent.flags.domainPath for the primary domain; empty places the domain at domains/\u003cid\u003e.",
                 "required": [],
                 "title": "directory"
               },
@@ -1639,6 +1639,13 @@
               "pattern": "^/.+",
               "required": [],
               "title": "domain"
+            },
+            "domains": {
+              "default": "/run/mxl/domains",
+              "description": "Where every MxlDomain without a directory lives, one subdirectory per id. Must be domains/ below the runtime root the primary domain sits in.",
+              "pattern": "^/.+",
+              "required": [],
+              "title": "domains"
             },
             "type": {
               "default": "DirectoryOrCreate",

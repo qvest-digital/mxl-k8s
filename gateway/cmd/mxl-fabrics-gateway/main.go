@@ -15,6 +15,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -75,7 +76,6 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("open libmxl: %w", err)
 	}
-	defer func() { _ = handles.Close() }()
 
 	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
 		Scheme:                 scheme,
@@ -83,8 +83,23 @@ func run(args []string) error {
 		HealthProbeBindAddress: cfg.ProbeAddr,
 	})
 	if err != nil {
+		_ = handles.Close()
 		return fmt.Errorf("construct manager: %w", err)
 	}
+
+	// Every other MxlDomain is opened on its first mirror, below the
+	// runtime root the primary domain sits in.
+	domains := &instance.Set{
+		Primary: handles,
+		Directory: func(ctx context.Context, name string) (string, error) {
+			var d mxlv1alpha1.MxlDomain
+			if err := mgr.GetClient().Get(ctx, client.ObjectKey{Name: name}, &d); err != nil {
+				return "", err
+			}
+			return d.Spec.Path(), nil
+		},
+	}
+	defer func() { _ = domains.Close() }()
 
 	if cfg.PprofAddr != "" {
 		pprofSrv := &http.Server{
@@ -113,7 +128,7 @@ func run(args []string) error {
 		Scheme:        mgr.GetScheme(),
 		NodeName:      cfg.NodeName,
 		Selector:      selector,
-		Handles:       handles,
+		Domains:       domains,
 		DomainPath:    cfg.DomainPath,
 		DegradedAfter: cfg.DegradedAfter,
 		Recorder:      mgr.GetEventRecorderFor("mxl-target-gateway"),
@@ -126,7 +141,7 @@ func run(args []string) error {
 		Scheme:           mgr.GetScheme(),
 		NodeName:         cfg.NodeName,
 		Selector:         selector,
-		Handles:          handles,
+		Domains:          domains,
 		ReaderStallAfter: cfg.ReaderStallAfter,
 		PacingFraction:   cfg.PacingFraction,
 		PacingChunks:     cfg.PacingChunks,
@@ -178,18 +193,25 @@ func run(args []string) error {
 	// Reclaiming abandoned flow directories is a Manager Runnable so
 	// it starts only once the caches have synced, which is the first
 	// half of not collecting a mirror copy the target reconciler has
-	// yet to re-establish; the sweeper's own grace is the second.
-	sweeper := &domaingc.Sweeper{
-		DomainPath:    cfg.DomainPath,
-		Interval:      cfg.DomainGCInterval,
-		Grace:         cfg.DomainGCGrace,
-		ScaffoldGrace: cfg.DomainGCScaffoldGrace,
-		Log:           ctrl.Log.WithName("domaingc"),
-	}
-	if inst := handles.MXL(); inst != nil {
-		sweeper.Collector = inst
-	}
-	if err := mgr.Add(manager.RunnableFunc(sweeper.Start)); err != nil {
+	// yet to re-establish; the sweeper's own grace is the second. One
+	// sweeper per open domain, each from the moment it is opened.
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		domains.Watch(func(h *instance.Handles) {
+			sweeper := &domaingc.Sweeper{
+				DomainPath:    h.DomainPath(),
+				Interval:      cfg.DomainGCInterval,
+				Grace:         cfg.DomainGCGrace,
+				ScaffoldGrace: cfg.DomainGCScaffoldGrace,
+				Log:           ctrl.Log.WithName("domaingc").WithValues("domain", h.DomainPath()),
+			}
+			if inst := h.MXL(); inst != nil {
+				sweeper.Collector = inst
+			}
+			go func() { _ = sweeper.Start(ctx) }()
+		})
+		<-ctx.Done()
+		return nil
+	})); err != nil {
 		return fmt.Errorf("add domain gc sweeper: %w", err)
 	}
 

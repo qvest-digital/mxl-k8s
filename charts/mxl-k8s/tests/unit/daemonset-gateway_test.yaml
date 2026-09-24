@@ -11,6 +11,23 @@ tests:
           path: spec.template.spec.dnsPolicy
           value: ClusterFirstWithHostNet
 
+  - it: mounts the primary domain and domains/, not the rest of the runtime root
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: {name: mxl-domain, mountPath: /run/mxl/domain}
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: {name: mxl-domains, mountPath: /run/mxl/domains}
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content: {name: mxl-run, mountPath: /run/mxl}
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: mxl-domains
+            hostPath: {path: /run/mxl/domains, type: DirectoryOrCreate}
+
   - it: pod template name label matches the selector
     asserts:
       - equal:
@@ -83,7 +100,7 @@ tests:
           content: IPC_LOCK
       - lengthEqual:
           path: spec.template.spec.volumes
-          count: 1
+          count: 2
 
   - it: POD_IP env wiring
     asserts:

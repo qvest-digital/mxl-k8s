@@ -65,6 +65,17 @@ tests:
             resources: [nodes]
             verbs: [get]
 
+  - it: gateway role can read MxlDomains to open a mirror's domain by its directory
+    template: templates/rbac-gateway.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [mxl.qvest-digital.com]
+            resources: [mxlflows, mxldomains]
+            verbs: [get, list, watch]
+
   - it: operator role can watch nodes so it can prune locations of departed ones
     template: templates/rbac-operator.yaml
     documentIndex: 0

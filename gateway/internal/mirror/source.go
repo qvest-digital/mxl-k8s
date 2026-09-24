@@ -58,6 +58,17 @@ const sourceFieldOwner = "mxl-source-gateway"
 // indexers point at the same logical key.
 const mirrorFlowIDIndex = "spec.flowID"
 
+// indexMirrorByFlow indexes a mirror under the MxlFlow object name of
+// the flow it copies, which carries the domain, so a Lease or flow in
+// one domain never wakes the mirrors of the same id in another.
+func indexMirrorByFlow(obj client.Object) []string {
+	m, ok := obj.(*mxlv1alpha1.MxlFlowMirror)
+	if !ok || m.Spec.FlowID == "" {
+		return nil
+	}
+	return []string{m.Ref().Name()}
+}
+
 // errAddTargetFailed wraps a libmxl-fabrics AddTarget failure so the
 // reconciler can errors.Is detect it and engage bounded backoff
 // without rebuilding the initiator from scratch on every tick.
@@ -115,8 +126,9 @@ type SourceReconciler struct {
 	// publisher applies the same one.
 	Selector fabric.Selector
 
-	// Handles owns the long-lived mxl + fabrics instances.
-	Handles *instance.Handles
+	// Domains holds the long-lived mxl + fabrics instances, one per
+	// MxlDomain a mirror reads from.
+	Domains *instance.Set
 
 	// ProgressInterval is how often the per-flow transfer goroutine
 	// calls MakeProgress + polls FlowRuntime for new grain indices.
@@ -173,7 +185,7 @@ type SourceReconciler struct {
 	// stalled head. Nil disables the check, which leaves the previous
 	// reopen-and-hope behaviour and is what tests wire when the
 	// question is not what they are exercising.
-	writerLiveFn func(flowID string) (bool, error)
+	writerLiveFn func(ref mxlv1alpha1.FlowRef) (bool, error)
 
 	mu sync.Mutex
 	// sources holds the per-mirror half, keyed by MxlFlowMirror;
@@ -195,7 +207,8 @@ type SourceReconciler struct {
 }
 
 // sourceKey identifies one shared source: the libmxl FlowReader on a
-// flow and the libmxl-fabrics Initiator pinned to it.
+// flow and the libmxl-fabrics Initiator pinned to it. A flow is its id
+// within its domain, and the same id in two domains is two flows.
 //
 // The provider is part of the key because an initiator is set up
 // against one interface, and resolveInterface picks that interface per
@@ -203,8 +216,13 @@ type SourceReconciler struct {
 // providers therefore cannot share an initiator, and get one shared
 // source each.
 type sourceKey struct {
+	domain   string
 	flowID   string
 	provider fabrics.Provider
+}
+
+func (k sourceKey) ref() mxlv1alpha1.FlowRef {
+	return mxlv1alpha1.FlowRef{Domain: k.domain, ID: k.flowID}
 }
 
 // sharedSource owns what the source side has per flow rather than per
@@ -353,6 +371,8 @@ func (e *sourceEntry) sourceKey() sourceKey {
 }
 
 func (e *sourceEntry) flowID() string { return e.sourceKey().flowID }
+
+func (e *sourceEntry) flowRef() mxlv1alpha1.FlowRef { return e.sourceKey().ref() }
 
 func (e *sourceEntry) provider() fabrics.Provider { return e.sourceKey().provider }
 
@@ -525,7 +545,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// the rotation comparison below and the openShared handoff both
 	// observe the same value, and a later rotation is detected
 	// even if the MxlFlow watch fires before status propagates.
-	originAt := r.observedOriginAt(ctx, mirror.Spec.FlowID)
+	originAt := r.observedOriginAt(ctx, mirror.Ref())
 
 	provider, err := providerForSetup(&mirror)
 	if err != nil {
@@ -546,7 +566,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// Resolved before the fast path rather than after it, because the
 	// provider is half the identity of the shared source this mirror
 	// belongs to.
-	skey := sourceKey{flowID: mirror.Spec.FlowID, provider: provider}
+	skey := sourceKey{domain: mirror.Spec.Domain, flowID: mirror.Spec.FlowID, provider: provider}
 
 	r.mu.Lock()
 	existing := r.sources[req.NamespacedName]
@@ -636,7 +656,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// again. The condition is written once and the requeue carries the
 	// retry, because a producer that re-attaches to a directory that
 	// was never collected rotates nothing and fires no watch.
-	if r.writerGone(mirror.Spec.FlowID) {
+	if r.writerGone(mirror.Ref()) {
 		if !sourceProgressReads(&mirror, mxlv1alpha1.ReasonSourceWriterGone) {
 			if err := r.publishSourceProgress(ctx, req.NamespacedName, sourceProgressState{
 				status:  metav1.ConditionFalse,
@@ -725,7 +745,7 @@ func (r *SourceReconciler) openShared(skey sourceKey, originAt *time.Time) (*sha
 		return s, nil
 	}
 
-	s, err := r.opener.open(skey.flowID, skey.provider)
+	s, err := r.opener.open(skey)
 	if err != nil {
 		return nil, err
 	}
@@ -836,9 +856,9 @@ func backoffFor(attempts uint32) time.Duration {
 // appears, which is the event this is trying to detect. Errors are logged but not fatal: a
 // missing flow means the reconciler will wait for the MxlFlow watch
 // to fire.
-func (r *SourceReconciler) observedOriginAt(ctx context.Context, flowID string) *time.Time {
+func (r *SourceReconciler) observedOriginAt(ctx context.Context, ref mxlv1alpha1.FlowRef) *time.Time {
 	var flow mxlv1alpha1.MxlFlow
-	if err := r.Get(ctx, types.NamespacedName{Name: flowID}, &flow); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name()}, &flow); err != nil {
 		return nil
 	}
 	for _, loc := range flow.Status.Locations {
@@ -908,7 +928,7 @@ func originRotated(baseline, observed *time.Time, openedAt time.Time) bool {
 // reads; the reconciler hands a fully populated value at
 // SetupWithManager time.
 type libmxlOpener struct {
-	Handles          *instance.Handles
+	Domains          *instance.Set
 	NodeName         string
 	Selector         fabric.Selector
 	ProgressInterval time.Duration
@@ -916,12 +936,17 @@ type libmxlOpener struct {
 	PacingChunks     int
 }
 
-func (o *libmxlOpener) open(flowID string, provider fabrics.Provider) (*sharedSource, error) {
-	mxlInst := o.Handles.MXL()
+func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
+	flowID, provider := key.flowID, key.provider
+	handles, err := o.Domains.For(context.Background(), key.domain)
+	if err != nil {
+		return nil, err
+	}
+	mxlInst := handles.MXL()
 	if mxlInst == nil {
 		return nil, fmt.Errorf("mxl instance closed")
 	}
-	fabInst := o.Handles.Fabrics()
+	fabInst := handles.Fabrics()
 	if fabInst == nil {
 		return nil, fmt.Errorf("fabrics instance closed")
 	}
@@ -989,7 +1014,7 @@ func (o *libmxlOpener) open(flowID string, provider fabrics.Provider) (*sharedSo
 	loopCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	s := &sharedSource{
-		key:       sourceKey{flowID: flowID, provider: provider},
+		key:       key,
 		reader:    reader,
 		initiator: initiator,
 		cancel:    cancel,
@@ -1944,7 +1969,7 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 		// TransfersNotLanding is the state a source reaches without
 		// asking for a reopen, and it pins the flow exactly as the
 		// wedge states do.
-		if state.status == metav1.ConditionFalse && r.writerGone(entry.flowID()) {
+		if state.status == metav1.ConditionFalse && r.writerGone(entry.flowRef()) {
 			state.status = metav1.ConditionFalse
 			state.reason = mxlv1alpha1.ReasonSourceWriterGone
 			state.message = "flow has no live writer; releasing the source reader so the flow can be reclaimed"
@@ -2033,11 +2058,11 @@ func (e *sourceEntry) beginRebuild() bool {
 // reopen, and failing to get an answer is not grounds for tearing down
 // a mirror that may be healthy. ErrFlowNotFound is the exception,
 // because it is an answer.
-func (r *SourceReconciler) writerGone(flowID string) bool {
-	if r.writerLiveFn == nil || flowID == "" {
+func (r *SourceReconciler) writerGone(ref mxlv1alpha1.FlowRef) bool {
+	if r.writerLiveFn == nil || ref.ID == "" {
 		return false
 	}
-	live, err := r.writerLiveFn(flowID)
+	live, err := r.writerLiveFn(ref)
 	if err != nil {
 		// The flow is not in this node's domain, so nothing here
 		// writes it and no reader can be opened on it. Answering
@@ -2051,7 +2076,7 @@ func (r *SourceReconciler) writerGone(flowID string) bool {
 		}
 		ctrl.Log.WithName("source-flush").V(1).Info(
 			"writer liveness check failed; assuming the writer is live",
-			"flowID", flowID, "error", err.Error())
+			"flow", ref.Name(), "error", err.Error())
 		return false
 	}
 	return !live
@@ -2311,7 +2336,7 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if r.opener == nil {
 		r.opener = &libmxlOpener{
-			Handles:          r.Handles,
+			Domains:          r.Domains,
 			NodeName:         r.NodeName,
 			Selector:         r.Selector,
 			ProgressInterval: r.ProgressInterval,
@@ -2321,25 +2346,23 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if r.writerLiveFn == nil {
 		// libmxl's own answer, not an inference from a stalled head.
-		r.writerLiveFn = func(flowID string) (bool, error) {
-			inst := r.Handles.MXL()
+		r.writerLiveFn = func(ref mxlv1alpha1.FlowRef) (bool, error) {
+			handles, err := r.Domains.For(context.Background(), ref.Domain)
+			if err != nil {
+				return false, err
+			}
+			inst := handles.MXL()
 			if inst == nil {
 				return false, fmt.Errorf("mxl instance closed")
 			}
-			return inst.IsFlowActive(flowID)
+			return inst.IsFlowActive(ref.ID)
 		}
 	}
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
 		&mxlv1alpha1.MxlFlowMirror{},
 		mirrorFlowIDIndex,
-		func(obj client.Object) []string {
-			m, ok := obj.(*mxlv1alpha1.MxlFlowMirror)
-			if !ok || m.Spec.FlowID == "" {
-				return nil
-			}
-			return []string{m.Spec.FlowID}
-		},
+		indexMirrorByFlow,
 	); err != nil {
 		return fmt.Errorf("index MxlFlowMirror by %s: %w", mirrorFlowIDIndex, err)
 	}
@@ -2383,7 +2406,7 @@ func (r *SourceReconciler) leaseToMirrors(ctx context.Context, obj client.Object
 	if !ok {
 		return nil
 	}
-	flowID, nodeName, ok := mxlv1alpha1.ParseLeaseName(lease.Name)
+	ref, nodeName, ok := mxlv1alpha1.ParseLeaseNameFor(lease.Name)
 	if !ok {
 		return nil
 	}
@@ -2391,7 +2414,7 @@ func (r *SourceReconciler) leaseToMirrors(ctx context.Context, obj client.Object
 		return nil
 	}
 	var mirrors mxlv1alpha1.MxlFlowMirrorList
-	if err := r.List(ctx, &mirrors, client.MatchingFields{mirrorFlowIDIndex: flowID}); err != nil {
+	if err := r.List(ctx, &mirrors, client.MatchingFields{mirrorFlowIDIndex: ref.Name()}); err != nil {
 		return nil
 	}
 	out := make([]reconcile.Request, 0, len(mirrors.Items))
@@ -2423,7 +2446,7 @@ func (r *SourceReconciler) flowToMirrors(ctx context.Context, obj client.Object)
 	var out []reconcile.Request
 	for i := range mirrors.Items {
 		m := &mirrors.Items[i]
-		if m.Spec.FlowID == flow.Spec.ID && m.Spec.SourceNode == r.NodeName {
+		if m.Ref() == flow.Ref() && m.Spec.SourceNode == r.NodeName {
 			out = append(out, reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Namespace: m.Namespace,

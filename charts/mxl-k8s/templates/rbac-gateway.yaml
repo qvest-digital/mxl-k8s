@@ -16,7 +16,7 @@ rules:
     resources: [mxlflowmirrors/finalizers]
     verbs: [update]
   - apiGroups: [mxl.qvest-digital.com]
-    resources: [mxlflows]
+    resources: [mxlflows, mxldomains]
     verbs: [get, list, watch]
   - apiGroups: [coordination.k8s.io]
     resources: [leases]

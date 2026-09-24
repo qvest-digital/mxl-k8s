@@ -164,6 +164,8 @@ spec:
           volumeMounts:
             - name: mxl-domain
               mountPath: {{ $g.hostPath.domain }}
+            - name: mxl-domains
+              mountPath: {{ $g.hostPath.domains }}
             {{- if and $g.rdma.enabled $g.rdma.mountInfiniband }}
             - name: infiniband
               mountPath: {{ $g.rdma.infinibandHostPath }}
@@ -178,6 +180,10 @@ spec:
         - name: mxl-domain
           hostPath:
             path: {{ $g.hostPath.domain }}
+            type: {{ $g.hostPath.type }}
+        - name: mxl-domains
+          hostPath:
+            path: {{ $g.hostPath.domains }}
             type: {{ $g.hostPath.type }}
         {{- if and $g.rdma.enabled $g.rdma.mountInfiniband }}
         - name: infiniband

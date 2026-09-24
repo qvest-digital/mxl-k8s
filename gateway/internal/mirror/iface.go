@@ -32,11 +32,11 @@ import "github.com/qvest-digital/go-mxl/fabrics"
 // at runtime: the field on SourceReconciler is an interface value
 // the constructor sets once and never reassigns.
 type initiatorOpener interface {
-	// open builds the per-flow half: a FlowReader on flowID, an
+	// open builds the per-flow half: a FlowReader on the flow, an
 	// Initiator set up against it on an interface the provider can
 	// carry, and the transfer goroutine feeding one into the other. It
 	// adds no target, so nothing is transferred until attach runs.
-	open(flowID string, provider fabrics.Provider) (*sharedSource, error)
+	open(key sourceKey) (*sharedSource, error)
 
 	// attach adds one target to an already-open shared initiator and
 	// returns the handle detach needs. An AddTarget failure is wrapped
