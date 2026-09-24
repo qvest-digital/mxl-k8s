@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.22](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.21...v1.1.0-rc.22) (2026-09-24)
+
+
+### Bug Fixes
+
+* **gateway:** keep a dropped mirror Failed against a concurrent recovery ([#347](https://github.com/qvest-digital/mxl-k8s/issues/347)) ([bc9ee57](https://github.com/qvest-digital/mxl-k8s/commit/bc9ee5749e3b436582d65d7fdde35a43c9080ddd))
+
 ## [1.1.0-rc.21](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.20...v1.1.0-rc.21) (2026-09-24)
 
 
