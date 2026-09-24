@@ -160,7 +160,7 @@ done
 domain=$("${KUBECTL[@]}" get mxlflow "${DOMAIN}.${FLOW_SHARED}" -o 'jsonpath={.spec.domain}')
 [ "$domain" = "$DOMAIN" ] || fail "second domain's MxlFlow names domain '${domain}'"
 
-old_shim=$("${KUBECTL[@]}" -n "$NAMESPACE" exec "$CONSUMER" -- sh -c 'ls /opt/old-shim/*.so' | head -1)
+old_shim=$("${KUBECTL[@]}" -n "$NAMESPACE" exec "$CONSUMER" -c consumer -- sh -c 'ls /opt/old-shim/*.so' | head -1)
 [ -n "$old_shim" ] || fail "${OLD_SHIM_IMAGE} delivered no shim"
 
 # read_through <shim> <flow>: open a flow of the second domain from the
@@ -168,7 +168,7 @@ old_shim=$("${KUBECTL[@]}" -n "$NAMESPACE" exec "$CONSUMER" -- sh -c 'ls /opt/ol
 read_through() {
   local shim="$1" flow="$2" i out
   for i in $(seq 1 "$ATTEMPTS"); do
-    if out=$("${KUBECTL[@]}" -n "$NAMESPACE" exec "$CONSUMER" -- env LD_PRELOAD="$shim" \
+    if out=$("${KUBECTL[@]}" -n "$NAMESPACE" exec "$CONSUMER" -c consumer -- env LD_PRELOAD="$shim" \
           /usr/local/bin/read-grain -domain "$DOMAIN_DIR" -flow "$flow" -count 3 2>&1) \
        && echo "$out" | grep -q 'idx='; then
       return 0
@@ -208,10 +208,10 @@ phase=$("${KUBECTL[@]}" get mxlflow "$FLOW_SHARED" \
   -o "jsonpath={.status.locations[?(@.nodeName==\"${node_b}\")].phase}")
 [ -z "$phase" ] || fail "the primary domain's ${FLOW_SHARED} appeared on ${node_b} (phase '${phase}')"
 
-"${KUBECTL[@]}" -n "$NAMESPACE" exec "$CONSUMER" -- \
+"${KUBECTL[@]}" -n "$NAMESPACE" exec "$CONSUMER" -c consumer -- \
   test -d "${DOMAIN_DIR}/${FLOW_SHARED}.mxl-flow" \
   || fail "the mirror did not write into ${DOMAIN_DIR} on ${node_b}"
-if "${KUBECTL[@]}" -n "$NAMESPACE" exec "$CONSUMER" -- \
+if "${KUBECTL[@]}" -n "$NAMESPACE" exec "$CONSUMER" -c consumer -- \
      test -e "/run/mxl/domain/${FLOW_SHARED}.mxl-flow"; then
   fail "the second domain's mirror wrote into the primary domain on ${node_b}"
 fi
