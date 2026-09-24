@@ -35,6 +35,8 @@ func TestADomainFlowResolvesAndMirrorsWithinItsDomain(t *testing.T) {
 		WithObjects(
 			origin(flowID, "", "primary-node"),
 			origin(ref.Name(), "studio-b", "studio-node"),
+			multiDomainNode("studio-node"),
+			multiDomainNode("n1"),
 		).Build()
 
 	d := &Dispatcher{Client: c, NodeName: "n1"}
@@ -56,4 +58,45 @@ func TestADomainFlowResolvesAndMirrorsWithinItsDomain(t *testing.T) {
 		types.NamespacedName{Namespace: "ns", Name: m.Name}, &stored))
 	assert.NotEqual(t, mxlv1alpha1.MirrorName(flowID, "n1"), stored.Name,
 		"distinct from a mirror of the primary domain's flow of the same id")
+}
+
+func multiDomainNode(name string) *mxlv1alpha1.MxlNodeCapabilities {
+	return &mxlv1alpha1.MxlNodeCapabilities{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status:     mxlv1alpha1.MxlNodeCapabilitiesStatus{MultiDomain: true},
+	}
+}
+
+// A gateway that predates domains ignores spec.domain and would copy the
+// primary domain's flow of the same id into the consumer's domain. No
+// mirror naming another domain is created unless the gateways on both ends
+// report multiDomain; the primary domain is unaffected.
+func TestADomainMirrorNeedsMultiDomainGatewaysOnBothEnds(t *testing.T) {
+	ref := mxlv1alpha1.FlowRef{Domain: "studio-b", ID: flowID}
+	pod := &metav1.ObjectMeta{Namespace: "ns", Name: "consumer", UID: "uid-1"}
+	for _, tc := range []struct {
+		name  string
+		ready []string
+		ok    bool
+	}{
+		{"both", []string{"src", "n1"}, true},
+		{"source is old", []string{"n1"}, false},
+		{"target is old", []string{"src"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := fake.NewClientBuilder().WithScheme(newScheme(t))
+			for _, n := range tc.ready {
+				b = b.WithObjects(multiDomainNode(n))
+			}
+			d := &Dispatcher{Client: b.Build(), NodeName: "n1"}
+			_, err := d.ensureMirror(context.Background(), ref, "src", pod)
+			if tc.ok {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+			_, err = d.ensureMirror(context.Background(), mxlv1alpha1.FlowRef{ID: flowID}, "src", pod)
+			require.NoError(t, err, "the primary domain does not need multiDomain")
+		})
+	}
 }

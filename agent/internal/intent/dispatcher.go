@@ -373,6 +373,12 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, ref mxlv1alpha1.FlowRef, 
 		return nil, err
 	}
 
+	if ref.Domain != "" {
+		if err := d.requireMultiDomain(ctx, sourceNode, d.NodeName); err != nil {
+			return nil, err
+		}
+	}
+
 	provider, err := d.resolveProvider(ctx, flowID, sourceNode)
 	if err != nil {
 		return nil, err
@@ -446,6 +452,24 @@ func (d *Dispatcher) resolveProvider(ctx context.Context, flowID, sourceNode str
 		l.Info("resolved mirror provider")
 	}
 	return provider, nil
+}
+
+// requireMultiDomain refuses a mirror in a domain other than the primary
+// unless the gateway on every node it involves reports multiDomain. A
+// gateway without it ignores spec.domain and would copy the primary
+// domain's flow of the same id, which is a wrong picture rather than a
+// failure.
+func (d *Dispatcher) requireMultiDomain(ctx context.Context, nodes ...string) error {
+	for _, node := range nodes {
+		caps, err := d.nodeCapabilities(ctx, node)
+		if err != nil {
+			return fmt.Errorf("node %s capabilities: %w", node, err)
+		}
+		if !caps.MultiDomain {
+			return fmt.Errorf("the gateway on node %s mirrors only the primary MXL domain", node)
+		}
+	}
+	return nil
 }
 
 // nodeCapabilities reads the cluster-scoped MxlNodeCapabilities the
