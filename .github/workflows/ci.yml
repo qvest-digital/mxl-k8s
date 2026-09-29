@@ -40,6 +40,7 @@ jobs:
       pure_go:      ${{ steps.f.outputs.pure_go }}
       workflow:     ${{ steps.f.outputs.workflow }}
       api_pins:     ${{ steps.f.outputs.api_pins }}
+      go_mxl_pins:  ${{ steps.f.outputs.go_mxl_pins }}
       test_modules: ${{ steps.m.outputs.test_modules }}
     steps:
       - uses: actions/checkout@v7
@@ -67,6 +68,12 @@ jobs:
               - 'exporter/go.mod'
               - '.github/release-please-manifest.json'
               - 'hack/check-api-pins.sh'
+            go_mxl_pins:
+              - 'gateway/go.mod'
+              - 'exporter/go.mod'
+              - 'docker/*.Dockerfile'
+              - 'hack/flow-probe.sh'
+              - 'hack/check-go-mxl-pins.sh'
       - id: m
         # Build the JSON matrix of pure-Go modules whose tests need
         # to re-run. A workflow-file change expands the set to
@@ -205,6 +212,29 @@ jobs:
       - uses: actions/checkout@v7
       - name: Consumer api pins name the released version
         run: ./hack/check-api-pins.sh
+
+  # The gateway and exporter images ship the libmxl of the go-mxl image
+  # named in docker/, while the cgo lanes below compile in the image
+  # named here. A go.mod or container pin that moves without the
+  # Dockerfiles tests one libmxl and releases another.
+  go-mxl-pins:
+    needs: changes
+    if: needs.changes.outputs.go_mxl_pins == 'true' || needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v7
+      - name: go.mod, Dockerfiles and CI name one go-mxl
+        run: |
+          ./hack/check-go-mxl-pins.sh
+          want=$(sed -nE 's/^ARG GO_MXL_TAG=//p' docker/gateway.Dockerfile)
+          bad=$(grep -nE '^ +image: ghcr.io/qvest-digital/go-mxl-builder:' .github/workflows/ci.yml | grep -v "go-mxl-builder:${want}\$" || true)
+          if [ -n "$bad" ]; then
+            echo "FAIL ci.yml container images differ from ${want}:" >&2
+            echo "$bad" >&2
+            exit 1
+          fi
+          echo "ok   ci.yml: ${want}"
 
   manifests-check:
     needs: changes
@@ -377,7 +407,7 @@ jobs:
   # conditional job individually and would block PRs that legitimately
   # skipped one (skipped checks count as "not satisfied" otherwise).
   ci-summary:
-    needs: [changes, lint, gateway, exporter, api-pins, manifests-check, test, test-gateway, report]
+    needs: [changes, lint, gateway, exporter, api-pins, go-mxl-pins, manifests-check, test, test-gateway, report]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
