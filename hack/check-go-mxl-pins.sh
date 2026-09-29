@@ -39,7 +39,7 @@ for f in $DOCKERFILES; do
 done
 
 for m in $MODULES; do
-  v="$(sed -nE "s#^[[:space:]]*${GO_MXL_MODULE} v([^[:space:]]+).*#\1#p" "${m}/go.mod" | head -1)"
+  v="$(sed -nE "s#^[[:space:]]*(require[[:space:]]+)?${GO_MXL_MODULE} v([^[:space:]]+).*#\2#p" "${m}/go.mod" | head -1)"
   check "${m}/go.mod" "$v"
 done
 
