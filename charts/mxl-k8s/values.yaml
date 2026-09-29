@@ -525,8 +525,9 @@ gateway:
     # this, so 0.5 halves the burst and doubles its length, and is
     # where to start. The cost is latency: a grain completes at the
     # receiver up to this much of its interval later. Depends on the
-    # flow's edit rate alone, never on the link speed, so one value
-    # holds from 25GbE to EFA. Raise it toward 1 while drops remain;
+    # flow's edit rate alone, never on the link speed. Mirrors over
+    # efa are never paced, whatever this says: EFA does not keep one
+    # grain's writes in order. Raise it toward 1 while drops remain;
     # lower it when the added latency matters more than the burst.
     # Must stay below 1, or a grain's transmission runs into the next
     # one.
@@ -794,16 +795,6 @@ gateway:
         enabled: true
         mountInfiniband: false
         resourceName: vpc.amazonaws.com/efa
-        # @schema
-        # type: array
-        # items:
-        #   type: object
-        # @schema
-        # -- Every mirror crosses nodes, so the shared-memory path the
-        # EFA provider opens beside each endpoint carries nothing.
-        extraEnv:
-          - name: FI_EFA_ENABLE_SHM_TRANSFER
-            value: "0"
     # Nodes with no fabric device. Needs no resource request, so it
     # schedules anywhere its placement allows.
     tcp:

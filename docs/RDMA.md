@@ -20,7 +20,7 @@ gateway which of a node's NICs the fabric is.
   `ibstat`, `rdma`, ...). Most distros' default package set.
 - Nothing for `RLIMIT_MEMLOCK`. A memory registration pins pages
   against that limit only for a process without `CAP_IPC_LOCK`, and
-  the gateway runs with it, so containerd's 8 MiB default is not a
+  the gateway runs with it, so the inherited 8 MiB default is not a
   ceiling for the gateway.
 - `/dev/infiniband/{rdma_cm,uverbs0,...}` present and readable by
   the container user. The gateway DaemonSet bind-mounts
@@ -164,7 +164,7 @@ host setup is AWS-specific.
 - `MxlFlowMirror.spec.provider: efa` (or
   `MxlReceiver.spec.provider: efa`) to pin a mirror rather than
   letting `selection.Resolve` pick from what both nodes report.
-- The efa variant sets `FI_EFA_ENABLE_SHM_TRANSFER=0`: every mirror
+- The gateway image sets `FI_EFA_ENABLE_SHM_TRANSFER=0`: every mirror
   crosses nodes, so the shared-memory path the provider would open
   beside each endpoint carries nothing.
 - EFA delivers the RMA writes of one initiator in any order

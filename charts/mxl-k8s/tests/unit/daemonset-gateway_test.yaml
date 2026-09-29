@@ -191,17 +191,3 @@ tests:
           path: spec.template.spec.hostNetwork
           value: false
 
-  - it: the efa variant turns off the EFA provider's shared-memory path
-    set:
-      gateway.variants.efa.enabled: true
-      gateway.variants.efa.nodeSelector:
-        mxl.qvest-digital.com/fabric: efa
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: FI_EFA_ENABLE_SHM_TRANSFER
-            value: "0"
-      - contains:
-          path: spec.template.spec.containers[0].securityContext.capabilities.add
-          content: IPC_LOCK

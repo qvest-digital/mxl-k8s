@@ -19,4 +19,15 @@ RUN git config --global --add safe.directory '*' && \
 
 FROM ghcr.io/qvest-digital/go-mxl-runtime:${GO_MXL_TAG}
 COPY --from=builder /out/mxl-fabrics-gateway /usr/local/bin/mxl-fabrics-gateway
+# The runtime preempts a long-running goroutine by sending its thread
+# SIGURG. The gateway's long-running goroutines sit in blocking libfabric
+# reads, where the signal cuts epoll_wait short with EINTR and libfabric
+# logs "poll failed" for each: thousands of warnings a minute on a busy
+# gateway, for preemption that buys nothing inside a cgo call.
+#
+# Every mirror crosses nodes, so the shared-memory endpoint the EFA
+# provider opens beside each of its own carries nothing; in a container's
+# 64 MiB /dev/shm it failed to open and warned at every target setup.
+ENV GODEBUG=asyncpreemptoff=1 \
+    FI_EFA_ENABLE_SHM_TRANSFER=0
 ENTRYPOINT ["/usr/local/bin/mxl-fabrics-gateway"]
