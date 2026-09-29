@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.23](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.22...v1.1.0-rc.23) (2026-09-29)
+
+
+### Bug Fixes
+
+* **gateway:** serialise and dedupe commits to a flow two mirrors share ([#351](https://github.com/qvest-digital/mxl-k8s/issues/351)) ([ffa6287](https://github.com/qvest-digital/mxl-k8s/commit/ffa62873835b71e933411e9f526b6cbb8da14944)), closes [#349](https://github.com/qvest-digital/mxl-k8s/issues/349)
+
 ## [1.1.0-rc.22](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.21...v1.1.0-rc.22) (2026-09-29)
 
 
