@@ -1041,13 +1041,7 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 			progressInterval = 2 * time.Millisecond
 		}
 	}
-	// Zero means "not configured" and takes the default, which is
-	// itself negative; a negative fraction is how pacing is turned off,
-	// and newPacer reads either as a disabled pacer.
-	pacingFraction := o.PacingFraction
-	if pacingFraction == 0 {
-		pacingFraction = defaultPacingFraction
-	}
+	pacingFraction := effectivePacingFraction(o.PacingFraction, provider)
 	pacingChunks := o.PacingChunks
 	if pacingChunks == 0 {
 		pacingChunks = defaultPacingChunks
@@ -2543,6 +2537,24 @@ func defaultSampleProgressInterval(rate mxl.Rational, xferBatch uint64) time.Dur
 	}
 	batch := time.Duration(int64(time.Second) * int64(rate.Den) * int64(xferBatch) / int64(rate.Num))
 	return batch / sampleProgressOversample
+}
+
+// effectivePacingFraction is the pacing fraction a transfer loop runs
+// with. Zero means "not configured" and takes the default, which is
+// itself negative; a negative fraction is how pacing is turned off, and
+// newPacer reads either as a disabled pacer.
+//
+// A paced grain goes out as one write per chunk, each carrying the slice
+// count it completes in its immediate data, and the target takes that
+// count as the grain's valid slices. EFA reports no write-after-write
+// ordering, so a later chunk can land first and a reader sees slices
+// counted valid whose data has not arrived. EFA therefore only ever
+// sends whole grains, whatever is configured.
+func effectivePacingFraction(configured float64, provider fabrics.Provider) float64 {
+	if configured == 0 || provider == fabrics.ProviderEFA {
+		return defaultPacingFraction
+	}
+	return configured
 }
 
 // progressBlocking reports whether the provider's completion queue
