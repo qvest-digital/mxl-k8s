@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.1.0-rc.22](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.21...v1.1.0-rc.22) (2026-09-29)
+
+
+### Bug Fixes
+
+* **chart:** grant the RDMA gateway IPC_LOCK only ([#348](https://github.com/qvest-digital/mxl-k8s/issues/348)) ([e5fdb4c](https://github.com/qvest-digital/mxl-k8s/commit/e5fdb4c42938950887679c28f0479da616f3ca03))
+* **gateway:** disable EFA shm and async preemption in the image ([#348](https://github.com/qvest-digital/mxl-k8s/issues/348)) ([e5fdb4c](https://github.com/qvest-digital/mxl-k8s/commit/e5fdb4c42938950887679c28f0479da616f3ca03))
+* **gateway:** keep a dropped mirror Failed against a concurrent recovery ([#347](https://github.com/qvest-digital/mxl-k8s/issues/347)) ([bc9ee57](https://github.com/qvest-digital/mxl-k8s/commit/bc9ee5749e3b436582d65d7fdde35a43c9080ddd))
+* **gateway:** never pace grains on an EFA mirror ([#348](https://github.com/qvest-digital/mxl-k8s/issues/348)) ([e5fdb4c](https://github.com/qvest-digital/mxl-k8s/commit/e5fdb4c42938950887679c28f0479da616f3ca03))
+
+
+### Dependencies
+
+* **go-mxl:** update to v1.1.0-rc.6 ([#348](https://github.com/qvest-digital/mxl-k8s/issues/348)) ([e5fdb4c](https://github.com/qvest-digital/mxl-k8s/commit/e5fdb4c42938950887679c28f0479da616f3ca03))
+
 ## [1.1.0-rc.21](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.20...v1.1.0-rc.21) (2026-09-24)
 
 
