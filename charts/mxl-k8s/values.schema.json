@@ -1863,7 +1863,7 @@
           "properties": {
             "enabled": {
               "default": "false",
-              "description": "Add the capabilities the verbs/efa providers need (IPC_LOCK, SYS_RESOURCE; libmxl pins shm pages).",
+              "description": "Add the capability the verbs/efa providers need: IPC_LOCK, which exempts their memory registrations from RLIMIT_MEMLOCK.",
               "required": [],
               "title": "enabled"
             },
@@ -2109,6 +2109,15 @@
                       "default": true,
                       "title": "enabled",
                       "type": "boolean"
+                    },
+                    "extraEnv": {
+                      "description": "Every mirror crosses nodes, so the shared-memory path the EFA provider opens beside each endpoint carries nothing.",
+                      "items": {
+                        "required": [],
+                        "type": "object"
+                      },
+                      "title": "extraEnv",
+                      "type": "array"
                     },
                     "mountInfiniband": {
                       "default": false,

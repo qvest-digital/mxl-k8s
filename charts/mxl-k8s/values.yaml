@@ -622,8 +622,8 @@ gateway:
     # @schema
     type: DirectoryOrCreate
   rdma:
-    # -- Add the capabilities the verbs/efa providers need
-    # (IPC_LOCK, SYS_RESOURCE; libmxl pins shm pages).
+    # -- Add the capability the verbs/efa providers need: IPC_LOCK,
+    # which exempts their memory registrations from RLIMIT_MEMLOCK.
     enabled: false
     # -- Bind-mount the host's InfiniBand device directory into
     # the gateway. Only consulted when rdma.enabled is set.
@@ -794,6 +794,16 @@ gateway:
         enabled: true
         mountInfiniband: false
         resourceName: vpc.amazonaws.com/efa
+        # @schema
+        # type: array
+        # items:
+        #   type: object
+        # @schema
+        # -- Every mirror crosses nodes, so the shared-memory path the
+        # EFA provider opens beside each endpoint carries nothing.
+        extraEnv:
+          - name: FI_EFA_ENABLE_SHM_TRANSFER
+            value: "0"
     # Nodes with no fabric device. Needs no resource request, so it
     # schedules anywhere its placement allows.
     tcp:
