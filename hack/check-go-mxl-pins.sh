@@ -14,7 +14,6 @@ set -eu
 REF_FILE="docker/gateway.Dockerfile"
 DOCKERFILES="${DOCKERFILES:-docker/gateway.Dockerfile docker/exporter.Dockerfile docker/demo-tools.Dockerfile}"
 MODULES="${MODULES:-gateway exporter}"
-PROBE="hack/flow-probe.sh"
 GO_MXL_MODULE="github.com/qvest-digital/go-mxl"
 
 arg_of() {
@@ -42,7 +41,5 @@ for m in $MODULES; do
   v="$(sed -nE "s#^[[:space:]]*(require[[:space:]]+)?${GO_MXL_MODULE} v([^[:space:]]+).*#\2#p" "${m}/go.mod" | head -1)"
   check "${m}/go.mod" "$v"
 done
-
-check "$PROBE" "$(sed -nE 's/^GO_MXL_TAG=\$\{GO_MXL_TAG:-([^}]+)\}.*/\1/p' "$PROBE" | head -1)"
 
 exit "$rc"

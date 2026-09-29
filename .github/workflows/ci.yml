@@ -72,7 +72,6 @@ jobs:
               - 'gateway/go.mod'
               - 'exporter/go.mod'
               - 'docker/*.Dockerfile'
-              - 'hack/flow-probe.sh'
               - 'hack/check-go-mxl-pins.sh'
       - id: m
         # Build the JSON matrix of pure-Go modules whose tests need

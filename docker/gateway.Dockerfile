@@ -28,6 +28,9 @@ COPY --from=builder /out/mxl-fabrics-gateway /usr/local/bin/mxl-fabrics-gateway
 # Every mirror crosses nodes, so the shared-memory endpoint the EFA
 # provider opens beside each of its own carries nothing; in a container's
 # 64 MiB /dev/shm it failed to open and warned at every target setup.
+#
+# A GODEBUG set through the chart's extraEnv replaces this value, so it
+# has to repeat asyncpreemptoff=1.
 ENV GODEBUG=asyncpreemptoff=1 \
     FI_EFA_ENABLE_SHM_TRANSFER=0
 ENTRYPOINT ["/usr/local/bin/mxl-fabrics-gateway"]
