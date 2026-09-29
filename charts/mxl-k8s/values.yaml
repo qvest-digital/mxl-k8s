@@ -525,8 +525,9 @@ gateway:
     # this, so 0.5 halves the burst and doubles its length, and is
     # where to start. The cost is latency: a grain completes at the
     # receiver up to this much of its interval later. Depends on the
-    # flow's edit rate alone, never on the link speed, so one value
-    # holds from 25GbE to EFA. Raise it toward 1 while drops remain;
+    # flow's edit rate alone, never on the link speed. Mirrors over
+    # efa are never paced, whatever this says: EFA does not keep one
+    # grain's writes in order. Raise it toward 1 while drops remain;
     # lower it when the added latency matters more than the burst.
     # Must stay below 1, or a grain's transmission runs into the next
     # one.
@@ -622,8 +623,8 @@ gateway:
     # @schema
     type: DirectoryOrCreate
   rdma:
-    # -- Add the capabilities the verbs/efa providers need
-    # (IPC_LOCK, SYS_RESOURCE; libmxl pins shm pages).
+    # -- Add the capability the verbs/efa providers need: IPC_LOCK,
+    # which exempts their memory registrations from RLIMIT_MEMLOCK.
     enabled: false
     # -- Bind-mount the host's InfiniBand device directory into
     # the gateway. Only consulted when rdma.enabled is set.

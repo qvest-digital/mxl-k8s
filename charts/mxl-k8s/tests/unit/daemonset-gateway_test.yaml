@@ -70,14 +70,14 @@ tests:
           path: spec.template.spec.containers[0].args
           content: --pprof-bind-address=127.0.0.1:6060
 
-  - it: rdma.enabled adds IPC_LOCK + SYS_RESOURCE and the /dev/infiniband mount
+  - it: rdma.enabled adds IPC_LOCK and the /dev/infiniband mount
     set:
       gateway.rdma.enabled: true
     asserts:
       - contains:
           path: spec.template.spec.containers[0].securityContext.capabilities.add
           content: IPC_LOCK
-      - contains:
+      - notContains:
           path: spec.template.spec.containers[0].securityContext.capabilities.add
           content: SYS_RESOURCE
       - contains:
@@ -190,3 +190,4 @@ tests:
       - equal:
           path: spec.template.spec.hostNetwork
           value: false
+

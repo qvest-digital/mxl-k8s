@@ -19,7 +19,9 @@ set -euo pipefail
 
 NS=${NS:-mxl-system}
 KEEP=${KEEP:-1}
-GO_MXL_TAG=${GO_MXL_TAG:-1.1.0-rc.4}
+repo=$(cd "$(dirname "$0")/.." && pwd)
+# The go-mxl the gateway image ships, so the probe links the same libmxl.
+GO_MXL_TAG=${GO_MXL_TAG:-$(sed -nE 's/^ARG GO_MXL_TAG=([^[:space:]]+).*/\1/p' "$repo/docker/gateway.Dockerfile")}
 BUILDER=ghcr.io/qvest-digital/go-mxl-builder:${GO_MXL_TAG}
 RUNTIME=ghcr.io/qvest-digital/go-mxl-runtime:${GO_MXL_TAG}
 DOMAIN=${DOMAIN:-/run/mxl/domain}
@@ -32,7 +34,6 @@ node=$1
 flow=$2
 shift 2
 
-repo=$(cd "$(dirname "$0")/.." && pwd)
 bin=${BIN:-$repo/.probe-bin/mxl-flow-probe}
 
 if [ ! -x "$bin" ]; then

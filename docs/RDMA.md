@@ -18,17 +18,10 @@ gateway which of a node's NICs the fabric is.
   below.
 - `rdma-core` userspace (provides `libibverbs`, `librdmacm`,
   `ibstat`, `rdma`, ...). Most distros' default package set.
-- `RLIMIT_MEMLOCK` set to `infinity` or at least multiple GiB.
-  Common patterns:
-  - `/etc/security/limits.d/rdma.conf`:
-    ```
-    *       hard    memlock         unlimited
-    *       soft    memlock         unlimited
-    ```
-  - For containerd / cri-o, set `default_ulimits` or pass
-    `LimitMEMLOCK=infinity` in the runtime's systemd unit.
-  - The mxl-fabrics-gateway pod also asks for `SYS_RESOURCE` so
-    it can raise its own limit if the host default is low.
+- Nothing for `RLIMIT_MEMLOCK`. A memory registration pins pages
+  against that limit only for a process without `CAP_IPC_LOCK`, and
+  the gateway runs with it, so the inherited 8 MiB default is not a
+  ceiling for the gateway.
 - `/dev/infiniband/{rdma_cm,uverbs0,...}` present and readable by
   the container user. The gateway DaemonSet bind-mounts
   `/dev/infiniband` into the pod.
@@ -40,10 +33,9 @@ gateway which of a node's NICs the fabric is.
 
 ### Per-pod
 
-- `securityContext.capabilities.add: ["IPC_LOCK", "SYS_RESOURCE"]`
-  on the gateway container. `IPC_LOCK` lets libmxl call `mlock(2)`
-  on the tmpfs grain pages; `SYS_RESOURCE` lets the process raise
-  its own `RLIMIT_MEMLOCK` when the host default is low.
+- `securityContext.capabilities.add: ["IPC_LOCK"]` on the gateway
+  container, which exempts the provider's memory registrations from
+  `RLIMIT_MEMLOCK`.
 - Bind-mount `/dev/infiniband` from the host.
 - Optional knobs the gateway forwards into libfabric via env:
   - `FI_VERBS_IFACE=<ifname>`: pin verbs to a specific interface
@@ -145,7 +137,7 @@ host setup is AWS-specific.
   (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-start.html);
   this lays down the `efa` kernel module and the userspace
   libfabric EFA provider plugin.
-- `RLIMIT_MEMLOCK` as above.
+- Nothing for `RLIMIT_MEMLOCK`, as above.
 - `/dev/infiniband/uverbs0` is present once the module is loaded;
   no PFC or DSCP knobs to fuss with (EFA is its own protocol on
   the Nitro fabric).
@@ -162,8 +154,8 @@ host setup is AWS-specific.
 
 ### Per-pod
 
-- `securityContext.capabilities.add: ["IPC_LOCK", "SYS_RESOURCE"]`,
-  same reason as verbs.
+- `securityContext.capabilities.add: ["IPC_LOCK"]`, same reason as
+  verbs.
 - Bind-mount `/dev/infiniband` from the host.
 - Nothing on the gateway DaemonSet: the default `--providers=any`
   advertises efa on the nodes that have an adapter and leaves it
@@ -172,6 +164,14 @@ host setup is AWS-specific.
 - `MxlFlowMirror.spec.provider: efa` (or
   `MxlReceiver.spec.provider: efa`) to pin a mirror rather than
   letting `selection.Resolve` pick from what both nodes report.
+- The gateway image sets `FI_EFA_ENABLE_SHM_TRANSFER=0`: every mirror
+  crosses nodes, so the shared-memory path the provider would open
+  beside each endpoint carries nothing.
+- EFA delivers the RMA writes of one initiator in any order
+  (`fi_info -p efa -v` reports no write-after-write ordering). The
+  gateway therefore never paces grains into per-chunk writes on an
+  efa mirror, whatever `--pacing-fraction` says, and libmxl-fabrics
+  sends each audio transfer as a single write.
 - Multus is *not* the right tool for EFA pods -- EFA is exposed
   via the host's network namespace. `hostNetwork: true` on the
   gateway DaemonSet (as in the rdma-demo example) keeps the
@@ -498,8 +498,9 @@ covering a verbs class, an EFA class, and a tcp catch-all together.
 
 ### The hostPath mount
 
-`rdma.enabled` adds `IPC_LOCK` and `SYS_RESOURCE`, which libmxl needs
-to pin shm pages, and is independent of how the device is reached.
+`rdma.enabled` adds `IPC_LOCK`, which exempts the providers' memory
+registrations from `RLIMIT_MEMLOCK`, and is independent of how the
+device is reached.
 `rdma.mountInfiniband` controls the `/dev/infiniband` bind mount
 separately, because a node whose devices come from a device plugin
 wants the capabilities without the mount.
@@ -526,6 +527,6 @@ those nodes belong in their own variant.
 | Two gateway pods on one node | Two `gateway.variants` entries match the same node. Their selectors have to be complementary; both pods open the same domain and overwrite each other's `MxlNodeCapabilities`. |
 | `RDMA_CM_EVENT_REJECTED` in gateway logs | Both ends agree on the provider but the wire-side handshake fails. For RoCEv2 this is almost always PFC/DSCP misconfiguration on the switches. |
 | Throughput far below NIC line rate | PFC pauses too aggressive or wrong traffic class. Use `mlnx_qos`, `ethtool -S` counters. |
-| `cannot allocate memory` from libmxl-fabrics | `RLIMIT_MEMLOCK` too low. Bump the host default or rely on the gateway's `SYS_RESOURCE` cap. |
+| `cannot allocate memory` from libmxl-fabrics | The gateway runs without `IPC_LOCK`, so its registrations count against `RLIMIT_MEMLOCK`. Set `rdma.enabled`. |
 | Verbs fine within a node, fails across | RoCE traffic isn't getting through. Check `ip link`, `ip route`, and the underlying VLAN/MTU/PFC. |
 | EFA endpoint setup fails | EFA security group rule missing. EFA traffic flows between instances *only* when an inbound rule allowing all traffic from the same SG is in place. |

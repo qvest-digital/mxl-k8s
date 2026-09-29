@@ -22,13 +22,13 @@ probes, update strategy, service account -- stays shared.
 {{- $variant := .variant -}}
 {{- /*
 Build the effective capability list for the gateway container.
-rdma.enabled implies IPC_LOCK + SYS_RESOURCE (libmxl pins shm pages).
-Users may add more via containerSecurityContext.capabilities.add.
+rdma.enabled implies IPC_LOCK, which exempts the providers' memory
+registrations from RLIMIT_MEMLOCK. Users may add more via
+containerSecurityContext.capabilities.add.
 */ -}}
 {{- $caps := list -}}
 {{- if $g.rdma.enabled -}}
   {{- $caps = append $caps "IPC_LOCK" -}}
-  {{- $caps = append $caps "SYS_RESOURCE" -}}
 {{- end -}}
 {{- range $g.containerSecurityContext.capabilities.add -}}
   {{- $caps = append $caps . -}}
