@@ -1,13 +1,13 @@
 package flowpublisher
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -188,10 +188,10 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 			l.Error(err, "renew origin lease", "flowID", flowID)
 		}
 	}
-	// The directory outlives its definition: a producer that restarts
-	// with a different format writes a new flow_def.json into the same
-	// directory, and Create above leaves the spec of an MxlFlow that
-	// already exists untouched. The object then describes a format
+	// The object outlives its directory: a producer that comes back in
+	// a different format publishes a new flow directory under the same
+	// name, and Create above leaves the spec of an MxlFlow that already
+	// exists untouched. The object then describes a format
 	// nothing produces any more, and every consumer reading it -- a
 	// compositor sizing its tiles, an NMOS registry, a UI -- is told
 	// the wrong one. Only the Origin refreshes it: a mirror target's
@@ -206,7 +206,7 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 
 // refreshDefinition folds the on-disk definition into the MxlFlow's
 // spec. The file is authoritative for every key it carries -- libmxl
-// rewrites it whenever the producer's format changes -- while keys the
+// writes it whenever it publishes the flow -- while keys the
 // object has and the file does not are left alone, because the
 // operator or another writer may hold a richer definition than the
 // agent can see. A no-op in the common case, so this costs one Get per
@@ -238,12 +238,26 @@ func (p *Publisher) refreshDefinition(ctx context.Context, flowID string, def []
 		if err != nil {
 			return fmt.Errorf("marshal merged definition: %w", err)
 		}
-		if bytes.Equal(flow.Spec.Definition.Raw, out) {
+		// Compared by content: the API server hands the definition back
+		// with its keys sorted at every level, the file keeps libmxl's
+		// order, and an Update for that alone wakes every watcher of the
+		// spec on every observation.
+		if sameJSON(flow.Spec.Definition.Raw, out) {
 			return nil
 		}
 		flow.Spec.Definition = runtime.RawExtension{Raw: out}
 		return p.Client.Update(ctx, &flow)
 	})
+}
+
+// sameJSON reports whether a and b hold the same JSON value, whatever
+// their key order or spacing.
+func sameJSON(a, b []byte) bool {
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	return reflect.DeepEqual(x, y)
 }
 
 // isMirrorTarget reports whether any MxlFlowMirror in the cluster
