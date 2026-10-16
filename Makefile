@@ -1,5 +1,5 @@
 # renovate: datasource=go depName=sigs.k8s.io/controller-tools versioning=semver
-CONTROLLER_TOOLS_VERSION ?= v0.21.0
+CONTROLLER_TOOLS_VERSION ?= v0.22.0
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
 
 # renovate: datasource=go depName=gotest.tools/gotestsum versioning=semver
