@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.24](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.23...v1.1.0-rc.24) (2026-10-16)
+
+
+### Bug Fixes
+
+* **agent:** refresh a flow definition the producer changed ([#354](https://github.com/qvest-digital/mxl-k8s/issues/354)) ([231836b](https://github.com/qvest-digital/mxl-k8s/commit/231836b42db948e863ec5df68fb6bc92d7619838))
+
 ## [1.1.0-rc.23](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.22...v1.1.0-rc.23) (2026-09-29)
 
 
