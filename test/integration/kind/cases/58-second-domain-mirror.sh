@@ -48,6 +48,15 @@ cleanup() {
         >/dev/null 2>&1 || true
     done
   fi
+  # The flows go too, once nothing writes them any more. An MxlFlow left
+  # with only Stale locations is collected by the operator on its next
+  # sweep, and a later case that counts a node's locations sees that as
+  # an entry vanishing under it.
+  "${KUBECTL[@]}" -n "$NAMESPACE" wait --for=delete pod/"$WRITER" pod/"$CONSUMER" \
+      --timeout=60s >/dev/null 2>&1 || true
+  "${KUBECTL[@]}" get mxlflow -o name 2>/dev/null \
+    | grep -E "${FLOW_SHARED}|${FLOW_OLD_SHIM}" \
+    | xargs -r "${KUBECTL[@]}" delete --wait=false >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
