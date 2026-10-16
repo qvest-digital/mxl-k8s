@@ -4,10 +4,8 @@
 # - --providers=verbs (the gateway only claims the verbs provider).
 # - /dev/infiniband mounted into the pod so libibverbs / librdmacm
 #   can talk to the userspace RDMA driver.
-# - CAP_IPC_LOCK so libmxl can mlock() the tmpfs grain pages, which
-#   is what makes them pinnable for ibv_reg_mr.
-# - SYS_RESOURCE so the kernel raises RLIMIT_MEMLOCK for the
-#   process; some distros default it too low for production flows.
+# - CAP_IPC_LOCK, which exempts the verbs provider's memory
+#   registrations (ibv_reg_mr) from RLIMIT_MEMLOCK.
 # - FI_VERBS_IFACE forces libfabric to bind verbs to a specific
 #   net interface name; uncomment and set if your nodes have more
 #   than one RDMA NIC.
@@ -55,7 +53,7 @@ spec:
             #   value: "net1"
           securityContext:
             capabilities:
-              add: ["IPC_LOCK", "SYS_RESOURCE"]
+              add: ["IPC_LOCK"]
           ports:
             - name: probe
               containerPort: 8081

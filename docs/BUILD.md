@@ -37,9 +37,11 @@ CI and [`docker/gateway.Dockerfile`](../docker/gateway.Dockerfile) build
 `gateway` inside the published `go-mxl` builder image, which already has
 the Go toolchain, libmxl, libmxl-fabrics, libfabric, and a working
 `PKG_CONFIG_PATH`. The image tag tracks the `go-mxl` release the
-`gateway` module requires (currently
-`ghcr.io/qvest-digital/go-mxl-builder:1.0.0-rc.10`); bump it together
-with the `go-mxl` require in `gateway/go.mod`.
+`gateway` module requires; `ARG GO_MXL_TAG` in the Dockerfiles, the
+container images in `ci.yml` and the `go-mxl` require in
+`gateway/go.mod` and `exporter/go.mod` move together, and the
+`go-mxl-pins` CI job fails when they do not. `hack/flow-probe.sh`
+reads its tag from `docker/gateway.Dockerfile`.
 
 ### On the host
 

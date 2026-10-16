@@ -47,7 +47,7 @@
       "allowedVersions": "!/\\.test/"
     },
     {
-      "description": "go-mxl publishes its builder and runtime images only as rc prereleases. Docker versioning reads everything after the first hyphen as a compatibility suffix and never offers an update that changes it, so 1.0.0-rc.15 was never offered 1.1.0-rc.1 and both the ci.yml container pins and the docker/ ARGs stood still while the modules moved. Semver orders the tags; ignoreUnstable has to go with it because no stable tag has ever been published. Grouped so the workflow that compiles the modules and the images that ship them move together.",
+      "description": "Docker versioning for the go-mxl images, which are published only as rc prereleases; see the go-mxl group below.",
       "matchDatasources": [
         "docker"
       ],
@@ -56,10 +56,7 @@
         "ghcr.io/qvest-digital/go-mxl-runtime"
       ],
       "versioning": "semver",
-      "ignoreUnstable": false,
-      "groupName": "go-mxl images",
-      "semanticCommitType": "deps",
-      "semanticCommitScope": "images"
+      "ignoreUnstable": false
     },
     {
       "description": "Group GitHub Actions bumps into one PR",
@@ -92,6 +89,17 @@
         "github.com/qvest-digital/mxl-k8s/api"
       ],
       "enabled": false
+    },
+    {
+      "description": "go-mxl's Go module and its builder and runtime images move together: the images ship the libmxl the module is built against, and hack/check-go-mxl-pins.sh fails a PR that moves one without the other. The images are published only as rc prereleases, and Docker versioning reads everything after the first hyphen as a compatibility suffix and never offers an update that changes it, so semver orders the tags and ignoreUnstable goes with it. Placed after the grouping rules keyed on manager, which would otherwise pull the ci.yml container pin and the go.mod require into other groups.",
+      "matchPackageNames": [
+        "github.com/qvest-digital/go-mxl",
+        "ghcr.io/qvest-digital/go-mxl-builder",
+        "ghcr.io/qvest-digital/go-mxl-runtime"
+      ],
+      "groupName": "go-mxl",
+      "semanticCommitType": "deps",
+      "semanticCommitScope": "go-mxl"
     }
   ]
 }

@@ -205,7 +205,8 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"Fraction of a grain's own interval to spread that grain's transmission over. "+
 			"Caps peak rate at the flow's rate divided by this, and costs up to this much "+
 			"of a grain interval in latency. Negative disables pacing, which is the "+
-			"default; 0.5 is where to start when enabling it.")
+			"default; 0.5 is where to start when enabling it. Mirrors over efa are "+
+			"never paced.")
 	fs.IntVar(&c.PacingChunks, "pacing-chunks", 8,
 		"Number of slice ranges a paced grain is split into. Higher shortens the burst "+
 			"further at the cost of one cgo call and one RMA write per plane each. "+

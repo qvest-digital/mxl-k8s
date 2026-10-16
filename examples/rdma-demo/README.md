@@ -11,9 +11,9 @@ close cousin (see `docs/RDMA.md` for AWS specifics).
 - `mxl-fabrics-gateway` runs with `--providers=verbs`.
 - The gateway DaemonSet bind-mounts `/dev/infiniband` from the host
   so libibverbs can reach the userspace RDMA character devices.
-- The gateway container adds `IPC_LOCK` (`mlock(2)` for pinning
-  tmpfs grain pages) and `SYS_RESOURCE` (raise
-  `RLIMIT_MEMLOCK`) on top of the tcp-demo's set.
+- The gateway container adds `IPC_LOCK`, which exempts the verbs
+  provider's memory registrations from `RLIMIT_MEMLOCK`, on top of
+  the tcp-demo's set.
 - `MxlReceiver.spec.provider` is `verbs`.
 
 The writer and reader pods are identical to tcp-demo's apart from
@@ -30,10 +30,6 @@ list; quick summary:
 - `ibverbs`, `rdma-core`, and the NIC-specific kernel modules
   (e.g. `mlx5_ib` for Mellanox / NVIDIA ConnectX, `bnxt_re` for
   Broadcom, `irdma` for Intel E810) loaded on the host.
-- `RLIMIT_MEMLOCK` raised system-wide (often `infinity` via systemd
-  or `ulimit -l unlimited` in container runtime config); the
-  `SYS_RESOURCE` capability lets the container do this itself when
-  the host default is small.
 - A network configuration where the gateway pod's host network can
   carry RDMA traffic. For RoCEv2 this typically means both nodes
   see each other on the same VLAN with the right DSCP/PFC settings.

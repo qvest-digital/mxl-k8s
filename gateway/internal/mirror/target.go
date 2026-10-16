@@ -289,6 +289,10 @@ type TargetReconciler struct {
 	mu      sync.Mutex
 	targets map[types.NamespacedName]*targetEntry
 
+	// sharedFlows holds one *sharedFlow per flow a target writes, keyed
+	// by sharedFlowKey; see sharedFlow.
+	sharedFlows sync.Map
+
 	// attempts counts consecutive openTarget failures per mirror.
 	// Cleared the moment a target opens, so the value is always the
 	// length of the current failure run. Guarded by mu.
@@ -326,10 +330,15 @@ type targetEntry struct {
 	// so the recovery path can rebuild the fabric side identically.
 	provider fabrics.Provider
 
-	// commits counts grains the progress loop has successfully handed
-	// to commitArrivedGrain. lastCommitAt records the wall-clock time
-	// of the most recent successful commit. Both feed the per-mirror
-	// status flusher.
+	// flow serialises commits into the local flow with every other
+	// entry writing it; see sharedFlow.
+	flow *sharedFlow
+
+	// commits counts grains the progress loop has committed, and
+	// arrivals of grains a sibling mirror of the flow committed shortly
+	// before. lastCommitAt records the wall-clock time of the most
+	// recent of either, the sibling's commit time for the latter. Both
+	// feed the per-mirror status flusher.
 	commits      atomic.Uint64
 	lastCommitAt atomic.Pointer[time.Time]
 
@@ -353,7 +362,9 @@ type targetEntry struct {
 	// bytes counts payload committed to the local flow for this
 	// mirror, read by the throughput collector at scrape time. A
 	// counter rather than a rate: the scrape interval is the
-	// collector's business, not the progress loop's.
+	// collector's business, not the progress loop's. When two mirrors
+	// share a flow, each counts only the commits it won, so the two
+	// split the flow's bytes between them.
 	bytes atomic.Uint64
 
 	// phaseMu orders the phases a recovery publishes against the Failed a
@@ -728,7 +739,12 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef 
 
 	// The entry is not in r.targets yet, so nothing can be tearing it
 	// down and the install cannot be refused.
-	entry := &targetEntry{writer: writer, handles: handles, provider: provider}
+	entry := &targetEntry{
+		writer:   writer,
+		handles:  handles,
+		provider: provider,
+		flow:     r.sharedFlowFor(handles, writer.Config().Common.ID),
+	}
 	r.startProgressLoop(entry, key, target, info, s)
 	return entry, nil
 }
@@ -953,6 +969,7 @@ func (r *TargetReconciler) startProgressLoop(
 	entry.cancel = cancel
 	entry.done = done
 	writer := entry.writer
+	flow := entry.flow
 	entry.lifecycle.Unlock()
 
 	onFatal := func() {
@@ -967,7 +984,7 @@ func (r *TargetReconciler) startProgressLoop(
 	if writer.Config().Common.Format == mxl.FormatAudio {
 		readFn := func() (uint64, int, error) { return target.ReadSamples(targetReadTimeout) }
 		commitFn := func(head uint64, count int) error {
-			n, err := commitArrivedSamples(writer, head, count)
+			n, err := flow.commitSamples(writer, head, count, entry)
 			entry.bytes.Add(n)
 			return err
 		}
@@ -975,7 +992,7 @@ func (r *TargetReconciler) startProgressLoop(
 	} else {
 		readFn := func() (uint64, error) { return target.ReadGrain(targetReadTimeout) }
 		completeFn := func(idx uint64) (bool, error) {
-			g, err := writer.GrainInfo(idx)
+			g, err := flow.grainInfo(writer, idx)
 			if err != nil {
 				return false, err
 			}
@@ -985,7 +1002,7 @@ func (r *TargetReconciler) startProgressLoop(
 			return g.TotalSlices == 0 || g.Complete(), nil
 		}
 		commitFn := func(idx uint64) error {
-			n, err := commitArrivedGrain(writer, idx)
+			n, err := flow.commitGrain(writer, idx, entry)
 			entry.bytes.Add(n)
 			return err
 		}
@@ -1001,7 +1018,8 @@ func (r *TargetReconciler) startProgressLoop(
 const targetReadTimeout = 20 * time.Millisecond
 
 // commitTracker is the subset of targetEntry the progress loop
-// updates after every successful commit. Defined as an interface so
+// updates after every successful commit, and sharedFlow after an
+// arrival a sibling's recent commit vouches for. Defined as an interface so
 // tests can drive runTargetProgressLoop with a stub.
 type commitTracker interface {
 	recordCommit(idx uint64, at time.Time)
@@ -1101,7 +1119,17 @@ func runTargetProgressLoop(
 				}
 			}
 			if err := commit(idx); err != nil {
-				l.Error(err, "commit received grain", "idx", idx)
+				if !errors.Is(err, errGrainAlreadyCommitted) {
+					l.Error(err, "commit received grain", "idx", idx)
+					break
+				}
+				// Another mirror of this flow into this node committed
+				// the grain first, or the source sent it twice. It is in
+				// the ring either way; the commit function has already
+				// counted the arrival if a sibling's commit vouches for
+				// it.
+				l.V(1).Info("dropping already-committed grain arrival",
+					"idx", idx, "error", err.Error())
 				break
 			}
 			if tracker != nil {
@@ -1141,9 +1169,21 @@ func runTargetProgressLoop(
 // flow metadata catches up.
 // The returned byte count is the grain payload libmxl declares for the
 // flow, which the write access already carries.
+//
+// errGrainAlreadyCommitted reports an arrival whose grain the writer
+// has already committed: libmxl rejects an OpenGrain whose index does
+// not advance the last committed one, and that is the only case it
+// answers with invalid argument. libmxl shares one writer per flow, so
+// a second mirror of the flow into this node commits every grain the
+// first already has.
+var errGrainAlreadyCommitted = errors.New("grain already committed")
+
 func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, error) {
 	ga, err := writer.OpenGrain(idx)
 	if err != nil {
+		if errors.Is(err, mxl.ErrInvalidArg) {
+			return 0, fmt.Errorf("OpenGrain(%d): %w: %w", idx, errGrainAlreadyCommitted, err)
+		}
 		return 0, fmt.Errorf("OpenGrain(%d): %w", idx, err)
 	}
 	if err := ga.Commit(ga.TotalSlices, 0); err != nil {
@@ -1186,20 +1226,23 @@ func runTargetSampleProgressLoop(
 		switch kind := classifyFabricError(err); {
 		case err == nil:
 			if err := commit(head, count); err != nil {
-				if errors.Is(err, errSamplesAlreadyCommitted) {
-					// The arrival's range is already in the ring and
-					// the writer's head is past it: a retransmitted
-					// or overlapping chunk from the source. Dropping
-					// it is the only correct move -- retrying the
-					// commit can never succeed, and parking on the
-					// arrival stalls the ingress, which is what
-					// starves the initiator's send queue down to the
-					// rate at which this loop gives up on one entry.
-					l.V(1).Info("dropping already-committed sample arrival",
-						"headIndex", head, "count", count, "error", err.Error())
+				if !errors.Is(err, errSamplesAlreadyCommitted) {
+					l.Error(err, "commit received samples", "headIndex", head, "count", count)
 					break
 				}
-				l.Error(err, "commit received samples", "headIndex", head, "count", count)
+				// The arrival's range is already in the ring and the
+				// writer's head is past it: a retransmitted or
+				// overlapping chunk from the source, or a range another
+				// mirror of this flow into this node committed first.
+				// Dropping it is the only correct move -- retrying the
+				// commit can never succeed, and parking on the arrival
+				// stalls the ingress, which is what starves the
+				// initiator's send queue down to the rate at which this
+				// loop gives up on one entry. The commit function has
+				// already counted the arrival if a sibling's commit
+				// vouches for it.
+				l.V(1).Info("dropping already-committed sample arrival",
+					"headIndex", head, "count", count, "error", err.Error())
 				break
 			}
 			if tracker != nil {
@@ -1242,20 +1285,20 @@ func runTargetSampleProgressLoop(
 // the stride between two channels' ring buffers, which is the word
 // size times the buffer length the flow config states.
 // errSamplesAlreadyCommitted reports an arrival whose sample range
-// the writer has already committed: libmxl rejects an OpenSamples
-// whose index does not strictly advance the last committed index.
-// The remote write carrying it has already landed in the ring, so
-// the range is stale, not lost -- the mirror's source retransmitted
-// or overlapped it, and the only work left is to consume the
-// arrival so the ingress can move on.
+// does not advance past the last committed head, which libmxl would
+// reject. The remote write carrying it has already landed in the
+// ring, so the range is stale, not lost -- the mirror's source
+// retransmitted or overlapped it, or a sibling mirror of the flow
+// committed it -- and the only work left is to consume the arrival so
+// the ingress can move on. sharedFlow.commitSamples decides it from
+// libmxl's rejection and the head it tracks, because libmxl answers
+// other misfits, such as a run longer than half the ring, with the same
+// invalid argument.
 var errSamplesAlreadyCommitted = errors.New("samples already committed")
 
 func commitArrivedSamples(writer *mxl.Writer, head uint64, count int) (uint64, error) {
 	sa, err := writer.OpenSamples(head, count)
 	if err != nil {
-		if errors.Is(err, mxl.ErrInvalidArg) {
-			return 0, fmt.Errorf("OpenSamples(%d,%d): %w: %w", head, count, errSamplesAlreadyCommitted, err)
-		}
 		return 0, fmt.Errorf("OpenSamples(%d,%d): %w", head, count, err)
 	}
 	if err := sa.Commit(); err != nil {

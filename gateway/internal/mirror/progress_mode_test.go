@@ -97,3 +97,16 @@ func TestDefaultSampleProgressInterval_ZeroRateFallsBack(t *testing.T) {
 	assert.Zero(t, defaultSampleProgressInterval(mxl.Rational{}, 480),
 		"a zero rate leaves the interval to the caller's fallback")
 }
+
+// EFA delivers the writes of one grain in any order, so a paced grain
+// would have the target count slices valid before their data landed.
+// Pacing configured for the cluster must not reach an EFA mirror.
+func TestEffectivePacingFraction_NeverPacesEFA(t *testing.T) {
+	assert.Equal(t, float64(defaultPacingFraction), effectivePacingFraction(0.5, fabrics.ProviderEFA))
+	assert.False(t, newPacer(mxl.Rational{Num: 50, Den: 1}, effectivePacingFraction(0.5, fabrics.ProviderEFA), defaultPacingChunks, "f").enabled())
+
+	for _, p := range []fabrics.Provider{fabrics.ProviderVerbs, fabrics.ProviderTCP} {
+		assert.Equal(t, 0.5, effectivePacingFraction(0.5, p), "provider %v", p)
+		assert.Equal(t, float64(defaultPacingFraction), effectivePacingFraction(0, p), "unset on provider %v", p)
+	}
+}
