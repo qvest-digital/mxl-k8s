@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -187,7 +188,76 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 			l.Error(err, "renew origin lease", "flowID", flowID)
 		}
 	}
+	// The object outlives its directory: a producer that comes back in
+	// a different format publishes a new flow directory under the same
+	// name, and Create above leaves the spec of an MxlFlow that already
+	// exists untouched. The object then describes a format
+	// nothing produces any more, and every consumer reading it -- a
+	// compositor sizing its tiles, an NMOS registry, a UI -- is told
+	// the wrong one. Only the Origin refreshes it: a mirror target's
+	// copy is not authoritative about what the flow is.
+	if written == mxlv1alpha1.MxlFlowLocationOrigin {
+		if err := p.refreshDefinition(ctx, flowID, raw); err != nil {
+			l.Error(err, "refresh flow definition", "flowID", flowID)
+		}
+	}
 	return nil
+}
+
+// refreshDefinition folds the on-disk definition into the MxlFlow's
+// spec. The file is authoritative for every key it carries -- libmxl
+// writes it whenever it publishes the flow -- while keys the
+// object has and the file does not are left alone, because the
+// operator or another writer may hold a richer definition than the
+// agent can see. A no-op in the common case, so this costs one Get per
+// observation and an Update only on a real change.
+func (p *Publisher) refreshDefinition(ctx context.Context, flowID string, def []byte) error {
+	var fromDisk map[string]json.RawMessage
+	if err := json.Unmarshal(def, &fromDisk); err != nil {
+		return fmt.Errorf("parse on-disk definition: %w", err)
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var flow mxlv1alpha1.MxlFlow
+		if err := p.Client.Get(ctx, types.NamespacedName{Name: p.key(flowID)}, &flow); err != nil {
+			return err
+		}
+		merged := map[string]json.RawMessage{}
+		if raw := flow.Spec.Definition.Raw; len(raw) > 0 {
+			if err := json.Unmarshal(raw, &merged); err != nil {
+				// Not an object we can merge into: the file wins whole.
+				merged = nil
+			}
+		}
+		if merged == nil {
+			merged = map[string]json.RawMessage{}
+		}
+		for k, v := range fromDisk {
+			merged[k] = v
+		}
+		out, err := json.Marshal(merged)
+		if err != nil {
+			return fmt.Errorf("marshal merged definition: %w", err)
+		}
+		// Compared by content: the API server hands the definition back
+		// with its keys sorted at every level, the file keeps libmxl's
+		// order, and an Update for that alone wakes every watcher of the
+		// spec on every observation.
+		if sameJSON(flow.Spec.Definition.Raw, out) {
+			return nil
+		}
+		flow.Spec.Definition = runtime.RawExtension{Raw: out}
+		return p.Client.Update(ctx, &flow)
+	})
+}
+
+// sameJSON reports whether a and b hold the same JSON value, whatever
+// their key order or spacing.
+func sameJSON(a, b []byte) bool {
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	return reflect.DeepEqual(x, y)
 }
 
 // isMirrorTarget reports whether any MxlFlowMirror in the cluster
