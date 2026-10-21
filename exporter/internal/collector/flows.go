@@ -156,7 +156,9 @@ func (c *FlowCollector) collectFlow(ch chan<- prometheus.Metric, dom string, obs
 	if obs.HaveWriteAge {
 		gauge(descWriteAge, obs.WriteAge.Seconds())
 	}
-	gauge(descLatency, float64(obs.LatencyGrains))
+	if cfg.Common.Format != mxl.FormatEvent {
+		gauge(descLatency, float64(obs.LatencyGrains))
+	}
 	gauge(descRateNum, float64(cfg.Common.GrainRate.Num))
 	gauge(descRateDen, float64(cfg.Common.GrainRate.Den))
 	gauge(descCommitBatch, float64(cfg.Common.MaxCommitBatchSizeHint))
@@ -172,6 +174,10 @@ func (c *FlowCollector) collectFlow(ch chan<- prometheus.Metric, dom string, obs
 			gauge(descSliceSize, float64(size), strconv.Itoa(i))
 		}
 		gauge(descRingGrains, float64(cfg.Discrete.GrainCount))
+		return
+	}
+
+	if cfg.Common.Format == mxl.FormatEvent {
 		return
 	}
 
