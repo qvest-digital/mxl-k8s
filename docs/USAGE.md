@@ -91,7 +91,7 @@ Helm chart published as an OCI artefact:
 
 ```sh
 helm install mxl oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
-  --version 1.0.0-rc.2 \
+  --version 1.1.0-rc.24 \
   --namespace mxl-system --create-namespace
 ```
 
@@ -305,7 +305,7 @@ cluster runs, copies it out of an `initContainer` instead:
 spec:
   initContainers:
     - name: install-intent-shim
-      image: ghcr.io/qvest-digital/mxl-k8s/shim:v1.0.0-rc.2
+      image: ghcr.io/qvest-digital/mxl-k8s/shim:v1.1.0-rc.24
       volumeMounts:
         - name: intent-shim
           mountPath: /shared
