@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0-rc.25](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.24...v1.1.0-rc.25) (2026-10-22)
+
+
+### Bug Fixes
+
+* **exporter:** judge event flows by their last write ([84a7c2e](https://github.com/qvest-digital/mxl-k8s/commit/84a7c2eb65553340da18d1a2d3866e1d2cead8a3))
+
+
+### Dependencies
+
+* **go-mxl:** update go-mxl to v1.1.0-rc.7 ([84a7c2e](https://github.com/qvest-digital/mxl-k8s/commit/84a7c2eb65553340da18d1a2d3866e1d2cead8a3))
+
 ## [1.1.0-rc.24](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.23...v1.1.0-rc.24) (2026-10-16)
 
 
