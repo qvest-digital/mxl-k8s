@@ -28,7 +28,7 @@ jobs:
   # must be added to the importing module's filter list so the test
   # job re-runs when the dependency changes. See CLAUDE.md.
   changes:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 2
     outputs:
       api:          ${{ steps.f.outputs.api }}
@@ -93,7 +93,7 @@ jobs:
   lint:
     needs: changes
     if: needs.changes.outputs.pure_go == 'true' || needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -135,7 +135,7 @@ jobs:
   gateway:
     needs: changes
     if: needs.changes.outputs.gateway == 'true' || needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     container:
       image: ghcr.io/qvest-digital/go-mxl-builder:1.1.0-rc.7
     timeout-minutes: 15
@@ -167,7 +167,7 @@ jobs:
   exporter:
     needs: changes
     if: needs.changes.outputs.exporter == 'true' || needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     container:
       image: ghcr.io/qvest-digital/go-mxl-builder:1.1.0-rc.7
     timeout-minutes: 15
@@ -205,7 +205,7 @@ jobs:
   api-pins:
     needs: changes
     if: needs.changes.outputs.api_pins == 'true' || needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v7
@@ -219,7 +219,7 @@ jobs:
   go-mxl-pins:
     needs: changes
     if: needs.changes.outputs.go_mxl_pins == 'true' || needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v7
@@ -238,7 +238,7 @@ jobs:
   manifests-check:
     needs: changes
     if: needs.changes.outputs.generated == 'true' || needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -266,7 +266,7 @@ jobs:
   test:
     needs: changes
     if: needs.changes.outputs.test_modules != '[]'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -335,7 +335,7 @@ jobs:
   test-gateway:
     needs: changes
     if: needs.changes.outputs.gateway == 'true' || needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     container:
       image: ghcr.io/qvest-digital/go-mxl-builder:1.1.0-rc.7
     timeout-minutes: 15
@@ -377,7 +377,7 @@ jobs:
   report:
     needs: [test, test-gateway]
     if: ${{ !cancelled() && (needs.test.result == 'success' || needs.test-gateway.result == 'success') }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
@@ -408,7 +408,7 @@ jobs:
   ci-summary:
     needs: [changes, lint, gateway, exporter, api-pins, go-mxl-pins, manifests-check, test, test-gateway, report]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 2
     steps:
       - name: Verify upstream jobs
