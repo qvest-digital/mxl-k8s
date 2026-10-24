@@ -28,6 +28,7 @@ const (
 	iocViewSetSources  = 1<<30 | 40<<16 | 'x'<<8 | 1 // _IOW('x', 1, struct mxlfs_view_sources)
 	iocViewSelect      = 1<<30 | 4<<16 | 'x'<<8 | 2  // _IOW('x', 2, __u32)
 	iocViewSelectRange = 1<<30 | 24<<16 | 'x'<<8 | 9 // _IOW('x', 9, struct mxlfs_view_range)
+	iocAllocate        = 'x'<<8 | 8                  // _IO('x', 8)
 	maxSources         = 8
 
 	sysFutexWaitv = 449 // the same number on every architecture
@@ -336,6 +337,19 @@ func view(path string, size int64, sources []*os.File) (*os.File, error) {
 	return f, nil
 }
 
+// allocate gives f size bytes of pages. The gateway allocates lazily on
+// mxlfs, so a plain fallocate leaves holes, and a view page selecting a
+// hole faults SIGBUS in its readers.
+func allocate(f *os.File, size int64) error {
+	if err := unix.Fallocate(int(f.Fd()), 0, 0, size); err != nil {
+		return err
+	}
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), iocAllocate, 0); errno != 0 {
+		return fmt.Errorf("MXLFS_IOC_ALLOCATE on %s: %w", f.Name(), errno)
+	}
+	return nil
+}
+
 func selectAll(f *os.File, source int) error {
 	v := uint32(source)
 	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), iocViewSelect, uintptr(unsafe.Pointer(&v))); errno != 0 {
@@ -365,7 +379,7 @@ func (e *Engine) buildDiscrete(tmp, src0 string) error {
 		return err
 	}
 	defer inv.Close()
-	if err := unix.Fallocate(int(inv.Fd()), 0, 0, size); err != nil {
+	if err := allocate(inv, size); err != nil {
 		return err
 	}
 	tmpl, err := os.ReadFile(filepath.Join(src0, "grains", "data.0"))
@@ -434,7 +448,7 @@ func (e *Engine) buildAudio(tmp, src0 string) error {
 		return err
 	}
 	defer sil.Close()
-	if err := unix.Fallocate(int(sil.Fd()), 0, 0, size); err != nil {
+	if err := allocate(sil, size); err != nil {
 		return err
 	}
 	var srcs []*os.File

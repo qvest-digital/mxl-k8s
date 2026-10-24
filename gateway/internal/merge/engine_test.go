@@ -13,6 +13,9 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/qvest-digital/go-mxl/mxl"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
+
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/mxlfs"
 )
 
 // These run against a real mxlfs (MXLFS_TEST_DIR), where views exist;
@@ -38,6 +41,14 @@ func mxlfsDomain(t *testing.T) string {
 	require.NoError(t, os.WriteFile(filepath.Join(d, "options.json"),
 		[]byte(`{"urn:x-mxl:option:history_duration/v1.0": 400000000}`), 0o644))
 	return d
+}
+
+// lazily makes this process allocate lazily from here on, as the
+// gateway does on mxlfs: what the engine creates must still be backed.
+func lazily(t *testing.T, domain string) {
+	t.Helper()
+	require.NoError(t, mxlfs.SetLazy(domain, true))
+	t.Cleanup(func() { _ = mxlfs.SetLazy(domain, false) })
 }
 
 func videoDef(id string) string {
@@ -103,6 +114,7 @@ func runDiscrete(t *testing.T, def func(string) string, data bool) {
 	defer func() { close(stop); wg.Wait() }()
 	time.Sleep(300 * time.Millisecond)
 
+	lazily(t, domain)
 	e, err := Start(context.Background(), Spec{DomainDir: domain, OutputID: output, Members: []string{memberA, memberB},
 		Skew: 40 * time.Millisecond, Ordered: true}, logr.Discard())
 	require.NoError(t, err)
@@ -184,6 +196,7 @@ func TestEngineMergesAudio(t *testing.T) {
 	defer func() { close(stop); wg.Wait() }()
 	time.Sleep(300 * time.Millisecond)
 
+	lazily(t, domain)
 	mu.Lock()
 	e, err = Start(context.Background(), Spec{DomainDir: domain, OutputID: output, Members: []string{memberA, memberB},
 		Skew: 40 * time.Millisecond, Ordered: true}, logr.Discard())
@@ -208,5 +221,45 @@ func TestEngineMergesAudio(t *testing.T) {
 				require.Equal(t, uint32(idx&0x0fffffff), s&0x0fffffff, fmt.Sprintf("sample %d", idx))
 			}
 		}
+	}
+}
+
+// Every slot and page of an output starts on the INVALID grain or on
+// silence, and a reader maps all of it. The gateway allocates lazily,
+// so whatever backs those must be allocated outright, or touching an
+// unwritten page faults SIGBUS in the reader.
+func TestEngineBacksWhatNoMemberHolds(t *testing.T) {
+	for _, tc := range []struct {
+		def  func(string) string
+		file string
+	}{{videoDef, "grains/data.0"}, {audioDef, "channels"}} {
+		domain := mxlfsDomain(t)
+		inst, err := mxl.NewInstance(domain, "")
+		require.NoError(t, err)
+		defer inst.Close()
+		for _, id := range []string{memberA, memberB} {
+			w, _, err := inst.NewWriter(tc.def(id))
+			require.NoError(t, err)
+			defer w.Close()
+		}
+		lazily(t, domain)
+		e, err := Start(context.Background(), Spec{DomainDir: domain, OutputID: output, Members: []string{memberA, memberB},
+			Skew: 40 * time.Millisecond, Ordered: true}, logr.Discard())
+		require.NoError(t, err)
+		defer e.Close()
+
+		f, err := os.Open(filepath.Join(flowDir(domain, output), tc.file))
+		require.NoError(t, err)
+		defer f.Close()
+		st, err := f.Stat()
+		require.NoError(t, err)
+		mem, err := unix.Mmap(int(f.Fd()), 0, int(st.Size()), unix.PROT_READ, unix.MAP_SHARED)
+		require.NoError(t, err)
+		var sum int
+		for o := 0; o < len(mem); o += 4096 {
+			sum += int(mem[o])
+		}
+		_ = unix.Munmap(mem)
+		t.Logf("%s: %d bytes mapped and read, first bytes of each page sum to %d", tc.file, st.Size(), sum)
 	}
 }
