@@ -257,6 +257,11 @@ type TargetReconciler struct {
 	// defaultStuckHandshakeAfter.
 	StuckHandshakeAfter time.Duration
 
+	// SamplesCommitted is told every audio sample range a target commits:
+	// the domain directory, the flow id and the samples [start, end).
+	// A redundancy set merging that flow learns its arrivals from it.
+	SamplesCommitted func(domain, id string, start, end uint64)
+
 	// Filled is told when a target's ring on an mxlfs domain has been
 	// allocated, with the domain directory and the flow id, so a
 	// placeholder there becomes a published copy. Nil leaves it out.
@@ -1018,9 +1023,14 @@ func (r *TargetReconciler) startProgressLoop(
 	// cached config is the source of truth for which API is valid.
 	if writer.Config().Common.Format == mxl.FormatAudio {
 		readFn := func() (uint64, int, error) { return target.ReadSamples(targetReadTimeout) }
+		id := writer.Config().Common.ID
+		flowID := fmt.Sprintf("%x-%x-%x-%x-%x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16])
 		commitFn := func(head uint64, count int) error {
 			n, err := flow.commitSamples(writer, head, count, entry)
 			entry.bytes.Add(n)
+			if err == nil && r.SamplesCommitted != nil && entry.handles != nil {
+				r.SamplesCommitted(entry.handles.DomainPath(), flowID, head-uint64(count), head)
+			}
 			return err
 		}
 		go runTargetSampleProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)

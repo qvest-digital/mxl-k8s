@@ -30,6 +30,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/config"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/domaingc"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/merge"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/mirror"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/placeholder"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/rdma"
@@ -148,6 +149,17 @@ func run(args []string) error {
 		LocalWriter: targetReconciler.StopFlow,
 	}
 	targetReconciler.Filled = placeholders.Filled
+
+	// Redundancy sets whose output a reader wants on this node.
+	sets := &merge.Reconciler{
+		Client:   mgr.GetClient(),
+		NodeName: cfg.NodeName,
+		Domains:  setDomains{domains},
+	}
+	targetReconciler.SamplesCommitted = sets.SamplesCommitted
+	if err := sets.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup redundancy set reconciler: %w", err)
+	}
 	if err := ctrl.NewControllerManagedBy(mgr).
 		Named("placeholder").
 		For(&mxlv1alpha1.MxlFlow{}).
@@ -282,4 +294,16 @@ func providerNames(providers []fabrics.Provider) []string {
 		out = append(out, p.String())
 	}
 	return out
+}
+
+// setDomains resolves an MxlDomain name to its directory for the merge
+// reconciler, opening the domain as a mirror would.
+type setDomains struct{ s *instance.Set }
+
+func (d setDomains) DomainPath(ctx context.Context, name string) (string, bool, error) {
+	h, err := d.s.For(ctx, name)
+	if err != nil {
+		return "", false, err
+	}
+	return h.DomainPath(), h.OnMxlfs(), nil
 }
