@@ -196,8 +196,10 @@ func (m Mount) Local(fsPath string) (string, bool) {
 // yet gets none; the walk then waits until its placeholder appears, or
 // fails when wait= runs out. claim, when set, is offered each wanted flow
 // directory first and takes it when it reports true: a redundancy set's
-// output is merged here, not mirrored.
-func RunWanted(ctx context.Context, domain string, d Materializer, claim func(ctx context.Context, flowDir string) bool, l logr.Logger) error {
+// output is merged here, not mirrored. A walk by a process ours reports
+// as mxl-k8s's own is no reader and starts nothing.
+func RunWanted(ctx context.Context, domain string, d Materializer, claim func(ctx context.Context, flowDir string) bool,
+	ours func(ctx context.Context, pid int32) bool, l logr.Logger) error {
 	mount, err := MountOf(domain)
 	if err != nil {
 		return err
@@ -223,6 +225,9 @@ func RunWanted(ctx context.Context, domain string, d Materializer, claim func(ct
 		}
 		pid := int32(req.PID)
 		go func() {
+			if ours != nil && ours(ctx, pid) {
+				return
+			}
 			if claim != nil && claim(ctx, local) {
 				return
 			}

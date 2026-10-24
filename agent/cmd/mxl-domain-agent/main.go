@@ -448,7 +448,7 @@ func runMxlfs(ctx context.Context, domain string, fp *flowpublisher.Publisher,
 		}
 	}()
 	go func() {
-		if err := mxlfswatch.RunWanted(ctx, domain, d, claim, l); err != nil && ctx.Err() == nil {
+		if err := mxlfswatch.RunWanted(ctx, domain, d, claim, trigger.Ours, l); err != nil && ctx.Err() == nil {
 			l.Error(err, "wanted flow loop exited")
 		}
 	}()
