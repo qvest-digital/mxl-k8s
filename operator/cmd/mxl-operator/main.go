@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"os"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -21,6 +22,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/operator/internal/mirror"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/nodecaps"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/receiver"
+	"github.com/qvest-digital/mxl-k8s/operator/internal/redundancyset"
 )
 
 var (
@@ -39,6 +41,7 @@ func main() {
 		probeAddr   string
 		leaderElect bool
 		gcGrace     time.Duration
+		setMirrorNS string
 	)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080",
 		"The address the metric endpoint binds to.")
@@ -50,6 +53,10 @@ func main() {
 		"How long an MxlFlow must have no live copy, and an MxlFlowMirror "+
 			"no claim or no source, before it is deleted. Has to outlast a "+
 			"producer or consumer pod rolling over.")
+
+	flag.StringVar(&setMirrorNS, "redundancy-mirror-namespace", "",
+		"Namespace for the member mirrors of MxlFlowRedundancySets. Empty is the "+
+			"operator's own namespace.")
 
 	zapOpts := zap.Options{Development: false}
 	zapOpts.BindFlags(flag.CommandLine)
@@ -104,6 +111,11 @@ func main() {
 			Scheme:   mgr.GetScheme(),
 			Recorder: mgr.GetEventRecorderFor("mxlnodecapabilities-controller"),
 		}).SetupWithManager},
+		{"MxlFlowRedundancySet", (&redundancyset.Reconciler{
+			Client:    mgr.GetClient(),
+			Namespace: ownNamespace(setMirrorNS),
+			Lease:     &leasecheck.Checker{Client: mgr.GetClient()},
+		}).SetupWithManager},
 	}
 	for _, rc := range reconcilers {
 		if err := rc.setup(mgr); err != nil {
@@ -126,4 +138,16 @@ func main() {
 		setupLog.Error(err, "manager exited with error")
 		os.Exit(1)
 	}
+}
+
+// ownNamespace is ns, or the namespace of the operator's service account.
+func ownNamespace(ns string) string {
+	if ns != "" {
+		return ns
+	}
+	b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	if err != nil {
+		return "default"
+	}
+	return strings.TrimSpace(string(b))
 }

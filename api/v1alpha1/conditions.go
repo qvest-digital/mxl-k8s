@@ -216,6 +216,11 @@ const (
 	// reference to a live MxlReceiver.
 	ReasonReceiverOwned = "ReceiverOwned"
 
+	// ReasonRedundancySetOwned marks an MxlFlowMirror claimed by an owner
+	// reference to an MxlFlowRedundancySet whose output is wanted on the
+	// mirror's target node.
+	ReasonRedundancySetOwned = "RedundancySetOwned"
+
 	// ReasonRequestorLive marks an MxlFlowMirror claimed by a
 	// spec.requestor pod that is still present with the recorded UID.
 	ReasonRequestorLive = "RequestorLive"

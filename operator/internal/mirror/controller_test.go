@@ -257,6 +257,55 @@ func TestClaim_LiveReceiverOwner_IsKept(t *testing.T) {
 	assert.Equal(t, mxlv1alpha1.ReasonReceiverOwned, claimed.Reason)
 }
 
+func withSetOwner(name string, uid types.UID) mirrorOpt {
+	return func(m *mxlv1alpha1.MxlFlowMirror) {
+		m.OwnerReferences = append(m.OwnerReferences, metav1.OwnerReference{
+			APIVersion: mxlv1alpha1.GroupVersion.String(),
+			Kind:       "MxlFlowRedundancySet",
+			Name:       name,
+			UID:        uid,
+		})
+	}
+}
+
+func set(uid types.UID, nodes ...string) *mxlv1alpha1.MxlFlowRedundancySet {
+	return &mxlv1alpha1.MxlFlowRedundancySet{
+		ObjectMeta: metav1.ObjectMeta{Name: "programme", UID: uid},
+		Status:     mxlv1alpha1.MxlFlowRedundancySetStatus{Nodes: nodes},
+	}
+}
+
+// A set mirrors each member to every node its output is read on, and
+// no pod is named on such a mirror: the reader holds the output, not
+// the member. The set wanting the output on the target is the claim.
+func TestClaim_SetWantingOutputOnTarget_IsKept(t *testing.T) {
+	m := newMirror(withSetOwner("programme", "set-uid"))
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), set("set-uid", tgtNode))
+
+	reconcileOnce(t, r, m.Name)
+	assert.False(t, mirrorGone(t, c, m.Name))
+
+	claimed := condition(t, getMirror(t, c, m.Name), mxlv1alpha1.ConditionTypeClaimed)
+	require.NotNil(t, claimed)
+	assert.Equal(t, mxlv1alpha1.ReasonRedundancySetOwned, claimed.Reason)
+}
+
+func TestClaim_SetNotWantingOutputOnTarget_IsCollected(t *testing.T) {
+	m := newMirror(withSetOwner("programme", "set-uid"))
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), set("set-uid", "elsewhere"))
+
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name))
+}
+
+func TestClaim_SetRecreatedUnderTheSameName_IsNotAClaim(t *testing.T) {
+	m := newMirror(withSetOwner("programme", "old-uid"))
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), set("new-uid", tgtNode))
+
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name))
+}
+
 // The trap the old collectors left open. A receiver that stops wanting
 // a mirror removes its owner reference rather than being deleted, and
 // apiserver garbage collection fires when an owner is deleted, not
