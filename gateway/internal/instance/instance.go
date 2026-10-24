@@ -9,6 +9,8 @@ import (
 
 	"github.com/qvest-digital/go-mxl/fabrics"
 	"github.com/qvest-digital/go-mxl/mxl"
+
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/mxlfs"
 )
 
 // Handles bundles the gateway-scoped MXL handles. The zero value is
@@ -17,14 +19,25 @@ import (
 type Handles struct {
 	mu      sync.RWMutex
 	domain  string
+	onMxlfs bool
 	mxlInst *mxl.Instance
 	fabInst *fabrics.Instance
 	closed  bool
 }
 
 // Open opens the MXL domain at domainPath and the corresponding
-// fabrics instance. Both stay open until Close.
+// fabrics instance. Both stay open until Close. On an mxlfs domain the
+// process allocates lazily from then on; see package mxlfs.
 func Open(domainPath string) (*Handles, error) {
+	onMxlfs, err := mxlfs.IsMxlfs(domainPath)
+	if err != nil {
+		return nil, err
+	}
+	if onMxlfs {
+		if err := mxlfs.SetLazy(domainPath, true); err != nil {
+			return nil, err
+		}
+	}
 	inst, err := mxl.NewInstance(domainPath, "")
 	if err != nil {
 		return nil, fmt.Errorf("mxl.NewInstance %q: %w", domainPath, err)
@@ -36,6 +49,7 @@ func Open(domainPath string) (*Handles, error) {
 	}
 	return &Handles{
 		domain:  domainPath,
+		onMxlfs: onMxlfs,
 		mxlInst: inst,
 		fabInst: fab,
 	}, nil
@@ -44,6 +58,11 @@ func Open(domainPath string) (*Handles, error) {
 // DomainPath returns the path the underlying mxl.Instance was opened
 // against.
 func (h *Handles) DomainPath() string { return h.domain }
+
+// OnMxlfs reports whether the domain is on an mxlfs, where flows this
+// process creates or opens through libmxl hold no ring until
+// mxlfs.AllocateFlow allocates it.
+func (h *Handles) OnMxlfs() bool { return h.onMxlfs }
 
 // MXL returns the underlying mxl.Instance. Returns nil after Close.
 func (h *Handles) MXL() *mxl.Instance {

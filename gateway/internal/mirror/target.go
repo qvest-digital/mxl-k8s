@@ -28,6 +28,7 @@ import (
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/mxlfs"
 )
 
 // TargetFinalizerName is the finalizer the target-side reconciler
@@ -730,6 +731,14 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef 
 	writer, _, err := mxlInst.NewWriter(flowDef)
 	if err != nil {
 		return nil, fmt.Errorf("%w: NewWriter: %w", errOpenWriterFailed, err)
+	}
+	// The ring has to be in place before the fabric side registers it:
+	// pinning a lazily allocated mxlfs ring would fault it in page by page.
+	if handles.OnMxlfs() {
+		if err := mxlfs.AllocateFlow(mxlfs.FlowDir(handles.DomainPath(), writer.Config().Common.ID)); err != nil {
+			_ = writer.Close()
+			return nil, fmt.Errorf("%w: allocate ring: %w", errOpenWriterFailed, err)
+		}
 	}
 	target, info, s, err := r.openFabricSideDispatch(handles, writer, provider)
 	if err != nil {
