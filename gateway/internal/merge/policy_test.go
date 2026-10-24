@@ -211,6 +211,30 @@ func TestAudioServesEverySampleSomeMemberHoldsWhole(t *testing.T) {
 	}
 }
 
+// The engine starts with whatever arrives first, mostly in the middle of
+// a page. Every sample it publishes must still come from a member.
+func TestAudioStartsAtAPageBoundaryWithoutSilence(t *testing.T) {
+	const batch = 480
+	a := NewAudio(1, 38, 1)
+	a.Skew = 2048
+	var shown []int
+	first := uint64(0)
+	for b := uint64(10); b < 60; b++ { // 4800 is in the middle of page 4
+		a.Committed(0, b*batch, (b+1)*batch)
+		before := a.Head
+		_, head, _ := a.Step(time.Unix(0, 0))
+		if first == 0 && head > before {
+			first = before
+		}
+		for s := before; s < head; s++ {
+			shown = append(shown, a.Current[(s/PageSamples)%a.Pages])
+		}
+	}
+	require.NotEmpty(t, shown)
+	require.Zero(t, first%PageSamples, "publishing started mid-page, at %d", first)
+	require.NotContains(t, shown, 1, "a published sample was silence though the member held it")
+}
+
 func TestAudioSilencesAPageNoMemberHoldsWhole(t *testing.T) {
 	a := NewAudio(2, 38, 2)
 	a.Skew = 2048

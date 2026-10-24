@@ -199,7 +199,10 @@ func NewAudio(members int, pages uint64, silence int) *Audio {
 // Committed records that member committed samples [start, end).
 func (a *Audio) Committed(member int, start, end uint64) {
 	if !a.started {
-		a.Head, a.started = start, true
+		// Publish from the first page boundary on: the page the first
+		// arrival starts in is not known whole for any member, and would
+		// be served as silence.
+		a.Head, a.started = (start+PageSamples-1)/PageSamples*PageSamples, true
 	}
 	for n := start / PageSamples; n*PageSamples < end; n++ {
 		c := &a.cov[member][n%a.Pages]
