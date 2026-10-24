@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/qvest-digital/go-mxl/mxl"
+
+	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
 // flowDirSuffix is what libmxl names a flow's directory inside a
@@ -351,7 +353,9 @@ func (d *Domain) listFlows() (map[string]struct{}, map[string]uint64, error) {
 			continue
 		}
 		id := strings.TrimSuffix(de.Name(), flowDirSuffix)
-		if id == "" {
+		// A placeholder is not a flow this node has: its ring is empty and
+		// unallocated, and reading it would report a flow that is not here.
+		if id == "" || mxlv1alpha1.IsPlaceholder(d.path, id) {
 			continue
 		}
 		ids[id] = struct{}{}
