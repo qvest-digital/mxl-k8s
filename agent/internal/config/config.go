@@ -44,6 +44,11 @@ type Config struct {
 	// disables the drop.
 	ShimPath string
 
+	// CSIEndpoint is the unix socket the agent serves the CSI node
+	// plugin on, which delivers the domain to pods as an inline
+	// ephemeral volume. Empty disables it.
+	CSIEndpoint string
+
 	// MaterializeTimeout caps the per-request wait the intent
 	// dispatcher allows before giving up on a mirror reaching
 	// Ready.
@@ -88,6 +93,8 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.StringVar(&c.ShimPath, "shim-path", "/run/mxl/libmxl-intent.so",
 		"Path the agent writes its copy of libmxl-intent.so to on every "+
 			"start, for consumers that preload it off the node. Empty disables.")
+	fs.StringVar(&c.CSIEndpoint, "csi-endpoint", "",
+		"Unix socket for the CSI node plugin that mounts the domain into pods. Empty disables.")
 	fs.DurationVar(&c.MaterializeTimeout, "materialize-timeout", 5*time.Second,
 		"Per-request budget for the intent dispatcher waiting for a mirror Ready.")
 	fs.StringVar(&c.Provider, "provider", "",

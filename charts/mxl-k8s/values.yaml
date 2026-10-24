@@ -323,6 +323,28 @@ agent:
     # enum: ["debug", "info", "warn", "error"]
     # @schema
     zapLogLevel: info
+  # -- CSI node plugin that delivers the domain to pods as an inline
+  # ephemeral volume (driver mxl.qvest-digital.com), with the volume
+  # attributes domain (an MxlDomain name; empty for the primary domain)
+  # and access (read or write). Mounting into pod volumes needs the
+  # agent container privileged, for Bidirectional mount propagation of
+  # the kubelet pods directory.
+  csi:
+    enabled: false
+    # @schema
+    # pattern: ^/.+
+    # @schema
+    # -- The kubelet's root directory on the node.
+    kubeletDir: /var/lib/kubelet
+    registrar:
+      image:
+        repository: registry.k8s.io/sig-storage/csi-node-driver-registrar
+        tag: v2.15.0
+      resources:
+        requests:
+          cpu: 5m
+          memory: 16Mi
+        limits: {}
   # -- hostPath layout. The agent mounts the whole /run/mxl so the
   # intent socket lands on the host where consumer pods can see it.
   hostPath:

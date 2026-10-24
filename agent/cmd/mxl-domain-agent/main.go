@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/config"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/csi"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/domainpublisher"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/fanotify"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/flowpublisher"
@@ -202,6 +203,28 @@ func run(args []string) error {
 			&podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName}); err != nil {
 			return err
 		}
+	}
+
+	if cfg.CSIEndpoint != "" {
+		plugin := &csi.Plugin{
+			NodeName: cfg.NodeName,
+			Mounter:  csi.SysMounter{},
+			DomainDir: func(ctx context.Context, domain string) (string, error) {
+				if domain == "" {
+					return cfg.DomainPath, nil
+				}
+				var d mxlv1alpha1.MxlDomain
+				if err := kClient.Get(ctx, client.ObjectKey{Name: domain}, &d); err != nil {
+					return "", err
+				}
+				return filepath.Join(filepath.Dir(cfg.DomainPath), d.Spec.Path()), nil
+			},
+		}
+		go func() {
+			if err := plugin.Serve(ctx, cfg.CSIEndpoint); err != nil && ctx.Err() == nil {
+				setupLog.Error(err, "CSI node plugin exited")
+			}
+		}()
 	}
 
 	setupLog.Info("agent started",

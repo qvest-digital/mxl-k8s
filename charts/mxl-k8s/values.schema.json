@@ -77,6 +77,93 @@
           "title": "containerSecurityContext",
           "type": "object"
         },
+        "csi": {
+          "description": "CSI node plugin that delivers the domain to pods as an inline ephemeral volume (driver mxl.qvest-digital.com), with the volume attributes domain (an MxlDomain name; empty for the primary domain) and access (read or write). Mounting into pod volumes needs the agent container privileged, for Bidirectional mount propagation of the kubelet pods directory.",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "title": "enabled",
+              "type": "boolean"
+            },
+            "kubeletDir": {
+              "default": "/var/lib/kubelet",
+              "description": "The kubelet's root directory on the node.",
+              "pattern": "^/.+",
+              "required": [],
+              "title": "kubeletDir"
+            },
+            "registrar": {
+              "properties": {
+                "image": {
+                  "properties": {
+                    "repository": {
+                      "default": "registry.k8s.io/sig-storage/csi-node-driver-registrar",
+                      "title": "repository",
+                      "type": "string"
+                    },
+                    "tag": {
+                      "default": "v2.15.0",
+                      "title": "tag",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "repository",
+                    "tag"
+                  ],
+                  "title": "image",
+                  "type": "object"
+                },
+                "resources": {
+                  "properties": {
+                    "limits": {
+                      "required": [],
+                      "title": "limits",
+                      "type": "object"
+                    },
+                    "requests": {
+                      "properties": {
+                        "cpu": {
+                          "default": "5m",
+                          "title": "cpu",
+                          "type": "string"
+                        },
+                        "memory": {
+                          "default": "16Mi",
+                          "title": "memory",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "cpu",
+                        "memory"
+                      ],
+                      "title": "requests",
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "requests",
+                    "limits"
+                  ],
+                  "title": "resources",
+                  "type": "object"
+                }
+              },
+              "required": [
+                "image",
+                "resources"
+              ],
+              "title": "registrar",
+              "type": "object"
+            }
+          },
+          "required": [
+            "enabled",
+            "registrar"
+          ],
+          "title": "csi"
+        },
         "enabled": {
           "default": true,
           "title": "enabled",
