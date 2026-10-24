@@ -120,6 +120,14 @@ func TestCommitArrivedGrain_DataGrainKeepsItsLength(t *testing.T) {
 	require.Equal(t, uint16(64), g.ValidSlices)
 }
 
+func TestArrivalComplete(t *testing.T) {
+	partial := mxl.Grain{TotalSlices: 4096, ValidSlices: 64}
+	require.True(t, arrivalComplete(partial, true), "a data grain is committed as it arrives")
+	require.False(t, arrivalComplete(partial, false), "a paced video grain waits for its last range")
+	require.True(t, arrivalComplete(mxl.Grain{TotalSlices: 1080, ValidSlices: 1080}, false))
+	require.True(t, arrivalComplete(mxl.Grain{}, false))
+}
+
 // Two progress loops committing one flow through two writers at once
 // interleave libmxl's open and commit on the one writer they share, and
 // a commit then fails for a grain nobody has committed. Through

@@ -1036,15 +1036,13 @@ func (r *TargetReconciler) startProgressLoop(
 		go runTargetSampleProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)
 	} else {
 		readFn := func() (uint64, error) { return target.ReadGrain(targetReadTimeout) }
+		data := writer.Config().Common.Format == mxl.FormatData
 		completeFn := func(idx uint64) (bool, error) {
 			g, err := flow.grainInfo(writer, idx)
 			if err != nil {
 				return false, err
 			}
-			// TotalSlices == 0 is a grain the source never subdivides
-			// and never transfers in ranges, so there is nothing to
-			// wait for; Complete() reports false for it.
-			return g.TotalSlices == 0 || g.Complete(), nil
+			return arrivalComplete(g, data), nil
 		}
 		commitFn := func(idx uint64) error {
 			n, err := flow.commitGrain(writer, idx, entry)
@@ -1205,6 +1203,17 @@ func runTargetProgressLoop(
 			return
 		}
 	}
+}
+
+// arrivalComplete reports whether an arrived grain may be committed. A
+// video grain the source paced arrives as several slice ranges and is
+// committed once all of them are in. A data grain is never complete,
+// its valid slices being its length, and the source sends it in one
+// write, so it is committed as it arrives. TotalSlices == 0 is a grain
+// the source never subdivides, so there is nothing to wait for;
+// Complete() reports false for it.
+func arrivalComplete(g mxl.Grain, data bool) bool {
+	return data || g.TotalSlices == 0 || g.Complete()
 }
 
 // commitArrivedGrain advances the local flow's HeadIndex for a grain
