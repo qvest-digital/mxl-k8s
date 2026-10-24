@@ -36,20 +36,15 @@ import (
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
 )
 
-// MarkerDir is the directory in a domain that holds one empty file per
-// placeholder, named after the flow id.
-const MarkerDir = ".mxlfs-placeholders"
+// MarkerDir is the directory in a domain that holds the placeholder
+// markers; see mxlv1alpha1.PlaceholderMarkerDir.
+const MarkerDir = mxlv1alpha1.PlaceholderMarkerDir
 
 // MarkerPath is the marker of flow id in domain.
-func MarkerPath(domain, id string) string {
-	return filepath.Join(domain, MarkerDir, id)
-}
+func MarkerPath(domain, id string) string { return mxlv1alpha1.PlaceholderMarker(domain, id) }
 
 // IsPlaceholder reports whether flow id in domain is a placeholder.
-func IsPlaceholder(domain, id string) bool {
-	_, err := os.Stat(MarkerPath(domain, id))
-	return err == nil
-}
+func IsPlaceholder(domain, id string) bool { return mxlv1alpha1.IsPlaceholder(domain, id) }
 
 // Handles is what the manager needs of an open domain.
 type Handles interface {

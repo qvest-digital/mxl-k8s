@@ -283,7 +283,8 @@ func (d *Dispatcher) flowExistsLocally(ref mxlv1alpha1.FlowRef) bool {
 		return false
 	}
 	_, err := os.Stat(filepath.Join(dir, ref.ID+".mxl-flow", "flow_def.json"))
-	return err == nil
+	// A placeholder lists the flow without holding it.
+	return err == nil && !mxlv1alpha1.IsPlaceholder(dir, ref.ID)
 }
 
 func (d *Dispatcher) resolveSourceNode(ctx context.Context, ref mxlv1alpha1.FlowRef) (mxlv1alpha1.OriginResolution, error) {

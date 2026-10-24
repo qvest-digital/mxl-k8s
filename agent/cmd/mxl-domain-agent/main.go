@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/agent/internal/flowpublisher"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/intent"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/intentsock"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/mxlfswatch"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/originlease"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/podlookup"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/shiminstall"
@@ -165,8 +167,9 @@ func run(args []string) error {
 
 	go flowPub.RunLocalRescan(ctx, 30*time.Second)
 
-	if cfg.IntentSocketPath != "" {
-		intentDispatcher := &intent.Dispatcher{
+	var intentDispatcher *intent.Dispatcher
+	if cfg.IntentSocketPath != "" || mxlfswatch.IsMxlfs(cfg.DomainPath) {
+		intentDispatcher = &intent.Dispatcher{
 			Client:             kClient,
 			Resolver:           &podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName},
 			DomainPath:         cfg.DomainPath,
@@ -181,6 +184,8 @@ func run(args []string) error {
 				return current
 			},
 		}
+	}
+	if cfg.IntentSocketPath != "" {
 		intentServer := &intentsock.Server{
 			SocketPath: cfg.IntentSocketPath,
 			Dispatcher: intentDispatcher,
@@ -190,6 +195,13 @@ func run(args []string) error {
 				setupLog.Error(err, "intent socket exited")
 			}
 		}()
+	}
+
+	if mxlfswatch.IsMxlfs(cfg.DomainPath) {
+		if err := runMxlfs(ctx, cfg.DomainPath, flowPub, intentDispatcher,
+			&podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName}); err != nil {
+			return err
+		}
 	}
 
 	setupLog.Info("agent started",
@@ -342,4 +354,68 @@ func (o originClaims) ClaimOrigin(ctx context.Context, ref mxlv1alpha1.FlowRef) 
 		return o.primary.ClaimOrigin(ctx, ref.ID)
 	}
 	return o.trackers.ClaimOrigin(ctx, ref.Domain, ref.ID)
+}
+
+// runMxlfs starts what a domain on mxlfs needs beyond fanotify on the
+// domain directory: a mirror for every placeholder a pod opens, one for
+// every flow a path walk waits for, and a publish for every placeholder
+// that stops being one.
+func runMxlfs(ctx context.Context, domain string, fp *flowpublisher.Publisher,
+	d *intent.Dispatcher, pods *podlookup.Resolver) error {
+
+	l := ctrl.Log.WithName("mxlfs")
+	ns, _ := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	own := strings.TrimSpace(string(ns))
+	trigger := &mxlfswatch.Trigger{
+		Dispatcher: d,
+		// The gateway and the exporter open placeholders too. A process
+		// that is in no pod is not a consumer either.
+		Ours: func(ctx context.Context, pid int32) bool {
+			pod, err := pods.PodForPID(ctx, pid)
+			return err != nil || pod.Namespace == own
+		},
+		Log: l,
+	}
+	go func() {
+		if err := trigger.Run(ctx, domain); err != nil && ctx.Err() == nil {
+			l.Error(err, "placeholder open watcher exited")
+		}
+	}()
+	go func() {
+		if err := mxlfswatch.RunWanted(ctx, domain, d, l); err != nil && ctx.Err() == nil {
+			l.Error(err, "wanted flow loop exited")
+		}
+	}()
+
+	markers, err := mxlfswatch.MarkerDir(domain)
+	if err != nil {
+		return fmt.Errorf("placeholder marker directory: %w", err)
+	}
+	w, err := fanotify.New()
+	if err != nil {
+		return fmt.Errorf("fanotify init: %w", err)
+	}
+	if err := w.MarkInode(markers, fanotify.MaskDelete|fanotify.MaskMovedFrom); err != nil {
+		w.Close()
+		return fmt.Errorf("fanotify mark %s: %w", markers, err)
+	}
+	events := make(chan fanotify.Event, 32)
+	go func() {
+		defer w.Close()
+		if err := w.Run(ctx, events); err != nil && ctx.Err() == nil {
+			l.Error(err, "placeholder marker watcher exited")
+		}
+	}()
+	go func() {
+		// A marker goes when a mirror fills the placeholder or a local
+		// writer takes it over; either way the directory is a location
+		// now.
+		for ev := range events {
+			if err := fp.PublishAppeared(ctx, ev.Name+flowpublisher.FlowDirSuffix); err != nil {
+				l.Error(err, "publish former placeholder", "flowID", ev.Name)
+			}
+		}
+	}()
+	l.Info("watching mxlfs placeholders", "domain", domain)
+	return nil
 }

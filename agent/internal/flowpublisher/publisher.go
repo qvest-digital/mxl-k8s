@@ -114,6 +114,13 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 		l.V(1).Info("ignoring non-flow entry", "name", dirName)
 		return nil
 	}
+	// A placeholder only lists the flow here; nothing feeds it until a
+	// mirror fills it or a local writer takes it over, and either removes
+	// the marker, which brings the directory back through here.
+	if mxlv1alpha1.IsPlaceholder(p.DomainPath, flowID) {
+		l.V(1).Info("ignoring placeholder", "flowID", flowID)
+		return nil
+	}
 
 	defPath := filepath.Join(p.DomainPath, dirName, FlowDefName)
 	raw, err := os.ReadFile(defPath)
@@ -528,7 +535,7 @@ func (p *Publisher) localFlowIDs() (map[string]struct{}, error) {
 			continue
 		}
 		id, ok := FlowIDFromDirName(e.Name())
-		if !ok {
+		if !ok || mxlv1alpha1.IsPlaceholder(p.DomainPath, id) {
 			continue
 		}
 		out[id] = struct{}{}
