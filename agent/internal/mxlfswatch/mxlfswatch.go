@@ -194,8 +194,10 @@ func (m Mount) Local(fsPath string) (string, bool) {
 // RunWanted asks the mxlfs holding domain for flows path walks wait for
 // and starts a mirror for each, until ctx ends. A flow nobody publishes
 // yet gets none; the walk then waits until its placeholder appears, or
-// fails when wait= runs out.
-func RunWanted(ctx context.Context, domain string, d Materializer, l logr.Logger) error {
+// fails when wait= runs out. claim, when set, is offered each wanted flow
+// directory first and takes it when it reports true: a redundancy set's
+// output is merged here, not mirrored.
+func RunWanted(ctx context.Context, domain string, d Materializer, claim func(ctx context.Context, flowDir string) bool, l logr.Logger) error {
 	mount, err := MountOf(domain)
 	if err != nil {
 		return err
@@ -221,6 +223,9 @@ func RunWanted(ctx context.Context, domain string, d Materializer, l logr.Logger
 		}
 		pid := int32(req.PID)
 		go func() {
+			if claim != nil && claim(ctx, local) {
+				return
+			}
 			if err := d.Materialize(ctx, pid, filepath.Join(local, "data")); err != nil {
 				l.Info("wanted flow, no mirror yet", "path", local, "pid", pid, "reason", err.Error())
 			}

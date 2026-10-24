@@ -59,6 +59,10 @@ type Publisher struct {
 	// existing tests that don't care about Leases continue to work.
 	Lease LeaseRenewer
 
+	// IsOutput reports whether a flow is a redundancy set's output, which
+	// is not published as a location. Nil publishes every flow.
+	IsOutput func(ctx context.Context, domain, flowID string) bool
+
 	// WriterAttached reports whether a writer still holds the flow's
 	// directory on this node. Nil takes the flock probe in
 	// agent/internal/flowlock, which is libmxl's own test; tests
@@ -119,6 +123,12 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	// the marker, which brings the directory back through here.
 	if mxlv1alpha1.IsPlaceholder(p.DomainPath, flowID) {
 		l.V(1).Info("ignoring placeholder", "flowID", flowID)
+		return nil
+	}
+	// A redundancy set's output is merged on each node it is read on and
+	// is never a location other nodes mirror from.
+	if p.IsOutput != nil && p.IsOutput(ctx, p.Domain, flowID) {
+		l.V(1).Info("ignoring redundancy set output", "flowID", flowID)
 		return nil
 	}
 

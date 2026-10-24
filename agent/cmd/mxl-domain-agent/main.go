@@ -31,6 +31,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/agent/internal/observed"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/originlease"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/podlookup"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/redundancy"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/shiminstall"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/statfs"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/tracker"
@@ -131,11 +132,13 @@ func run(args []string) error {
 		setupLog.Error(err, "initial domain sync failed")
 	}
 
+	sets := &redundancy.Sets{Client: kClient, NodeName: cfg.NodeName}
 	flowPub := &flowpublisher.Publisher{
 		Client:     kClient,
 		DomainPath: cfg.DomainPath,
 		NodeName:   cfg.NodeName,
 		Lease:      leaseMgr,
+		IsOutput:   sets.IsOutput,
 	}
 	if err := flowPub.InitialSync(ctx); err != nil {
 		// Initial sync failures are logged, not fatal -- the fanotify
@@ -200,7 +203,21 @@ func run(args []string) error {
 	}
 
 	if mxlfswatch.IsMxlfs(cfg.DomainPath) {
-		if err := runMxlfs(ctx, cfg.DomainPath, flowPub, intentDispatcher,
+		claim := func(ctx context.Context, flowDir string) bool {
+			domainsMu.Lock()
+			doms := current
+			domainsMu.Unlock()
+			ref, ok := doms.FlowRefFromPath(flowDir)
+			if !ok {
+				return false
+			}
+			isOutput, err := sets.Want(ctx, ref.Domain, ref.ID)
+			if err != nil {
+				setupLog.Error(err, "record redundancy set demand", "flowID", ref.ID)
+			}
+			return isOutput
+		}
+		if err := runMxlfs(ctx, cfg.DomainPath, flowPub, intentDispatcher, claim,
 			&podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName}); err != nil {
 			return err
 		}
@@ -410,7 +427,7 @@ func (o originClaims) ClaimOrigin(ctx context.Context, ref mxlv1alpha1.FlowRef) 
 // every flow a path walk waits for, and a publish for every placeholder
 // that stops being one.
 func runMxlfs(ctx context.Context, domain string, fp *flowpublisher.Publisher,
-	d *intent.Dispatcher, pods *podlookup.Resolver) error {
+	d *intent.Dispatcher, claim func(context.Context, string) bool, pods *podlookup.Resolver) error {
 
 	l := ctrl.Log.WithName("mxlfs")
 	ns, _ := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
@@ -431,7 +448,7 @@ func runMxlfs(ctx context.Context, domain string, fp *flowpublisher.Publisher,
 		}
 	}()
 	go func() {
-		if err := mxlfswatch.RunWanted(ctx, domain, d, l); err != nil && ctx.Err() == nil {
+		if err := mxlfswatch.RunWanted(ctx, domain, d, claim, l); err != nil && ctx.Err() == nil {
 			l.Error(err, "wanted flow loop exited")
 		}
 	}()
