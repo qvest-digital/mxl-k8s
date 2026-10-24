@@ -22,6 +22,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&MxlFlowMirror{}, &MxlFlowMirrorList{},
 		&MxlReceiver{}, &MxlReceiverList{},
 		&MxlNodeCapabilities{}, &MxlNodeCapabilitiesList{},
+		&MxlFlowRedundancySet{}, &MxlFlowRedundancySetList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil
