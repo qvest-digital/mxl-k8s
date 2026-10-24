@@ -179,3 +179,24 @@ func TestFlowAProcessHereWritesGetsNoPlaceholder(t *testing.T) {
 	require.Empty(t, m.Held())
 	require.False(t, IsPlaceholder(h.dir, flowID))
 }
+
+// On mxlfs a path walk into a flow that does not exist waits for it and
+// posts it as wanted under the walker's pid; the agent then mirrors the
+// flow here for the gateway, which reads nothing. Deciding that a flow
+// is absent must not look the flow up.
+func TestAbsentFlowIsNotLookedUp(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(mxlv1alpha1.MxlFlowLocation{NodeName: "node-b", Phase: mxlv1alpha1.MxlFlowLocationOrigin}))
+	saved := foreignWriters
+	t.Cleanup(func() { foreignWriters = saved })
+	foreignWriters = func(path string) (int, error) {
+		if _, err := os.Stat(filepath.Dir(path)); os.IsNotExist(err) {
+			t.Errorf("looked up %s, which does not exist", path)
+		}
+		return saved(path)
+	}
+
+	reconcileFlow(t, m)
+
+	require.Equal(t, []string{flowID}, m.Held())
+}

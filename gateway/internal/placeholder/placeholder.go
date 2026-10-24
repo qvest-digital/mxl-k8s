@@ -114,9 +114,18 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	domain := h.DomainPath()
 	e := &entry{domain: domain, id: flow.Spec.ID}
 
-	// A flow some process here already writes is not absent.
-	if n, err := flowlocks.ForeignWriters(m.dataPath(e)); err != nil || n > 0 {
+	// A flow some process here already writes is not absent. Whether it
+	// exists at all is read from the directory: a path walk into a
+	// missing flow on mxlfs waits for it and posts it as wanted, under
+	// the gateway's pid, which the agent would mirror.
+	exists, err := present(domain, e.id)
+	if err != nil {
 		return reconcile.Result{}, err
+	}
+	if exists {
+		if n, err := foreignWriters(m.dataPath(e)); err != nil || n > 0 {
+			return reconcile.Result{}, err
+		}
 	}
 	if err := os.MkdirAll(filepath.Join(domain, MarkerDir), 0o755); err != nil {
 		return reconcile.Result{}, err
@@ -146,6 +155,24 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	m.mu.Unlock()
 	l.Info("holding placeholder", "domain", domain, "created", created)
 	return reconcile.Result{}, nil
+}
+
+// foreignWriters is flowlocks.ForeignWriters; tests replace it.
+var foreignWriters = flowlocks.ForeignWriters
+
+// present reports whether domain holds a directory for flow id, without
+// a lookup of the flow's own name.
+func present(domain, id string) (bool, error) {
+	entries, err := os.ReadDir(domain)
+	if err != nil {
+		return false, err
+	}
+	for _, d := range entries {
+		if d.Name() == id+".mxl-flow" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // hasLocation reports whether the flow has a copy on this node already.
@@ -192,7 +219,7 @@ func (m *Manager) CheckLocalWriters(l logr.Logger) {
 	m.mu.Lock()
 	var taken []string
 	for name, e := range m.held {
-		if n, err := flowlocks.ForeignWriters(m.dataPath(e)); err == nil && n > 0 {
+		if n, err := foreignWriters(m.dataPath(e)); err == nil && n > 0 {
 			taken = append(taken, name)
 		}
 	}
