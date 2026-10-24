@@ -1223,7 +1223,16 @@ func runTargetProgressLoop(
 // first already has.
 var errGrainAlreadyCommitted = errors.New("grain already committed")
 
+// A data grain is committed with the valid slices the initiator's write
+// carried: they are its length, and libmxl data writers never complete
+// a grain. OpenGrain clears them, so they are read first.
 func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, error) {
+	var valid uint16
+	if writer.Config().Common.Format == mxl.FormatData {
+		if g, err := writer.GrainInfo(idx); err == nil && g.Index == idx {
+			valid = g.ValidSlices
+		}
+	}
 	ga, err := writer.OpenGrain(idx)
 	if err != nil {
 		if errors.Is(err, mxl.ErrInvalidArg) {
@@ -1231,7 +1240,10 @@ func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, error) {
 		}
 		return 0, fmt.Errorf("OpenGrain(%d): %w", idx, err)
 	}
-	if err := ga.Commit(ga.TotalSlices, 0); err != nil {
+	if valid == 0 {
+		valid = ga.TotalSlices
+	}
+	if err := ga.Commit(valid, 0); err != nil {
 		return 0, fmt.Errorf("Commit(%d): %w", idx, err)
 	}
 	return uint64(ga.GrainSize), nil

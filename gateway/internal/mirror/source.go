@@ -1103,12 +1103,29 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 		betweenChunks := func() {
 			chunkProgress.runProgress(progressFn, func(err error) { logProgressFailure(l, err) })
 		}
+		// A data grain is never complete: its valid slices are its
+		// length. It is read once committed at all, and only what is
+		// valid goes over, so the target commits the same length.
+		data := cfg.Common.Format == mxl.FormatData
 		transferFn := func(idx uint64, paced bool) (bool, error) {
-			grain, err := reader.GetGrainNonBlocking(idx)
+			var grain mxl.Grain
+			var err error
+			if data {
+				grain, err = reader.GetGrainSliceNonBlocking(idx, 1)
+			} else {
+				grain, err = reader.GetGrainNonBlocking(idx)
+			}
 			if err != nil {
 				// Not yet committed or already aged out; signal the loop
 				// to break and re-try on the next tick.
 				return false, err
+			}
+			if data {
+				if err := initiator.TransferGrain(idx, 0, grain.ValidSlices); err != nil {
+					return false, err
+				}
+				s.addBytes(uint64(grain.ValidSlices))
+				return false, nil
 			}
 			if grain.TotalSlices == 0 {
 				// A discrete grain with no slice subdivision; continuous

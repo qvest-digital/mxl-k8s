@@ -88,6 +88,38 @@ func TestCommitArrivedGrain_SecondWriterOfSameFlowSeesAlreadyCommitted(t *testin
 	require.ErrorIs(t, err, errGrainAlreadyCommitted)
 }
 
+const sharedFlowDataDef = `{
+  "description": "mirror shared-flow test",
+  "id": "5d1a7c2e-3f4b-4e8a-9c6d-2b7e1f0a9d35",
+  "format": "urn:x-nmos:format:data",
+  "label": "mirror shared-flow test",
+  "parents": [],
+  "tags": {"urn:x-nmos:tag:grouphint/v1.0": ["mirror-test:Data"]},
+  "media_type": "video/smpte291",
+  "grain_rate": {"numerator": 50, "denominator": 1}
+}`
+
+// A data grain's valid slices are its length, and the initiator's write
+// sets them in the slot's header before the target commits. A commit
+// with the grain's total slices turned every ANC packet into a full
+// grain of trailing garbage on the target.
+func TestCommitArrivedGrain_DataGrainKeepsItsLength(t *testing.T) {
+	w, _ := twoWriters(t, sharedFlowDataDef)
+	const idx = 1000
+	// What the initiator's write leaves in the slot: the header of idx
+	// with 64 valid slices. A partial commit writes the same header.
+	ga, err := w.OpenGrain(idx)
+	require.NoError(t, err)
+	require.NoError(t, ga.Commit(64, 0))
+
+	_, err = commitArrivedGrain(w, idx)
+	require.NoError(t, err)
+
+	g, err := w.GrainInfo(idx)
+	require.NoError(t, err)
+	require.Equal(t, uint16(64), g.ValidSlices)
+}
+
 // Two progress loops committing one flow through two writers at once
 // interleave libmxl's open and commit on the one writer they share, and
 // a commit then fails for a grain nobody has committed. Through
