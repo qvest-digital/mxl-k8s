@@ -73,7 +73,7 @@ tests:
           path: rules
           content:
             apiGroups: [mxl.qvest-digital.com]
-            resources: [mxlflows, mxldomains]
+            resources: [mxlflows, mxldomains, mxlflowredundancysets]
             verbs: [get, list, watch]
 
   - it: operator role can watch nodes so it can prune locations of departed ones
@@ -138,3 +138,25 @@ tests:
             apiGroups: [dmf.qvest-digital.com]
             resources: [mediafunctionclaims/status]
             verbs: [patch]
+
+  - it: operator writes the status of the redundancy sets it reconciles
+    template: templates/rbac-operator.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [mxl.qvest-digital.com]
+            resources: [mxlflowredundancysets/status]
+            verbs: [get, patch, update]
+
+  - it: agent records its node on a redundancy set whose output a reader waits for
+    template: templates/rbac-agent.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [mxl.qvest-digital.com]
+            resources: [mxlflowredundancysets/status]
+            verbs: [get, update]

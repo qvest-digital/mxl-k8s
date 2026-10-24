@@ -26,6 +26,14 @@ rules:
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxlnodecapabilities]
     verbs: [get, list, watch]
+  # The agent adds its node to a set's status.nodes when a reader here
+  # waits for the set's output.
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxlflowredundancysets]
+    verbs: [get, list, watch]
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxlflowredundancysets/status]
+    verbs: [get, update]
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch]
