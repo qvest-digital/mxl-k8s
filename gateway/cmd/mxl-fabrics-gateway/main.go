@@ -31,6 +31,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/domaingc"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/mirror"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/placeholder"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/rdma"
 )
 
@@ -136,6 +137,25 @@ func run(args []string) error {
 	}
 	if err := targetReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup target reconciler: %w", err)
+	}
+
+	// On an mxlfs domain every MxlFlow absent here gets a placeholder,
+	// so every pod on the node sees the whole domain.
+	placeholders := &placeholder.Manager{
+		Client:      mgr.GetClient(),
+		NodeName:    cfg.NodeName,
+		Domain:      placeholder.FromSet(domains),
+		LocalWriter: targetReconciler.StopFlow,
+	}
+	targetReconciler.Filled = placeholders.Filled
+	if err := ctrl.NewControllerManagedBy(mgr).
+		Named("placeholder").
+		For(&mxlv1alpha1.MxlFlow{}).
+		Complete(placeholders); err != nil {
+		return fmt.Errorf("setup placeholder reconciler: %w", err)
+	}
+	if err := mgr.Add(placeholders); err != nil {
+		return fmt.Errorf("register placeholder runnable: %w", err)
 	}
 	sourceReconciler := &mirror.SourceReconciler{
 		Client:           mgr.GetClient(),

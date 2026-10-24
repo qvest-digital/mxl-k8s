@@ -2,10 +2,12 @@ package mirror
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +29,7 @@ import (
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/mxlfs"
 )
@@ -253,6 +256,11 @@ type TargetReconciler struct {
 	// instead of waiting on a fatal that will not come. Defaults to
 	// defaultStuckHandshakeAfter.
 	StuckHandshakeAfter time.Duration
+
+	// Filled is told when a target's ring on an mxlfs domain has been
+	// allocated, with the domain directory and the flow id, so a
+	// placeholder there becomes a published copy. Nil leaves it out.
+	Filled func(domain, id string)
 
 	// TeardownGrace bounds how long a teardown waits for the per-mirror
 	// goroutines it cancelled to return before giving up on releasing
@@ -728,6 +736,20 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef 
 		return nil, fmt.Errorf("mxl instance closed")
 	}
 
+	// A flow another process on this node writes belongs to that
+	// process: the local writer wins, and a mirror into it would write
+	// over a producer's ring.
+	if handles.OnMxlfs() {
+		if id, ok := flowIDFromDef(flowDef); ok {
+			n, err := flowlocks.ForeignWriters(filepath.Join(handles.DomainPath(), id+".mxl-flow", "data"))
+			if err != nil {
+				return nil, fmt.Errorf("%w: check local writers: %w", errOpenWriterFailed, err)
+			}
+			if n > 0 {
+				return nil, fmt.Errorf("%w: %w", errOpenWriterFailed, errLocalWriter)
+			}
+		}
+	}
 	writer, _, err := mxlInst.NewWriter(flowDef)
 	if err != nil {
 		return nil, fmt.Errorf("%w: NewWriter: %w", errOpenWriterFailed, err)
@@ -735,9 +757,13 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef 
 	// The ring has to be in place before the fabric side registers it:
 	// pinning a lazily allocated mxlfs ring would fault it in page by page.
 	if handles.OnMxlfs() {
-		if err := mxlfs.AllocateFlow(mxlfs.FlowDir(handles.DomainPath(), writer.Config().Common.ID)); err != nil {
+		dir := mxlfs.FlowDir(handles.DomainPath(), writer.Config().Common.ID)
+		if err := mxlfs.AllocateFlow(dir); err != nil {
 			_ = writer.Close()
 			return nil, fmt.Errorf("%w: allocate ring: %w", errOpenWriterFailed, err)
+		}
+		if r.Filled != nil {
+			r.Filled(handles.DomainPath(), strings.TrimSuffix(filepath.Base(dir), ".mxl-flow"))
 		}
 	}
 	target, info, s, err := r.openFabricSideDispatch(handles, writer, provider)
@@ -1318,6 +1344,38 @@ func commitArrivedSamples(writer *mxl.Writer, head uint64, count int) (uint64, e
 		return 0, nil
 	}
 	return uint64(count) * (sa.Stride / bufferLength) * sa.ChannelCount, nil
+}
+
+// errLocalWriter is why a target does not open on a flow a process on
+// this node already writes.
+var errLocalWriter = errors.New("a process on this node writes the flow")
+
+// flowIDFromDef reads the id a flow definition carries.
+func flowIDFromDef(def string) (string, bool) {
+	var v struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal([]byte(def), &v) != nil || v.ID == "" {
+		return "", false
+	}
+	return strings.ToLower(v.ID), true
+}
+
+// StopFlow tears down every target writing flow id in the domain at
+// directory domain, leaving the flow in place: a local writer has taken
+// it over.
+func (r *TargetReconciler) StopFlow(domain, id string) {
+	r.mu.Lock()
+	var keys []types.NamespacedName
+	for key, e := range r.targets {
+		if e.handles != nil && e.handles.DomainPath() == domain && strings.EqualFold(e.flowID, id) {
+			keys = append(keys, key)
+		}
+	}
+	r.mu.Unlock()
+	for _, key := range keys {
+		r.closeEntry(key, keepFlow)
+	}
 }
 
 // closeEntry drops a mirror from the live set and tears its handles
