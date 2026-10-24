@@ -44,9 +44,9 @@ func ForeignWriters(dataPath string) (int, error) {
 //	1: FLOCK  ADVISORY  READ 514830 08:01:11011342 0 EOF
 //
 // and counts FLOCK entries on major:minor:ino held by a pid other than
-// self. The kernel prints the device as hex and the inode as decimal, and
-// a holder outside the reader's pid namespace with pid 0 or -1; those are
-// not self either.
+// self. The kernel prints the device as hex and the inode as decimal. It
+// leaves out holders the reader's pid namespace cannot see, so a reader
+// outside the host's sees none of another container's locks.
 func count(r io.Reader, major, minor uint32, ino uint64, self int) (int, error) {
 	want := fmt.Sprintf("%02x:%02x:%d", major, minor, ino)
 	n := 0

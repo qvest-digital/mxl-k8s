@@ -11,6 +11,12 @@ tests:
           path: spec.template.spec.dnsPolicy
           value: ClusterFirstWithHostNet
 
+  - it: runs in the host PID namespace so it sees local producers' flocks
+    asserts:
+      - equal:
+          path: spec.template.spec.hostPID
+          value: true
+
   - it: mounts the primary domain and domains/, not the rest of the runtime root
     asserts:
       - contains:

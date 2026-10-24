@@ -68,6 +68,7 @@ spec:
     spec:
       serviceAccountName: {{ include "mxlk8s.serviceAccountName" (dict "Context" $ctx "component" "gateway" "values" $ctx.Values.gateway) }}
       hostNetwork: {{ $g.hostNetwork }}
+      hostPID: {{ $g.hostPID }}
       dnsPolicy: {{ $g.dnsPolicy }}
       {{- with $ctx.Values.global.image.pullSecrets }}
       imagePullSecrets:

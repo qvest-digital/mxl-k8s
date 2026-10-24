@@ -1724,6 +1724,12 @@
           "required": [],
           "title": "hostNetwork"
         },
+        "hostPID": {
+          "default": "true",
+          "description": "Run the gateway in the host PID namespace. On an mxlfs domain the gateway counts the flocks local producers hold on a flow through /proc/locks, which lists only lock holders visible in the reader's PID namespace; without it a producer here goes unseen, and the gateway holds a placeholder over a flow that has an origin.",
+          "required": [],
+          "title": "hostPID"
+        },
         "hostPath": {
           "properties": {
             "domain": {
