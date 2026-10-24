@@ -85,6 +85,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			l.Info("member is in another domain than the output; views cannot cross domains", "member", m.FlowID)
 			return ctrl.Result{}, nil
 		}
+	}
+	for _, m := range set.Spec.Members {
 		if _, err := os.Stat(filepath.Join(flowDir(dir, m.FlowID), "data")); err != nil {
 			// The placeholder or the mirror is still on its way.
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
