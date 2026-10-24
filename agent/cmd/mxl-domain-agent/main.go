@@ -461,7 +461,7 @@ func runMxlfs(ctx context.Context, domain string, fp *flowpublisher.Publisher,
 	if err != nil {
 		return fmt.Errorf("fanotify init: %w", err)
 	}
-	if err := w.MarkInode(markers, fanotify.MaskDelete|fanotify.MaskMovedFrom); err != nil {
+	if err := w.MarkInode(markers, fanotify.MaskDelete|fanotify.MaskMovedFrom|fanotify.MaskCreate|fanotify.MaskMovedTo); err != nil {
 		w.Close()
 		return fmt.Errorf("fanotify mark %s: %w", markers, err)
 	}
@@ -475,10 +475,18 @@ func runMxlfs(ctx context.Context, domain string, fp *flowpublisher.Publisher,
 	go func() {
 		// A marker goes when a mirror fills the placeholder or a local
 		// writer takes it over; either way the directory is a location
-		// now.
+		// now. It comes back when the mirror goes, and the directory is
+		// no copy any more, though the gateway still holds it open.
 		for ev := range events {
-			if err := fp.PublishAppeared(ctx, ev.Name+flowpublisher.FlowDirSuffix); err != nil {
-				l.Error(err, "publish former placeholder", "flowID", ev.Name)
+			dir := ev.Name + flowpublisher.FlowDirSuffix
+			var err error
+			if ev.IsCreate() {
+				err = fp.PublishVanished(ctx, dir)
+			} else {
+				err = fp.PublishAppeared(ctx, dir)
+			}
+			if err != nil {
+				l.Error(err, "publish placeholder change", "flowID", ev.Name)
 			}
 		}
 	}()
