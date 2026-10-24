@@ -115,6 +115,49 @@ func TestDiscreteOrderedStaysOnThePrimary(t *testing.T) {
 	require.LessOrEqual(t, switches, 20, "one select per slot at startup, none after")
 }
 
+// Mirrors over a network deliver the members' grains several
+// milliseconds apart, in either order. Within the skew budget that
+// jitter must not move the set off its primary: each move remaps the
+// slots in every reader. Only a primary late beyond the tolerance does.
+func TestDiscreteRidesOutJitterWithinTheBudget(t *testing.T) {
+	a, b := newRing(20), newRing(20)
+	d := NewDiscrete(20, 2)
+	d.Ordered, d.Skew, d.Tolerance = true, 2, ToleranceFor(40*time.Millisecond)
+	now := time.Unix(0, 0)
+	a.commit(9) // a arrives first once, and becomes the primary
+	d.Step([]Member{a.member(), b.member()}, now)
+	b.commit(9)
+	switches := 0
+	for i := uint64(10); i < 300; i++ {
+		now = now.Add(20 * time.Millisecond)
+		late := time.Duration(i%3) * 6 * time.Millisecond // a is 0, 6 or 12 ms behind b
+		b.commit(i)
+		sel, _, wait := d.Step([]Member{a.member(), b.member()}, now)
+		switches += len(sel)
+		// The engine wakes when the wait runs out, before a arrives.
+		if wait > 0 && wait < late {
+			sel, _, _ = d.Step([]Member{a.member(), b.member()}, now.Add(wait))
+			switches += len(sel)
+		}
+		a.commit(i)
+		sel, _, _ = d.Step([]Member{a.member(), b.member()}, now.Add(late))
+		switches += len(sel)
+	}
+	require.Equal(t, 0, d.Primary)
+	require.LessOrEqual(t, switches, 20, "one select per slot at startup, none after")
+
+	// A primary that stops is replaced once the tolerance has passed.
+	for i := uint64(300); i < 340; i++ {
+		now = now.Add(20 * time.Millisecond)
+		b.commit(i)
+		if _, _, wait := d.Step([]Member{a.member(), b.member()}, now); wait > 0 {
+			d.Step([]Member{a.member(), b.member()}, now.Add(wait))
+		}
+	}
+	require.Equal(t, 1, d.Primary)
+	require.Equal(t, uint64(339), d.Head)
+}
+
 // A data grain's valid slices are its length, so a committed data grain
 // counts as complete; a video grain with half its slices does not.
 func TestDiscreteJudgesDataGrainsByCommit(t *testing.T) {

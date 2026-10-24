@@ -51,6 +51,15 @@ type Discrete struct {
 	waitingSince time.Time
 }
 
+// ToleranceFor is how long a set with skew budget skew waits for a late
+// primary before replacing it: half the budget, and no less than 2ms.
+// Replacing the primary moves every slot it then serves, one remap per
+// slot in every reader, so arrival jitter between members within the
+// budget must not do it.
+func ToleranceFor(skew time.Duration) time.Duration {
+	return max(skew/2, 2*time.Millisecond)
+}
+
 // Select is one view slot to point at a source.
 type Select struct {
 	Slot   uint

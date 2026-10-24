@@ -156,6 +156,10 @@ type Engine struct {
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
+
+	// selects counts the slots or pages the engine pointed at another
+	// source, each one a remap in every reader of the output.
+	selects atomic.Uint64
 }
 
 func flowDir(domain, id string) string { return filepath.Join(domain, id+".mxl-flow") }
@@ -415,6 +419,7 @@ func (e *Engine) buildDiscrete(tmp, src0 string) error {
 	e.disc.Ordered = e.spec.Ordered
 	period := time.Duration(float64(time.Second) * float64(e.rate.denominator) / float64(e.rate.numerator))
 	e.disc.Skew = max(uint64(e.spec.Skew/period), 1)
+	e.disc.Tolerance = ToleranceFor(e.spec.Skew)
 	return nil
 }
 
@@ -453,6 +458,7 @@ func (e *Engine) buildAudio(tmp, src0 string) error {
 	}
 	e.audio = NewAudio(len(e.members), uint64(length)/PageSamples, silence)
 	e.audio.Skew = uint64(e.spec.Skew.Seconds() * float64(e.rate.numerator) / float64(e.rate.denominator))
+	e.audio.Tolerance = ToleranceFor(e.spec.Skew)
 	return nil
 }
 
@@ -486,7 +492,12 @@ func (e *Engine) run(ctx context.Context) {
 	defer close(e.done)
 	waits := make([]futexWaitv, len(e.members))
 	lastHead := make([]uint64, len(e.members))
+	report := time.Now()
 	for ctx.Err() == nil {
+		if time.Since(report) >= time.Minute {
+			report = time.Now()
+			e.log.Info("merging", "head", e.out.head(), "selects", e.selects.Load())
+		}
 		timeout := 20 * time.Millisecond
 		for i, m := range e.members {
 			waits[i] = futexWaitv{Val: uint64(atomic.LoadUint32(m.syncWord())),
@@ -509,6 +520,7 @@ func (e *Engine) run(ctx context.Context) {
 			}
 			var sel []Select
 			sel, head, wait = e.disc.Step(ms, now)
+			e.selects.Add(uint64(len(sel)))
 			for _, s := range sel {
 				if err = selectAll(e.views[s.Slot], s.Source); err != nil {
 					break
@@ -528,6 +540,7 @@ func (e *Engine) run(ctx context.Context) {
 			}
 			var sel []PageSelect
 			sel, head, wait = e.audio.Step(now)
+			e.selects.Add(uint64(len(sel)))
 			channels, length := e.members[0].continuous()
 			for _, s := range sel {
 				for c := uint64(0); c < uint64(channels) && err == nil; c++ {
