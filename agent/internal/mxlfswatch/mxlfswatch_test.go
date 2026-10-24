@@ -107,3 +107,51 @@ func TestWantedRequestLayout(t *testing.T) {
 	// _IOWR('x', 5, 4096 bytes): read|write, size, type, number.
 	require.Equal(t, uintptr(3<<30|4096<<16|0x78<<8|5), iocWantedNext)
 }
+
+// The gateway and the exporter walk into flows too; neither reads one, and
+// a mirror started for them would copy a flow onto a node nobody reads it
+// on. On EFA that mirrored every redundancy set member onto the other
+// member's node.
+func TestWantedByOurOwnProcessStartsNoMirror(t *testing.T) {
+	r := &recorder{done: make(chan struct{}, 1)}
+	wanted(context.Background(), "/d/"+id+".mxl-flow", 7, r, nil,
+		func(context.Context, int32) bool { return true }, logr.Discard())
+	require.Empty(t, r.calls)
+}
+
+func TestWantedByAReaderStartsAMirror(t *testing.T) {
+	r := &recorder{done: make(chan struct{}, 1)}
+	wanted(context.Background(), "/d/"+id+".mxl-flow", 7, r, nil,
+		func(context.Context, int32) bool { return false }, logr.Discard())
+	require.Equal(t, []string{"/d/" + id + ".mxl-flow/data"}, r.calls)
+}
+
+func TestWantedOutputIsClaimedNotMirrored(t *testing.T) {
+	r := &recorder{done: make(chan struct{}, 1)}
+	wanted(context.Background(), "/d/"+id+".mxl-flow", 7, r,
+		func(context.Context, string) bool { return true }, nil, logr.Discard())
+	require.Empty(t, r.calls)
+}
+
+type locations struct{ appeared, vanished []string }
+
+func (l *locations) PublishAppeared(_ context.Context, dir string) error {
+	l.appeared = append(l.appeared, dir)
+	return nil
+}
+
+func (l *locations) PublishVanished(_ context.Context, dir string) error {
+	l.vanished = append(l.vanished, dir)
+	return nil
+}
+
+// A marker that comes back means the mirror filling the placeholder was
+// deleted: the gateway still holds the directory open, so publishing it
+// would make the node look like the flow's producer.
+func TestMarkerChanged(t *testing.T) {
+	l := &locations{}
+	require.NoError(t, MarkerChanged(context.Background(), l, id, false))
+	require.NoError(t, MarkerChanged(context.Background(), l, id, true))
+	require.Equal(t, []string{id + ".mxl-flow"}, l.appeared, "a marker that goes publishes the location")
+	require.Equal(t, []string{id + ".mxl-flow"}, l.vanished, "a marker that returns withdraws it")
+}

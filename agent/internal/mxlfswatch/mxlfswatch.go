@@ -223,20 +223,44 @@ func RunWanted(ctx context.Context, domain string, d Materializer, claim func(ct
 		if !ok {
 			continue
 		}
-		pid := int32(req.PID)
-		go func() {
-			if ours != nil && ours(ctx, pid) {
-				return
-			}
-			if claim != nil && claim(ctx, local) {
-				return
-			}
-			if err := d.Materialize(ctx, pid, filepath.Join(local, "data")); err != nil {
-				l.Info("wanted flow, no mirror yet", "path", local, "pid", pid, "reason", err.Error())
-			}
-		}()
+		go wanted(ctx, local, int32(req.PID), d, claim, ours, l)
 	}
 	return ctx.Err()
+}
+
+// wanted handles one flow a path walk waits for: nothing when the walker
+// is mxl-k8s's own process, the claim when it takes the flow, a mirror
+// otherwise.
+func wanted(ctx context.Context, flowDir string, pid int32, d Materializer,
+	claim func(ctx context.Context, flowDir string) bool, ours func(ctx context.Context, pid int32) bool, l logr.Logger) {
+	if ours != nil && ours(ctx, pid) {
+		return
+	}
+	if claim != nil && claim(ctx, flowDir) {
+		return
+	}
+	if err := d.Materialize(ctx, pid, filepath.Join(flowDir, "data")); err != nil {
+		l.Info("wanted flow, no mirror yet", "path", flowDir, "pid", pid, "reason", err.Error())
+	}
+}
+
+// Locations is what a placeholder marker change asks of the publisher.
+type Locations interface {
+	PublishAppeared(ctx context.Context, dirName string) error
+	PublishVanished(ctx context.Context, dirName string) error
+}
+
+// MarkerChanged publishes a placeholder marker change for flow id: a
+// marker that goes leaves a location, a mirror's copy or a local
+// producer's flow, and one that comes back, when the mirror filling the
+// placeholder is deleted, leaves a directory that is no copy any more,
+// though the gateway still holds it open.
+func MarkerChanged(ctx context.Context, p Locations, id string, created bool) error {
+	dir := id + ".mxl-flow"
+	if created {
+		return p.PublishVanished(ctx, dir)
+	}
+	return p.PublishAppeared(ctx, dir)
 }
 
 // MarkerDir creates the placeholder marker directory of domain, so its
