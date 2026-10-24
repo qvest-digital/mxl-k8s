@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -211,6 +212,26 @@ func (m *Manager) Filled(domain, id string) {
 	}
 	m.mu.Unlock()
 	_ = os.Remove(MarkerPath(domain, id))
+}
+
+// Unfilled turns a placeholder whose mirror is gone back into one: the
+// marker returns, so the agent stops publishing the directory as a
+// location. Its ring keeps what the mirror wrote, which nothing reads
+// until the next mirror fills it. Without this the gateway's writer,
+// still holding the placeholder, made the directory look like a local
+// producer's and the node claimed Origin.
+func (m *Manager) Unfilled(domain, id string) {
+	m.mu.Lock()
+	var held bool
+	for _, e := range m.held {
+		if e.domain == domain && strings.EqualFold(e.id, id) && e.filled {
+			e.filled, held = false, true
+		}
+	}
+	m.mu.Unlock()
+	if held {
+		_ = os.WriteFile(MarkerPath(domain, id), nil, 0o644)
+	}
 }
 
 // CheckLocalWriters gives up every held placeholder some other process

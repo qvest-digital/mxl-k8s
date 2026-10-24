@@ -262,6 +262,12 @@ type TargetReconciler struct {
 	// A redundancy set merging that flow learns its arrivals from it.
 	SamplesCommitted func(domain, id string, start, end uint64)
 
+	// Unfilled is told when a mirror is deleted, with the domain
+	// directory and the flow id, so a placeholder the mirror filled
+	// becomes one again rather than a copy nothing feeds. Nil leaves it
+	// out.
+	Unfilled func(domain, id string)
+
 	// Filled is told when a target's ring on an mxlfs domain has been
 	// allocated, with the domain directory and the flow id, so a
 	// placeholder there becomes a published copy. Nil leaves it out.
@@ -570,9 +576,13 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// does not remove finalizers either. Abandoned handles cost
 		// one node's memory until the gateway restarts, which is
 		// recoverable; an undeletable object is not.
+		domain := r.entryDomain(req.NamespacedName)
 		if !r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Ref().Name())) {
 			l.Info("target-side teardown timed out; abandoning libmxl handles to let the mirror be deleted",
 				"grace", r.teardownGrace())
+		}
+		if r.Unfilled != nil && domain != "" {
+			r.Unfilled(domain, mirror.Spec.FlowID)
 		}
 		controllerutil.RemoveFinalizer(&mirror, TargetFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
@@ -1407,6 +1417,17 @@ func (r *TargetReconciler) StopFlow(domain, id string) {
 	for _, key := range keys {
 		r.closeEntry(key, keepFlow)
 	}
+}
+
+// entryDomain is the domain directory of a live mirror, or "" for one
+// that is not live.
+func (r *TargetReconciler) entryDomain(key types.NamespacedName) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e := r.targets[key]; e != nil && e.handles != nil {
+		return e.handles.DomainPath()
+	}
+	return ""
 }
 
 // closeEntry drops a mirror from the live set and tears its handles

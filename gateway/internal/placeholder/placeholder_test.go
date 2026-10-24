@@ -200,3 +200,29 @@ func TestAbsentFlowIsNotLookedUp(t *testing.T) {
 
 	require.Equal(t, []string{flowID}, m.Held())
 }
+
+// A mirror filling a placeholder makes it a copy; the mirror going must
+// make it a placeholder again. The gateway's writer still holds it, and
+// without the marker the agent reads that writer as a local producer
+// and the node claims Origin of a flow nothing here produces.
+func TestUnfilledPlaceholderGetsItsMarkerBack(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(mxlv1alpha1.MxlFlowLocation{NodeName: "node-b", Phase: mxlv1alpha1.MxlFlowLocationOrigin}))
+	reconcileFlow(t, m)
+	m.Filled(h.dir, flowID)
+	require.False(t, IsPlaceholder(h.dir, flowID))
+
+	m.Unfilled(h.dir, flowID)
+
+	require.True(t, IsPlaceholder(h.dir, flowID))
+	require.Equal(t, []string{flowID}, m.Held())
+}
+
+// A flow a local writer took over is not a placeholder at all; a
+// mirror going later must not mark it as one.
+func TestUnfilledLeavesATakenOverFlowAlone(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h)
+	m.Unfilled(h.dir, flowID)
+	require.False(t, IsPlaceholder(h.dir, flowID))
+}

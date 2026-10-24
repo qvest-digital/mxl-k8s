@@ -149,6 +149,7 @@ func run(args []string) error {
 		LocalWriter: targetReconciler.StopFlow,
 	}
 	targetReconciler.Filled = placeholders.Filled
+	targetReconciler.Unfilled = placeholders.Unfilled
 
 	// Redundancy sets whose output a reader wants on this node.
 	sets := &merge.Reconciler{
