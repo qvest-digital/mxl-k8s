@@ -16,9 +16,9 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].securityContext.capabilities.add
           content: SYS_ADMIN
-      - equal:
-          path: spec.template.spec.containers[0].args[0]
-          value: --domain-path=/run/mxl/domain
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --domain-path=/run/mxl/domain
 
   - it: pod template name label matches the selector
     asserts:
