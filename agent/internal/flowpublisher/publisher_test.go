@@ -271,7 +271,7 @@ func TestPublishAppeared_MirrorTargetMarksReadyNotOrigin(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
-		WithObjects(mirror).
+		WithObjects(mirror, existingFlow()).
 		Build()
 
 	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}

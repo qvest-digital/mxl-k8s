@@ -1,0 +1,279 @@
+suite: mxlfs
+templates:
+  - templates/daemonset-agent.yaml
+  - templates/daemonset-gateway.yaml
+  - templates/daemonset-exporter.yaml
+  - templates/deployment-operator.yaml
+  - templates/rbac-agent.yaml
+  - templates/rbac-gateway.yaml
+  - templates/rbac-operator.yaml
+tests:
+  # Off, the chart renders what it did before mxlfs: a release that has
+  # no mxlfs module on its nodes upgrades without noticing.
+  - it: runs no component with --mxlfs by default
+    set:
+      exporter.enabled: true
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs
+      - notExists:
+          path: spec.template.spec.containers[0].securityContext.privileged
+      - notExists:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPropagation
+
+  - it: leaves the gateway in its own PID namespace and unordered by default
+    template: templates/daemonset-gateway.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.hostPID
+      - notExists:
+          path: spec.template.spec.initContainers
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: mxl-run
+            hostPath: {path: /run/mxl, type: DirectoryOrCreate}
+
+  - it: leaves the exporter unordered by default
+    set:
+      exporter.enabled: true
+    template: templates/daemonset-exporter.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers
+      - notExists:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPropagation
+
+  - it: runs the operator without --mxlfs by default
+    template: templates/deployment-operator.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs
+
+  - it: grants no component access to redundancy sets by default
+    template: templates/rbac-agent.yaml
+    documentIndex: 0
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [mxl.qvest-digital.com]
+            resources: [mxlflowredundancysets/status]
+            verbs: [get, update]
+  - it: grants the gateway no access to redundancy sets by default
+    template: templates/rbac-gateway.yaml
+    documentIndex: 0
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [mxl.qvest-digital.com]
+            resources: [mxlflowredundancysets]
+            verbs: [get, list, watch]
+  - it: grants the operator no access to redundancy sets by default
+    template: templates/rbac-operator.yaml
+    documentIndex: 0
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [mxl.qvest-digital.com]
+            resources: [mxlflowredundancysets/status]
+            verbs: [get, patch, update]
+
+  # The agent mounts each domain itself, and the mount has to leave its
+  # container for the host and every pod that mounts the domain.
+  # Without the agent nothing mounts mxlfs or writes the ready marker,
+  # and the gateway and exporter wait for it in their init containers
+  # for good.
+  - it: refuses mxlfs without the agent
+    template: templates/daemonset-agent.yaml
+    set:
+      mxlfs.enabled: true
+      agent.enabled: false
+    asserts:
+      - failedTemplate:
+          errorMessage: "mxlfs.enabled requires agent.enabled: the agent mounts mxlfs and writes the ready marker the gateway and exporter wait for"
+
+  # Outside the host PID namespace /proc holds only the agent's own
+  # processes: no placeholder open resolves to a pod, so no mirror
+  # starts, and no reader keeps a redundancy set output in use.
+  - it: refuses mxlfs with the agent outside the host PID namespace
+    template: templates/daemonset-agent.yaml
+    set:
+      mxlfs.enabled: true
+      agent.hostPID: false
+    asserts:
+      - failedTemplate:
+          errorMessage: "mxlfs.enabled requires agent.hostPID: the agent finds the pod of each process opening a placeholder, and the readers of each redundancy set output, through /proc"
+
+  - it: runs the agent privileged with Bidirectional propagation and --mxlfs
+    set:
+      mxlfs.enabled: true
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.privileged
+          value: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: mxl-run
+            mountPath: /run/mxl
+            mountPropagation: Bidirectional
+
+  - it: holds the gateway until the agent has decided the domains
+    set:
+      mxlfs.enabled: true
+    template: templates/daemonset-gateway.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.hostPID
+          value: true
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-mxlfs
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: busybox:1.38
+      - contains:
+          path: spec.template.spec.initContainers[0].command
+          content: /run/mxl/mxlfs.ready
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: mxl-run
+            hostPath: {path: /run/mxl, type: DirectoryOrCreate}
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: mxl-domain
+            mountPath: /run/mxl/domain
+            mountPropagation: HostToContainer
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: mxl-domains
+            mountPath: /run/mxl/domains
+            mountPropagation: HostToContainer
+
+  # A namespace with a ResourceQuota on requests admits no pod with a
+  # container that sets none, init containers included.
+  - it: gives the wait container requests
+    template: templates/daemonset-gateway.yaml
+    set:
+      mxlfs.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-mxlfs
+      - equal:
+          path: spec.template.spec.initContainers[0].resources.requests
+          value:
+            cpu: 1m
+            memory: 4Mi
+
+  - it: keeps the gateway's own init containers after the wait
+    set:
+      mxlfs.enabled: true
+      gateway.initContainers:
+        - name: site-setup
+          image: busybox:1.38
+    template: templates/daemonset-gateway.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-mxlfs
+      - equal:
+          path: spec.template.spec.initContainers[1].name
+          value: site-setup
+
+  - it: waits for the marker below the root of a moved domain
+    set:
+      mxlfs.enabled: true
+      gateway.hostPath.domain: /srv/mxl/domain
+      gateway.hostPath.domains: /srv/mxl/domains
+    template: templates/daemonset-gateway.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].command
+          content: /srv/mxl/mxlfs.ready
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: mxl-run
+            hostPath: {path: /srv/mxl, type: DirectoryOrCreate}
+
+  - it: holds the exporter until the agent has decided the domains
+    set:
+      mxlfs.enabled: true
+      exporter.enabled: true
+    template: templates/daemonset-exporter.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-mxlfs
+      - contains:
+          path: spec.template.spec.initContainers[0].command
+          content: /run/mxl/mxlfs.ready
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPropagation
+          value: HostToContainer
+
+  - it: runs the operator with --mxlfs
+    set:
+      mxlfs.enabled: true
+    template: templates/deployment-operator.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs
+
+  - it: lets the agent record its node on a redundancy set
+    set:
+      mxlfs.enabled: true
+    template: templates/rbac-agent.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [mxl.qvest-digital.com]
+            resources: [mxlflowredundancysets/status]
+            verbs: [get, update]
+  - it: lets the gateway watch redundancy sets
+    set:
+      mxlfs.enabled: true
+    template: templates/rbac-gateway.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [mxl.qvest-digital.com]
+            resources: [mxlflowredundancysets]
+            verbs: [get, list, watch]
+  - it: lets the operator write the status of redundancy sets
+    set:
+      mxlfs.enabled: true
+    template: templates/rbac-operator.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [mxl.qvest-digital.com]
+            resources: [mxlflowredundancysets/status]
+            verbs: [get, patch, update]

@@ -21,10 +21,14 @@ RUN go install \
         github.com/qvest-digital/go-mxl/examples/write-grain@v${GO_MXL_TAG} \
         github.com/qvest-digital/go-mxl/examples/read-grain@v${GO_MXL_TAG} \
         github.com/qvest-digital/go-mxl/examples/write-samples@v${GO_MXL_TAG} \
-        github.com/qvest-digital/go-mxl/examples/read-samples@v${GO_MXL_TAG}
+        github.com/qvest-digital/go-mxl/examples/read-samples@v${GO_MXL_TAG} && \
+    git clone -q https://github.com/danielclasen/mxlfs.git /tmp/mxlfs && \
+    git -C /tmp/mxlfs checkout -q d27ddbf39613ad8c404fd14308086b112a0105d2 && \
+    cd /tmp/mxlfs/tools/setcheck && go build -o /out/setcheck .
 
 FROM ghcr.io/qvest-digital/go-mxl-runtime:${GO_MXL_TAG}
 COPY --from=builder /out/write-grain   /usr/local/bin/write-grain
 COPY --from=builder /out/read-grain    /usr/local/bin/read-grain
 COPY --from=builder /out/write-samples /usr/local/bin/write-samples
 COPY --from=builder /out/read-samples  /usr/local/bin/read-samples
+COPY --from=builder /out/setcheck      /usr/local/bin/setcheck

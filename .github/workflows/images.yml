@@ -628,7 +628,6 @@ jobs:
         image: ${{ fromJSON(needs.meta.outputs.images) }}
         runner:
           - { arch: amd64, runs_on: ubuntu-24.04,     platform: linux/amd64 }
-          - { arch: arm64, runs_on: ubuntu-24.04-arm, platform: linux/arm64 }
     runs-on: ${{ matrix.runner.runs_on }}
     timeout-minutes: 60
     steps:
@@ -735,7 +734,7 @@ jobs:
           for t in $TAGS; do tag_args="$tag_args -t $t"; done
           unset IFS
           refs=""
-          for f in digests-${{ matrix.image.name }}-*/*; do
+          for f in $(find . -type f); do
             digest=$(basename "$f")
             refs="$refs ${IMAGE}@sha256:${digest}"
           done

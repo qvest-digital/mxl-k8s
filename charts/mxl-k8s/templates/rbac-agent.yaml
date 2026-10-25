@@ -26,6 +26,16 @@ rules:
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxlnodecapabilities]
     verbs: [get, list, watch]
+  {{- if .Values.mxlfs.enabled }}
+  # The agent adds its node to a set's status.nodes when a reader here
+  # waits for the set's output.
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxlflowredundancysets]
+    verbs: [get, list, watch]
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxlflowredundancysets/status]
+    verbs: [get, update]
+  {{- end }}
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch]
@@ -36,6 +46,15 @@ rules:
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]
+  {{- if .Values.agent.flags.claimStatusLabel }}
+  # status.io of dmf-k8s claims, from the flows their pods use.
+  - apiGroups: [dmf.qvest-digital.com]
+    resources: [mediafunctionclaims]
+    verbs: [get]
+  - apiGroups: [dmf.qvest-digital.com]
+    resources: [mediafunctionclaims/status]
+    verbs: [patch]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

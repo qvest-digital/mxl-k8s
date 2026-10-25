@@ -21,13 +21,13 @@ import (
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/qvest-digital/mxl-k8s/agent/internal/podlookup"
 	"github.com/qvest-digital/mxl-k8s/api/selection"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -60,7 +60,7 @@ type Dispatcher struct {
 	nowFn     func() time.Time
 
 	Client     client.Client
-	Resolver   *podlookup.Resolver
+	Resolver   PodResolver
 	DomainPath string
 	NodeName   string
 
@@ -92,11 +92,22 @@ type Dispatcher struct {
 	// domain, DomainPath.
 	Domains func() Domains
 
+	// Own reports a pod as mxl-k8s's own: the gateway filling a
+	// placeholder or the exporter reading one opens it as no reader
+	// wanting a mirror. Nil treats every pod as a consumer.
+	Own func(*corev1.Pod) bool
+
 	// Origin records this node as a flow's origin when a local
 	// producer attaches to a flow that already existed. Nil makes
 	// NotifyProducerAttached a no-op, which is what a dispatcher
 	// wired without a publisher wants.
 	Origin OriginClaimer
+}
+
+// PodResolver finds the pod of a host PID; *podlookup.Resolver is the
+// one the agent runs with.
+type PodResolver interface {
+	PodForPID(ctx context.Context, pid int32) (*corev1.Pod, error)
 }
 
 // OriginClaimer is the slice of the flowpublisher.Publisher surface
@@ -144,6 +155,12 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 	pod, err := d.Resolver.PodForPID(wctx, pid)
 	if err != nil {
 		return fmt.Errorf("pod lookup: %w", err)
+	}
+	// The open trigger checks this too, but passes on a pid whose pod it
+	// could not resolve; a mirror for the gateway's or the exporter's
+	// open is one no reader asked for.
+	if d.Own != nil && d.Own(pod) {
+		return fmt.Errorf("pod %s/%s is mxl-k8s's own, not a reader", pod.Namespace, pod.Name)
 	}
 
 	l := log.FromContext(ctx).WithName("intent").WithValues(
@@ -283,7 +300,8 @@ func (d *Dispatcher) flowExistsLocally(ref mxlv1alpha1.FlowRef) bool {
 		return false
 	}
 	_, err := os.Stat(filepath.Join(dir, ref.ID+".mxl-flow", "flow_def.json"))
-	return err == nil
+	// A placeholder lists the flow without holding it.
+	return err == nil && !mxlv1alpha1.IsPlaceholder(dir, ref.ID)
 }
 
 func (d *Dispatcher) resolveSourceNode(ctx context.Context, ref mxlv1alpha1.FlowRef) (mxlv1alpha1.OriginResolution, error) {

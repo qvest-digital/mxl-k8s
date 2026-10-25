@@ -1,4 +1,13 @@
+{{- if and .Values.mxlfs.enabled (not .Values.agent.enabled) }}
+{{- fail "mxlfs.enabled requires agent.enabled: the agent mounts mxlfs and writes the ready marker the gateway and exporter wait for" }}
+{{- end }}
 {{- if .Values.agent.enabled }}
+{{- if and .Values.agent.csi.enabled (not .Values.mxlfs.enabled) }}
+{{- fail "agent.csi.enabled requires mxlfs.enabled" }}
+{{- end }}
+{{- if and .Values.mxlfs.enabled (not .Values.agent.hostPID) }}
+{{- fail "mxlfs.enabled requires agent.hostPID: the agent finds the pod of each process opening a placeholder, and the readers of each redundancy set output, through /proc" }}
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -66,7 +75,13 @@ spec:
           image: {{ include "mxlk8s.image" (dict "Context" . "image" .Values.agent.image) }}
           imagePullPolicy: {{ include "mxlk8s.imagePullPolicy" (dict "global" .Values.global "image" .Values.agent.image) }}
           args:
-            {{- include "mxlk8s.flags.render" (dict "flags" .Values.agent.flags) | nindent 12 }}
+            {{- include "mxlk8s.flags.render" (dict "flags" .Values.agent.flags "keepEmpty" (list "shimPath")) | nindent 12 }}
+            {{- if .Values.mxlfs.enabled }}
+            - --mxlfs
+            {{- end }}
+            {{- if .Values.agent.csi.enabled }}
+            - --csi-endpoint=unix:///csi/csi.sock
+            {{- end }}
             {{- with .Values.agent.args }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -91,18 +106,58 @@ spec:
           readinessProbe:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if .Values.mxlfs.enabled }}
+          # Bidirectional mount propagation is only granted to a
+          # privileged container.
+          securityContext:
+            privileged: true
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+          {{- else }}
           {{- with .Values.agent.containerSecurityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- end }}
           resources:
             {{- toYaml .Values.agent.resources | nindent 12 }}
           volumeMounts:
             - name: mxl-run
               mountPath: {{ .Values.agent.hostPath.run }}
+              {{- if .Values.mxlfs.enabled }}
+              # The mxlfs the agent mounts on each domain has to reach
+              # the host, and every pod that mounts the domain from it.
+              mountPropagation: Bidirectional
+              {{- end }}
+            {{- if .Values.agent.csi.enabled }}
+            - name: csi-socket
+              mountPath: /csi
+            - name: kubelet-pods
+              mountPath: {{ .Values.agent.csi.kubeletDir }}/pods
+              mountPropagation: Bidirectional
+            {{- end }}
             {{- with .Values.agent.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+        {{- if .Values.agent.csi.enabled }}
+        - name: csi-registrar
+          image: "{{ .Values.agent.csi.registrar.image.repository }}:{{ .Values.agent.csi.registrar.image.tag }}"
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path={{ .Values.agent.csi.kubeletDir }}/plugins/mxl.qvest-digital.com/csi.sock
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.agent.csi.registrar.resources | nindent 12 }}
+          volumeMounts:
+            - name: csi-socket
+              mountPath: /csi
+            - name: registration
+              mountPath: /registration
+        {{- end }}
         {{- with .Values.agent.extraContainers }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -111,6 +166,20 @@ spec:
           hostPath:
             path: {{ .Values.agent.hostPath.run }}
             type: {{ .Values.agent.hostPath.type }}
+        {{- if .Values.agent.csi.enabled }}
+        - name: csi-socket
+          hostPath:
+            path: {{ .Values.agent.csi.kubeletDir }}/plugins/mxl.qvest-digital.com
+            type: DirectoryOrCreate
+        - name: registration
+          hostPath:
+            path: {{ .Values.agent.csi.kubeletDir }}/plugins_registry
+            type: Directory
+        - name: kubelet-pods
+          hostPath:
+            path: {{ .Values.agent.csi.kubeletDir }}/pods
+            type: Directory
+        {{- end }}
         {{- with .Values.agent.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

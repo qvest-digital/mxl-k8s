@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -28,6 +29,12 @@ func writeFlowDir(t *testing.T, domain, flowID string) {
 		filepath.Join(dir, FlowDefName), []byte(`{"id":"`+flowID+`"}`), 0o644))
 }
 
+// existingFlow is the MxlFlow a producer published before this node's
+// copy appeared.
+func existingFlow() *mxlv1alpha1.MxlFlow {
+	return &mxlv1alpha1.MxlFlow{ObjectMeta: ObjectMeta(validFlowID), Spec: mxlv1alpha1.MxlFlowSpec{ID: validFlowID}}
+}
+
 // phaseOnNode reads back this node's published phase.
 func phaseOnNode(t *testing.T, c client.Client, node string) mxlv1alpha1.MxlFlowLocationPhase {
 	t.Helper()
@@ -44,6 +51,7 @@ func TestPublishAppeared_WriterDetached_PublishesStaleAndReleasesLease(t *testin
 	c := fake.NewClientBuilder().
 		WithScheme(newScheme(t)).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(existingFlow()).
 		Build()
 	lease := &fakeLease{}
 	p := &Publisher{
@@ -101,7 +109,7 @@ func TestPublishAppeared_WriterAttachedAndMirrorTarget_IsReady(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(newScheme(t)).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
-		WithObjects(mirror).
+		WithObjects(mirror, existingFlow()).
 		Build()
 	lease := &fakeLease{}
 	p := &Publisher{
@@ -176,4 +184,46 @@ func TestHeldFlowIDs_ProbeErrorCountsAsHeld(t *testing.T) {
 	}
 	held := p.heldFlowIDs(context.Background(), map[string]struct{}{validFlowID: {}})
 	assert.Contains(t, held, validFlowID)
+}
+
+// Only the Origin creates an MxlFlow. A mirror target's copy and a copy
+// nothing writes any more hold the definition the object had when they
+// were made; recreating a deleted object from them brings back a
+// geometry the producer may since have changed, and every mirror built
+// from that object recreates the stale copy in turn.
+func TestPublishAppeared_OnlyTheOriginCreatesTheMxlFlow(t *testing.T) {
+	mirror := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metaNS("ns", "m1"),
+		Spec:       mxlv1alpha1.MxlFlowMirrorSpec{FlowID: validFlowID, SourceNode: "n2", TargetNode: "n1"},
+	}
+	for _, tc := range []struct {
+		name     string
+		attached func(string) (bool, error)
+		mirror   bool
+		created  bool
+	}{
+		{"mirror target", writerAttached, true, false},
+		{"copy without a writer", writerDetached, false, false},
+		{"origin", writerAttached, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			domain := t.TempDir()
+			writeFlowDir(t, domain, validFlowID)
+			b := fake.NewClientBuilder().WithScheme(newScheme(t)).WithStatusSubresource(&mxlv1alpha1.MxlFlow{})
+			if tc.mirror {
+				b = b.WithObjects(mirror.DeepCopy())
+			}
+			c := b.Build()
+			p := &Publisher{Client: c, WriterAttached: tc.attached, DomainPath: domain, NodeName: "n1"}
+
+			require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
+
+			err := c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &mxlv1alpha1.MxlFlow{})
+			if tc.created {
+				require.NoError(t, err)
+			} else {
+				require.True(t, apierrors.IsNotFound(err), "a %s recreated the MxlFlow: %v", tc.name, err)
+			}
+		})
+	}
 }

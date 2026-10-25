@@ -88,6 +88,114 @@ func TestCommitArrivedGrain_SecondWriterOfSameFlowSeesAlreadyCommitted(t *testin
 	require.ErrorIs(t, err, errGrainAlreadyCommitted)
 }
 
+const sharedFlowDataDef = `{
+  "description": "mirror shared-flow test",
+  "id": "5d1a7c2e-3f4b-4e8a-9c6d-2b7e1f0a9d35",
+  "format": "urn:x-nmos:format:data",
+  "label": "mirror shared-flow test",
+  "parents": [],
+  "tags": {"urn:x-nmos:tag:grouphint/v1.0": ["mirror-test:Data"]},
+  "media_type": "video/smpte291",
+  "grain_rate": {"numerator": 50, "denominator": 1}
+}`
+
+// A data grain's valid slices are its length, and the initiator's write
+// sets them in the slot's header before the target commits. A commit
+// with the grain's total slices turned every ANC packet into a full
+// grain of trailing garbage on the target.
+func TestCommitArrivedGrain_DataGrainKeepsItsLength(t *testing.T) {
+	w, _ := twoWriters(t, sharedFlowDataDef)
+	const idx = 1000
+	// What the initiator's write leaves in the slot: the header of idx
+	// with 64 valid slices. A partial commit writes the same header.
+	ga, err := w.OpenGrain(idx)
+	require.NoError(t, err)
+	require.NoError(t, ga.Commit(64, 0))
+
+	_, err = commitArrivedGrain(w, idx)
+	require.NoError(t, err)
+
+	g, err := w.GrainInfo(idx)
+	require.NoError(t, err)
+	require.Equal(t, uint16(64), g.ValidSlices)
+}
+
+// Gateways of two versions mirror a data flow. A source from before data
+// grains went by their length reads with GetGrainNonBlocking, which
+// hands out no data grain short of all its slices, so it never sends a
+// target a short one; this source reads what the grain holds. A target
+// from before commits only a complete grain, the rule arrivalComplete
+// applies without data, so a short grain from this source is never
+// committed there at the length of a full one.
+func TestDataGrainAcrossGatewayVersions(t *testing.T) {
+	inst, err := mxl.NewInstance(t.TempDir(), "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = inst.Close() })
+	w, _, err := inst.NewWriter(sharedFlowDataDef)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = w.Close() })
+	r, err := inst.NewReader("5d1a7c2e-3f4b-4e8a-9c6d-2b7e1f0a9d35")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	const idx = 1000
+	ga, err := w.OpenGrain(idx)
+	require.NoError(t, err)
+	require.NoError(t, ga.Commit(64, 0))
+
+	_, err = r.GetGrainNonBlocking(idx)
+	require.Error(t, err, "the older source's read never returns a short data grain")
+
+	g, err := r.GetGrainSliceNonBlocking(idx, 1)
+	require.NoError(t, err)
+	require.Equal(t, uint16(64), g.ValidSlices)
+	require.Less(t, g.ValidSlices, g.TotalSlices)
+	require.False(t, arrivalComplete(g, false), "an older target leaves a short grain uncommitted")
+	require.True(t, arrivalComplete(g, true))
+}
+
+// A data writer commits a grain with nothing in it, as an ANC writer
+// does for a frame with no packets. The source must read and send it,
+// header only, or its transfer loop retries it until it resyncs past it
+// and drops the grains behind it; the target must commit it empty, not
+// as a full grain of whatever the slot held.
+func TestEmptyDataGrainIsMirroredEmpty(t *testing.T) {
+	inst, err := mxl.NewInstance(t.TempDir(), "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = inst.Close() })
+	w, _, err := inst.NewWriter(sharedFlowDataDef)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = w.Close() })
+	r, err := inst.NewReader("5d1a7c2e-3f4b-4e8a-9c6d-2b7e1f0a9d35")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	const idx = 1000
+	ga, err := w.OpenGrain(idx)
+	require.NoError(t, err)
+	require.NoError(t, ga.Commit(0, 0))
+
+	g, err := readForTransfer(r, idx, true)
+	require.NoError(t, err, "the source reads an empty data grain")
+	require.Zero(t, g.ValidSlices)
+
+	// What the initiator's header-only write leaves in the target's
+	// slot is the same header, as in the test above.
+	_, err = commitArrivedGrain(w, idx)
+	require.NoError(t, err)
+	got, err := w.GrainInfo(idx)
+	require.NoError(t, err)
+	require.Zero(t, got.ValidSlices, "committed as the full grain")
+}
+
+func TestArrivalComplete(t *testing.T) {
+	partial := mxl.Grain{TotalSlices: 4096, ValidSlices: 64}
+	require.True(t, arrivalComplete(partial, true), "a data grain is committed as it arrives")
+	require.False(t, arrivalComplete(partial, false), "a paced video grain waits for its last range")
+	require.True(t, arrivalComplete(mxl.Grain{TotalSlices: 1080, ValidSlices: 1080}, false))
+	require.True(t, arrivalComplete(mxl.Grain{}, false))
+}
+
 // Two progress loops committing one flow through two writers at once
 // interleave libmxl's open and commit on the one writer they share, and
 // a commit then fails for a grain nobody has committed. Through

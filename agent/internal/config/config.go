@@ -44,6 +44,16 @@ type Config struct {
 	// disables the drop.
 	ShimPath string
 
+	// CSIEndpoint is the unix socket the agent serves the CSI node
+	// plugin on, which delivers the domain to pods as an inline
+	// ephemeral volume. Empty disables it.
+	CSIEndpoint string
+
+	// ClaimStatusLabel is the pod label that names a pod's
+	// MediaFunctionClaim, whose status.io the agent then writes from the
+	// flows the pod is observed to read and write. Empty disables it.
+	ClaimStatusLabel string
+
 	// MaterializeTimeout caps the per-request wait the intent
 	// dispatcher allows before giving up on a mirror reaching
 	// Ready.
@@ -66,6 +76,11 @@ type Config struct {
 	// KubeAPIBurst is the burst ceiling of the Kubernetes API client
 	// rate limiter.
 	KubeAPIBurst int
+
+	// Mxlfs runs what a domain on mxlfs needs: placeholder and wanted
+	// flow watchers, redundancy set demand. Off, every domain is a plain
+	// directory.
+	Mxlfs bool
 }
 
 // FromFlags populates a Config from command-line flags.
@@ -88,6 +103,15 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.StringVar(&c.ShimPath, "shim-path", "/run/mxl/libmxl-intent.so",
 		"Path the agent writes its copy of libmxl-intent.so to on every "+
 			"start, for consumers that preload it off the node. Empty disables.")
+	fs.StringVar(&c.CSIEndpoint, "csi-endpoint", "",
+		"Unix socket for the CSI node plugin that mounts the domain into pods. Empty disables.")
+	fs.StringVar(&c.ClaimStatusLabel, "claim-status-label", "",
+		"Pod label naming a pod's MediaFunctionClaim, whose status.io the agent "+
+			"writes from observed flow use. Empty disables.")
+	fs.BoolVar(&c.Mxlfs, "mxlfs", false,
+		"Run what a domain on mxlfs needs: mirrors for opened placeholders and "+
+			"waited-for flows, and MxlFlowRedundancySet demand. Off, every domain is "+
+			"treated as a plain directory.")
 	fs.DurationVar(&c.MaterializeTimeout, "materialize-timeout", 5*time.Second,
 		"Per-request budget for the intent dispatcher waiting for a mirror Ready.")
 	fs.StringVar(&c.Provider, "provider", "",
