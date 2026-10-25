@@ -493,6 +493,12 @@ func (e *Engine) buildAudio(tmp, src0 string) error {
 // Committed reports that member committed samples [start, end) of an
 // audio flow: the gateway knows each arrival from its completion queue,
 // which tells a skipped batch from two quick ones where the ring cannot.
+//
+// The gateway names the flow, not the ring: the directory at that id may
+// since have been replaced, a placeholder retired for another geometry,
+// while the engine still maps the old ring. Only samples the mapped
+// ring's own head covers count. A ring nobody wrote may hold no pages on
+// mxlfs, and a page selected to it faults SIGBUS in the output's readers.
 func (e *Engine) Committed(member int, start, end uint64) {
 	if e.audio == nil {
 		return
@@ -502,7 +508,9 @@ func (e *Engine) Committed(member int, start, end uint64) {
 		e.feeds = make([]bool, len(e.members))
 	}
 	e.feeds[member] = true
-	e.audio.Committed(member, start, end)
+	if end = min(end, e.members[member].head()); end > start {
+		e.audio.Committed(member, start, end)
+	}
 	e.mu.Unlock()
 }
 
