@@ -50,6 +50,9 @@ type Discrete struct {
 
 	waitingIndex uint64
 	waitingSince time.Time
+
+	seen []uint64 // per member, the head Retire last saw
+	late []uint64 // per member, how far its head was behind due when it last moved
 }
 
 // ToleranceFor is how long a set with skew budget skew waits for a late
@@ -154,24 +157,37 @@ func (d *Discrete) Step(members []Member, now time.Time) (selects []Select, head
 	return selects, d.Head, 0
 }
 
-// overwrites reports whether m may write index next before the engine's
-// next pass: the grain after its head, or, writing at the clock after a
-// loss, the index due now. The engine passes at every grain boundary, so
-// the clock moves no further before it looks again.
-func overwrites(m Member, due, next uint64) bool { return max(m.Head+1, due) >= next }
-
 // Retire returns the selects that keep the output's oldest grains true
 // while it lags its members. Readers trust every index from
 // Head - Grains + 2 on, but a member writes index i + Grains into the
 // slot of i. A slot whose source may do that before the next pass moves
 // to a member that still holds i and will not, or to the placeholder,
 // rather than show the next ring period's grain as i. due is the index
-// the clock is at; nothing moves while the output keeps up with the
-// members and the clock.
+// the clock is at a guard past now. The engine passes that guard before
+// every grain boundary, so a member writing at the clock writes nothing
+// past due before the next pass. Nothing moves while the output keeps up
+// with the members and the clock.
+//
+// A member may write the grain after its head, or, after a loss, the
+// index it would have written had it lost none: due, less how far its
+// head was behind due when it last moved. For a member writing at the
+// clock that is due. One that commits each grain a period or more after
+// its boundary is not taken to write due, or the oldest grain readers
+// trust would be retired every grain while it keeps up.
 func (d *Discrete) Retire(members []Member, due uint64) (selects []Select) {
-	reach := due
-	for _, m := range members {
-		reach = max(reach, m.Head+1)
+	if len(d.seen) != len(members) {
+		d.seen, d.late = make([]uint64, len(members)), make([]uint64, len(members))
+	}
+	for m, mb := range members {
+		if mb.Head != d.seen[m] {
+			d.seen[m], d.late[m] = mb.Head, due-min(due, mb.Head)
+		}
+	}
+	// next is the highest index member m may write before the next pass.
+	next := func(m int) uint64 { return max(members[m].Head+1, due-min(due, d.late[m])) }
+	var reach uint64
+	for m := range members {
+		reach = max(reach, next(m))
 	}
 	from := uint64(1)
 	if d.Head+2 > uint64(d.Grains) {
@@ -180,12 +196,12 @@ func (d *Discrete) Retire(members []Member, due uint64) (selects []Select) {
 	for i := from; i <= d.Head && i+uint64(d.Grains) <= reach; i++ {
 		slot := uint(i % uint64(d.Grains))
 		cur := d.Current[slot]
-		if cur == d.Placeholder || !overwrites(members[cur], due, i+uint64(d.Grains)) {
+		if cur == d.Placeholder || next(cur) < i+uint64(d.Grains) {
 			continue
 		}
 		to := d.Placeholder
 		for m := range members {
-			if m != cur && d.serves(members[m], i) && !overwrites(members[m], due, i+uint64(d.Grains)) {
+			if m != cur && d.serves(members[m], i) && next(m) < i+uint64(d.Grains) {
 				to = m
 				break
 			}

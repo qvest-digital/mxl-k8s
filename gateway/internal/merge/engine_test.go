@@ -447,6 +447,46 @@ func TestEnginePublishesTheHeadBeforeMovingASlotReadersTrust(t *testing.T) {
 	require.Equal(t, []uint64{101, 102, 103, 104}, indexes)
 }
 
+// A member writing at the clock writes index k into the slot of
+// k - Grains at the boundary of k, whatever its head says after a loss.
+// While the output lags, readers still trust that slot, so the engine
+// must pass, and retire it, before that boundary: a pass at the boundary
+// races the member, which may write first. It runs without mxlfs: the
+// timing is the engine's.
+func TestEngineRetiresASlotBeforeTheBoundaryAMemberWritesItAt(t *testing.T) {
+	const grains = 20
+	rate := mxl.Rational{Num: 50, Den: 1}
+	guard := min(retireGuard, 20*time.Millisecond/4)
+	a, b := newRing(grains), newRing(grains)
+	d := NewDiscrete(grains, 2)
+	d.Ordered, d.Skew = true, 8
+	// Both write at the clock up to 119, then lose 120: the output stays
+	// at 119, and readers trust 101 on.
+	for i := uint64(100); i <= 119; i++ {
+		a.commit(i)
+		b.commit(i)
+		ms := []Member{a.member(), b.member()}
+		d.Step(ms, time.Unix(0, 0))
+		due, _ := retireDue(mxl.IndexToTimestamp(rate, i)+uint64(time.Millisecond), rate, guard)
+		require.Equal(t, i, due, "a member committing at the clock reads as late")
+		d.Retire(ms, due) // the pass the commit wakes
+	}
+	require.Equal(t, uint64(119), d.Head)
+	ms := []Member{a.member(), b.member()}
+
+	// A pass late in grain 120, then the one it schedules.
+	now := mxl.IndexToTimestamp(rate, 120) + uint64(12*time.Millisecond)
+	due, next := retireDue(now, rate, guard)
+	require.Equal(t, uint64(120), due)
+	require.Empty(t, d.Retire(ms, due))
+	now += uint64(next)
+	require.Less(t, now, mxl.IndexToTimestamp(rate, 121), "the next pass is not before the boundary of 121")
+	due, _ = retireDue(now, rate, guard)
+	require.Equal(t, uint64(121), due)
+	require.Equal(t, []Select{{Slot: 101 % grains, Source: d.Placeholder, Index: 101}}, d.Retire(ms, due),
+		"the slot of 101, which both members overwrite with 121 at its boundary, did not move before it")
+}
+
 // futex_waitv returns at once when it fails, ENOSYS on a kernel without
 // it; the engine loop would then spin a core. A wait that times out, is
 // woken or finds a word already changed is the normal case and must not

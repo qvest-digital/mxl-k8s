@@ -572,9 +572,9 @@ func (e *Engine) run(ctx context.Context) {
 			var sel []Select
 			sel, head, wait = e.disc.Step(ms, now)
 			// Retire looks as far as the index due, so the engine must
-			// pass at every grain boundary.
-			due := mxl.CurrentIndex(e.mxlRate())
-			timeout = min(timeout, time.Duration(mxl.NsUntilIndex(due+1, e.mxlRate())))
+			// pass before every grain boundary.
+			due, next := retireDue(mxl.Now(), e.mxlRate(), min(retireGuard, e.period/4))
+			timeout = min(timeout, next)
 			for i, m := range e.members {
 				ms[i].Head = m.head()
 			}
@@ -643,6 +643,27 @@ func (e *Engine) publish(head uint64) {
 	atomic.StoreUint64((*uint64)(unsafe.Pointer(&e.out.info.runtime.headIndex)), head)
 	atomic.AddUint32(e.out.syncWord(), 1)
 	_, _, _ = unix.Syscall6(unix.SYS_FUTEX, uintptr(unsafe.Pointer(e.out.syncWord())), futexWake, futexWakeAll, 0, 0, 0)
+}
+
+// retireGuard is how long before a grain boundary the engine passes, so
+// that a slot a member writing at the clock overwrites at that boundary
+// moves before the member writes: it covers the wait's timer slack and
+// the pass itself. It is at most a quarter of the grain period, so a
+// member that commits up to three quarters of a period after its
+// boundary still counts as writing at the clock.
+const retireGuard = 3 * time.Millisecond
+
+// retireDue returns, for a pass at MXL time now, the index Retire looks
+// as far as, the one whose period the clock is in guard from now, and
+// how long until the next pass, guard before the boundary after it.
+func retireDue(now uint64, rate mxl.Rational, guard time.Duration) (due uint64, next time.Duration) {
+	t := now + uint64(guard)
+	// libmxl rounds a time to the nearest index.
+	due = mxl.TimestampToIndex(rate, t)
+	if mxl.IndexToTimestamp(rate, due) > t {
+		due--
+	}
+	return due, time.Duration(mxl.IndexToTimestamp(rate, due+1) - t)
 }
 
 // futexWaitvCall waits on waits until the absolute CLOCK_MONOTONIC time

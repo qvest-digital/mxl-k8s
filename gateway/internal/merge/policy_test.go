@@ -389,6 +389,56 @@ func TestDiscreteRetiresSlotsTheMembersOverwriteWhileItLags(t *testing.T) {
 	require.NotZero(t, retired, "the output never lagged")
 }
 
+// A member that commits each grain a period after its boundary is never
+// about to write the index due. Taken to, it retired the oldest grain readers trust every grain,
+// a remap in every reader each time. After a loss it writes on at its
+// own lag, and the slot that write overwrites still moves first.
+func TestDiscreteRetiresForAMemberBehindTheClockOnlyWhatItOverwrites(t *testing.T) {
+	const grains = 20
+	a, b := newRing(grains), newRing(grains)
+	d := NewDiscrete(grains, 2)
+	d.Ordered, d.Skew = true, 8
+	now := time.Unix(0, 0)
+	retired := 0
+	for i := uint64(100); i < 160; i++ {
+		// i is committed in the period of i+1, which wakes a pass.
+		if i != 140 {
+			a.commit(i)
+			b.commit(i)
+		}
+		ms := []Member{a.member(), b.member()}
+		now = now.Add(20 * time.Millisecond)
+		d.Step(ms, now)
+		sel := d.Retire(ms, i+1)
+		// The pass before the boundary of i+2, after which i+1 is written.
+		sel = append(sel, d.Retire(ms, i+2)...)
+		if d.Head == i {
+			require.Empty(t, sel, "an output keeping up with its members moved slots at index %d", i)
+		}
+		retired += len(sel)
+
+		next := map[*ring]Grain{}
+		for _, r := range []*ring{a, b} {
+			next[r] = r.slots[uint((i+1)%grains)]
+			r.slots[uint((i+1)%grains)] = Grain{Index: i + 1, TotalSlices: 10, ValidSlices: 10}
+		}
+		for j := max(d.Head+2, grains) - grains; j <= d.Head; j++ {
+			src := d.Current[uint(j%grains)]
+			if src == d.Placeholder {
+				continue
+			}
+			g := []*ring{a, b}[src].slots[uint(j%grains)]
+			require.Equal(t, j, g.Index, "after index %d the output offers index %d from member %d, whose slot holds %d",
+				i, j, src, g.Index)
+		}
+		for r, g := range next {
+			r.slots[uint((i+1)%grains)] = g
+		}
+	}
+	require.Equal(t, uint64(159), d.Head)
+	require.NotZero(t, retired, "the output never lagged")
+}
+
 // A member writing ahead of the clock overwrites sooner than one at the
 // clock: a slot it serves moves to the member that still holds the index,
 // and only to INVALID where both would overwrite it.
