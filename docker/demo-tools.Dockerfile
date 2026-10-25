@@ -23,7 +23,7 @@ RUN go install \
         github.com/qvest-digital/go-mxl/examples/write-samples@v${GO_MXL_TAG} \
         github.com/qvest-digital/go-mxl/examples/read-samples@v${GO_MXL_TAG} && \
     git clone -q https://github.com/danielclasen/mxlfs.git /tmp/mxlfs && \
-    git -C /tmp/mxlfs checkout -q 3a081ae8f7a9858db7492ffa2233d83b889da0f8 && \
+    git -C /tmp/mxlfs checkout -q e43d05464a3258075455bc8060764d720e90bd48 && \
     cd /tmp/mxlfs/tools/setcheck && go build -o /out/setcheck .
 
 FROM ghcr.io/qvest-digital/go-mxl-runtime:${GO_MXL_TAG}
