@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -103,4 +104,44 @@ func TestReconcilerRefusesAMemberInAnotherDomain(t *testing.T) {
 
 	require.Zero(t, reconcileSet(t, r))
 	require.Empty(t, r.engines)
+}
+
+// A producer restarted in another geometry, or a mirror target rebuilt
+// for one, replaces a member's flow directory underneath a running
+// engine, which then merges the old copy's frozen ring and never
+// publishes. A set deleted and created again under the same name starts
+// at the same generation. Either way the engine must be built again.
+func TestRunningEngineServesOnlyTheFlowsAndSetItWasBuiltFor(t *testing.T) {
+	dir := t.TempDir()
+	member := func(id string) string {
+		p := filepath.Join(dir, id+".mxl-flow")
+		require.NoError(t, os.MkdirAll(p, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(p, "data"), nil, 0o644))
+		return filepath.Join(p, "data")
+	}
+	// The engine keeps each member file open, so its inode is not reused.
+	inode := func(path string) uint64 {
+		f, err := os.Open(path)
+		require.NoError(t, err)
+		t.Cleanup(func() { f.Close() })
+		fi, err := f.Stat()
+		require.NoError(t, err)
+		return fi.Sys().(*syscall.Stat_t).Ino
+	}
+	a, b := member("a"), member("b")
+	set := wantedSet("n1")
+	set.UID, set.Generation = "first", 1
+	cur := &running{engine: &Engine{data: []string{a, b}, inodes: []uint64{inode(a), inode(b)}}, uid: set.UID, gen: 1}
+	require.True(t, cur.serves(set))
+
+	again := set.DeepCopy()
+	again.UID = "second"
+	require.False(t, cur.serves(again), "a set created again under the same name kept the old engine")
+
+	require.NoError(t, os.RemoveAll(filepath.Dir(b)))
+	member("b")
+	require.False(t, cur.serves(set), "a member replaced underneath the engine kept it")
+
+	require.NoError(t, os.RemoveAll(filepath.Dir(a)))
+	require.True(t, cur.engine.Stale(), "a removed member")
 }

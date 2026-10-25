@@ -40,9 +40,20 @@ type Reconciler struct {
 
 type running struct {
 	engine *Engine
+	uid    types.UID
 	gen    int64
 	domain string
 }
+
+// serves reports whether cur still serves set as it stands: the same
+// object at the same generation, over the member flows it mapped.
+func (cur *running) serves(set *mxlv1alpha1.MxlFlowRedundancySet) bool {
+	return cur != nil && cur.uid == set.UID && cur.gen == set.Generation && !cur.engine.Stale()
+}
+
+// recheck is how often a served set is looked at again for a member
+// replaced underneath its engine, which raises no event on the set.
+const recheck = 5 * time.Second
 
 // Reconcile starts, keeps or stops the engine of one set.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -62,10 +73,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	r.mu.Lock()
 	cur := r.engines[req.Name]
 	r.mu.Unlock()
-	if cur != nil && cur.gen == set.Generation {
-		return ctrl.Result{}, nil
+	if cur.serves(&set) {
+		return ctrl.Result{RequeueAfter: recheck}, nil
 	}
-	r.stop(req.Name) // a changed spec builds a new output
+	r.stop(req.Name) // a changed spec or member builds a new output
 
 	dir, onMxlfs, err := r.Domains.DomainPath(ctx, set.Spec.Output.Domain)
 	if err != nil {
@@ -106,10 +117,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if r.engines == nil {
 		r.engines = map[string]*running{}
 	}
-	r.engines[req.Name] = &running{engine: e, gen: set.Generation, domain: dir}
+	r.engines[req.Name] = &running{engine: e, uid: set.UID, gen: set.Generation, domain: dir}
 	r.mu.Unlock()
 	l.Info("serving redundancy set", "output", spec.OutputID, "members", spec.Members)
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: recheck}, nil
 }
 
 func wantedHere(set *mxlv1alpha1.MxlFlowRedundancySet, node string) bool {
