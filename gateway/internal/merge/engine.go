@@ -11,6 +11,7 @@ import "C"
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -165,6 +166,8 @@ type Engine struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
+	waitFailed sync.Once // logs the first futex_waitv failure
+
 	// selects counts the slots or pages the engine pointed at another
 	// source, each one a remap in every reader of the output.
 	selects atomic.Uint64
@@ -256,7 +259,10 @@ func (e *Engine) build() error {
 	if err != nil {
 		return err
 	}
-	def = bytes.ReplaceAll(def, []byte(e.spec.Members[0]), []byte(e.spec.OutputID))
+	def, err = withID(def, e.spec.OutputID)
+	if err != nil {
+		return fmt.Errorf("member %s flow_def.json: %w", e.spec.Members[0], err)
+	}
 	if err := os.WriteFile(filepath.Join(tmp, "flow_def.json"), def, 0o644); err != nil {
 		return err
 	}
@@ -282,6 +288,22 @@ func (e *Engine) build() error {
 	}
 	cleanup = false
 	return nil
+}
+
+// withID returns the flow definition def with its id set to id. Only the
+// top-level id is the flow's: the same uuid can appear anywhere else in
+// a definition, in parents or a label, and in either case.
+func withID(def []byte, id string) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(def, &m); err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(id)
+	if err != nil {
+		return nil, err
+	}
+	m["id"] = raw
+	return json.Marshal(m)
 }
 
 func (e *Engine) buildHeader(tmp string) error {
@@ -605,11 +627,36 @@ func (e *Engine) run(ctx context.Context) {
 		if wait > 0 && wait < timeout {
 			timeout = wait
 		}
-		var mono unix.Timespec
-		_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &mono)
-		abs := unix.NsecToTimespec(unix.TimespecToNsec(mono) + int64(timeout))
-		_, _, _ = unix.Syscall6(sysFutexWaitv, uintptr(unsafe.Pointer(&waits[0])), uintptr(len(waits)), 0,
-			uintptr(unsafe.Pointer(&abs)), unix.CLOCK_MONOTONIC, 0)
+		e.wait(waits, timeout)
+	}
+}
+
+// futexWaitvCall waits on waits until the absolute CLOCK_MONOTONIC time
+// abs; tests replace it.
+var futexWaitvCall = func(waits []futexWaitv, abs *unix.Timespec) unix.Errno {
+	_, _, errno := unix.Syscall6(sysFutexWaitv, uintptr(unsafe.Pointer(&waits[0])), uintptr(len(waits)), 0,
+		uintptr(unsafe.Pointer(abs)), unix.CLOCK_MONOTONIC, 0)
+	return errno
+}
+
+// sleep is time.Sleep; tests replace it.
+var sleep = time.Sleep
+
+// wait blocks until a member's sync word changes or timeout passes. A
+// futex_waitv that fails outright, on a kernel without it (ENOSYS) or on
+// arguments it refuses, returns at once every pass and would spin a
+// core, so the engine sleeps the timeout instead and says so once.
+func (e *Engine) wait(waits []futexWaitv, timeout time.Duration) {
+	var mono unix.Timespec
+	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &mono)
+	abs := unix.NsecToTimespec(unix.TimespecToNsec(mono) + int64(timeout))
+	switch errno := futexWaitvCall(waits, &abs); errno {
+	case 0, unix.ETIMEDOUT, unix.EAGAIN, unix.EINTR:
+	default:
+		e.waitFailed.Do(func() {
+			e.log.Error(errno, "futex_waitv failed; polling the members every pass instead")
+		})
+		sleep(timeout)
 	}
 }
 

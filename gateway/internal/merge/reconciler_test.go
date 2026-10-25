@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -48,7 +49,8 @@ func wantedSet(nodes ...string) *mxlv1alpha1.MxlFlowRedundancySet {
 			Members: []mxlv1alpha1.RedundancyFlowRef{{FlowID: memberA}, {FlowID: memberB}},
 			Output:  mxlv1alpha1.RedundancyFlowRef{FlowID: output},
 		},
-		Status: mxlv1alpha1.MxlFlowRedundancySetStatus{Nodes: nodes},
+		Status: mxlv1alpha1.MxlFlowRedundancySetStatus{Nodes: nodes, Conditions: []metav1.Condition{{
+			Type: mxlv1alpha1.ConditionTypeValid, Status: metav1.ConditionTrue, ObservedGeneration: 1}}},
 	}
 }
 
@@ -144,4 +146,49 @@ func TestRunningEngineServesOnlyTheFlowsAndSetItWasBuiltFor(t *testing.T) {
 
 	require.NoError(t, os.RemoveAll(filepath.Dir(a)))
 	require.True(t, cur.engine.Stale(), "a removed member")
+}
+
+// The operator alone reads the members' definitions and the output's
+// MxlFlow. A set it has not found valid, or found valid before the spec
+// changed, may name a live flow as its output, which building the
+// output would remove.
+func TestReconcilerServesOnlyASetValidAtItsGeneration(t *testing.T) {
+	for name, conds := range map[string][]metav1.Condition{
+		"unchecked": nil,
+		"invalid":   {{Type: mxlv1alpha1.ConditionTypeValid, Status: metav1.ConditionFalse, ObservedGeneration: 2}},
+		"valid for the previous generation": {{Type: mxlv1alpha1.ConditionTypeValid, Status: metav1.ConditionTrue,
+			ObservedGeneration: 1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			set := wantedSet("reader")
+			set.Generation = 2
+			set.Status.Conditions = conds
+			d := &fakeDomains{dir: t.TempDir(), onMxlfs: true}
+			r := reconcilerFor(t, set, d)
+
+			require.Zero(t, reconcileSet(t, r))
+			require.Empty(t, d.asked, "a set not valid at its generation opens no domain")
+			require.Empty(t, r.engines)
+		})
+	}
+}
+
+// A directory under the output's id that a writer holds is a live flow,
+// a producer's or a mirror's: it is not a leftover output to replace.
+func TestReconcilerLeavesAnOutputIDAWriterHolds(t *testing.T) {
+	dir := t.TempDir()
+	for _, id := range []string{memberA, memberB, output} {
+		require.NoError(t, os.MkdirAll(flowDir(dir, id), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(flowDir(dir, id), "data"), nil, 0o644))
+	}
+	f, err := os.Open(filepath.Join(flowDir(dir, output), "data"))
+	require.NoError(t, err)
+	t.Cleanup(func() { f.Close() })
+	require.NoError(t, unix.Flock(int(f.Fd()), unix.LOCK_SH), "libmxl's writer lock")
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+
+	res := reconcileSet(t, r)
+	require.Equal(t, 10*time.Second, res.RequeueAfter)
+	require.FileExists(t, filepath.Join(flowDir(dir, output), "data"), "the writer's flow was removed")
+	require.Empty(t, r.engines)
 }

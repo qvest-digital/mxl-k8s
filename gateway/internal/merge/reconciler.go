@@ -8,12 +8,15 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
 )
 
 // Domains is what the reconciler needs of the gateway's open domains.
@@ -66,7 +69,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		return ctrl.Result{}, err
 	}
-	if !set.DeletionTimestamp.IsZero() || !wantedHere(&set, r.NodeName) {
+	if !set.DeletionTimestamp.IsZero() || !wantedHere(&set, r.NodeName) || !valid(&set) {
 		r.stop(req.Name)
 		return ctrl.Result{}, nil
 	}
@@ -106,8 +109,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	// An output left behind by an engine that did not stop cleanly is no
 	// one's: its head is frozen. Readers holding it reopen on the inode
-	// change of the rebuilt one.
-	_ = os.RemoveAll(flowDir(dir, spec.OutputID))
+	// change of the rebuilt one. A directory some writer holds, a
+	// producer's or a mirror's, is a live flow of that id and stays.
+	out := flowDir(dir, spec.OutputID)
+	// This set's engine is stopped by now, so every flock is another
+	// writer's, the gateway's own mirrors and engines included.
+	if n, err := flowlocks.Writers(filepath.Join(out, "data")); err != nil || n > 0 {
+		l.Info("output id is a flow some writer holds; not replacing it", "output", spec.OutputID, "writers", n, "error", err)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+	_ = os.RemoveAll(out)
 	e, err := Start(context.Background(), spec, l)
 	if err != nil {
 		l.Error(err, "start merge")
@@ -121,6 +132,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	r.mu.Unlock()
 	l.Info("serving redundancy set", "output", spec.OutputID, "members", spec.Members)
 	return ctrl.Result{RequeueAfter: recheck}, nil
+}
+
+// valid reports whether the operator found the set's members mergeable
+// at its current generation. A set it has not checked yet, or checked
+// before a spec change, is not served: its output may name a member.
+func valid(set *mxlv1alpha1.MxlFlowRedundancySet) bool {
+	c := meta.FindStatusCondition(set.Status.Conditions, mxlv1alpha1.ConditionTypeValid)
+	return c != nil && c.Status == metav1.ConditionTrue && c.ObservedGeneration == set.Generation
 }
 
 func wantedHere(set *mxlv1alpha1.MxlFlowRedundancySet, node string) bool {

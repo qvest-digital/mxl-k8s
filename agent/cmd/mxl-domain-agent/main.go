@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -254,27 +255,49 @@ func run(args []string) error {
 		}
 	}
 
+	scanner := &observed.Scanner{Domains: func() map[string]string {
+		domainsMu.Lock()
+		doms := current
+		domainsMu.Unlock()
+		byDev := map[string]string{}
+		if dev, err := observed.Device(cfg.DomainPath); err == nil {
+			byDev[dev] = ""
+		}
+		for dir, name := range doms.ByDir {
+			if dev, err := observed.Device(filepath.Join(doms.Root, dir)); err == nil {
+				byDev[dev] = name
+			}
+		}
+		return byDev
+	}}
+	if sets != nil {
+		ns, _ := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+		inUse := func() (map[mxlv1alpha1.FlowRef]bool, error) {
+			return flowsInUse(ctx, kClient, cfg.NodeName, strings.TrimSpace(string(ns)), scanner.Scan)
+		}
+		go func() {
+			t := time.NewTicker(10 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+				}
+				if err := sets.Release(ctx, inUse, redundancy.ReleaseGrace); err != nil {
+					setupLog.Error(err, "release unused redundancy set outputs")
+				}
+			}
+		}()
+	}
+
 	if cfg.ClaimStatusLabel != "" {
 		claims := &observed.ClaimWriter{
 			Client:   kClient,
 			NodeName: cfg.NodeName,
 			Label:    cfg.ClaimStatusLabel,
 			Log:      ctrl.Log.WithName("observed"),
-			Scanner: &observed.Scanner{Domains: func() map[string]string {
-				domainsMu.Lock()
-				doms := current
-				domainsMu.Unlock()
-				byDev := map[string]string{}
-				if dev, err := observed.Device(cfg.DomainPath); err == nil {
-					byDev[dev] = ""
-				}
-				for dir, name := range doms.ByDir {
-					if dev, err := observed.Device(filepath.Join(doms.Root, dir)); err == nil {
-						byDev[dev] = name
-					}
-				}
-				return byDev
-			}},
+			Scanner:  scanner,
 		}
 		go claims.Run(ctx, 10*time.Second)
 	}
@@ -492,6 +515,55 @@ func (o originClaims) ClaimOrigin(ctx context.Context, ref mxlv1alpha1.FlowRef) 
 	return o.trackers.ClaimOrigin(ctx, ref.Domain, ref.ID)
 }
 
+// ownComponents are the mxl-k8s components that open placeholders: the
+// gateway creating and filling them, the exporter reading them.
+var ownComponents = map[string]bool{"agent": true, "gateway": true, "exporter": true}
+
+// ours reports a pid as mxl-k8s's own when its pod is one of
+// ownComponents in the agent's namespace. Any other pod there is a
+// consumer like any other, and a pid whose pod cannot be resolved is
+// not known to be ours: the dispatcher resolves it again and reports
+// why no mirror starts.
+func ours(pods interface {
+	PodForPID(ctx context.Context, pid int32) (*corev1.Pod, error)
+}, namespace string) func(ctx context.Context, pid int32) bool {
+	return func(ctx context.Context, pid int32) bool {
+		pod, err := pods.PodForPID(ctx, pid)
+		return err == nil && pod.Namespace == namespace && ownComponents[pod.Labels["app.kubernetes.io/component"]]
+	}
+}
+
+// flowsInUse returns the flows processes on this node map, leaving out
+// mxl-k8s's own: the gateway writing a merged output and the exporter
+// reading every flow would otherwise keep each output in use for good.
+func flowsInUse(ctx context.Context, c client.Client, node, namespace string,
+	scan func() (map[string][]observed.Use, error)) (map[mxlv1alpha1.FlowRef]bool, error) {
+	uses, err := scan()
+	if err != nil {
+		return nil, err
+	}
+	var pods corev1.PodList
+	if err := c.List(ctx, &pods, client.MatchingFields{"spec.nodeName": node}); err != nil {
+		return nil, err
+	}
+	own := map[string]bool{}
+	for _, p := range pods.Items {
+		if p.Namespace == namespace && ownComponents[p.Labels["app.kubernetes.io/component"]] {
+			own[string(p.UID)] = true
+		}
+	}
+	out := map[mxlv1alpha1.FlowRef]bool{}
+	for uid, us := range uses {
+		if own[uid] {
+			continue
+		}
+		for _, u := range us {
+			out[mxlv1alpha1.FlowRef{Domain: u.Domain, ID: u.FlowID}] = true
+		}
+	}
+	return out, nil
+}
+
 // runMxlfs starts what a domain on mxlfs needs beyond fanotify on the
 // domain directory: a mirror for every placeholder a pod opens, one for
 // every flow a path walk waits for, and a publish for every placeholder
@@ -501,16 +573,10 @@ func runMxlfs(ctx context.Context, domain string, fp *flowpublisher.Publisher,
 
 	l := ctrl.Log.WithName("mxlfs")
 	ns, _ := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-	own := strings.TrimSpace(string(ns))
 	trigger := &mxlfswatch.Trigger{
 		Dispatcher: d,
-		// The gateway and the exporter open placeholders too. A process
-		// that is in no pod is not a consumer either.
-		Ours: func(ctx context.Context, pid int32) bool {
-			pod, err := pods.PodForPID(ctx, pid)
-			return err != nil || pod.Namespace == own
-		},
-		Log: l,
+		Ours:       ours(pods, strings.TrimSpace(string(ns))),
+		Log:        l,
 	}
 	go func() {
 		if err := trigger.Run(ctx, domain); err != nil && ctx.Err() == nil {

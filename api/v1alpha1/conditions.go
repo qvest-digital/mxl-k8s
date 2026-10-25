@@ -106,6 +106,11 @@ const (
 	// provider will build an endpoint on, so the gateway reports the
 	// difference rather than acting on it.
 	ConditionTypeRDMADevicesEnumerated = "RDMADevicesEnumerated"
+
+	// ConditionTypeValid reports whether an MxlFlowRedundancySet's
+	// members can be merged. Owned by the operator; a gateway serves a
+	// set's output only while it is True for the set's generation.
+	ConditionTypeValid = "Valid"
 )
 
 // Condition reason constants for MxlFlowMirror and MxlFlow status.

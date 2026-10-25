@@ -226,6 +226,29 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	return reconcile.Result{}, nil
 }
 
+// ClearMarkers removes every placeholder marker in domain. A gateway
+// that exits without dropping its placeholders leaves their markers, and
+// the agent and the exporter would take each such directory for a
+// placeholder for good: a copy or a local writer's flow under that id
+// would never become a location. Call it when the gateway holds no
+// placeholder in domain, as on opening the domain.
+func ClearMarkers(domain string) error {
+	dir := filepath.Join(domain, MarkerDir)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 // foreignWriters is flowlocks.ForeignWriters; tests replace it.
 var foreignWriters = flowlocks.ForeignWriters
 

@@ -1,6 +1,7 @@
 // Package redundancy is the agent's side of MxlFlowRedundancySets: it
-// records the nodes a reader wants a set's output on, and keeps outputs
-// out of the flows it publishes.
+// records the nodes a reader wants a set's output on, removes this node
+// again once no reader here uses the output, and keeps outputs out of
+// the flows it publishes.
 //
 // An output is merged on each node it is read on, from member mirrors
 // there; it is never a location of a flow other nodes mirror from. Its
@@ -9,6 +10,9 @@ package redundancy
 
 import (
 	"context"
+	"slices"
+	"sync"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -17,10 +21,36 @@ import (
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
+// ReleaseGrace is how long an output may go unused on this node before
+// the node leaves the set's status.nodes. A reader that restarts, or
+// waits while its output is first built from member mirrors, uses
+// nothing for a while, and leaving would tear the output down under it.
+const ReleaseGrace = time.Minute
+
 // Sets finds sets by output.
 type Sets struct {
 	Client   client.Client
 	NodeName string
+
+	now      func() time.Time // a seam for tests; nil is time.Now
+	mu       sync.Mutex
+	lastUsed map[string]time.Time // by set name: last seen used here
+}
+
+func (s *Sets) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+func (s *Sets) used(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastUsed == nil {
+		s.lastUsed = map[string]time.Time{}
+	}
+	s.lastUsed[name] = s.clock()
 }
 
 // outputOf returns the set whose output is flow id in domain.
@@ -53,6 +83,7 @@ func (s *Sets) Want(ctx context.Context, domain, id string) (bool, error) {
 	if err != nil || set == nil {
 		return false, err
 	}
+	s.used(set.Name)
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var cur mxlv1alpha1.MxlFlowRedundancySet
 		if err := s.Client.Get(ctx, types.NamespacedName{Name: set.Name}, &cur); err != nil {
@@ -67,4 +98,75 @@ func (s *Sets) Want(ctx context.Context, domain, id string) (bool, error) {
 		return s.Client.Status().Update(ctx, &cur)
 	})
 	return true, err
+}
+
+// Release takes this node out of status.nodes of every set whose output
+// no process here has used for grace. inUse reports the flows processes
+// on this node other than mxl-k8s's own map; it is asked only while some
+// set lists this node. An output's grace starts when this agent first
+// sees the set list the node, so a restarted agent gives every reader
+// the whole grace again.
+func (s *Sets) Release(ctx context.Context, inUse func() (map[mxlv1alpha1.FlowRef]bool, error), grace time.Duration) error {
+	var list mxlv1alpha1.MxlFlowRedundancySetList
+	if err := s.Client.List(ctx, &list); err != nil {
+		return err
+	}
+	var here []*mxlv1alpha1.MxlFlowRedundancySet
+	for i := range list.Items {
+		if slices.Contains(list.Items[i].Status.Nodes, s.NodeName) {
+			here = append(here, &list.Items[i])
+		}
+	}
+	var used map[mxlv1alpha1.FlowRef]bool
+	if len(here) > 0 {
+		var err error
+		if used, err = inUse(); err != nil {
+			return err
+		}
+	}
+	now := s.clock()
+	var idle []string
+	s.mu.Lock()
+	if s.lastUsed == nil {
+		s.lastUsed = map[string]time.Time{}
+	}
+	listed := map[string]bool{}
+	for _, set := range here {
+		listed[set.Name] = true
+		last, seen := s.lastUsed[set.Name]
+		switch {
+		case used[mxlv1alpha1.FlowRef{Domain: set.Spec.Output.Domain, ID: set.Spec.Output.FlowID}] || !seen:
+			s.lastUsed[set.Name] = now
+		case now.Sub(last) >= grace:
+			idle = append(idle, set.Name)
+		}
+	}
+	for name := range s.lastUsed {
+		if !listed[name] {
+			delete(s.lastUsed, name)
+		}
+	}
+	s.mu.Unlock()
+	for _, name := range idle {
+		if err := s.leave(ctx, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// leave removes this node from the set's status.nodes.
+func (s *Sets) leave(ctx context.Context, name string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var cur mxlv1alpha1.MxlFlowRedundancySet
+		if err := s.Client.Get(ctx, types.NamespacedName{Name: name}, &cur); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		i := slices.Index(cur.Status.Nodes, s.NodeName)
+		if i < 0 {
+			return nil
+		}
+		cur.Status.Nodes = slices.Delete(cur.Status.Nodes, i, i+1)
+		return s.Client.Status().Update(ctx, &cur)
+	})
 }

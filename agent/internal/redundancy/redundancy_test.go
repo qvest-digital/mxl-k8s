@@ -3,6 +3,7 @@ package redundancy
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -61,4 +62,68 @@ func TestIsOutput(t *testing.T) {
 	s, _ := newSets(t, "node-a")
 	require.True(t, s.IsOutput(context.Background(), "", out))
 	require.False(t, s.IsOutput(context.Background(), "", "11111111-1111-4111-8111-111111111111"))
+}
+
+// A node stays in status.nodes while a reader there maps the output, and
+// for the grace after the last one stops, so a reader that restarts
+// keeps its output. Only then does it leave, so the gateway stops
+// merging and the member mirrors onto the node go.
+func TestReleaseLeavesOnlyAfterTheGraceWithNoReader(t *testing.T) {
+	s, set := newSets(t, "node-a")
+	ctx := context.Background()
+	now := time.Unix(1000, 0)
+	s.now = func() time.Time { return now }
+	_, err := s.Want(ctx, "", out)
+	require.NoError(t, err)
+
+	reading := true
+	asked := 0
+	inUse := func() (map[mxlv1alpha1.FlowRef]bool, error) {
+		asked++
+		return map[mxlv1alpha1.FlowRef]bool{{ID: out}: reading}, nil
+	}
+	nodes := func() []string {
+		var got mxlv1alpha1.MxlFlowRedundancySet
+		require.NoError(t, s.Client.Get(ctx, types.NamespacedName{Name: set.Name}, &got))
+		return got.Status.Nodes
+	}
+
+	now = now.Add(5 * time.Minute)
+	require.NoError(t, s.Release(ctx, inUse, time.Minute))
+	require.Equal(t, []string{"node-a"}, nodes(), "a reader maps the output")
+
+	reading = false
+	now = now.Add(59 * time.Second)
+	require.NoError(t, s.Release(ctx, inUse, time.Minute))
+	require.Equal(t, []string{"node-a"}, nodes(), "inside the grace a restarting reader keeps it")
+
+	now = now.Add(time.Second)
+	require.NoError(t, s.Release(ctx, inUse, time.Minute))
+	require.Empty(t, nodes(), "no reader for the grace")
+
+	n := asked
+	require.NoError(t, s.Release(ctx, inUse, time.Minute))
+	require.Equal(t, n, asked, "no /proc scan while no set lists this node")
+}
+
+// The output of another domain is another flow; a reader of it keeps no
+// set alive. An agent that restarts starts every grace afresh.
+func TestReleaseCountsOnlyTheOutputItself(t *testing.T) {
+	s, set := newSets(t, "node-a")
+	ctx := context.Background()
+	set.Status.Nodes = []string{"node-b", "node-a"}
+	require.NoError(t, s.Client.Status().Update(ctx, set))
+	now := time.Unix(1000, 0)
+	s.now = func() time.Time { return now }
+	inUse := func() (map[mxlv1alpha1.FlowRef]bool, error) {
+		return map[mxlv1alpha1.FlowRef]bool{{Domain: "studio", ID: out}: true}, nil
+	}
+
+	require.NoError(t, s.Release(ctx, inUse, time.Minute))
+	now = now.Add(time.Minute)
+	require.NoError(t, s.Release(ctx, inUse, time.Minute))
+
+	var got mxlv1alpha1.MxlFlowRedundancySet
+	require.NoError(t, s.Client.Get(ctx, types.NamespacedName{Name: set.Name}, &got))
+	require.Equal(t, []string{"node-b"}, got.Status.Nodes, "only this node leaves")
 }

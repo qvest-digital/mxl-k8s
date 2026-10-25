@@ -1,10 +1,11 @@
 // Package csi is a CSI node plugin that delivers an MXL domain to pods as
 // an inline ephemeral volume.
 //
-// A volume is a bind mount of the node's domain directory, read-only for
-// a pod that only reads: libmxl readers need no write access. The volume
-// attributes name the domain (an MxlDomain name; empty for the primary
-// domain) and the access. With podInfoOnMount the kubelet passes the pod
+// A volume is a bind mount of the node's domain directory, read-only
+// unless the volume asks for write access: libmxl readers need none. The
+// volume attributes name the domain (an MxlDomain name; empty for the
+// primary domain) and the access. Write access is granted to any pod that
+// asks for it. With podInfoOnMount the kubelet passes the pod
 // a volume is for, which the plugin keeps per mount so what a pod opens
 // in the domain can be traced back to it.
 package csi
@@ -31,7 +32,7 @@ const DriverName = "mxl.qvest-digital.com"
 // Volume attributes.
 const (
 	AttrDomain = "domain"
-	AttrAccess = "access" // "read" or "write" (the default)
+	AttrAccess = "access" // "read" (the default) or "write"
 )
 
 // Pod attributes the kubelet adds with podInfoOnMount.
@@ -117,7 +118,7 @@ func (p *Plugin) NodePublishVolume(ctx context.Context, req *csipb.NodePublishVo
 	if access != "" && access != "read" && access != "write" {
 		return nil, status.Errorf(codes.InvalidArgument, "access %q is neither read nor write", access)
 	}
-	readOnly := access == "read" || req.GetReadonly()
+	readOnly := access != "write" || req.GetReadonly()
 	source, err := p.DomainDir(ctx, vc[AttrDomain])
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "domain %q: %v", vc[AttrDomain], err)

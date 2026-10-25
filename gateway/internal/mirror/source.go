@@ -1104,17 +1104,11 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 			chunkProgress.runProgress(progressFn, func(err error) { logProgressFailure(l, err) })
 		}
 		// A data grain is never complete: its valid slices are its
-		// length. It is read once committed at all, and only what is
-		// valid goes over, so the target commits the same length.
+		// length. Only what is valid goes over, so the target commits
+		// the same length.
 		data := cfg.Common.Format == mxl.FormatData
 		transferFn := func(idx uint64, paced bool) (bool, error) {
-			var grain mxl.Grain
-			var err error
-			if data {
-				grain, err = reader.GetGrainSliceNonBlocking(idx, 1)
-			} else {
-				grain, err = reader.GetGrainNonBlocking(idx)
-			}
+			grain, err := readForTransfer(reader, idx, data)
 			if err != nil {
 				// Not yet committed or already aged out; signal the loop
 				// to break and re-try on the next tick.
@@ -1151,6 +1145,19 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 	}
 
 	return s, nil
+}
+
+// readForTransfer reads grain idx as the transfer loop sends it. A data
+// grain is read once committed at all, with no valid slice too: a writer
+// commits an empty one like any other, and a read that waited for a
+// slice would retry it until the loop resynced past it, dropping the
+// grains behind it as well. A range of no slices still carries the
+// grain's header, which is what the target commits from.
+func readForTransfer(r *mxl.Reader, idx uint64, data bool) (mxl.Grain, error) {
+	if data {
+		return r.GetGrainSliceNonBlocking(idx, 0)
+	}
+	return r.GetGrainNonBlocking(idx)
 }
 
 // attach parses the target's serialized info and adds it to the shared

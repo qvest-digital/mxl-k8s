@@ -1262,13 +1262,15 @@ func arrivalComplete(g mxl.Grain, data bool) bool {
 var errGrainAlreadyCommitted = errors.New("grain already committed")
 
 // A data grain is committed with the valid slices the initiator's write
-// carried: they are its length, and libmxl data writers never complete
-// a grain. OpenGrain clears them, so they are read first.
+// carried, none included: they are its length, and libmxl data writers
+// never complete a grain. OpenGrain clears them, so they are read first.
+// Any other grain, and a data grain whose header is not this index's,
+// is committed whole.
 func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, error) {
-	var valid uint16
+	valid, carried := uint16(0), false
 	if writer.Config().Common.Format == mxl.FormatData {
 		if g, err := writer.GrainInfo(idx); err == nil && g.Index == idx {
-			valid = g.ValidSlices
+			valid, carried = g.ValidSlices, true
 		}
 	}
 	ga, err := writer.OpenGrain(idx)
@@ -1278,7 +1280,7 @@ func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, error) {
 		}
 		return 0, fmt.Errorf("OpenGrain(%d): %w", idx, err)
 	}
-	if valid == 0 {
+	if !carried {
 		valid = ga.TotalSlices
 	}
 	if err := ga.Commit(valid, 0); err != nil {

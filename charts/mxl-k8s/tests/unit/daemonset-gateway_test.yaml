@@ -54,9 +54,9 @@ tests:
           path: spec.template.spec.containers[0].args
           content: --bind-address=
 
-  - it: default pprofBindAddress renders a bare --pprof-bind-address= arg
+  - it: default pprofBindAddress renders no --pprof-bind-address arg
     asserts:
-      - contains:
+      - notContains:
           path: spec.template.spec.containers[0].args
           content: --pprof-bind-address=
       - notContains:

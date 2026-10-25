@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -56,9 +57,18 @@ func TestRedundancySetAgainstAnAPIServer(t *testing.T) {
 				s["members"] = m
 			}, "members"},
 			{"unknown granularity", func(s map[string]any) { s["granularity"] = "Line" }, "granularity"},
+			{"slice granularity, never implemented", func(s map[string]any) { s["granularity"] = "Slice" }, "granularity"},
 			{"unknown preference", func(s map[string]any) { s["preference"] = "Random" }, "preference"},
 			{"node name as flow id", func(s map[string]any) { s["output"] = ref("n1") }, "flowID"},
 			{"missing output", func(s map[string]any) { delete(s, "output") }, "output"},
+			{"output is a member", func(s map[string]any) { s["output"] = ref(memberB) }, "output must not be one of the members"},
+			{"output is a member, domain given", func(s map[string]any) {
+				s["members"] = []any{ref(memberA), map[string]any{"flowID": output, "domain": "studio"}}
+				s["output"] = map[string]any{"flowID": output, "domain": "studio"}
+			}, "output must not be one of the members"},
+			{"output id in another domain than the member", func(s map[string]any) {
+				s["members"] = []any{ref(memberA), map[string]any{"flowID": output, "domain": "studio"}}
+			}, ""},
 		}
 		for i, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
@@ -83,6 +93,7 @@ func TestRedundancySetAgainstAnAPIServer(t *testing.T) {
 
 	t.Run("reconcile", func(t *testing.T) {
 		mirrorNS := env.NewNamespace(t)
+		require.NoError(t, env.Client.Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "reader"}}))
 		for _, f := range []*mxlv1alpha1.MxlFlow{flow(memberA, video1080, ""), flow(memberB, video1080, "")} {
 			require.NoError(t, env.Client.Create(ctx, f))
 			origin := map[string]string{memberA: "node-a", memberB: "node-b"}[f.Name]

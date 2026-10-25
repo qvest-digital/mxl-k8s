@@ -5,18 +5,13 @@ import (
 )
 
 // RedundancyGranularity is the unit a redundancy set switches members in.
-// +kubebuilder:validation:Enum=Grain;Slice
+// +kubebuilder:validation:Enum=Grain
 type RedundancyGranularity string
 
-const (
-	// RedundancyGrain publishes a grain only once one member holds it
-	// complete, so a grain never mixes members. Audio switches per page
-	// of the channel buffer either way.
-	RedundancyGrain RedundancyGranularity = "Grain"
-	// RedundancySlice lets a grain switch member part-way through. Only
-	// sound for members that carry bit-identical content.
-	RedundancySlice RedundancyGranularity = "Slice"
-)
+// RedundancyGrain publishes a grain only once one member holds it
+// complete, so a grain never mixes members. Audio switches per page of
+// the channel buffer either way.
+const RedundancyGrain RedundancyGranularity = "Grain"
 
 // RedundancyPreference is how a redundancy set picks among members that
 // all hold a grain.
@@ -56,6 +51,10 @@ type RedundancyFlowRef struct {
 // geometry and rate, with indices anchored to the same epoch, as two
 // copies of one source over separate paths or two producers locked to
 // one reference are.
+//
+// The output is none of the members: a gateway building the output
+// replaces whatever directory holds its id.
+// +kubebuilder:validation:XValidation:rule="!self.members.exists(m, m.flowID == self.output.flowID && has(m.domain) == has(self.output.domain) && (!has(m.domain) || m.domain == self.output.domain))",message="output must not be one of the members"
 type MxlFlowRedundancySetSpec struct {
 	// Members are the flows the output is served from, in order of
 	// preference. At most seven: a merged flow selects among its members
@@ -69,7 +68,8 @@ type MxlFlowRedundancySetSpec struct {
 	// +kubebuilder:validation:Required
 	Output RedundancyFlowRef `json:"output"`
 
-	// Granularity is the unit members are switched in. Defaults to Grain.
+	// Granularity is the unit members are switched in. Grain is the only
+	// one.
 	// +kubebuilder:default=Grain
 	// +optional
 	Granularity RedundancyGranularity `json:"granularity,omitempty"`
@@ -93,6 +93,8 @@ type MxlFlowRedundancySetSpec struct {
 type MxlFlowRedundancySetStatus struct {
 	// Nodes are the nodes a reader asked for the output on. The gateway
 	// on each serves it, from member mirrors the operator creates there.
+	// A node's agent removes it once no reader there has used the output
+	// for a minute; the operator removes a node that is deleted.
 	// +optional
 	// +listType=set
 	Nodes []string `json:"nodes,omitempty"`
@@ -117,7 +119,18 @@ type MxlFlowRedundancySetStatus struct {
 
 // MxlFlowRedundancySet serves one flow from several member flows,
 // switching members per grain, or per page of audio, wherever one fails
-// to deliver.
+// to deliver. The output's members all have to be on an mxlfs domain of
+// the reading node, and to agree in format, rate and geometry.
+//
+// While the output waits up to the skew budget for a grain no member has,
+// the members keep writing a ring period ahead, into slots the output
+// still offers as its oldest grains. The gateway moves each such slot to
+// a member that still holds it, or to an INVALID grain, at every grain
+// boundary; a gateway that gets no CPU for longer than a grain can leave
+// the oldest grain of the output reading the next ring period's picture.
+// Readers at the output's head are unaffected. A member that changes
+// geometry, or a set created again, builds the output again, and its
+// readers have to reopen it.
 type MxlFlowRedundancySet struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

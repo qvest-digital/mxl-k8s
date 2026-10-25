@@ -76,9 +76,20 @@ func TestPublishBindsANamedDomainWritable(t *testing.T) {
 	p, m := newPlugin(t)
 	target := filepath.Join(t.TempDir(), "mount")
 
-	require.NoError(t, publish(p, target, map[string]string{AttrDomain: "studio"}, false))
+	require.NoError(t, publish(p, target, map[string]string{AttrDomain: "studio", AttrAccess: "write"}, false))
 
 	require.Equal(t, bind{"/run/mxl/domains/studio", false}, m.mounts[target])
+}
+
+// A volume that names no access gets the least: a pod writes into a
+// shared domain only when it says it does.
+func TestPublishBindsReadOnlyWhenNoAccessIsNamed(t *testing.T) {
+	p, m := newPlugin(t)
+	target := filepath.Join(t.TempDir(), "mount")
+
+	require.NoError(t, publish(p, target, map[string]string{AttrDomain: "studio"}, false))
+
+	require.Equal(t, bind{"/run/mxl/domains/studio", true}, m.mounts[target])
 }
 
 func TestPublishIsIdempotent(t *testing.T) {
@@ -144,5 +155,5 @@ func TestPublishWaitsForTheDomainMount(t *testing.T) {
 
 	ready = true
 	require.NoError(t, publish(p, target, nil, false))
-	require.Equal(t, bind{"/run/mxl/domain", false}, m.mounts[target])
+	require.Equal(t, bind{"/run/mxl/domain", true}, m.mounts[target])
 }
