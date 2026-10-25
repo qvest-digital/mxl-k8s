@@ -678,8 +678,10 @@ func produce(t *testing.T, inst *mxl.Instance, def string, tag uint64) *producer
 // reader of the oldest grain or sample does. Member B wrote all of it, so
 // every grain and sample must be there with its own index: an INVALID
 // grain or silence is a slot or page left on the replaced member, where
-// the new ring holds nothing yet. A grain or sample of producer tag 0,
-// the old ring, cannot be there any more.
+// the new ring holds nothing yet. The exception is an oldest grain B may
+// be writing the next ring period into, which the engine retires to the
+// INVALID grain whichever member served it. A grain or sample of
+// producer tag 0, the old ring, cannot be there any more.
 func trustedWindow(t *testing.T, e *Engine, r *mxl.Reader) {
 	t.Helper()
 	rt, err := r.Runtime()
@@ -693,7 +695,12 @@ func trustedWindow(t *testing.T, e *Engine, r *mxl.Reader) {
 				continue // overwritten since the head was read
 			}
 			require.NoError(t, err, "grain %d", i)
-			require.False(t, g.Invalid(), "grain %d behind head %d is INVALID though member B holds it", i, head)
+			if g.Invalid() {
+				// Discrete.serves: B's head this far on may be writing the slot.
+				require.Greater(t, e.members[1].head(), i+grains-2,
+					"grain %d behind head %d is INVALID though member B holds it", i, head)
+				continue
+			}
 			v := binary.LittleEndian.Uint64(g.Payload)
 			require.Equal(t, i, v&(1<<56-1), "grain %d behind head %d shows grain %d of producer %d", i, head, v&(1<<56-1), v>>56)
 			require.NotZero(t, v>>56, "grain %d behind head %d is the old ring's", i, head)
