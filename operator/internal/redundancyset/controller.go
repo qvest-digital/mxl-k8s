@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -31,14 +32,16 @@ import (
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
-// Condition and reasons on a set.
+// Conditions and reasons on a set.
 const (
-	ConditionValid       = mxlv1alpha1.ConditionTypeValid
-	ReasonMembersAligned = "MembersAligned"
-	ReasonMemberMissing  = "MemberMissing"
-	ReasonOtherDomain    = "MemberInOtherDomain"
-	ReasonMisaligned     = "MembersMisaligned"
-	ReasonOutputTaken    = "OutputIsAFlow"
+	ConditionValid        = mxlv1alpha1.ConditionTypeValid
+	ConditionMembersReady = mxlv1alpha1.ConditionTypeMembersReady
+	ReasonMembersAligned  = "MembersAligned"
+	ReasonMembersReady    = "MembersReady"
+	ReasonMemberMissing   = "MemberMissing"
+	ReasonOtherDomain     = "MemberInOtherDomain"
+	ReasonMisaligned      = "MembersMisaligned"
+	ReasonOutputTaken     = "OutputIsAFlow"
 )
 
 // LeaseChecker reports whether an Origin's Lease is fresh.
@@ -74,19 +77,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	pruned := len(nodes) != len(set.Status.Nodes)
 	set.Status.Nodes = nodes
-	flows, cond := r.validate(ctx, &set)
+	ms, err := r.members(ctx, &set)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	valid := r.validate(ctx, &set, ms)
+	ready := membersReady(ms)
 	res := ctrl.Result{}
-	if cond.Status == metav1.ConditionTrue {
-		var err error
-		res, err = r.ensureMirrors(ctx, &set, flows)
-		if err != nil {
+	if ready.Status != metav1.ConditionTrue {
+		res = ctrl.Result{RequeueAfter: 10 * time.Second} // a member or its producer is not up
+	}
+	if valid.Status == metav1.ConditionTrue {
+		if err := r.ensureMirrors(ctx, &set, ms); err != nil {
 			return ctrl.Result{}, err
 		}
-	} else if cond.Reason == ReasonMemberMissing {
-		res = ctrl.Result{RequeueAfter: 10 * time.Second}
 	}
-	cond.ObservedGeneration = set.Generation
-	if meta.SetStatusCondition(&set.Status.Conditions, cond) || set.Status.ObservedGeneration != set.Generation || pruned {
+	valid.ObservedGeneration, ready.ObservedGeneration = set.Generation, set.Generation
+	changed := meta.SetStatusCondition(&set.Status.Conditions, valid)
+	changed = meta.SetStatusCondition(&set.Status.Conditions, ready) || changed
+	if changed || set.Status.ObservedGeneration != set.Generation || pruned {
 		set.Status.ObservedGeneration = set.Generation
 		if err := r.Status().Update(ctx, &set); err != nil {
 			return ctrl.Result{}, err
@@ -118,69 +127,135 @@ func (r *Reconciler) existingNodes(ctx context.Context, nodes []string) ([]strin
 	return out, nil
 }
 
-func (r *Reconciler) validate(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet) ([]*mxlv1alpha1.MxlFlow, metav1.Condition) {
-	fail := func(reason, msg string) ([]*mxlv1alpha1.MxlFlow, metav1.Condition) {
-		return nil, metav1.Condition{Type: ConditionValid, Status: metav1.ConditionFalse, Reason: reason, Message: msg}
+// member is what the operator knows of one member of a set.
+type member struct {
+	ref    mxlv1alpha1.FlowRef
+	flow   *mxlv1alpha1.MxlFlow // nil while it has no MxlFlow
+	origin mxlv1alpha1.OriginResolution
+	// apart says how the member differs from the first member that has
+	// an MxlFlow; empty when it agrees.
+	apart string
+}
+
+// members reads every member's MxlFlow and Origin, and compares each
+// definition with the first member's that has one.
+func (r *Reconciler) members(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet) ([]member, error) {
+	ms := make([]member, len(set.Spec.Members))
+	var first map[string]any
+	var firstID string
+	for i, m := range set.Spec.Members {
+		ms[i].ref = mxlv1alpha1.FlowRef{Domain: m.Domain, ID: m.FlowID}
+		var f mxlv1alpha1.MxlFlow
+		if err := r.Get(ctx, types.NamespacedName{Name: ms[i].ref.Name()}, &f); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, err
+		}
+		ms[i].flow = &f
+		origin, err := mxlv1alpha1.ResolveOrigin(&f, r.freshness(ctx))
+		if err != nil {
+			return nil, err
+		}
+		ms[i].origin = origin
+		var def map[string]any
+		if err := json.Unmarshal(f.Spec.Definition.Raw, &def); err != nil {
+			ms[i].apart = fmt.Sprintf("member %s: %v", ms[i].ref.Name(), err)
+			continue
+		}
+		if first == nil {
+			first, firstID = def, m.FlowID
+			continue
+		}
+		for _, k := range alignedKeys {
+			if !reflect.DeepEqual(first[k], def[k]) {
+				ms[i].apart = fmt.Sprintf("member %s differs from %s in %s", ms[i].ref.Name(), firstID, k)
+				break
+			}
+		}
+	}
+	return ms, nil
+}
+
+// validate reports whether the set can be served. The spec is checked
+// every time; the members only until they first agree at a generation.
+// From then on a member that goes away, or comes back in another
+// geometry, leaves the output served from the others, and MembersReady
+// reports it.
+func (r *Reconciler) validate(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet, ms []member) metav1.Condition {
+	fail := func(reason, msg string) metav1.Condition {
+		return metav1.Condition{Type: ConditionValid, Status: metav1.ConditionFalse, Reason: reason, Message: msg}
 	}
 	out := mxlv1alpha1.FlowRef{Domain: set.Spec.Output.Domain, ID: set.Spec.Output.FlowID}
 	var existing mxlv1alpha1.MxlFlow
 	if err := r.Get(ctx, types.NamespacedName{Name: out.Name()}, &existing); err == nil {
 		return fail(ReasonOutputTaken, fmt.Sprintf("output %s is a flow of its own", out.Name()))
 	}
-	var flows []*mxlv1alpha1.MxlFlow
-	var first map[string]any
 	for _, m := range set.Spec.Members {
 		if m.Domain != set.Spec.Output.Domain {
 			return fail(ReasonOtherDomain, fmt.Sprintf("member %s is not in the output's domain; one output selects among pages of one domain", m.FlowID))
 		}
-		ref := mxlv1alpha1.FlowRef{Domain: m.Domain, ID: m.FlowID}
-		var f mxlv1alpha1.MxlFlow
-		if err := r.Get(ctx, types.NamespacedName{Name: ref.Name()}, &f); err != nil {
-			if apierrors.IsNotFound(err) {
-				return fail(ReasonMemberMissing, fmt.Sprintf("member %s has no MxlFlow yet", ref.Name()))
-			}
-			return fail(ReasonMemberMissing, err.Error())
-		}
-		var def map[string]any
-		if err := json.Unmarshal(f.Spec.Definition.Raw, &def); err != nil {
-			return fail(ReasonMisaligned, fmt.Sprintf("member %s: %v", ref.Name(), err))
-		}
-		if first == nil {
-			first = def
-		} else {
-			for _, k := range alignedKeys {
-				if !reflect.DeepEqual(first[k], def[k]) {
-					return fail(ReasonMisaligned, fmt.Sprintf("member %s differs from %s in %s", ref.Name(), set.Spec.Members[0].FlowID, k))
-				}
-			}
-		}
-		flows = append(flows, &f)
 	}
-	return flows, metav1.Condition{Type: ConditionValid, Status: metav1.ConditionTrue, Reason: ReasonMembersAligned,
+	ok := metav1.Condition{Type: ConditionValid, Status: metav1.ConditionTrue, Reason: ReasonMembersAligned,
 		Message: "members agree in format, rate and geometry"}
+	if c := meta.FindStatusCondition(set.Status.Conditions, ConditionValid); c != nil &&
+		c.Status == metav1.ConditionTrue && c.ObservedGeneration == set.Generation {
+		return ok
+	}
+	present := false
+	for _, m := range ms {
+		if m.apart != "" {
+			return fail(ReasonMisaligned, m.apart)
+		}
+		present = present || m.flow != nil
+	}
+	if !present {
+		return fail(ReasonMemberMissing, "no member has an MxlFlow yet")
+	}
+	return ok
 }
 
-func (r *Reconciler) ensureMirrors(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet, flows []*mxlv1alpha1.MxlFlow) (ctrl.Result, error) {
-	res := ctrl.Result{}
+// membersReady reports the members the output is served without.
+func membersReady(ms []member) metav1.Condition {
+	var missing, apart []string
+	for _, m := range ms {
+		switch {
+		case m.flow == nil:
+			missing = append(missing, fmt.Sprintf("member %s has no MxlFlow", m.ref.Name()))
+		case m.apart != "":
+			apart = append(apart, m.apart)
+		case !m.origin.Found:
+			missing = append(missing, fmt.Sprintf("member %s has no producer", m.ref.Name()))
+		}
+	}
+	switch {
+	case len(missing) > 0:
+		return metav1.Condition{Type: ConditionMembersReady, Status: metav1.ConditionFalse, Reason: ReasonMemberMissing,
+			Message: strings.Join(append(missing, apart...), "; ")}
+	case len(apart) > 0:
+		return metav1.Condition{Type: ConditionMembersReady, Status: metav1.ConditionFalse, Reason: ReasonMisaligned,
+			Message: strings.Join(apart, "; ")}
+	}
+	return metav1.Condition{Type: ConditionMembersReady, Status: metav1.ConditionTrue, Reason: ReasonMembersReady,
+		Message: "every member is produced in the output's geometry"}
+}
+
+// ensureMirrors mirrors every member that has an Origin to each node
+// the output is wanted on. A member whose producer is gone has its
+// mirrors collected by the mirror controller once they have no source;
+// they are created again here when it comes back.
+func (r *Reconciler) ensureMirrors(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet, ms []member) error {
 	for _, node := range set.Status.Nodes {
-		for i, m := range set.Spec.Members {
-			origin, err := mxlv1alpha1.ResolveOrigin(flows[i], r.freshness(ctx))
-			if err != nil {
-				return res, err
+		for i, m := range ms {
+			if !m.origin.Found || m.origin.Node == node {
+				continue // the producer is not up, or produces on that node
 			}
-			if !origin.Found {
-				res = ctrl.Result{RequeueAfter: 10 * time.Second} // the member's producer is not up
-				continue
-			}
-			if origin.Node == node {
-				continue // produced on that node
-			}
-			if err := r.ensureMirror(ctx, set, m, origin.Node, node); err != nil {
-				return res, err
+			if err := r.ensureMirror(ctx, set, set.Spec.Members[i], m.origin.Node, node); err != nil {
+				return err
 			}
 		}
 	}
-	return res, nil
+	return nil
 }
 
 func (r *Reconciler) freshness(ctx context.Context) mxlv1alpha1.LeaseFreshness {

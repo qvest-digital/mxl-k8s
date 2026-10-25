@@ -174,15 +174,106 @@ func TestRefusesAnOutputThatIsAFlow(t *testing.T) {
 	assert.Empty(t, mirrors(t, c))
 }
 
-// A member not yet published is the normal start-up order, not an
-// error: the set waits for it.
-func TestWaitsForAMissingMember(t *testing.T) {
-	r, c := harness(t, newSet("reader"), flow(memberA, video1080, "node-a"))
+// membersReady is the set's MembersReady condition.
+func membersReadyOf(t *testing.T, c client.Client) *metav1.Condition {
+	t.Helper()
+	var got mxlv1alpha1.MxlFlowRedundancySet
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "programme"}, &got))
+	return meta.FindStatusCondition(got.Status.Conditions, ConditionMembersReady)
+}
+
+// Before any member is published there is nothing to compare or serve:
+// the set waits.
+func TestWaitsForAMember(t *testing.T) {
+	r, c := harness(t, newSet("reader"))
 
 	res, cond := reconcile(t, r)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, ReasonMemberMissing, cond.Reason)
 	assert.NotZero(t, res.RequeueAfter)
 	assert.Empty(t, mirrors(t, c))
+}
+
+// A member whose producer is gone for good may never have an MxlFlow
+// again. The output is served from the members there are, and the
+// missing one is reported beside Valid rather than through it.
+func TestServesFromTheMembersPublished(t *testing.T) {
+	r, c := harness(t, newSet("reader"), flow(memberA, video1080, "node-a"))
+
+	res, cond := reconcile(t, r)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.NotZero(t, res.RequeueAfter)
+	assert.Contains(t, mirrors(t, c), memberA+"->reader")
+	ready := membersReadyOf(t, c)
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, ReasonMemberMissing, ready.Reason)
+	assert.Contains(t, ready.Message, memberB)
+}
+
+// A set exists to survive a member going away. Its MxlFlow is collected
+// once no copy is left; the gateways serve only a Valid set, so turning
+// Valid False then removed the output under every reader while the
+// other member still delivered.
+func TestStaysValidWhenAMemberGoesAway(t *testing.T) {
+	r, c := harness(t, newSet("reader"),
+		flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-b"))
+	_, cond := reconcile(t, r)
+	require.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, metav1.ConditionTrue, membersReadyOf(t, c).Status)
+
+	require.NoError(t, c.Delete(context.Background(), flow(memberB, video1080, "")))
+	_, cond = reconcile(t, r)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status, "a member gone away invalidated the set")
+	ready := membersReadyOf(t, c)
+	assert.Equal(t, ReasonMemberMissing, ready.Reason)
+	assert.Contains(t, ready.Message, memberB)
+	assert.Contains(t, mirrors(t, c), memberA+"->reader")
+}
+
+// A member that comes back in another geometry after the set was
+// served is left out of the output by the gateways; the set stays
+// valid and says which member that is.
+func TestStaysValidWhenAMemberComesBackInAnotherGeometry(t *testing.T) {
+	r, c := harness(t, newSet("reader"),
+		flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-b"))
+	reconcile(t, r)
+
+	var b mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: memberB}, &b))
+	b.Spec.Definition.Raw = []byte(video720)
+	require.NoError(t, c.Update(context.Background(), &b))
+	_, cond := reconcile(t, r)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	ready := membersReadyOf(t, c)
+	assert.Equal(t, ReasonMisaligned, ready.Reason)
+	assert.Contains(t, ready.Message, "frame_width")
+}
+
+// The mirror of a member whose producer is gone is collected once it
+// has no source. When the producer comes back it is mirrored again.
+func TestMirrorsAMemberAgainWhenItsProducerReturns(t *testing.T) {
+	r, c := harness(t, newSet("reader"),
+		flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-b"))
+	reconcile(t, r)
+	ctx := context.Background()
+
+	var b mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: memberB}, &b))
+	b.Status.Locations = nil
+	require.NoError(t, c.Update(ctx, &b))
+	m := mirrors(t, c)[memberB+"->reader"]
+	require.NoError(t, c.Delete(ctx, &m))
+	reconcile(t, r)
+	assert.NotContains(t, mirrors(t, c), memberB+"->reader")
+	assert.Equal(t, metav1.ConditionFalse, membersReadyOf(t, c).Status)
+
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: memberB}, &b))
+	b.Status.Locations = []mxlv1alpha1.MxlFlowLocation{{NodeName: "node-c", Phase: mxlv1alpha1.MxlFlowLocationOrigin}}
+	require.NoError(t, c.Update(ctx, &b))
+	reconcile(t, r)
+	assert.Equal(t, "node-c", mirrors(t, c)[memberB+"->reader"].Spec.SourceNode)
+	assert.Equal(t, metav1.ConditionTrue, membersReadyOf(t, c).Status)
 }
 
 // A member whose producer is down is mirrored once it comes back; the

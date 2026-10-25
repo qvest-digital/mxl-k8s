@@ -115,6 +115,9 @@ func TestRedundancySetAgainstAnAPIServer(t *testing.T) {
 		cond := meta.FindStatusCondition(got.Status.Conditions, ConditionValid)
 		require.NotNil(t, cond)
 		assert.Equal(t, metav1.ConditionTrue, cond.Status)
+		ready := meta.FindStatusCondition(got.Status.Conditions, ConditionMembersReady)
+		require.NotNil(t, ready)
+		assert.Equal(t, metav1.ConditionTrue, ready.Status)
 		assert.Equal(t, []string{"reader"}, got.Status.Nodes, "the operator's status write keeps the agents' nodes")
 
 		var list mxlv1alpha1.MxlFlowMirrorList
