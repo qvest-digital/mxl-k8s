@@ -107,6 +107,11 @@ type Reconciler struct {
 	// or a receiver created a moment ago. Nil falls back to the cached
 	// Client; production wires mgr.GetAPIReader().
 	APIReader client.Reader
+
+	// RedundancySets counts an owning MxlFlowRedundancySet as a claim.
+	// Off, such an owner reference is not read: the operator then has no
+	// access to sets, and the kind may not be installed.
+	RedundancySets bool
 }
 
 // liveReader returns the APIReader when set, otherwise the cached
@@ -320,7 +325,7 @@ func (r *Reconciler) claimFrom(ctx context.Context, reader client.Reader, m *mxl
 	}
 
 	for _, or := range m.OwnerReferences {
-		if or.Kind != "MxlFlowRedundancySet" || or.APIVersion != mxlv1alpha1.GroupVersion.String() {
+		if !r.RedundancySets || or.Kind != "MxlFlowRedundancySet" || or.APIVersion != mxlv1alpha1.GroupVersion.String() {
 			continue
 		}
 		var set mxlv1alpha1.MxlFlowRedundancySet

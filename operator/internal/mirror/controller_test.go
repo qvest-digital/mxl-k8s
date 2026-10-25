@@ -281,6 +281,7 @@ func set(uid types.UID, nodes ...string) *mxlv1alpha1.MxlFlowRedundancySet {
 func TestClaim_SetWantingOutputOnTarget_IsKept(t *testing.T) {
 	m := newMirror(withSetOwner("programme", "set-uid"))
 	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), set("set-uid", tgtNode))
+	r.RedundancySets = true
 
 	reconcileOnce(t, r, m.Name)
 	assert.False(t, mirrorGone(t, c, m.Name))
@@ -293,6 +294,7 @@ func TestClaim_SetWantingOutputOnTarget_IsKept(t *testing.T) {
 func TestClaim_SetNotWantingOutputOnTarget_IsCollected(t *testing.T) {
 	m := newMirror(withSetOwner("programme", "set-uid"))
 	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), set("set-uid", "elsewhere"))
+	r.RedundancySets = true
 
 	reconcileOnce(t, r, m.Name)
 	assert.True(t, mirrorGone(t, c, m.Name))
@@ -301,6 +303,18 @@ func TestClaim_SetNotWantingOutputOnTarget_IsCollected(t *testing.T) {
 func TestClaim_SetRecreatedUnderTheSameName_IsNotAClaim(t *testing.T) {
 	m := newMirror(withSetOwner("programme", "old-uid"))
 	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), set("new-uid", tgtNode))
+	r.RedundancySets = true
+
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name))
+}
+
+// Without redundancy sets the operator has no access to them, and an
+// owner reference left from when it had is no claim: the mirror goes
+// like any other nothing wants.
+func TestClaim_SetOwnerWithoutRedundancySets_IsNotAClaim(t *testing.T) {
+	m := newMirror(withSetOwner("programme", "set-uid"))
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), set("set-uid", tgtNode))
 
 	reconcileOnce(t, r, m.Name)
 	assert.True(t, mirrorGone(t, c, m.Name))
