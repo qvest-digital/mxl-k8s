@@ -101,6 +101,18 @@ tests:
       - failedTemplate:
           errorMessage: "mxlfs.enabled requires agent.enabled: the agent mounts mxlfs and writes the ready marker the gateway and exporter wait for"
 
+  # Outside the host PID namespace /proc holds only the agent's own
+  # processes: no placeholder open resolves to a pod, so no mirror
+  # starts, and no reader keeps a redundancy set output in use.
+  - it: refuses mxlfs with the agent outside the host PID namespace
+    template: templates/daemonset-agent.yaml
+    set:
+      mxlfs.enabled: true
+      agent.hostPID: false
+    asserts:
+      - failedTemplate:
+          errorMessage: "mxlfs.enabled requires agent.hostPID: the agent finds the pod of each process opening a placeholder, and the readers of each redundancy set output, through /proc"
+
   - it: runs the agent privileged with Bidirectional propagation and --mxlfs
     set:
       mxlfs.enabled: true

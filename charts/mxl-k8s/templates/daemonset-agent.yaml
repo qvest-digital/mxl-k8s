@@ -5,6 +5,9 @@
 {{- if and .Values.agent.csi.enabled (not .Values.mxlfs.enabled) }}
 {{- fail "agent.csi.enabled requires mxlfs.enabled" }}
 {{- end }}
+{{- if and .Values.mxlfs.enabled (not .Values.agent.hostPID) }}
+{{- fail "mxlfs.enabled requires agent.hostPID: the agent finds the pod of each process opening a placeholder, and the readers of each redundancy set output, through /proc" }}
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
