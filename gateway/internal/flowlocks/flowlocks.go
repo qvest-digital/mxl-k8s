@@ -23,7 +23,13 @@ var ProcLocks = "/proc/locks"
 
 // ForeignWriters counts the flocks other processes hold on the file at
 // dataPath. A missing file has none.
-func ForeignWriters(dataPath string) (int, error) {
+func ForeignWriters(dataPath string) (int, error) { return writers(dataPath, os.Getpid()) }
+
+// Writers counts every flock on the file at dataPath, this process's
+// own included. A missing file has none.
+func Writers(dataPath string) (int, error) { return writers(dataPath, -1) }
+
+func writers(dataPath string, self int) (int, error) {
 	var st unix.Stat_t
 	if err := unix.Stat(dataPath, &st); err != nil {
 		if os.IsNotExist(err) {
@@ -36,7 +42,7 @@ func ForeignWriters(dataPath string) (int, error) {
 		return 0, err
 	}
 	defer f.Close()
-	return count(f, unix.Major(st.Dev), unix.Minor(st.Dev), st.Ino, os.Getpid())
+	return count(f, unix.Major(st.Dev), unix.Minor(st.Dev), st.Ino, self)
 }
 
 // count reads /proc/locks lines such as

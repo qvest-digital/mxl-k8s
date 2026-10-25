@@ -58,3 +58,21 @@ func TestForeignWritersCountsOtherProcesses(t *testing.T) {
 		return err == nil && n == 1
 	}, 5*time.Second, 20*time.Millisecond)
 }
+
+// Writers counts this process's own writers too: a directory one of the
+// gateway's writers holds is not a leftover to remove.
+func TestWritersCountsOwnFlocks(t *testing.T) {
+	data := filepath.Join(t.TempDir(), "data")
+	require.NoError(t, os.WriteFile(data, nil, 0o644))
+	n, err := Writers(data)
+	require.NoError(t, err)
+	require.Zero(t, n)
+
+	own, err := os.Open(data)
+	require.NoError(t, err)
+	defer own.Close()
+	require.NoError(t, unix.Flock(int(own.Fd()), unix.LOCK_SH))
+	n, err = Writers(data)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+}

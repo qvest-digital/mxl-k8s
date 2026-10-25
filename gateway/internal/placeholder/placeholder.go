@@ -13,14 +13,23 @@
 // the target reconciler calls Filled. Or a process on this node opens it
 // as a writer, a producer whose flow happened to be absent here: the
 // local writer wins, and the gateway gives the flow up to it.
+//
+// libmxl opens a flow that exists instead of creating it, whatever
+// geometry it was asked for, so a placeholder of a geometry the flow no
+// longer has would be taken over as it is, by a mirror or by a producer.
+// A placeholder is therefore held only while the flow has an Origin, the
+// producer whose geometry the MxlFlow describes, and one whose geometry
+// no longer matches the MxlFlow is replaced.
 package placeholder
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +37,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/qvest-digital/go-mxl/mxl"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -61,12 +71,13 @@ type Manager struct {
 	// Domain opens the domain an MxlFlow's spec.domain names.
 	Domain func(ctx context.Context, name string) (Handles, error)
 	// Period is how often held placeholders are checked for a local
-	// writer.
+	// writer and against their MxlFlow.
 	Period time.Duration
 	// LocalWriter is called before a placeholder is given up to a local
 	// writer, so whatever fills the flow stops first.
 	LocalWriter func(domain, id string)
 
+	rmu  sync.Mutex // one Reconcile at a time: the controller's and Start's
 	mu   sync.Mutex
 	held map[string]*entry // by MxlFlow name
 }
@@ -82,8 +93,35 @@ func (m *Manager) dataPath(e *entry) string {
 	return filepath.Join(e.domain, e.id+".mxl-flow", "data")
 }
 
-// Reconcile creates or drops the placeholder of one MxlFlow.
+// geometryKeys are the definition keys a flow's ring is laid out from.
+var geometryKeys = []string{"format", "media_type", "grain_rate", "sample_rate", "frame_width", "frame_height",
+	"interlace_mode", "components", "channel_count", "bit_depth"}
+
+// SameGeometry reports whether two flow definitions describe rings of
+// one layout. A definition that is no JSON object matches none.
+func SameGeometry(a, b []byte) bool {
+	var x, y map[string]any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	for _, k := range geometryKeys {
+		if !reflect.DeepEqual(x[k], y[k]) {
+			return false
+		}
+	}
+	return true
+}
+
+// onDiskDefinition is the definition the flow directory dir was built
+// from.
+func onDiskDefinition(dir string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(dir, "flow_def.json"))
+}
+
+// Reconcile creates, replaces or drops the placeholder of one MxlFlow.
 func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
+	m.rmu.Lock()
+	defer m.rmu.Unlock()
 	l := log.FromContext(ctx).WithValues("flow", req.Name)
 	var flow mxlv1alpha1.MxlFlow
 	if err := m.Client.Get(ctx, req.NamespacedName, &flow); err != nil {
@@ -99,9 +137,26 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	}
 
 	m.mu.Lock()
-	_, have := m.held[req.Name]
+	e := m.held[req.Name]
 	m.mu.Unlock()
-	if have || m.hasLocation(&flow) || len(flow.Spec.Definition.Raw) == 0 {
+	if e != nil {
+		// A placeholder a mirror fills is that mirror's copy until it goes.
+		if e.filled {
+			return reconcile.Result{}, nil
+		}
+		def, err := onDiskDefinition(filepath.Dir(m.dataPath(e)))
+		if err == nil && hasOrigin(&flow) && SameGeometry(def, flow.Spec.Definition.Raw) {
+			return reconcile.Result{}, nil
+		}
+		// One a producer here opened is the producer's: CheckLocalWriters
+		// gives it up.
+		if n, err := foreignWriters(m.dataPath(e)); err != nil || n > 0 {
+			return reconcile.Result{}, err
+		}
+		l.Info("retiring placeholder", "origin", hasOrigin(&flow), "domain", e.domain)
+		m.drop(l, req.Name)
+	}
+	if m.hasLocation(&flow) || len(flow.Spec.Definition.Raw) == 0 || !hasOrigin(&flow) {
 		return reconcile.Result{}, nil
 	}
 
@@ -113,7 +168,7 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 		return reconcile.Result{}, nil
 	}
 	domain := h.DomainPath()
-	e := &entry{domain: domain, id: flow.Spec.ID}
+	e = &entry{domain: domain, id: flow.Spec.ID}
 
 	// A flow some process here already writes is not absent. Whether it
 	// exists at all is read from the directory: a path walk into a
@@ -126,6 +181,19 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	if exists {
 		if n, err := foreignWriters(m.dataPath(e)); err != nil || n > 0 {
 			return reconcile.Result{}, err
+		}
+		// libmxl would open a directory of another geometry as it is. One
+		// nothing holds is a leftover and goes; one a mirror here still
+		// writes is tried again once it is released.
+		dir := filepath.Dir(m.dataPath(e))
+		if def, err := onDiskDefinition(dir); err != nil || !SameGeometry(def, flow.Spec.Definition.Raw) {
+			if n, err := flowlocks.Writers(m.dataPath(e)); err != nil || n > 0 {
+				return reconcile.Result{RequeueAfter: m.period()}, err
+			}
+			if err := os.RemoveAll(dir); err != nil {
+				return reconcile.Result{}, err
+			}
+			l.Info("removed a leftover copy of another geometry", "domain", domain)
 		}
 	}
 	if err := os.MkdirAll(filepath.Join(domain, MarkerDir), 0o755); err != nil {
@@ -176,6 +244,17 @@ func present(domain, id string) (bool, error) {
 	return false, nil
 }
 
+// hasOrigin reports whether a producer publishes the flow, which is what
+// makes the MxlFlow's definition the geometry it is written in.
+func hasOrigin(flow *mxlv1alpha1.MxlFlow) bool {
+	for _, loc := range flow.Status.Locations {
+		if loc.Phase == mxlv1alpha1.MxlFlowLocationOrigin {
+			return true
+		}
+	}
+	return false
+}
+
 // hasLocation reports whether the flow has a copy on this node already.
 func (m *Manager) hasLocation(flow *mxlv1alpha1.MxlFlow) bool {
 	for _, loc := range flow.Status.Locations {
@@ -199,6 +278,22 @@ func (m *Manager) drop(l logr.Logger, name string) {
 	_ = e.writer.Close()
 	_ = os.Remove(MarkerPath(e.domain, e.id))
 	l.Info("dropped placeholder", "domain", e.domain)
+}
+
+// Retire releases the placeholder of flow id in domain, filled or not,
+// for a mirror that has to replace a directory of another geometry.
+func (m *Manager) Retire(domain, id string) {
+	m.mu.Lock()
+	var name string
+	for n, e := range m.held {
+		if e.domain == domain && strings.EqualFold(e.id, id) {
+			name = n
+		}
+	}
+	m.mu.Unlock()
+	if name != "" {
+		m.drop(log.Log.WithName("placeholder"), name)
+	}
 }
 
 // Filled marks the placeholder of flow id in domain as a mirror's copy:
@@ -263,15 +358,20 @@ func (m *Manager) CheckLocalWriters(l logr.Logger) {
 	}
 }
 
+func (m *Manager) period() time.Duration {
+	if m.Period <= 0 {
+		return time.Second
+	}
+	return m.Period
+}
+
 // Start runs the local-writer check every Period until ctx ends, then
-// releases every placeholder.
+// releases every placeholder. Each pass also reconciles every held
+// placeholder again: one a mirror released is retired then if its flow
+// lost its Origin or changed geometry while the mirror held it.
 func (m *Manager) Start(ctx context.Context) error {
 	l := log.FromContext(ctx).WithName("placeholder")
-	period := m.Period
-	if period <= 0 {
-		period = time.Second
-	}
-	t := time.NewTicker(period)
+	t := time.NewTicker(m.period())
 	defer t.Stop()
 	for {
 		select {
@@ -288,6 +388,11 @@ func (m *Manager) Start(ctx context.Context) error {
 			return nil
 		case <-t.C:
 			m.CheckLocalWriters(l)
+			for _, name := range m.Held() {
+				if _, err := m.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}}); err != nil {
+					l.Error(err, "reconcile held placeholder", "flow", name)
+				}
+			}
 		}
 	}
 }

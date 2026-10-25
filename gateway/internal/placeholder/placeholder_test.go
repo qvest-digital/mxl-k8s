@@ -2,9 +2,11 @@ package placeholder
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +85,10 @@ func flow(locations ...mxlv1alpha1.MxlFlowLocation) *mxlv1alpha1.MxlFlow {
 	}
 }
 
+// origin is the producer the MxlFlow's definition describes. A flow
+// without one gets no placeholder.
+var origin = mxlv1alpha1.MxlFlowLocation{NodeName: "node-b", Phase: mxlv1alpha1.MxlFlowLocationOrigin}
+
 func reconcileFlow(t *testing.T, m *Manager) {
 	t.Helper()
 	_, err := m.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: flowID}})
@@ -114,7 +120,7 @@ func TestFlowWithALocalCopyGetsNone(t *testing.T) {
 
 func TestDeletedFlowDropsItsPlaceholder(t *testing.T) {
 	h := newDomain(t)
-	f := flow()
+	f := flow(origin)
 	m := newManager(t, h, f)
 	reconcileFlow(t, m)
 	require.DirExists(t, flowDir(h))
@@ -129,7 +135,7 @@ func TestDeletedFlowDropsItsPlaceholder(t *testing.T) {
 
 func TestFilledPlaceholderLosesItsMarker(t *testing.T) {
 	h := newDomain(t)
-	m := newManager(t, h, flow())
+	m := newManager(t, h, flow(origin))
 	reconcileFlow(t, m)
 
 	m.Filled(h.dir, flowID)
@@ -152,7 +158,7 @@ func lockShared(t *testing.T, path string) {
 
 func TestLocalWriterWins(t *testing.T) {
 	h := newDomain(t)
-	m := newManager(t, h, flow())
+	m := newManager(t, h, flow(origin))
 	var stopped []string
 	m.LocalWriter = func(domain, id string) { stopped = append(stopped, id) }
 	reconcileFlow(t, m)
@@ -172,7 +178,7 @@ func TestFlowAProcessHereWritesGetsNoPlaceholder(t *testing.T) {
 	data := filepath.Join(flowDir(h), "data")
 	require.NoError(t, os.WriteFile(data, nil, 0o644))
 	lockShared(t, data)
-	m := newManager(t, h, flow())
+	m := newManager(t, h, flow(origin))
 
 	reconcileFlow(t, m)
 
@@ -225,4 +231,152 @@ func TestUnfilledLeavesATakenOverFlowAlone(t *testing.T) {
 	m := newManager(t, h)
 	m.Unfilled(h.dir, flowID)
 	require.False(t, IsPlaceholder(h.dir, flowID))
+}
+
+// larger is flowDef at twice the size: another ring layout.
+var larger = strings.NewReplacer("320", "640", "180", "360", "160", "320").Replace(flowDef)
+
+func onDiskWidth(t *testing.T, h *handles) any {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(flowDir(h), "flow_def.json"))
+	require.NoError(t, err)
+	var def map[string]any
+	require.NoError(t, json.Unmarshal(raw, &def))
+	return def["frame_width"]
+}
+
+func setDefinition(t *testing.T, m *Manager, def string) {
+	t.Helper()
+	var f mxlv1alpha1.MxlFlow
+	require.NoError(t, m.Client.Get(context.Background(), types.NamespacedName{Name: flowID}, &f))
+	f.Spec.Definition = runtime.RawExtension{Raw: []byte(def)}
+	require.NoError(t, m.Client.Update(context.Background(), &f))
+}
+
+func setLocations(t *testing.T, m *Manager, locs ...mxlv1alpha1.MxlFlowLocation) {
+	t.Helper()
+	var f mxlv1alpha1.MxlFlow
+	require.NoError(t, m.Client.Get(context.Background(), types.NamespacedName{Name: flowID}, &f))
+	f.Status.Locations = locs
+	require.NoError(t, m.Client.Status().Update(context.Background(), &f))
+}
+
+// A flow nothing produces has no geometry anyone vouches for: the next
+// producer may bring another one, and libmxl would hand it a
+// placeholder of the old one as its own.
+func TestFlowWithoutAnOriginGetsNoPlaceholder(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(mxlv1alpha1.MxlFlowLocation{NodeName: "node-b", Phase: mxlv1alpha1.MxlFlowLocationStale}))
+
+	reconcileFlow(t, m)
+
+	require.Empty(t, m.Held())
+	require.NoDirExists(t, flowDir(h))
+}
+
+func TestPlaceholderGoesWithItsOrigin(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	reconcileFlow(t, m)
+	require.DirExists(t, flowDir(h))
+
+	setLocations(t, m, mxlv1alpha1.MxlFlowLocation{NodeName: "node-b", Phase: mxlv1alpha1.MxlFlowLocationStale})
+	reconcileFlow(t, m)
+
+	require.Empty(t, m.Held())
+	require.False(t, IsPlaceholder(h.dir, flowID))
+	require.NoDirExists(t, flowDir(h), "a producer starting here would open the old placeholder as its flow")
+}
+
+func TestPlaceholderOfAnotherGeometryIsReplaced(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	reconcileFlow(t, m)
+	require.EqualValues(t, 320, onDiskWidth(t, h))
+
+	setDefinition(t, m, larger)
+	reconcileFlow(t, m)
+
+	require.Equal(t, []string{flowID}, m.Held())
+	require.True(t, IsPlaceholder(h.dir, flowID))
+	require.EqualValues(t, 640, onDiskWidth(t, h), "the placeholder kept the geometry the flow no longer has")
+}
+
+// A producer that opened the placeholder writes into it: only giving it
+// up to the producer is left, which CheckLocalWriters does.
+func TestPlaceholderAProducerOpenedIsNotReplaced(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	reconcileFlow(t, m)
+	lockShared(t, filepath.Join(flowDir(h), "data"))
+
+	setDefinition(t, m, larger)
+	reconcileFlow(t, m)
+
+	require.EqualValues(t, 320, onDiskWidth(t, h))
+	require.Equal(t, []string{flowID}, m.Held())
+}
+
+// A mirror's copy is not replaced under it. Once the mirror goes, the
+// periodic pass retires it.
+func TestFilledPlaceholderIsReplacedOnceReleased(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	m.Period = 10 * time.Millisecond
+	reconcileFlow(t, m)
+	m.Filled(h.dir, flowID)
+
+	setDefinition(t, m, larger)
+	reconcileFlow(t, m)
+	require.EqualValues(t, 320, onDiskWidth(t, h), "a filled placeholder was replaced under its mirror")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = m.Start(ctx) }()
+	defer func() { cancel(); <-done }()
+	m.Unfilled(h.dir, flowID)
+
+	require.Eventually(t, func() bool {
+		raw, err := os.ReadFile(filepath.Join(flowDir(h), "flow_def.json"))
+		return err == nil && strings.Contains(string(raw), `"frame_width":640`)
+	}, 5*time.Second, 10*time.Millisecond, "the released placeholder kept its old geometry")
+	require.True(t, IsPlaceholder(h.dir, flowID))
+}
+
+// A directory nothing holds, left by a copy of the old geometry, is not
+// opened as the placeholder: libmxl would keep its layout.
+func TestLeftoverOfAnotherGeometryIsReplaced(t *testing.T) {
+	h := newDomain(t)
+	require.NoError(t, os.MkdirAll(flowDir(h), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(flowDir(h), "flow_def.json"), []byte(flowDef), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(flowDir(h), "data"), nil, 0o644))
+	m := newManager(t, h, flow(origin))
+	setDefinition(t, m, larger)
+
+	reconcileFlow(t, m)
+
+	require.Equal(t, []string{flowID}, m.Held())
+	require.EqualValues(t, 640, onDiskWidth(t, h))
+}
+
+// A mirror replacing a directory of another geometry releases the
+// placeholder held there, filled or not.
+func TestRetireReleasesThePlaceholder(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	reconcileFlow(t, m)
+	m.Filled(h.dir, flowID)
+
+	m.Retire(h.dir, strings.ToUpper(flowID))
+
+	require.Empty(t, m.Held())
+	require.NoDirExists(t, flowDir(h))
+}
+
+func TestSameGeometry(t *testing.T) {
+	relabelled := strings.Replace(flowDef, `"label":"placeholder test"`, `"label":"renamed"`, 1)
+	require.True(t, SameGeometry([]byte(flowDef), []byte(relabelled)), "a label is no part of the ring")
+	require.False(t, SameGeometry([]byte(flowDef), []byte(larger)))
+	require.False(t, SameGeometry([]byte(flowDef), []byte(strings.Replace(flowDef, `"numerator":50`, `"numerator":25`, 1))))
+	require.False(t, SameGeometry([]byte(flowDef), []byte("not json")))
 }
