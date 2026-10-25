@@ -60,8 +60,10 @@ type running struct {
 	failed  bool     // a Replace failed, which may leave the engine half replaced
 	// retrying holds the spec members replaced underneath the engine
 	// whose new ring could not be opened yet; serves keeps the engine
-	// for them until the next recheck tries again.
+	// for them until the next recheck tries again. retries counts the
+	// rechecks each has been tried at in a row.
 	retrying map[int]bool
+	retries  map[int]int
 }
 
 // serves reports whether cur still serves set as it stands: the same
@@ -123,22 +125,39 @@ var replace = (*Engine).Replace
 // cannot take that way, in another geometry or on an mxlfs without
 // MXLFS_IOC_VIEW_REPLACE_SOURCE, is left to serves, which rebuilds. One
 // whose directory could not be read, gone again or not yet whole, is
-// tried again at the next recheck, and is in retrying until then.
+// tried again at the next recheck, and is in retrying until then, for at
+// most maxRetries rechecks: the engine is kept for it meanwhile, so it
+// must not hold off a rebuild the other members need for long.
 func (cur *running) replaceRestarted(l logr.Logger, set *mxlv1alpha1.MxlFlowRedundancySet) {
 	if cur == nil || cur.uid != set.UID || cur.gen != set.Generation {
 		return
 	}
+	if cur.retries == nil {
+		cur.retries = map[int]int{}
+	}
 	cur.retrying = map[int]bool{}
+	retry := func(i int, msg, id string, err error) bool {
+		if cur.retries[i]++; cur.retries[i] > maxRetries {
+			l.Info(msg+"; building the output again", "member", id, "error", err.Error())
+			cur.failed = true
+			return false
+		}
+		l.Info(msg+"; trying again", "member", id, "error", err.Error())
+		cur.retrying[i] = true
+		return true
+	}
 	for i, ino := range inodes(cur.domain, set.Spec.Members) {
 		m := slices.Index(cur.started, i)
 		if ino == 0 || ino == cur.seen[i] || m < 0 {
+			delete(cur.retries, i)
 			continue
 		}
 		id := set.Spec.Members[i].FlowID
 		def, err := os.ReadFile(filepath.Join(flowDir(cur.domain, id), "flow_def.json"))
 		if err != nil {
-			l.Info("cannot read a restarted member's definition; trying again", "member", id, "error", err.Error())
-			cur.retrying[i] = true
+			if !retry(i, "cannot read a restarted member's definition", id, err) {
+				return
+			}
 			continue
 		}
 		if !placeholder.SameGeometry(cur.def, def) {
@@ -147,8 +166,9 @@ func (cur *running) replaceRestarted(l logr.Logger, set *mxlv1alpha1.MxlFlowRedu
 		got, err := replace(cur.engine, m)
 		switch {
 		case errors.Is(err, ErrNotOpened):
-			l.Info("cannot open a restarted member's ring; trying again", "member", id, "error", err.Error())
-			cur.retrying[i] = true
+			if !retry(i, "cannot open a restarted member's ring", id, err) {
+				return
+			}
 		case err != nil:
 			l.Info("cannot replace a restarted member in place; building the output again", "member", id,
 				"error", err.Error())
@@ -156,9 +176,14 @@ func (cur *running) replaceRestarted(l logr.Logger, set *mxlv1alpha1.MxlFlowRedu
 			return
 		default:
 			cur.seen[i] = got
+			delete(cur.retries, i)
 		}
 	}
 }
+
+// maxRetries is how many rechecks in a row a restarted member whose ring
+// could not be opened keeps the engine before the output is built again.
+const maxRetries = 3
 
 // recheck is how often a served set is looked at again for a member
 // that appeared or was replaced underneath its engine, which raises no

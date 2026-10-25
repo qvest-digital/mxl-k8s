@@ -184,6 +184,8 @@ type Engine struct {
 	// a view's source; replaces hands Replace to the engine's loop.
 	replaceable bool
 	replaces    chan replaceReq
+	closing     sync.RWMutex // held by Replace, taken by Close
+	closed      bool
 
 	waitFailed sync.Once // logs the first futex_waitv failure
 
@@ -236,7 +238,7 @@ func (e *Engine) checkAligned() error {
 	m0 := e.members[0]
 	for i, m := range e.members[1:] {
 		if !aligned(m0, m) {
-			return fmt.Errorf("member %s differs from %s in format, rate or ring geometry", e.spec.Members[i+1], e.spec.Members[0])
+			return fmt.Errorf("member %s has %s, %s %s", e.spec.Members[i+1], m.layout(), e.spec.Members[0], m0.layout())
 		}
 	}
 	e.rate = m0.info.config.common.grainRate
@@ -574,10 +576,20 @@ func (e *Engine) MemberIndex(id string) int {
 // MXLFS_IOC_VIEW_REPLACE_SOURCE.
 var ErrNoReplace = errors.New("mxlfs has no MXLFS_IOC_VIEW_REPLACE_SOURCE")
 
-// ErrNotOpened is Replace failing before it touched the engine: the
-// member's new ring could not be opened, or is not of the output's
-// geometry. The engine serves on as it was.
-var ErrNotOpened = errors.New("the member's ring could not be taken")
+// ErrNotOpened is Replace failing before it touched the engine because
+// the member's new ring could not be opened. The engine serves on as it
+// was.
+var ErrNotOpened = errors.New("the member's ring could not be opened")
+
+// ErrOtherLayout is Replace refusing a new ring whose layout is not the
+// output's. The flow definition does not show a ring's depth, which is
+// the domain's history duration times the rate: a member restarted after
+// the domain's history duration changed has the output's geometry by its
+// definition and still another depth. Trying again cannot change that.
+// The engine serves on as it was; only an output built again can take it.
+var ErrOtherLayout = errors.New("the member's ring is not of the output's layout")
+
+var errStopped = errors.New("engine stopped")
 
 type replaceReq struct {
 	member int
@@ -620,13 +632,22 @@ func (r *memberRing) close(taken bool) {
 // it every file: the output and the readers holding it stay as they are,
 // only the member's source in each view is replaced. The ring is opened
 // here, so the engine's loop is held only for the selects and the swap.
-// ErrNotOpened leaves the engine as it was; any other error may leave
-// it half replaced, and then it has to be closed.
+// ErrNoReplace, ErrNotOpened, ErrOtherLayout and an engine closed leave
+// the engine as it was; any other error may leave it half replaced, and
+// then it has to be closed. Close waits for a Replace under way.
 func (e *Engine) Replace(member int) (uint64, error) {
 	if !e.replaceable {
 		return 0, ErrNoReplace
 	}
+	e.closing.RLock()
+	defer e.closing.RUnlock()
+	if e.closed {
+		return 0, errStopped
+	}
 	r, err := e.openRing(member)
+	if errors.Is(err, ErrOtherLayout) {
+		return 0, err
+	}
 	if err != nil {
 		return 0, fmt.Errorf("%w: %w", ErrNotOpened, err)
 	}
@@ -635,7 +656,7 @@ func (e *Engine) Replace(member int) (uint64, error) {
 	case e.replaces <- req:
 	case <-e.done:
 		r.close(false)
-		return 0, errors.New("engine stopped")
+		return 0, errStopped
 	}
 	if err := <-req.done; err != nil {
 		return 0, err
@@ -677,7 +698,8 @@ func (e *Engine) openRing(member int) (_ *memberRing, err error) {
 	}
 	r.ino = st.Ino
 	if !aligned(e.out, r.h) {
-		return nil, fmt.Errorf("member %s is not of the output's geometry", e.spec.Members[member])
+		return nil, fmt.Errorf("%w: member %s has %s, the output %s", ErrOtherLayout, e.spec.Members[member],
+			r.h.layout(), e.out.layout())
 	}
 	if e.disc == nil {
 		s, err := open("channels")
@@ -700,6 +722,16 @@ func (e *Engine) openRing(member int) (_ *memberRing, err error) {
 		r.mems = append(r.mems, mem)
 	}
 	return r, nil
+}
+
+// layout describes what aligned compares.
+func (h *header) layout() string {
+	r := h.info.config.common.grainRate
+	if h.format() == formatAudio {
+		c, l := h.continuous()
+		return fmt.Sprintf("format %d at %d/%d, %d channels of %d samples", h.format(), r.numerator, r.denominator, c, l)
+	}
+	return fmt.Sprintf("format %d at %d/%d, %d grains", h.format(), r.numerator, r.denominator, h.discrete())
 }
 
 // aligned reports whether member m's ring has the layout of ref's.
@@ -952,6 +984,9 @@ func (e *Engine) fed(i int) bool { return e.feeds != nil && e.feeds[i] }
 
 // Close stops serving and removes the output from the domain.
 func (e *Engine) Close() {
+	e.closing.Lock()
+	e.closed = true
+	e.closing.Unlock()
 	if e.cancel != nil {
 		e.cancel()
 		<-e.done

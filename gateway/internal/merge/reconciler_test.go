@@ -382,6 +382,7 @@ func TestReconcilerRebuildsForARestartedMemberItCannotReplace(t *testing.T) {
 	}{
 		"no ioctl":                {videoDef, ErrNoReplace, false, []int{0}},
 		"failed, then gone again": {videoDef, unix.EINVAL, true, []int{0}},
+		"another ring depth":      {videoDef, fmt.Errorf("%w: 21 grains, the output 22", ErrOtherLayout), false, []int{0}},
 		"another geometry":        {func(id string) string { return strings.Replace(videoDef(id), "320", "160", 1) }, nil, false, nil},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -445,4 +446,57 @@ func TestReconcilerTriesAgainForARingItCouldNotOpen(t *testing.T) {
 	require.Len(t, *started, 1)
 	reconcileSet(t, r)
 	require.Equal(t, []int{0, 0}, asked, "a member replaced once was tried again")
+}
+
+// The flow definition does not carry a ring's depth: a member restarted
+// after the domain's history duration changed between the output's build
+// and the restart is of the output's geometry by its definition and still
+// cannot take its old place. Only a build can take it, and with
+// the other member gone for good the output must be built over it rather
+// than stay frozen on the gone member's ring.
+func TestReconcilerRebuildsOverAMemberRestartedWithAnotherRingDepth(t *testing.T) {
+	started := startWithSpec(t)
+	dir := t.TempDir()
+	asked := fakeReplace(t, dir, fmt.Errorf("%w: 21 grains, the output 22", ErrOtherLayout), nil)
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+	f, err := os.Open(filepath.Join(flowDir(dir, memberA), "data"))
+	require.NoError(t, err)
+	t.Cleanup(func() { f.Close() })
+
+	require.NoError(t, os.RemoveAll(flowDir(dir, memberB)))
+	memberDir(t, dir, memberA, videoDef(memberA))
+	reconcileSet(t, r)
+	require.Equal(t, []int{0}, *asked)
+	require.Equal(t, [][]string{{memberA, memberB}, {memberA}}, *started)
+}
+
+// A ring that cannot be opened keeps the engine while it is tried again,
+// but not for long: meanwhile the restarted member counts as one still
+// served, and the output would stay frozen on the others' rings when
+// they are gone too.
+func TestReconcilerStopsTryingARingItCannotOpen(t *testing.T) {
+	started := startWithSpec(t)
+	dir := t.TempDir()
+	asked := fakeReplace(t, dir, fmt.Errorf("%w: %w", ErrNotOpened, unix.ENOENT), nil)
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+	f, err := os.Open(filepath.Join(flowDir(dir, memberA), "data"))
+	require.NoError(t, err)
+	t.Cleanup(func() { f.Close() })
+
+	require.NoError(t, os.RemoveAll(flowDir(dir, memberB)))
+	memberDir(t, dir, memberA, videoDef(memberA))
+	for range maxRetries {
+		require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter)
+	}
+	require.Len(t, *started, 1, "the engine was not kept while the ring was tried again")
+	reconcileSet(t, r)
+	require.Len(t, *asked, maxRetries+1)
+	require.Equal(t, [][]string{{memberA, memberB}, {memberA}}, *started,
+		"the output stayed on a gone member's ring while the other could not be opened")
 }

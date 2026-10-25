@@ -811,3 +811,34 @@ func TestEngineTakesARestartedMembersRingInPlace(t *testing.T) {
 		})
 	}
 }
+
+// A ring's depth comes from the domain's history duration, not from the
+// flow's definition, so a member restarted after the domain's history
+// duration changed passes every check of its definition. Replace must refuse it as a ring of another
+// layout, which the reconciler builds the output again for, not as one
+// it could not open, which it tries again. It runs without mxlfs: the
+// ring is refused before any view is touched.
+func TestEngineRefusesARingOfAnotherDepth(t *testing.T) {
+	ring := func(history int) string {
+		domain := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(domain, "options.json"),
+			[]byte(fmt.Sprintf(`{"urn:x-mxl:option:history_duration/v1.0": %d}`, history)), 0o644))
+		inst, err := mxl.NewInstance(domain, "")
+		require.NoError(t, err)
+		t.Cleanup(func() { inst.Close() })
+		w, _, err := inst.NewWriter(videoDef(memberA))
+		require.NoError(t, err)
+		t.Cleanup(func() { w.Close() })
+		return domain
+	}
+	out, f, err := mapHeader(filepath.Join(flowDir(ring(400000000), memberA), "data"), false)
+	require.NoError(t, err)
+	e := &Engine{spec: Spec{DomainDir: ring(200000000), Members: []string{memberA}}, out: out, outFile: f,
+		disc: &Discrete{}, replaceable: true}
+	t.Cleanup(e.release)
+
+	_, err = e.Replace(0)
+	require.ErrorIs(t, err, ErrOtherLayout)
+	require.NotErrorIs(t, err, ErrNotOpened)
+	require.Contains(t, err.Error(), "grains")
+}
