@@ -573,7 +573,7 @@ func (e *Engine) run(ctx context.Context) {
 			sel, head, wait = e.disc.Step(ms, now)
 			// Retire looks as far as the index due, so the engine must
 			// pass before every grain boundary.
-			due, next := retireDue(mxl.Now(), e.mxlRate(), min(retireGuard, e.period/4))
+			due, next := retireDue(mxl.Now(), e.mxlRate(), e.retireGuard())
 			timeout = min(timeout, next)
 			for i, m := range e.members {
 				ms[i].Head = m.head()
@@ -651,7 +651,11 @@ func (e *Engine) publish(head uint64) {
 // the pass itself. It is at most a quarter of the grain period, so a
 // member that commits up to three quarters of a period after its
 // boundary still counts as writing at the clock.
-const retireGuard = 3 * time.Millisecond
+func (e *Engine) retireGuard() time.Duration {
+	return min(maxRetireGuard, e.period/4)
+}
+
+const maxRetireGuard = 3 * time.Millisecond
 
 // retireDue returns, for a pass at MXL time now, the index Retire looks
 // as far as, the one whose period the clock is in guard from now, and

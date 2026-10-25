@@ -456,7 +456,7 @@ func TestEnginePublishesTheHeadBeforeMovingASlotReadersTrust(t *testing.T) {
 func TestEngineRetiresASlotBeforeTheBoundaryAMemberWritesItAt(t *testing.T) {
 	const grains = 20
 	rate := mxl.Rational{Num: 50, Den: 1}
-	guard := min(retireGuard, 20*time.Millisecond/4)
+	guard := (&Engine{period: 20 * time.Millisecond}).retireGuard()
 	a, b := newRing(grains), newRing(grains)
 	d := NewDiscrete(grains, 2)
 	d.Ordered, d.Skew = true, 8
