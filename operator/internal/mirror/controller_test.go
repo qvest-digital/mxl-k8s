@@ -600,6 +600,21 @@ func TestWatches_EnqueueTheMirrorsEachInputAffects(t *testing.T) {
 	assert.Empty(t, r.nodeToMirrors(ctx, node("unrelated")))
 }
 
+// A set leaving a node changes nothing on its member mirrors there, so
+// only a watch on the set brings them back to be collected.
+func TestWatches_EnqueueTheMirrorsASetOwns(t *testing.T) {
+	m := newMirror(withSetOwner("programme", "set-uid"))
+	other := newMirror(withRequestor("consumer", "uid-1"))
+	other.Name = "m2"
+	r, _ := harness(t, time.Hour, m, other)
+	ctx := context.Background()
+
+	got := r.setToMirrors(ctx, set("set-uid"))
+	require.Len(t, got, 1)
+	assert.Equal(t, m.Name, got[0].Name)
+	assert.Empty(t, r.setToMirrors(ctx, set("new-uid")), "a set recreated under the name owns nothing")
+}
+
 func TestPodPredicate_DenyKubeSystem(t *testing.T) {
 	p := podLifecyclePredicate()
 	sys := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Name: "p"}}
