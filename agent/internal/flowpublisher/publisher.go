@@ -103,7 +103,7 @@ func FlowIDFromDirName(name string) (string, bool) {
 }
 
 // PublishAppeared loads flow_def.json from a freshly observed flow
-// directory and writes an MxlFlow describing it. status.locations
+// directory and, for an Origin, writes an MxlFlow describing it. status.locations
 // for this node is set to Origin when the agent saw the directory
 // before any MxlFlowMirror claims this node as target, otherwise to
 // Ready (the gateway target reconciler created the local copy as a
@@ -141,27 +141,6 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 		return fmt.Errorf("%s: not valid JSON", defPath)
 	}
 
-	now := metav1.Now()
-	desired := &mxlv1alpha1.MxlFlow{
-		ObjectMeta: metav1.ObjectMeta{Name: p.key(flowID)},
-		Spec: mxlv1alpha1.MxlFlowSpec{
-			ID:         flowID,
-			Domain:     p.Domain,
-			Definition: runtime.RawExtension{Raw: raw},
-		},
-	}
-
-	if err := p.Client.Create(ctx, desired); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create MxlFlow: %w", err)
-		}
-		// Already there -- leave spec alone (writers may have richer
-		// metadata than us), just refresh our location entry.
-		l.V(1).Info("MxlFlow already exists", "flowID", flowID)
-	} else {
-		l.Info("created MxlFlow", "flowID", flowID)
-	}
-
 	attached, err := p.writerAttached(flowID)
 	if err != nil {
 		l.Error(err, "test flow for an attached writer", "flowID", flowID)
@@ -191,6 +170,32 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	} else if isMirror {
 		phase = mxlv1alpha1.MxlFlowLocationReady
 	}
+
+	// Only the Origin creates the MxlFlow. Any other copy holds the
+	// definition the object had when the copy was made, so a copy that
+	// recreated a deleted object would bring back a geometry the
+	// producer may since have changed, and a mirror built from it would
+	// recreate the stale copy in turn.
+	if phase == mxlv1alpha1.MxlFlowLocationOrigin {
+		desired := &mxlv1alpha1.MxlFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: p.key(flowID)},
+			Spec: mxlv1alpha1.MxlFlowSpec{
+				ID:         flowID,
+				Domain:     p.Domain,
+				Definition: runtime.RawExtension{Raw: raw},
+			},
+		}
+		if err := p.Client.Create(ctx, desired); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("create MxlFlow: %w", err)
+			}
+			l.V(1).Info("MxlFlow already exists", "flowID", flowID)
+		} else {
+			l.Info("created MxlFlow", "flowID", flowID)
+		}
+	}
+
+	now := metav1.Now()
 	// The phase actually written, not the one asked for: upsertLocation
 	// refuses to demote an Origin this node already claimed, so a
 	// mirror-target inference can come back out as Origin.
