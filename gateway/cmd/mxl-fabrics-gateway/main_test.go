@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -52,7 +55,7 @@ func TestMxlfsComponentsOnlyWithMxlfs(t *testing.T) {
 	for _, c := range mxlfsComponents(true, nil, "n1", &instance.Set{}, target) {
 		names = append(names, c.name)
 	}
-	assert.ElementsMatch(t, []string{"redundancy set reconciler", "placeholder reconciler"}, names)
+	assert.ElementsMatch(t, []string{"stale placeholder markers", "redundancy set reconciler", "placeholder reconciler"}, names)
 	assert.NotNil(t, target.Filled)
 	assert.NotNil(t, target.Unfilled)
 	assert.NotNil(t, target.Retire)
@@ -67,4 +70,39 @@ func TestRequireKindNamesTheMissingCRD(t *testing.T) {
 	m := meta.NewDefaultRESTMapper(nil)
 	m.Add(mxlv1alpha1.GroupVersion.WithKind("MxlFlowRedundancySet"), meta.RESTScopeRoot)
 	require.NoError(t, requireKind(m, "MxlFlowRedundancySet"))
+}
+
+// A gateway that exits uncleanly leaves its placeholder markers, and the
+// directories they mark are taken for placeholders for good. Every
+// domain the gateway opens is cleared before a placeholder is held in
+// it: the primary one at start, any other as it is first opened.
+func TestStalePlaceholderMarkersGoWhenADomainOpens(t *testing.T) {
+	marker := func(domain string) string {
+		p := mxlv1alpha1.PlaceholderMarker(domain, "5fbec3b1-1b0f-417d-9059-8b94a47197ed")
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, nil, 0o644))
+		return p
+	}
+	root := t.TempDir()
+	primary := filepath.Join(root, "domain")
+	studio := filepath.Join(root, mxlv1alpha1.DomainsDir, "studio")
+	stale, later := marker(primary), marker(studio)
+	h, err := instance.Open(primary, true)
+	require.NoError(t, err)
+	domains := &instance.Set{Primary: h, Directory: func(context.Context, string) (string, error) {
+		return filepath.Join(mxlv1alpha1.DomainsDir, "studio"), nil
+	}}
+	t.Cleanup(func() { _ = domains.Close() })
+
+	for _, c := range mxlfsComponents(true, nil, "n1", domains, &mirror.TargetReconciler{}) {
+		if c.name == "stale placeholder markers" {
+			require.NoError(t, c.setup(nil))
+		}
+	}
+	assert.NoFileExists(t, stale, "the primary domain's marker")
+	assert.FileExists(t, later, "a domain not opened yet is not touched")
+
+	_, err = domains.For(context.Background(), "studio")
+	require.NoError(t, err)
+	assert.NoFileExists(t, later, "a domain opened later")
 }
