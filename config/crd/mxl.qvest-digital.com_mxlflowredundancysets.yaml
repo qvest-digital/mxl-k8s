@@ -44,13 +44,16 @@ spec:
           the oldest grain of the output reading the next ring period's picture.
           Readers at the output's head are unaffected. A member that goes away
           leaves the output to the others. One that comes back in the output's
-          geometry takes its old place in the output where the node's mxlfs has
-          MXLFS_IOC_VIEW_REPLACE_SOURCE. Without it, when that replacement
-          fails, when a member changes geometry or appears that was absent when
-          the output was built, or when a set is created again, the output is
-          built again, and its readers have to reopen it; a member whose
-          geometry differs from the output's is left out of it while another
-          member keeps that geometry.
+          geometry and ring depth takes its old place in the output where the
+          node's mxlfs has MXLFS_IOC_VIEW_REPLACE_SOURCE. The output is built
+          again, and its readers have to reopen it, without that ioctl; when a
+          replacement fails part-way, or its new ring cannot be opened for
+          several rechecks in a row; when a member comes back in another
+          geometry, or with another ring depth after the domain's history
+          duration changed; when a member that was absent or left out when the
+          output was built comes back; and when a set is created again. A member
+          whose geometry differs from the output's is left out of it while
+          another member keeps that geometry.
         properties:
           apiVersion:
             description: |-
