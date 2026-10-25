@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sys/unix"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,6 +18,7 @@ import (
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/placeholder"
 )
 
 // Domains is what the reconciler needs of the gateway's open domains.
@@ -27,11 +29,13 @@ type Domains interface {
 // Reconciler runs an engine for every MxlFlowRedundancySet whose output
 // is wanted on this node.
 //
-// An engine starts once every member has a directory here, a copy or the
-// gateway's placeholder: a view slot only ever selects a member that
-// delivered the grain, so a placeholder's unallocated ring is never
-// mapped through the output, and a mirror filling it later is seen
-// through the same files.
+// An engine starts over the members that have a directory here, a copy
+// or the gateway's placeholder, and agree with the output's geometry: a
+// view slot only ever selects a member that delivered the grain, so a
+// placeholder's unallocated ring is never mapped through the output, and
+// a mirror filling it later is seen through the same files. A member
+// that goes away for good, its producer gone and its placeholder or copy
+// with it, leaves the engine serving from the others.
 type Reconciler struct {
 	Client   client.Client
 	NodeName string
@@ -46,17 +50,54 @@ type running struct {
 	uid    types.UID
 	gen    int64
 	domain string
+	def    []byte   // the flow definition the output was built from
+	seen   []uint64 // per spec member, its data file's inode at build; 0 for none
 }
 
 // serves reports whether cur still serves set as it stands: the same
-// object at the same generation, over the member flows it mapped.
+// object at the same generation, with no member directory appeared or
+// replaced since the engine was built. One removed is no reason to
+// rebuild: the engine keeps its ring mapped, which stops advancing, and
+// the other members serve.
 func (cur *running) serves(set *mxlv1alpha1.MxlFlowRedundancySet) bool {
-	return cur != nil && cur.uid == set.UID && cur.gen == set.Generation && !cur.engine.Stale()
+	if cur == nil || cur.uid != set.UID || cur.gen != set.Generation {
+		return false
+	}
+	for i, ino := range inodes(cur.domain, set.Spec.Members) {
+		if ino != 0 && ino != cur.seen[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// inodes returns, per member, the inode of its data file in domain, or 0
+// for a member with no directory there. Which flows exist is read from
+// the directory: on mxlfs a path walk into a missing flow waits for it
+// and posts it as wanted.
+func inodes(domain string, members []mxlv1alpha1.RedundancyFlowRef) []uint64 {
+	names := map[string]bool{}
+	entries, _ := os.ReadDir(domain)
+	for _, d := range entries {
+		names[d.Name()] = true
+	}
+	out := make([]uint64, len(members))
+	for i, m := range members {
+		var st unix.Stat_t
+		if names[m.FlowID+".mxl-flow"] && unix.Stat(filepath.Join(flowDir(domain, m.FlowID), "data"), &st) == nil {
+			out[i] = st.Ino
+		}
+	}
+	return out
 }
 
 // recheck is how often a served set is looked at again for a member
-// replaced underneath its engine, which raises no event on the set.
+// that appeared or was replaced underneath its engine, which raises no
+// event on the set.
 const recheck = 5 * time.Second
+
+// start is Start; tests replace it.
+var start = Start
 
 // Reconcile starts, keeps or stops the engine of one set.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -79,6 +120,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if cur.serves(&set) {
 		return ctrl.Result{RequeueAfter: recheck}, nil
 	}
+	var prev []byte
+	if cur != nil {
+		prev = cur.def
+	}
 	r.stop(req.Name) // a changed spec or member builds a new output
 
 	dir, onMxlfs, err := r.Domains.DomainPath(ctx, set.Spec.Output.Domain)
@@ -100,12 +145,31 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			return ctrl.Result{}, nil
 		}
 	}
-	for _, m := range set.Spec.Members {
-		if _, err := os.Stat(filepath.Join(flowDir(dir, m.FlowID), "data")); err != nil {
-			// The placeholder or the mirror is still on its way.
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	// A member with no directory is on its way, or gone with its
+	// producer; the engine is built again when it appears.
+	seen := inodes(dir, set.Spec.Members)
+	defs := make([][]byte, len(set.Spec.Members))
+	for i, m := range set.Spec.Members {
+		if seen[i] != 0 {
+			if d, err := os.ReadFile(filepath.Join(flowDir(dir, m.FlowID), "flow_def.json")); err == nil {
+				defs[i] = d
+			}
 		}
-		spec.Members = append(spec.Members, m.FlowID)
+	}
+	def := outputGeometry(prev, defs)
+	for i, m := range set.Spec.Members {
+		switch {
+		case seen[i] == 0:
+		case defs[i] == nil:
+			l.Info("leaving out a member with no readable flow definition", "member", m.FlowID)
+		case placeholder.SameGeometry(def, defs[i]):
+			spec.Members = append(spec.Members, m.FlowID)
+		default:
+			l.Info("leaving out a member of another geometry than the output", "member", m.FlowID)
+		}
+	}
+	if len(spec.Members) == 0 {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 	// An output left behind by an engine that did not stop cleanly is no
 	// one's: its head is frozen. Readers holding it reopen on the inode
@@ -119,7 +183,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 	_ = os.RemoveAll(out)
-	e, err := Start(context.Background(), spec, l)
+	e, err := start(context.Background(), spec, l)
 	if err != nil {
 		l.Error(err, "start merge")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
@@ -128,10 +192,30 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if r.engines == nil {
 		r.engines = map[string]*running{}
 	}
-	r.engines[req.Name] = &running{engine: e, uid: set.UID, gen: set.Generation, domain: dir}
+	r.engines[req.Name] = &running{engine: e, uid: set.UID, gen: set.Generation, domain: dir, def: def, seen: seen}
 	r.mu.Unlock()
 	l.Info("serving redundancy set", "output", spec.OutputID, "members", spec.Members)
 	return ctrl.Result{RequeueAfter: recheck}, nil
+}
+
+// outputGeometry is the definition whose geometry the output is built
+// in: the one it was built in before while a member still has it, so a
+// member restarted in another geometry is left out rather than the
+// others; else the first member's present, in order of preference.
+func outputGeometry(prev []byte, defs [][]byte) []byte {
+	var first []byte
+	for _, d := range defs {
+		if d == nil {
+			continue
+		}
+		if prev != nil && placeholder.SameGeometry(prev, d) {
+			return prev
+		}
+		if first == nil {
+			first = d
+		}
+	}
+	return first
 }
 
 // valid reports whether the operator found the set's members mergeable

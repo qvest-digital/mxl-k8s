@@ -4,10 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"syscall"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -83,18 +84,107 @@ func TestReconcilerLeavesAnOutputOffMxlfsAlone(t *testing.T) {
 	require.Empty(t, r.engines)
 }
 
-// The member mirrors start when the output is first wanted, so the
-// members' directories appear after the set does: wait for them.
-func TestReconcilerWaitsForTheMembersDirectories(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(flowDir(dir, memberA)), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(flowDir(dir, memberA), "data"), nil, 0o644))
-	d := &fakeDomains{dir: dir, onMxlfs: true}
-	r := reconcilerFor(t, wantedSet("reader"), d)
+// fakeStart replaces the engine for the reconciler's decisions: it
+// records the members each engine is started over.
+func fakeStart(t *testing.T) *[][]string {
+	t.Helper()
+	var started [][]string
+	orig := start
+	start = func(_ context.Context, spec Spec, _ logr.Logger) (*Engine, error) {
+		started = append(started, spec.Members)
+		return &Engine{outDir: flowDir(spec.DomainDir, spec.OutputID)}, nil
+	}
+	t.Cleanup(func() { start = orig })
+	return &started
+}
+
+// memberDir creates flow id's directory in domain, as a copy, a
+// placeholder or a producer leaves it, in the geometry of def. It
+// replaces one there, with files of other inodes, as libmxl does.
+func memberDir(t *testing.T, domain, id, def string) {
+	t.Helper()
+	tmp, err := os.MkdirTemp(domain, ".tmp-")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "flow_def.json"), []byte(def), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "data"), nil, 0o644))
+	require.NoError(t, os.RemoveAll(flowDir(domain, id)))
+	require.NoError(t, os.Rename(tmp, flowDir(domain, id)))
+}
+
+// Before any member has a directory here there is nothing to serve
+// from: the member mirrors start when the output is first wanted.
+func TestReconcilerWaitsForAMemberDirectory(t *testing.T) {
+	started := fakeStart(t)
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: t.TempDir(), onMxlfs: true})
 
 	res := reconcileSet(t, r)
-	require.Equal(t, 2*time.Second, res.RequeueAfter, "member B has no directory yet")
+	require.Equal(t, 2*time.Second, res.RequeueAfter)
+	require.Empty(t, *started)
 	require.Empty(t, r.engines)
+}
+
+// A member whose producer is gone has no directory here, and may never
+// have one again. The output must not wait for it: it is served from
+// the members there are, and built again once the missing one appears.
+func TestReconcilerServesFromTheMembersPresent(t *testing.T) {
+	started := fakeStart(t)
+	dir := t.TempDir()
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+
+	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter)
+	require.Equal(t, [][]string{{memberB}}, *started)
+
+	reconcileSet(t, r)
+	require.Len(t, *started, 1, "the engine was rebuilt with nothing changed")
+
+	memberDir(t, dir, memberA, videoDef(memberA))
+	reconcileSet(t, r)
+	require.Equal(t, [][]string{{memberB}, {memberA, memberB}}, *started)
+}
+
+// A member that goes away for good takes its directory with it: its
+// mirror is collected, its placeholder retired. The engine keeps the
+// member's ring mapped, where it stops advancing, and the others serve.
+// Rebuilding instead would remove the output under every reader.
+func TestReconcilerKeepsServingWhenAMemberGoesAway(t *testing.T) {
+	started := fakeStart(t)
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+	require.Len(t, *started, 1)
+
+	require.NoError(t, os.RemoveAll(flowDir(dir, memberB)))
+	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter)
+	require.Len(t, *started, 1, "a member gone away rebuilt the output")
+	require.Contains(t, r.engines, "programme")
+}
+
+// A member restarted in another geometry replaces its directory. The
+// output keeps its geometry while another member has it, and leaves the
+// restarted member out rather than the others; it takes the new one
+// once no member is left in the old.
+func TestReconcilerRebuildsWithTheMembersOfTheOutputsGeometry(t *testing.T) {
+	started := fakeStart(t)
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+
+	small := func(id string) string {
+		return strings.Replace(videoDef(id), `"frame_width":320`, `"frame_width":160`, 1)
+	}
+	memberDir(t, dir, memberA, small(memberA))
+	reconcileSet(t, r)
+	reconcileSet(t, r)
+	require.Equal(t, [][]string{{memberA, memberB}, {memberB}}, *started, "the member in another geometry is left out, once")
+
+	memberDir(t, dir, memberB, small(memberB))
+	reconcileSet(t, r)
+	require.Equal(t, []string{memberA, memberB}, (*started)[2], "both members in the new geometry")
 }
 
 // A view selects among pages of one superblock.
@@ -111,41 +201,35 @@ func TestReconcilerRefusesAMemberInAnotherDomain(t *testing.T) {
 // A producer restarted in another geometry, or a mirror target rebuilt
 // for one, replaces a member's flow directory underneath a running
 // engine, which then merges the old copy's frozen ring and never
-// publishes. A set deleted and created again under the same name starts
-// at the same generation. Either way the engine must be built again.
+// publishes. A member that was absent appears. A set deleted and created
+// again under the same name starts at the same generation. Each time the
+// engine must be built again; a member removed is no reason to.
 func TestRunningEngineServesOnlyTheFlowsAndSetItWasBuiltFor(t *testing.T) {
 	dir := t.TempDir()
-	member := func(id string) string {
-		p := filepath.Join(dir, id+".mxl-flow")
-		require.NoError(t, os.MkdirAll(p, 0o755))
-		require.NoError(t, os.WriteFile(filepath.Join(p, "data"), nil, 0o644))
-		return filepath.Join(p, "data")
-	}
-	// The engine keeps each member file open, so its inode is not reused.
-	inode := func(path string) uint64 {
-		f, err := os.Open(path)
-		require.NoError(t, err)
-		t.Cleanup(func() { f.Close() })
-		fi, err := f.Stat()
-		require.NoError(t, err)
-		return fi.Sys().(*syscall.Stat_t).Ino
-	}
-	a, b := member("a"), member("b")
+	memberDir(t, dir, memberA, videoDef(memberA))
 	set := wantedSet("n1")
 	set.UID, set.Generation = "first", 1
-	cur := &running{engine: &Engine{data: []string{a, b}, inodes: []uint64{inode(a), inode(b)}}, uid: set.UID, gen: 1}
+	// The engine keeps each member file open, so its inode is not reused.
+	f, err := os.Open(filepath.Join(flowDir(dir, memberA), "data"))
+	require.NoError(t, err)
+	t.Cleanup(func() { f.Close() })
+	cur := &running{engine: &Engine{}, uid: set.UID, gen: 1, domain: dir, seen: inodes(dir, set.Spec.Members)}
 	require.True(t, cur.serves(set))
 
 	again := set.DeepCopy()
 	again.UID = "second"
 	require.False(t, cur.serves(again), "a set created again under the same name kept the old engine")
 
-	require.NoError(t, os.RemoveAll(filepath.Dir(b)))
-	member("b")
-	require.False(t, cur.serves(set), "a member replaced underneath the engine kept it")
+	memberDir(t, dir, memberB, videoDef(memberB))
+	require.False(t, cur.serves(set), "a member that appeared is not served")
+	cur.seen = inodes(dir, set.Spec.Members)
+	require.True(t, cur.serves(set))
 
-	require.NoError(t, os.RemoveAll(filepath.Dir(a)))
-	require.True(t, cur.engine.Stale(), "a removed member")
+	require.NoError(t, os.RemoveAll(flowDir(dir, memberA)))
+	require.True(t, cur.serves(set), "a removed member rebuilt the output")
+
+	memberDir(t, dir, memberA, videoDef(memberA))
+	require.False(t, cur.serves(set), "a member replaced underneath the engine kept it")
 }
 
 // The operator alone reads the members' definitions and the output's
@@ -178,8 +262,7 @@ func TestReconcilerServesOnlyASetValidAtItsGeneration(t *testing.T) {
 func TestReconcilerLeavesAnOutputIDAWriterHolds(t *testing.T) {
 	dir := t.TempDir()
 	for _, id := range []string{memberA, memberB, output} {
-		require.NoError(t, os.MkdirAll(flowDir(dir, id), 0o755))
-		require.NoError(t, os.WriteFile(filepath.Join(flowDir(dir, id), "data"), nil, 0o644))
+		memberDir(t, dir, id, videoDef(id))
 	}
 	f, err := os.Open(filepath.Join(flowDir(dir, output), "data"))
 	require.NoError(t, err)

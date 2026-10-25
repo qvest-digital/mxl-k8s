@@ -151,8 +151,6 @@ type Engine struct {
 	outFile  *os.File
 	members  []*header
 	files    []*os.File
-	data     []string   // each member's data file
-	inodes   []uint64   // and the inode the engine mapped there
 	views    []*os.File // one per grain slot, or the channels file
 	grains   [][]*C.mxlGrainInfo
 	grainMem [][]byte
@@ -196,11 +194,6 @@ func Start(ctx context.Context, spec Spec, log logr.Logger) (*Engine, error) {
 		}
 		e.members = append(e.members, h)
 		e.files = append(e.files, f)
-		var st unix.Stat_t
-		if err := unix.Fstat(int(f.Fd()), &st); err != nil {
-			return nil, err
-		}
-		e.data, e.inodes = append(e.data, path), append(e.inodes, st.Ino)
 	}
 	if err := e.checkAligned(); err != nil {
 		return nil, err
@@ -658,19 +651,6 @@ func (e *Engine) wait(waits []futexWaitv, timeout time.Duration) {
 		})
 		sleep(timeout)
 	}
-}
-
-// Stale reports whether a member's flow is no longer the one the engine
-// mapped: its directory was removed, or replaced by one laid out for
-// another geometry. The engine would merge the old copy's frozen ring.
-func (e *Engine) Stale() bool {
-	for i, path := range e.data {
-		var st unix.Stat_t
-		if err := unix.Stat(path, &st); err != nil || st.Ino != e.inodes[i] {
-			return true
-		}
-	}
-	return false
 }
 
 func (e *Engine) mxlRate() mxl.Rational {

@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 
+	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/mxlfs"
 )
 
@@ -333,13 +334,15 @@ func TestEngineReaderNeverFaultsOnAReplacedMember(t *testing.T) {
 	require.NoError(t, err)
 	defer e.Close()
 
+	refs := []mxlv1alpha1.RedundancyFlowRef{{FlowID: memberA}}
+	mapped := inodes(domain, refs)[0]
 	require.NoError(t, held[0].Close())
 	require.NoError(t, os.RemoveAll(flowDir(domain, memberA)))
 	w, _, err := inst.NewWriter(audioDef(memberA))
 	require.NoError(t, err)
 	held[0] = w
 	require.NoError(t, mxlfs.AllocateFlow(flowDir(domain, memberA)))
-	require.True(t, e.Stale(), "member A is still the mapped placeholder")
+	require.NotEqual(t, mapped, inodes(domain, refs)[0], "member A is still the mapped placeholder")
 
 	const batch = 480
 	rate := mxl.Rational{Num: 48000, Den: 1}
