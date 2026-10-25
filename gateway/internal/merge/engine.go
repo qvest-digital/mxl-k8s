@@ -580,11 +580,7 @@ func (e *Engine) run(ctx context.Context) {
 			}
 			sel = append(sel, e.disc.Retire(ms, due)...)
 			e.selects.Add(uint64(len(sel)))
-			for _, s := range sel {
-				if err = selectAll(e.views[s.Slot], s.Source); err != nil {
-					break
-				}
-			}
+			err = e.apply(sel)
 		} else {
 			e.mu.Lock()
 			// A member the gateway does not feed, a local producer, is
@@ -612,16 +608,41 @@ func (e *Engine) run(ctx context.Context) {
 		if err != nil {
 			e.log.Error(err, "select a member")
 		} else if head > e.out.head() {
-			e.out.info.runtime.lastWriteTime = C.uint64_t(time.Now().UnixNano())
-			atomic.StoreUint64((*uint64)(unsafe.Pointer(&e.out.info.runtime.headIndex)), head)
-			atomic.AddUint32(e.out.syncWord(), 1)
-			_, _, _ = unix.Syscall6(unix.SYS_FUTEX, uintptr(unsafe.Pointer(e.out.syncWord())), futexWake, futexWakeAll, 0, 0, 0)
+			e.publish(head)
 		}
 		if wait > 0 && wait < timeout {
 			timeout = wait
 		}
 		e.wait(waits, timeout)
 	}
+}
+
+// selectAllCall is selectAll; tests replace it.
+var selectAllCall = selectAll
+
+// apply points view slots at their sources, in the order the policy
+// returned them. Readers trust the slot of index i to hold i - Grains
+// until the head reaches i - 1, so a select for an index more than one
+// past the published head publishes i - 1 first: the selects before it
+// have set every slot up to there.
+func (e *Engine) apply(sel []Select) error {
+	for _, s := range sel {
+		if s.Index > e.out.head()+1 {
+			e.publish(s.Index - 1)
+		}
+		if err := selectAllCall(e.views[s.Slot], s.Source); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// publish moves the output's head to head and wakes its readers.
+func (e *Engine) publish(head uint64) {
+	e.out.info.runtime.lastWriteTime = C.uint64_t(time.Now().UnixNano())
+	atomic.StoreUint64((*uint64)(unsafe.Pointer(&e.out.info.runtime.headIndex)), head)
+	atomic.AddUint32(e.out.syncWord(), 1)
+	_, _, _ = unix.Syscall6(unix.SYS_FUTEX, uintptr(unsafe.Pointer(e.out.syncWord())), futexWake, futexWakeAll, 0, 0, 0)
 }
 
 // futexWaitvCall waits on waits until the absolute CLOCK_MONOTONIC time

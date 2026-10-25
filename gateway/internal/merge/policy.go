@@ -61,10 +61,11 @@ func ToleranceFor(skew time.Duration) time.Duration {
 	return max(skew/2, 2*time.Millisecond)
 }
 
-// Select is one view slot to point at a source.
+// Select is one view slot to point at a source, for the grain of Index.
 type Select struct {
 	Slot   uint
 	Source int
+	Index  uint64
 }
 
 // NewDiscrete returns a policy for a ring of grains slots whose slots all
@@ -89,7 +90,8 @@ func (d *Discrete) serves(m Member, index uint64) bool {
 }
 
 // Step advances the published head as far as the members allow at now.
-// It returns the selects to apply before the new head is published, and
+// It returns the selects to apply, in index order, before the new head
+// is published, and
 // how long until a pending decision times out (0 when none waits).
 func (d *Discrete) Step(members []Member, now time.Time) (selects []Select, head uint64, wait time.Duration) {
 	if d.Ordered && d.Primary < 0 {
@@ -145,7 +147,7 @@ func (d *Discrete) Step(members []Member, now time.Time) (selects []Select, head
 		}
 		if d.Current[slot] != pick {
 			d.Current[slot] = pick
-			selects = append(selects, Select{Slot: slot, Source: pick})
+			selects = append(selects, Select{Slot: slot, Source: pick, Index: index})
 		}
 		d.Head = index
 	}
@@ -189,7 +191,7 @@ func (d *Discrete) Retire(members []Member, due uint64) (selects []Select) {
 			}
 		}
 		d.Current[slot] = to
-		selects = append(selects, Select{Slot: slot, Source: to})
+		selects = append(selects, Select{Slot: slot, Source: to, Index: i})
 	}
 	return selects
 }

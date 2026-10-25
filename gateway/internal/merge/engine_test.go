@@ -391,6 +391,62 @@ func TestEngineReaderNeverFaultsOnAReplacedMember(t *testing.T) {
 	}
 }
 
+// A pass that moves the head on by more than one, after a tolerance or
+// skew wait, selects the slot of index i while the published head is
+// below i - 1. Readers still trust that slot as i - Grains, so a reader
+// of the oldest grain got the next ring period's grain under the old
+// index. The head must reach i - 1 before the slot moves. It runs
+// without mxlfs: the order is the engine's.
+func TestEnginePublishesTheHeadBeforeMovingASlotReadersTrust(t *testing.T) {
+	const grains = 20
+	path := filepath.Join(t.TempDir(), "data")
+	require.NoError(t, os.WriteFile(path, make([]byte, 4096), 0o644))
+	out, f, err := mapHeader(path, true)
+	require.NoError(t, err)
+	e := &Engine{out: out, outFile: f, views: make([]*os.File, grains)}
+	t.Cleanup(e.release)
+	var trusted []uint64 // per select, the oldest index readers then trusted
+	var indexes []uint64
+	orig := selectAllCall
+	t.Cleanup(func() { selectAllCall = orig })
+
+	a, b := newRing(grains), newRing(grains)
+	for i := uint64(90); i <= 100; i++ {
+		a.commit(i)
+		b.commit(i)
+	}
+	d := NewDiscrete(grains, 2)
+	d.Ordered, d.Skew = true, 8
+	now := time.Unix(0, 0)
+	_, head, _ := d.Step([]Member{a.member(), b.member()}, now)
+	e.publish(head)
+
+	// The primary is late with 101 to 104, which b has: the head waits
+	// out the tolerance, then moves four on, every slot to b.
+	for i := uint64(101); i <= 104; i++ {
+		b.commit(i)
+	}
+	ms := []Member{a.member(), b.member()}
+	sel, _, wait := d.Step(ms, now)
+	require.Empty(t, sel)
+	require.Positive(t, wait)
+	sel, head, _ = d.Step(ms, now.Add(wait))
+	require.Equal(t, uint64(104), head)
+	require.Len(t, sel, 4)
+
+	selectAllCall = func(_ *os.File, _ int) error {
+		trusted = append(trusted, e.out.head()+2-grains)
+		return nil
+	}
+	require.NoError(t, e.apply(sel))
+	for k, s := range sel {
+		indexes = append(indexes, s.Index)
+		require.Greater(t, trusted[k], s.Index-grains,
+			"the slot of %d moved while readers trusted it as %d", s.Index, s.Index-grains)
+	}
+	require.Equal(t, []uint64{101, 102, 103, 104}, indexes)
+}
+
 // futex_waitv returns at once when it fails, ENOSYS on a kernel without
 // it; the engine loop would then spin a core. A wait that times out, is
 // woken or finds a word already changed is the normal case and must not
