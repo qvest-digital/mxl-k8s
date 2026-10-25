@@ -77,11 +77,11 @@ spec:
             properties:
               granularity:
                 default: Grain
-                description: Granularity is the unit members are switched in. Defaults
-                  to Grain.
+                description: |-
+                  Granularity is the unit members are switched in. Grain is the only
+                  one.
                 enum:
                 - Grain
-                - Slice
                 type: string
               members:
                 description: |-

@@ -5,18 +5,13 @@ import (
 )
 
 // RedundancyGranularity is the unit a redundancy set switches members in.
-// +kubebuilder:validation:Enum=Grain;Slice
+// +kubebuilder:validation:Enum=Grain
 type RedundancyGranularity string
 
-const (
-	// RedundancyGrain publishes a grain only once one member holds it
-	// complete, so a grain never mixes members. Audio switches per page
-	// of the channel buffer either way.
-	RedundancyGrain RedundancyGranularity = "Grain"
-	// RedundancySlice lets a grain switch member part-way through. Only
-	// sound for members that carry bit-identical content.
-	RedundancySlice RedundancyGranularity = "Slice"
-)
+// RedundancyGrain publishes a grain only once one member holds it
+// complete, so a grain never mixes members. Audio switches per page of
+// the channel buffer either way.
+const RedundancyGrain RedundancyGranularity = "Grain"
 
 // RedundancyPreference is how a redundancy set picks among members that
 // all hold a grain.
@@ -69,7 +64,8 @@ type MxlFlowRedundancySetSpec struct {
 	// +kubebuilder:validation:Required
 	Output RedundancyFlowRef `json:"output"`
 
-	// Granularity is the unit members are switched in. Defaults to Grain.
+	// Granularity is the unit members are switched in. Grain is the only
+	// one.
 	// +kubebuilder:default=Grain
 	// +optional
 	Granularity RedundancyGranularity `json:"granularity,omitempty"`

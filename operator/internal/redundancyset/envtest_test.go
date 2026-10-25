@@ -56,6 +56,7 @@ func TestRedundancySetAgainstAnAPIServer(t *testing.T) {
 				s["members"] = m
 			}, "members"},
 			{"unknown granularity", func(s map[string]any) { s["granularity"] = "Line" }, "granularity"},
+			{"slice granularity, never implemented", func(s map[string]any) { s["granularity"] = "Slice" }, "granularity"},
 			{"unknown preference", func(s map[string]any) { s["preference"] = "Random" }, "preference"},
 			{"node name as flow id", func(s map[string]any) { s["output"] = ref("n1") }, "flowID"},
 			{"missing output", func(s map[string]any) { delete(s, "output") }, "output"},
