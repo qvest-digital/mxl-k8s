@@ -2156,7 +2156,8 @@
           "required": [
             "rollingUpdate"
           ],
-          "title": "updateStrategy"
+          "title": "updateStrategy",
+          "type": "object"
         },
         "variants": {
           "additionalProperties": {
@@ -2339,6 +2340,7 @@
       },
       "required": [
         "enabled",
+        "updateStrategy",
         "image",
         "args",
         "flags",

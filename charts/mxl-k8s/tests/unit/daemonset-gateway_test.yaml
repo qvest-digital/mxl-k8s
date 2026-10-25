@@ -192,3 +192,19 @@ tests:
           path: spec.template.spec.hostNetwork
           value: false
 
+
+  # The template renders updateStrategy whole; a scalar would reach the
+  # API server as an invalid DaemonSet rather than fail the render.
+  - it: rejects an updateStrategy that is no object
+    set:
+      gateway.updateStrategy: foo
+    asserts:
+      - failedTemplate:
+          errorPattern: "at '/gateway/updateStrategy': got string, want object"
+
+  - it: rejects a values file that drops updateStrategy
+    set:
+      gateway.updateStrategy: null
+    asserts:
+      - failedTemplate:
+          errorPattern: "at '/gateway': missing property 'updateStrategy'"

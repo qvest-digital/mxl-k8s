@@ -490,6 +490,10 @@ agent:
 # endpoint binds the node interface.
 gateway:
   enabled: true
+  # @schema
+  # type: object
+  # required: true
+  # @schema
   # -- DaemonSet update strategy. With mxlfs one gateway per node is
   # assumed: a gateway clears every placeholder marker in a domain as it
   # opens it, so a second gateway on the node would clear the markers of
