@@ -81,7 +81,7 @@ func TestOursIsOnlyMxlK8sComponents(t *testing.T) {
 		3: pod("mxl-system", "agent"),
 		4: pod("mxl-system", ""),
 		5: pod("media", "gateway"),
-	}, "mxl-system")
+	}, ownPod("mxl-system"))
 	ctx := context.Background()
 	assert.True(t, o(ctx, 1), "gateway")
 	assert.True(t, o(ctx, 2), "exporter")
@@ -113,7 +113,7 @@ func TestFlowsInUseLeavesOutMxlK8sComponents(t *testing.T) {
 		}, nil
 	}
 
-	got, err := flowsInUse(context.Background(), c, "n1", "mxl-system", scan)
+	got, err := flowsInUse(context.Background(), c, "n1", ownPod("mxl-system"), scan)
 	require.NoError(t, err)
 	assert.Equal(t, map[mxlv1alpha1.FlowRef]bool{{Domain: "studio", ID: other}: true}, got)
 }

@@ -204,17 +204,21 @@ func run(args []string) error {
 	go flowPub.RunLocalRescan(ctx, 30*time.Second)
 
 	onMxlfs := cfg.Mxlfs && mxlfswatch.IsMxlfs(cfg.DomainPath)
+	pods := &podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName}
+	ns, _ := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	own := ownPod(strings.TrimSpace(string(ns)))
 	var intentDispatcher *intent.Dispatcher
 	if cfg.IntentSocketPath != "" || onMxlfs {
 		intentDispatcher = &intent.Dispatcher{
 			Client:             kClient,
-			Resolver:           &podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName},
+			Resolver:           pods,
 			DomainPath:         cfg.DomainPath,
 			NodeName:           cfg.NodeName,
 			Provider:           mxlv1alpha1.MxlFabricsProvider(cfg.Provider),
 			MaterializeTimeout: cfg.MaterializeTimeout,
 			Lease:              leaseMgr,
 			Origin:             originClaims{primary: flowPub, trackers: trackers},
+			Own:                own,
 			Domains: func() intent.Domains {
 				domainsMu.Lock()
 				defer domainsMu.Unlock()
@@ -249,8 +253,7 @@ func run(args []string) error {
 			}
 			return isOutput
 		}
-		if err := runMxlfs(ctx, cfg.DomainPath, flowPub, intentDispatcher, claim,
-			&podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName}); err != nil {
+		if err := runMxlfs(ctx, cfg.DomainPath, flowPub, intentDispatcher, claim, ours(pods, own)); err != nil {
 			return err
 		}
 	}
@@ -271,9 +274,8 @@ func run(args []string) error {
 		return byDev
 	}}
 	if sets != nil {
-		ns, _ := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 		inUse := func() (map[mxlv1alpha1.FlowRef]bool, error) {
-			return flowsInUse(ctx, kClient, cfg.NodeName, strings.TrimSpace(string(ns)), scanner.Scan)
+			return flowsInUse(ctx, kClient, cfg.NodeName, own, scanner.Scan)
 		}
 		go func() {
 			t := time.NewTicker(10 * time.Second)
@@ -519,24 +521,31 @@ func (o originClaims) ClaimOrigin(ctx context.Context, ref mxlv1alpha1.FlowRef) 
 // gateway creating and filling them, the exporter reading them.
 var ownComponents = map[string]bool{"agent": true, "gateway": true, "exporter": true}
 
-// ours reports a pid as mxl-k8s's own when its pod is one of
-// ownComponents in the agent's namespace. Any other pod there is a
-// consumer like any other, and a pid whose pod cannot be resolved is
-// not known to be ours: the dispatcher resolves it again and reports
-// why no mirror starts.
+// ownPod reports a pod as mxl-k8s's own when it is one of ownComponents
+// in the agent's namespace. Any other pod there is a consumer like any
+// other.
+func ownPod(namespace string) func(*corev1.Pod) bool {
+	return func(pod *corev1.Pod) bool {
+		return pod.Namespace == namespace && ownComponents[pod.Labels["app.kubernetes.io/component"]]
+	}
+}
+
+// ours reports a pid as mxl-k8s's own when own reports its pod so. A pid
+// whose pod cannot be resolved is not known to be ours: the dispatcher
+// resolves it again and reports why no mirror starts.
 func ours(pods interface {
 	PodForPID(ctx context.Context, pid int32) (*corev1.Pod, error)
-}, namespace string) func(ctx context.Context, pid int32) bool {
+}, own func(*corev1.Pod) bool) func(ctx context.Context, pid int32) bool {
 	return func(ctx context.Context, pid int32) bool {
 		pod, err := pods.PodForPID(ctx, pid)
-		return err == nil && pod.Namespace == namespace && ownComponents[pod.Labels["app.kubernetes.io/component"]]
+		return err == nil && own(pod)
 	}
 }
 
 // flowsInUse returns the flows processes on this node map, leaving out
 // mxl-k8s's own: the gateway writing a merged output and the exporter
 // reading every flow would otherwise keep each output in use for good.
-func flowsInUse(ctx context.Context, c client.Client, node, namespace string,
+func flowsInUse(ctx context.Context, c client.Client, node string, own func(*corev1.Pod) bool,
 	scan func() (map[string][]observed.Use, error)) (map[mxlv1alpha1.FlowRef]bool, error) {
 	uses, err := scan()
 	if err != nil {
@@ -546,15 +555,15 @@ func flowsInUse(ctx context.Context, c client.Client, node, namespace string,
 	if err := c.List(ctx, &pods, client.MatchingFields{"spec.nodeName": node}); err != nil {
 		return nil, err
 	}
-	own := map[string]bool{}
+	mine := map[string]bool{}
 	for _, p := range pods.Items {
-		if p.Namespace == namespace && ownComponents[p.Labels["app.kubernetes.io/component"]] {
-			own[string(p.UID)] = true
+		if own(&p) {
+			mine[string(p.UID)] = true
 		}
 	}
 	out := map[mxlv1alpha1.FlowRef]bool{}
 	for uid, us := range uses {
-		if own[uid] {
+		if mine[uid] {
 			continue
 		}
 		for _, u := range us {
@@ -569,13 +578,13 @@ func flowsInUse(ctx context.Context, c client.Client, node, namespace string,
 // every flow a path walk waits for, and a publish for every placeholder
 // that stops being one.
 func runMxlfs(ctx context.Context, domain string, fp *flowpublisher.Publisher,
-	d *intent.Dispatcher, claim func(context.Context, string) bool, pods *podlookup.Resolver) error {
+	d *intent.Dispatcher, claim func(context.Context, string) bool,
+	ours func(ctx context.Context, pid int32) bool) error {
 
 	l := ctrl.Log.WithName("mxlfs")
-	ns, _ := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 	trigger := &mxlfswatch.Trigger{
 		Dispatcher: d,
-		Ours:       ours(pods, strings.TrimSpace(string(ns))),
+		Ours:       ours,
 		Log:        l,
 	}
 	go func() {
