@@ -158,3 +158,33 @@ func TestReleaseStaysForAReaderThatArrivesWhileLeaving(t *testing.T) {
 	require.NoError(t, base.Get(ctx, types.NamespacedName{Name: set.Name}, &got))
 	require.Equal(t, []string{"node-a"}, got.Status.Nodes)
 }
+
+// Leaving holds the lock Want records a use under. A status update the
+// API server never answers must not hold it, and with it every reader
+// waiting for an output here, for longer than the bound.
+func TestReleaseGivesUpOnAStatusUpdateThatHangs(t *testing.T) {
+	s, _ := newSets(t, "node-a")
+	ctx := context.Background()
+	now := time.Unix(1000, 0)
+	s.now = func() time.Time { return now }
+	s.timeout = 50 * time.Millisecond
+	_, err := s.Want(ctx, "", out)
+	require.NoError(t, err)
+	now = now.Add(5 * time.Minute)
+
+	s.Client = interceptor.NewClient(s.Client.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, _ client.Client, _ string, _ client.Object, _ ...client.SubResourceUpdateOption) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	})
+	none := func() (map[mxlv1alpha1.FlowRef]bool, error) { return nil, nil }
+	done := make(chan error, 1)
+	go func() { done <- s.Release(ctx, none, time.Minute) }()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Release still waits on the status update")
+	}
+}

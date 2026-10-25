@@ -27,12 +27,18 @@ import (
 // nothing for a while, and leaving would tear the output down under it.
 const ReleaseGrace = time.Minute
 
+// leaveTimeout bounds leaving one set. Leaving holds the lock every Want
+// records a use under, so a status update the API server is slow to
+// answer would hold up each reader waiting for an output on this node.
+const leaveTimeout = 5 * time.Second
+
 // Sets finds sets by output.
 type Sets struct {
 	Client   client.Client
 	NodeName string
 
 	now      func() time.Time // a seam for tests; nil is time.Now
+	timeout  time.Duration    // a seam for tests; zero is leaveTimeout
 	mu       sync.Mutex
 	lastUsed map[string]time.Time // by set name: last seen used here
 }
@@ -160,7 +166,14 @@ func (s *Sets) Release(ctx context.Context, inUse func() (map[mxlv1alpha1.FlowRe
 // the update hold the lock Want records a use under: a Want that finds
 // the node still listed has then recorded its use before the check, and
 // one that comes after the update finds the node gone and adds it back.
+// It gives up after leaveTimeout; the next Release tries again.
 func (s *Sets) leave(ctx context.Context, name string, grace time.Duration) error {
+	timeout := s.timeout
+	if timeout <= 0 {
+		timeout = leaveTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var cur mxlv1alpha1.MxlFlowRedundancySet
 		if err := s.Client.Get(ctx, types.NamespacedName{Name: name}, &cur); err != nil {
