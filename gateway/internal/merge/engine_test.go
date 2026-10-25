@@ -14,6 +14,7 @@ import (
 	"unsafe"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/qvest-digital/go-mxl/mxl"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
@@ -377,4 +378,31 @@ func TestEngineReaderNeverFaultsOnAReplacedMember(t *testing.T) {
 	for p, src := range e.audio.Current {
 		require.NotEqual(t, 0, src, "page %d selected to the replaced placeholder", p)
 	}
+}
+
+// futex_waitv returns at once when it fails, ENOSYS on a kernel without
+// it; the engine loop would then spin a core. A wait that times out, is
+// woken or finds a word already changed is the normal case and must not
+// add a sleep.
+func TestWaitSleepsWhenFutexWaitvFails(t *testing.T) {
+	var slept []time.Duration
+	var errno unix.Errno
+	origCall, origSleep := futexWaitvCall, sleep
+	t.Cleanup(func() { futexWaitvCall, sleep = origCall, origSleep })
+	futexWaitvCall = func([]futexWaitv, *unix.Timespec) unix.Errno { return errno }
+	sleep = func(d time.Duration) { slept = append(slept, d) }
+	var logged int
+	e := &Engine{log: funcr.New(func(string, string) { logged++ }, funcr.Options{})}
+	waits := make([]futexWaitv, 1)
+
+	for _, errno = range []unix.Errno{0, unix.ETIMEDOUT, unix.EAGAIN, unix.EINTR} {
+		e.wait(waits, maxSleep)
+	}
+	require.Empty(t, slept)
+
+	for _, errno = range []unix.Errno{unix.ENOSYS, unix.EINVAL, unix.EFAULT} {
+		e.wait(waits, maxSleep)
+	}
+	require.Equal(t, []time.Duration{maxSleep, maxSleep, maxSleep}, slept)
+	require.Equal(t, 1, logged, "the failure is logged once")
 }
