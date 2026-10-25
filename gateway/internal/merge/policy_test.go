@@ -659,7 +659,11 @@ func TestAudioDropMovesAReplacedMembersPagesToWhatStillHoldsThem(t *testing.T) {
 	a.Skew = 2048
 	for n := uint64(10); n <= 40; n++ {
 		a.Committed(0, n*PageSamples, (n+1)*PageSamples)
-		if n != 30 {
+		switch n {
+		case 30: // b skipped it
+		case 25: // b holds half of it
+			a.Committed(1, n*PageSamples, n*PageSamples+PageSamples/2)
+		default:
 			a.Committed(1, n*PageSamples, (n+1)*PageSamples)
 		}
 	}
@@ -672,8 +676,8 @@ func TestAudioDropMovesAReplacedMembersPagesToWhatStillHoldsThem(t *testing.T) {
 	require.Len(t, sel, 31, "a page stayed on the replaced member")
 	for _, s := range sel {
 		want := 1
-		if s.Page == 30 {
-			want = 2 // b has a gap there
+		if s.Page == 30 || s.Page == 25 {
+			want = 2 // b does not hold it whole
 		}
 		require.Equal(t, want, s.Source, "page slot %d", s.Page)
 	}
@@ -687,4 +691,32 @@ func TestAudioDropMovesAReplacedMembersPagesToWhatStillHoldsThem(t *testing.T) {
 	sel, head, _ = a.Step(time.Unix(1, 0))
 	require.Equal(t, uint64(44*PageSamples), head)
 	require.Equal(t, []PageSelect{{Page: 41 % 38, Source: 1}, {Page: 42 % 38, Source: 1}, {Page: 43 % 38, Source: 0}}, sel)
+}
+
+// The replaced member's head is forgotten with its pages. Left in place,
+// the old ring's last commit would read as the member having skipped the
+// pages after it, and its new ring would be passed over at once rather
+// than waited for as a late primary.
+func TestAudioDropWaitsForTheNewRingAsALatePrimary(t *testing.T) {
+	a := NewAudio(2, 38, 2)
+	a.Skew, a.Tolerance = 2048, 5*time.Millisecond
+	for n := uint64(10); n <= 20; n++ {
+		a.Committed(0, n*PageSamples, (n+1)*PageSamples)
+		a.Committed(1, n*PageSamples, (n+1)*PageSamples)
+	}
+	now := time.Unix(0, 0)
+	_, head, _ := a.Step(now)
+	require.Equal(t, uint64(21*PageSamples), head)
+	a.Committed(0, 21*PageSamples, 23*PageSamples) // the old ring's last, unpublished
+
+	a.Drop(0)
+	a.Committed(1, 21*PageSamples, 24*PageSamples)
+	sel, head, wait := a.Step(now)
+	require.Empty(t, sel)
+	require.Equal(t, uint64(21*PageSamples), head)
+	require.Equal(t, a.Tolerance, wait, "the restarted primary is taken to have skipped what its old ring wrote")
+
+	_, head, _ = a.Step(now.Add(wait))
+	require.Equal(t, uint64(24*PageSamples), head)
+	require.Equal(t, 1, a.Primary)
 }

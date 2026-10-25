@@ -214,8 +214,7 @@ func (d *Discrete) Retire(members []Member, due uint64) (selects []Select) {
 
 // Drop returns the selects that move every slot member m serves to
 // another member that holds its grain, or to the placeholder, before m's
-// ring is replaced by one that holds none of them. It forgets what Retire
-// saw of m.
+// ring is replaced by one that holds none of them.
 func (d *Discrete) Drop(members []Member, m int) (selects []Select) {
 	for slot, cur := range d.Current {
 		if cur != m {
@@ -235,9 +234,6 @@ func (d *Discrete) Drop(members []Member, m int) (selects []Select) {
 		}
 		d.Current[slot] = to
 		selects = append(selects, Select{Slot: uint(slot), Source: to, Index: index})
-	}
-	if m < len(d.seen) {
-		d.seen[m], d.late[m] = 0, 0
 	}
 	return selects
 }
@@ -410,8 +406,10 @@ func (a *Audio) Drop(m int) (selects []PageSelect) {
 		a.Current[p] = to
 		selects = append(selects, PageSelect{Page: uint64(p), Source: to})
 	}
+	// Its new ring has committed nothing: neither a page nor a head that
+	// would read as the member having skipped what it never wrote.
 	a.cov[m] = make([]coverage, a.Pages)
-	a.evHead[m], a.batch[m] = 0, 0
+	a.evHead[m] = 0
 	return selects
 }
 
