@@ -154,6 +154,40 @@ func TestDataGrainAcrossGatewayVersions(t *testing.T) {
 	require.True(t, arrivalComplete(g, true))
 }
 
+// A data writer commits a grain with nothing in it, as an ANC writer
+// does for a frame with no packets. The source must read and send it,
+// header only, or its transfer loop retries it until it resyncs past it
+// and drops the grains behind it; the target must commit it empty, not
+// as a full grain of whatever the slot held.
+func TestEmptyDataGrainIsMirroredEmpty(t *testing.T) {
+	inst, err := mxl.NewInstance(t.TempDir(), "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = inst.Close() })
+	w, _, err := inst.NewWriter(sharedFlowDataDef)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = w.Close() })
+	r, err := inst.NewReader("5d1a7c2e-3f4b-4e8a-9c6d-2b7e1f0a9d35")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	const idx = 1000
+	ga, err := w.OpenGrain(idx)
+	require.NoError(t, err)
+	require.NoError(t, ga.Commit(0, 0))
+
+	g, err := readForTransfer(r, idx, true)
+	require.NoError(t, err, "the source reads an empty data grain")
+	require.Zero(t, g.ValidSlices)
+
+	// What the initiator's header-only write leaves in the target's
+	// slot is the same header, as in the test above.
+	_, err = commitArrivedGrain(w, idx)
+	require.NoError(t, err)
+	got, err := w.GrainInfo(idx)
+	require.NoError(t, err)
+	require.Zero(t, got.ValidSlices, "committed as the full grain")
+}
+
 func TestArrivalComplete(t *testing.T) {
 	partial := mxl.Grain{TotalSlices: 4096, ValidSlices: 64}
 	require.True(t, arrivalComplete(partial, true), "a data grain is committed as it arrives")
