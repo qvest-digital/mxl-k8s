@@ -360,9 +360,12 @@ agent:
   # -- CSI node plugin that delivers the domain to pods as an inline
   # ephemeral volume (driver mxl.qvest-digital.com), with the volume
   # attributes domain (an MxlDomain name; empty for the primary domain)
-  # and access (read or write). Requires mxlfs.enabled. A publish is
-  # refused, and retried by the kubelet, until the agent has mounted the
-  # domain or left it plain.
+  # and access (read, the default, or write). Requires mxlfs.enabled. A
+  # publish is refused, and retried by the kubelet, until the agent has
+  # mounted the domain or left it plain. Write access is granted to any
+  # pod that asks for it in its volume attributes, and the domain
+  # directory is mode 0777, so a pod with write access can create,
+  # overwrite or remove any flow in the domain.
   csi:
     enabled: false
     # @schema
