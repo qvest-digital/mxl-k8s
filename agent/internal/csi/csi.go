@@ -65,6 +65,10 @@ type Plugin struct {
 	// DomainDir resolves a domain attribute to the directory to bind.
 	DomainDir func(ctx context.Context, domain string) (string, error)
 	Mounter   Mounter
+	// Ready reports whether a domain directory may be bound yet. A bind
+	// taken before the domain's own mount would hold the directory
+	// beneath it for the life of the pod. Nil binds at once.
+	Ready func(dir string) bool
 
 	mu   sync.Mutex
 	pods map[string]Pod // by target path
@@ -117,6 +121,10 @@ func (p *Plugin) NodePublishVolume(ctx context.Context, req *csipb.NodePublishVo
 	source, err := p.DomainDir(ctx, vc[AttrDomain])
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "domain %q: %v", vc[AttrDomain], err)
+	}
+	if p.Ready != nil && !p.Ready(source) {
+		// Unavailable rather than a final answer: the kubelet retries.
+		return nil, status.Errorf(codes.Unavailable, "domain %q at %s is not mounted yet", vc[AttrDomain], source)
 	}
 	if err := os.MkdirAll(target, 0o750); err != nil {
 		return nil, status.Errorf(codes.Internal, "create %s: %v", target, err)

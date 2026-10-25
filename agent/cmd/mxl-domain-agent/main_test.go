@@ -9,6 +9,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/config"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/mxlfsmount"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -35,4 +36,17 @@ func TestRequireKindNamesTheMissingCRD(t *testing.T) {
 	m := meta.NewDefaultRESTMapper(nil)
 	m.Add(mxlv1alpha1.GroupVersion.WithKind("MxlFlowRedundancySet"), meta.RESTScopeRoot)
 	require.NoError(t, requireKind(m, "MxlFlowRedundancySet"))
+}
+
+// Without mxlfs a CSI publish binds at once, as a plain directory needs
+// nothing first; with it, only once the agent has decided the domain.
+func TestCSIReadyWaitsOnlyWithMxlfs(t *testing.T) {
+	assert.Nil(t, csiReady(nil))
+
+	m := &mxlfsmount.Mounter{IsMxlfs: func(string) bool { return true }}
+	ready := csiReady(m)
+	dir := t.TempDir()
+	assert.False(t, ready(dir))
+	require.NoError(t, m.Ensure(dir))
+	assert.True(t, ready(dir))
 }

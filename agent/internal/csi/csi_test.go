@@ -128,3 +128,21 @@ func TestSysMounterIsMountPoint(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, mounted)
 }
+
+// A pod scheduled before the agent mounted the domain must not get the
+// directory beneath the mount: it would never see a flow. The kubelet
+// retries the publish until the domain is ready.
+func TestPublishWaitsForTheDomainMount(t *testing.T) {
+	p, m := newPlugin(t)
+	ready := false
+	p.Ready = func(dir string) bool { return ready && dir == "/run/mxl/domain" }
+	target := filepath.Join(t.TempDir(), "mount")
+
+	err := publish(p, target, nil, false)
+	require.Equal(t, codes.Unavailable, status.Code(err))
+	require.Empty(t, m.mounts)
+
+	ready = true
+	require.NoError(t, publish(p, target, nil, false))
+	require.Equal(t, bind{"/run/mxl/domain", false}, m.mounts[target])
+}

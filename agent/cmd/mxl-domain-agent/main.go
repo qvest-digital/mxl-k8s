@@ -24,11 +24,13 @@ import (
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/config"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/csi"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/domainfs"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/domainpublisher"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/fanotify"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/flowpublisher"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/intent"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/intentsock"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/mxlfsmount"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/mxlfswatch"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/observed"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/originlease"
@@ -126,6 +128,32 @@ func run(args []string) error {
 		domainsMu.Unlock()
 		trackers.Sync(ctx, m)
 	}
+	// Every domain directory is mounted as an mxlfs before anything is
+	// written into it or watched there: the primary one now, any other
+	// as it is materialised. Without mxlfs a marker left by an earlier
+	// run with it goes, so no gateway or exporter waits on it.
+	var mounts *mxlfsmount.Mounter
+	if cfg.Mxlfs {
+		if err := requireKind(kClient.RESTMapper(), "MxlFlowRedundancySet"); err != nil {
+			return fmt.Errorf("--mxlfs needs the redundancy set CRD: %w", err)
+		}
+		mounts = &mxlfsmount.Mounter{
+			Fallback: mxlfsmount.NodeEvent(kClient, cfg.NodeName, setupLog),
+			Log:      ctrl.Log.WithName("mxlfsmount"),
+		}
+		if err := mounts.Ensure(cfg.DomainPath); err != nil {
+			return err
+		}
+		domainPub.Apply = func(base string, spec *mxlv1alpha1.MxlDomainSpec) (domainfs.Result, error) {
+			if err := mounts.Ensure(filepath.Join(base, spec.Path())); err != nil {
+				return domainfs.Result{}, err
+			}
+			return domainfs.Apply(base, spec)
+		}
+	} else if err := mxlfsmount.ClearReady(root); err != nil {
+		setupLog.Error(err, "remove mxlfs ready marker")
+	}
+
 	// Before the fanotify mark: the mirrored directory is one of the
 	// domains, and a fresh node has none yet. A failure here is logged,
 	// not fatal -- the sync loop retries, and the mark below fails
@@ -133,12 +161,14 @@ func run(args []string) error {
 	if err := domainPub.Sync(ctx); err != nil {
 		setupLog.Error(err, "initial domain sync failed")
 	}
-
-	if cfg.Mxlfs {
-		if err := requireKind(kClient.RESTMapper(), "MxlFlowRedundancySet"); err != nil {
-			return fmt.Errorf("--mxlfs needs the redundancy set CRD: %w", err)
+	// The gateway and the exporter wait for this before they open a
+	// domain, so they never hold the directory beneath a later mount.
+	if mounts != nil {
+		if err := mxlfsmount.MarkReady(root); err != nil {
+			return fmt.Errorf("write mxlfs ready marker: %w", err)
 		}
 	}
+
 	flowPub, sets := newFlowPublisher(cfg, kClient, leaseMgr)
 	if err := flowPub.InitialSync(ctx); err != nil {
 		// Initial sync failures are logged, not fatal -- the fanotify
@@ -253,6 +283,7 @@ func run(args []string) error {
 		plugin := &csi.Plugin{
 			NodeName: cfg.NodeName,
 			Mounter:  csi.SysMounter{},
+			Ready:    csiReady(mounts),
 			DomainDir: func(ctx context.Context, domain string) (string, error) {
 				if domain == "" {
 					return cfg.DomainPath, nil
@@ -318,6 +349,15 @@ func newFlowPublisher(cfg *config.Config, c client.Client, lease *originlease.Ma
 	sets := &redundancy.Sets{Client: c, NodeName: cfg.NodeName}
 	fp.IsOutput = sets.IsOutput
 	return fp, sets
+}
+
+// csiReady holds a pod's bind of a domain until the domain is mounted or
+// known to stay plain. Without mxlfs nothing is mounted, and nothing waits.
+func csiReady(mounts *mxlfsmount.Mounter) func(dir string) bool {
+	if mounts == nil {
+		return nil
+	}
+	return mounts.Decided
 }
 
 // requireKind fails when the API server does not serve kind: every
