@@ -31,7 +31,7 @@ func TestStopFlowStopsOnlyTargetsOfThatFlow(t *testing.T) {
 		dir, err := os.MkdirTemp("/dev/shm", "stopflow-test-*")
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = os.RemoveAll(dir) })
-		h, err := instance.Open(dir)
+		h, err := instance.Open(dir, false)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = h.Close() })
 		return h

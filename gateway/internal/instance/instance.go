@@ -25,16 +25,26 @@ type Handles struct {
 	closed  bool
 }
 
+// Seams onto package mxlfs for tests.
+var (
+	isMxlfs = mxlfs.IsMxlfs
+	setLazy = mxlfs.SetLazy
+)
+
 // Open opens the MXL domain at domainPath and the corresponding
-// fabrics instance. Both stay open until Close. On an mxlfs domain the
-// process allocates lazily from then on; see package mxlfs.
-func Open(domainPath string) (*Handles, error) {
-	onMxlfs, err := mxlfs.IsMxlfs(domainPath)
-	if err != nil {
-		return nil, err
+// fabrics instance. Both stay open until Close. With withMxlfs and the
+// domain on an mxlfs, the process allocates lazily from then on; see
+// package mxlfs. Without it the domain is never looked at as one.
+func Open(domainPath string, withMxlfs bool) (*Handles, error) {
+	var onMxlfs bool
+	if withMxlfs {
+		var err error
+		if onMxlfs, err = isMxlfs(domainPath); err != nil {
+			return nil, err
+		}
 	}
 	if onMxlfs {
-		if err := mxlfs.SetLazy(domainPath, true); err != nil {
+		if err := setLazy(domainPath, true); err != nil {
 			return nil, err
 		}
 	}

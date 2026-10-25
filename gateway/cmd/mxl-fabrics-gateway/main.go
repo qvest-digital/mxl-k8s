@@ -11,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
@@ -75,7 +77,7 @@ func run(args []string) error {
 
 	// Open libmxl handles up front so any misconfiguration (bad
 	// domain path, missing .so) fails before the manager comes up.
-	handles, err := instance.Open(cfg.DomainPath)
+	handles, err := instance.Open(cfg.DomainPath, cfg.Mxlfs)
 	if err != nil {
 		return fmt.Errorf("open libmxl: %w", err)
 	}
@@ -101,6 +103,7 @@ func run(args []string) error {
 			}
 			return d.Spec.Path(), nil
 		},
+		Mxlfs: cfg.Mxlfs,
 	}
 	defer func() { _ = domains.Close() }()
 
@@ -140,35 +143,15 @@ func run(args []string) error {
 		return fmt.Errorf("setup target reconciler: %w", err)
 	}
 
-	// On an mxlfs domain every MxlFlow absent here gets a placeholder,
-	// so every pod on the node sees the whole domain.
-	placeholders := &placeholder.Manager{
-		Client:      mgr.GetClient(),
-		NodeName:    cfg.NodeName,
-		Domain:      placeholder.FromSet(domains),
-		LocalWriter: targetReconciler.StopFlow,
+	if cfg.Mxlfs {
+		if err := requireKind(mgr.GetRESTMapper(), "MxlFlowRedundancySet"); err != nil {
+			return fmt.Errorf("--mxlfs needs the redundancy set CRD: %w", err)
+		}
 	}
-	targetReconciler.Filled = placeholders.Filled
-	targetReconciler.Unfilled = placeholders.Unfilled
-
-	// Redundancy sets whose output a reader wants on this node.
-	sets := &merge.Reconciler{
-		Client:   mgr.GetClient(),
-		NodeName: cfg.NodeName,
-		Domains:  setDomains{domains},
-	}
-	targetReconciler.SamplesCommitted = sets.SamplesCommitted
-	if err := sets.SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup redundancy set reconciler: %w", err)
-	}
-	if err := ctrl.NewControllerManagedBy(mgr).
-		Named("placeholder").
-		For(&mxlv1alpha1.MxlFlow{}).
-		Complete(placeholders); err != nil {
-		return fmt.Errorf("setup placeholder reconciler: %w", err)
-	}
-	if err := mgr.Add(placeholders); err != nil {
-		return fmt.Errorf("register placeholder runnable: %w", err)
+	for _, c := range mxlfsComponents(cfg.Mxlfs, mgr.GetClient(), cfg.NodeName, domains, targetReconciler) {
+		if err := c.setup(mgr); err != nil {
+			return fmt.Errorf("setup %s: %w", c.name, err)
+		}
 	}
 	sourceReconciler := &mirror.SourceReconciler{
 		Client:           mgr.GetClient(),
@@ -307,4 +290,61 @@ func (d setDomains) DomainPath(ctx context.Context, name string) (string, bool, 
 		return "", false, err
 	}
 	return h.DomainPath(), h.OnMxlfs(), nil
+}
+
+type component struct {
+	name  string
+	setup func(ctrl.Manager) error
+}
+
+// mxlfsComponents wires what a domain on mxlfs needs into the target
+// reconciler and returns the controllers and runnables that go with it.
+// Without mxlfs it returns none and leaves the target's hooks nil.
+func mxlfsComponents(on bool, c client.Client, node string, domains *instance.Set,
+	target *mirror.TargetReconciler) []component {
+
+	if !on {
+		return nil
+	}
+	// On an mxlfs domain every MxlFlow absent here gets a placeholder,
+	// so every pod on the node sees the whole domain.
+	placeholders := &placeholder.Manager{
+		Client:      c,
+		NodeName:    node,
+		Domain:      placeholder.FromSet(domains),
+		LocalWriter: target.StopFlow,
+	}
+	target.Filled = placeholders.Filled
+	target.Unfilled = placeholders.Unfilled
+
+	// Redundancy sets whose output a reader wants on this node.
+	sets := &merge.Reconciler{
+		Client:   c,
+		NodeName: node,
+		Domains:  setDomains{domains},
+	}
+	target.SamplesCommitted = sets.SamplesCommitted
+
+	return []component{
+		{"redundancy set reconciler", sets.SetupWithManager},
+		{"placeholder reconciler", func(mgr ctrl.Manager) error {
+			if err := ctrl.NewControllerManagedBy(mgr).
+				Named("placeholder").
+				For(&mxlv1alpha1.MxlFlow{}).
+				Complete(placeholders); err != nil {
+				return err
+			}
+			return mgr.Add(placeholders)
+		}},
+	}
+}
+
+// requireKind fails when the API server does not serve kind: a
+// controller for it would otherwise wait for its cache without end.
+func requireKind(mapper meta.RESTMapper, kind string) error {
+	gk := schema.GroupKind{Group: mxlv1alpha1.GroupVersion.Group, Kind: kind}
+	if _, err := mapper.RESTMapping(gk, mxlv1alpha1.GroupVersion.Version); err != nil {
+		return fmt.Errorf("%s is not served (is its CRD installed?): %w", gk, err)
+	}
+	return nil
 }

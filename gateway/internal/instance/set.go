@@ -23,6 +23,9 @@ type Set struct {
 	// to the runtime root, the primary domain's parent.
 	Directory func(ctx context.Context, domain string) (string, error)
 
+	// Mxlfs is handed to Open for every domain the set opens.
+	Mxlfs bool
+
 	// open is the seam onto Open; nil takes Open.
 	open func(path string) (*Handles, error)
 
@@ -62,7 +65,7 @@ func (s *Set) For(ctx context.Context, domain string) (*Handles, error) {
 	}
 	open := s.open
 	if open == nil {
-		open = Open
+		open = func(path string) (*Handles, error) { return Open(path, s.Mxlfs) }
 	}
 	h, err := open(filepath.Join(filepath.Dir(primary), dir))
 	if err != nil {
