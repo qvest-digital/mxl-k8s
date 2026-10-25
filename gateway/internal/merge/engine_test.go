@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -673,6 +674,55 @@ func produce(t *testing.T, inst *mxl.Instance, def string, tag uint64) *producer
 	return p
 }
 
+// trustedWindow reads what the output offers behind its head, as a
+// reader of the oldest grain or sample does. Member B wrote all of it, so
+// every grain and sample must be there with its own index: an INVALID
+// grain or silence is a slot or page left on the replaced member, where
+// the new ring holds nothing yet. A grain or sample of producer tag 0,
+// the old ring, cannot be there any more.
+func trustedWindow(t *testing.T, e *Engine, r *mxl.Reader) {
+	t.Helper()
+	rt, err := r.Runtime()
+	require.NoError(t, err)
+	head := rt.HeadIndex
+	if e.audio == nil {
+		grains := uint64(e.disc.Grains)
+		for i := head + 2 - grains; i <= head; i++ {
+			g, err := r.GetGrain(i, 0)
+			if errors.Is(err, mxl.ErrOutOfRangeLate) {
+				continue // overwritten since the head was read
+			}
+			require.NoError(t, err, "grain %d", i)
+			require.False(t, g.Invalid(), "grain %d behind head %d is INVALID though member B holds it", i, head)
+			v := binary.LittleEndian.Uint64(g.Payload)
+			require.Equal(t, i, v&(1<<56-1), "grain %d behind head %d shows grain %d of producer %d", i, head, v&(1<<56-1), v>>56)
+			require.NotZero(t, v>>56, "grain %d behind head %d is the old ring's", i, head)
+		}
+		return
+	}
+	const batch = 480
+	length := e.audio.Pages * PageSamples
+	for end := (head-length/2)/batch*batch + 2*batch; end <= head; end += batch {
+		v, err := r.GetSamples(end, batch, 0)
+		if errors.Is(err, mxl.ErrOutOfRangeLate) {
+			continue
+		}
+		require.NoError(t, err, "samples up to %d", end)
+		for ch := uint64(0); ch < 2; ch++ {
+			buf, err := v.CopyChannel(ch)
+			require.NoError(t, err)
+			for o := 0; o < len(buf); o += 4 {
+				s := binary.LittleEndian.Uint32(buf[o:])
+				idx := end - batch + uint64(o/4)
+				require.NotZero(t, s, "sample %d of channel %d behind head %d is silence though member B holds it", idx, ch, head)
+				require.Equal(t, uint32(idx&0x0fffffff), s&0x0fffffff,
+					"sample %d of channel %d behind head %d carries %#x", idx, ch, head, s)
+				require.NotZero(t, s>>28&7, "sample %d of channel %d behind head %d is the old ring's", idx, ch, head)
+			}
+		}
+	}
+}
+
 func dataInode(t *testing.T, domain, id string) uint64 {
 	t.Helper()
 	var st unix.Stat_t
@@ -702,12 +752,18 @@ func TestEngineTakesARestartedMembersRingInPlace(t *testing.T) {
 			require.NoError(t, err)
 			defer e.Close()
 			if !e.replaceable {
+				if os.Getenv("MXLFS_REQUIRE_REPLACE") == "1" {
+					t.Fatal("this mxlfs has no MXLFS_IOC_VIEW_REPLACE_SOURCE")
+				}
 				t.Skip("this mxlfs has no MXLFS_IOC_VIEW_REPLACE_SOURCE")
 			}
 			r, err := inst.NewReader(output)
 			require.NoError(t, err)
 			defer r.Close()
 			out := dataInode(t, domain, output)
+			// Long enough that all the output offers behind its head was
+			// published from the members, none from before it started.
+			time.Sleep(time.Second)
 
 			a.Stop()
 			_, err = os.Stat(flowDir(domain, memberA))
@@ -716,6 +772,9 @@ func TestEngineTakesARestartedMembersRingInPlace(t *testing.T) {
 			ino, err := e.Replace(0)
 			require.NoError(t, err)
 			require.Equal(t, dataInode(t, domain, memberA), ino)
+			// What readers trust behind the head was served by the old ring
+			// until now; none of it may show what the new ring holds there.
+			trustedWindow(t, e, r)
 
 			b.Stop()
 
