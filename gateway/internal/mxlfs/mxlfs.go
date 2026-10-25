@@ -38,7 +38,8 @@ func IsMxlfs(path string) (bool, error) {
 
 // SetLazy turns lazy allocation on or off for the calling process on the
 // mxlfs holding dir: with it on, the process's fallocate calls there only
-// set file sizes. Needs CAP_SYS_ADMIN.
+// set file sizes. It needs no privilege, as it changes only how the
+// caller's own fallocate calls allocate.
 func SetLazy(dir string, on bool) error {
 	f, err := os.Open(dir)
 	if err != nil {

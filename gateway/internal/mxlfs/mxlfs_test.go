@@ -51,8 +51,8 @@ func allocated(t *testing.T, dir string) uint64 {
 	return (st.Blocks - st.Bfree) * uint64(st.Bsize)
 }
 
-// TestLazyWriterThenAllocate needs a writable mxlfs in MXLFS_TEST_DIR and
-// CAP_SYS_ADMIN; it is skipped otherwise. A lazily allocating process
+// TestLazyWriterThenAllocate needs a writable mxlfs in MXLFS_TEST_DIR; it
+// is skipped otherwise. A lazily allocating process
 // creates a flow through libmxl at the cost of its headers, and
 // AllocateFlow then allocates the whole ring.
 func TestLazyWriterThenAllocate(t *testing.T) {
