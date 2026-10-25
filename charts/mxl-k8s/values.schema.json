@@ -2126,7 +2126,7 @@
           "type": "array"
         },
         "updateStrategy": {
-          "description": "DaemonSet update strategy. With mxlfs one gateway per node is assumed: a gateway clears every placeholder marker in a domain as it opens it, so a second gateway on the node would clear the markers of the first one's placeholders. rollingUpdate.maxSurge has to stay 0.",
+          "description": "DaemonSet update strategy. With mxlfs one gateway per node is assumed: a gateway clears every placeholder marker in a domain as it opens it, so a second gateway on the node would clear the markers of the first one's placeholders. With mxlfs.enabled the chart refuses a rollingUpdate.maxSurge other than 0.",
           "properties": {
             "rollingUpdate": {
               "properties": {

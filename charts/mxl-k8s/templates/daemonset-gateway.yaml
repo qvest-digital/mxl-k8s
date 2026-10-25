@@ -20,6 +20,10 @@ probes, update strategy, service account -- stays shared.
 {{- $ctx := .Context -}}
 {{- $g := .gateway -}}
 {{- $variant := .variant -}}
+{{- $surge := dig "rollingUpdate" "maxSurge" 0 $g.updateStrategy | default 0 | toString -}}
+{{- if and $ctx.Values.mxlfs.enabled (not (has $surge (list "0" "0%"))) -}}
+{{- fail (printf "mxlfs.enabled requires gateway.updateStrategy.rollingUpdate.maxSurge 0, not %s: a gateway clears every placeholder marker in a domain as it opens it, so a second gateway on the node would clear the markers of the first one's placeholders" $surge) -}}
+{{- end -}}
 {{- /*
 Build the effective capability list for the gateway container.
 rdma.enabled implies IPC_LOCK, which exempts the providers' memory

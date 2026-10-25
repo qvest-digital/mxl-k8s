@@ -277,3 +277,47 @@ tests:
             apiGroups: [mxl.qvest-digital.com]
             resources: [mxlflowredundancysets/status]
             verbs: [get, patch, update]
+
+  # A gateway clears every placeholder marker in a domain as it opens it.
+  # A surging rollout starts the new gateway beside the old one, which
+  # then has its placeholders' markers cleared under it.
+  - it: refuses a surging gateway rollout with mxlfs
+    template: templates/daemonset-gateway.yaml
+    set:
+      mxlfs.enabled: true
+      gateway.updateStrategy.rollingUpdate.maxSurge: 1
+      gateway.updateStrategy.rollingUpdate.maxUnavailable: 0
+    asserts:
+      - failedTemplate:
+          errorMessage: "mxlfs.enabled requires gateway.updateStrategy.rollingUpdate.maxSurge 0, not 1: a gateway clears every placeholder marker in a domain as it opens it, so a second gateway on the node would clear the markers of the first one's placeholders"
+
+  - it: refuses a variant that surges with mxlfs
+    template: templates/daemonset-gateway.yaml
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      mxlfs.enabled: true
+      gateway.variants.efa.updateStrategy.rollingUpdate.maxSurge: 10%
+    asserts:
+      - failedTemplate:
+          errorPattern: "maxSurge 0, not 10%"
+
+  - it: allows any maxSurge without mxlfs
+    template: templates/daemonset-gateway.yaml
+    set:
+      gateway.updateStrategy.rollingUpdate.maxSurge: 1
+      gateway.updateStrategy.rollingUpdate.maxUnavailable: 0
+    asserts:
+      - equal:
+          path: spec.updateStrategy.rollingUpdate.maxSurge
+          value: 1
+
+  - it: allows an explicit zero maxSurge with mxlfs
+    template: templates/daemonset-gateway.yaml
+    set:
+      mxlfs.enabled: true
+      gateway.updateStrategy.rollingUpdate.maxSurge: "0%"
+    asserts:
+      - equal:
+          path: spec.updateStrategy.rollingUpdate.maxSurge
+          value: "0%"
