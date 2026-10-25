@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,7 +32,10 @@ const (
 	iocViewSelect      = 1<<30 | 4<<16 | 'x'<<8 | 2  // _IOW('x', 2, __u32)
 	iocViewSelectRange = 1<<30 | 24<<16 | 'x'<<8 | 9 // _IOW('x', 9, struct mxlfs_view_range)
 	iocAllocate        = 'x'<<8 | 8                  // _IO('x', 8)
-	maxSources         = 8
+	// _IOW('x', 10, struct mxlfs_view_replace), which mxlfs 0.1.0-rc.2
+	// does not have.
+	iocViewReplaceSource = 1<<30 | 12<<16 | 'x'<<8 | 10
+	maxSources           = 8
 
 	// maxSleep is the longest the engine waits between two passes.
 	maxSleep = 20 * time.Millisecond
@@ -61,6 +65,12 @@ type viewRange struct {
 	Flags  uint32
 	Offset uint64
 	Length uint64
+}
+
+type viewReplace struct {
+	Source uint32
+	FD     int32
+	Flags  uint32
 }
 
 // flowState follows mxlFlowInfo in a flow's data file: the inode readers
@@ -153,7 +163,7 @@ type Engine struct {
 	files    []*os.File
 	views    []*os.File // one per grain slot, or the channels file
 	grains   [][]*C.mxlGrainInfo
-	grainMem [][]byte
+	grainMem [][][]byte // per member, per slot
 	audio    *Audio
 	disc     *Discrete
 	rate     C.mxlRational
@@ -163,6 +173,11 @@ type Engine struct {
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
+
+	// replaceable is whether the module can put another file in place of
+	// a view's source; replaces hands Replace to the engine's loop.
+	replaceable bool
+	replaces    chan replaceReq
 
 	waitFailed sync.Once // logs the first futex_waitv failure
 
@@ -201,9 +216,10 @@ func Start(ctx context.Context, spec Spec, log logr.Logger) (*Engine, error) {
 	if err := e.build(); err != nil {
 		return nil, err
 	}
+	e.replaceable = canReplace(e.views[0])
 	ok = true
 	rctx, cancel := context.WithCancel(ctx)
-	e.cancel, e.done = cancel, make(chan struct{})
+	e.cancel, e.done, e.replaces = cancel, make(chan struct{}), make(chan replaceReq)
 	go e.run(rctx)
 	return e, nil
 }
@@ -394,6 +410,28 @@ func selectRange(f *os.File, source int, offset, length uint64) error {
 	return nil
 }
 
+// canReplace reports whether the module has MXLFS_IOC_VIEW_REPLACE_SOURCE.
+// It asks with flags none accepts: a module with the ioctl refuses them
+// with EINVAL, one without it does not know the command.
+func canReplace(v *os.File) bool {
+	req := viewReplace{Flags: ^uint32(0)}
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, v.Fd(), iocViewReplaceSource, uintptr(unsafe.Pointer(&req)))
+	return errno == unix.EINVAL
+}
+
+func replaceSource(v *os.File, source int, f *os.File) error {
+	req := viewReplace{Source: uint32(source), FD: int32(f.Fd())}
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, v.Fd(), iocViewReplaceSource, uintptr(unsafe.Pointer(&req))); errno != 0 {
+		return fmt.Errorf("MXLFS_IOC_VIEW_REPLACE_SOURCE: %w", errno)
+	}
+	return nil
+}
+
+// mapGrainInfo maps the grain header at the start of a grain file.
+func mapGrainInfo(f *os.File) ([]byte, error) {
+	return unix.Mmap(int(f.Fd()), 0, int(C.sizeof_mxlGrainInfo), unix.PROT_READ, unix.MAP_SHARED)
+}
+
 func (e *Engine) buildDiscrete(tmp, src0 string) error {
 	grains := uint(e.members[0].discrete())
 	st, err := os.Stat(filepath.Join(src0, "grains", "data.0"))
@@ -426,6 +464,7 @@ func (e *Engine) buildDiscrete(tmp, src0 string) error {
 	}
 	placeholder := len(e.members)
 	e.grains = make([][]*C.mxlGrainInfo, len(e.members))
+	e.grainMem = make([][][]byte, len(e.members))
 	for slot := uint(0); slot < grains; slot++ {
 		var srcs []*os.File
 		for m, id := range e.spec.Members {
@@ -433,12 +472,12 @@ func (e *Engine) buildDiscrete(tmp, src0 string) error {
 			if err != nil {
 				return err
 			}
-			mem, err := unix.Mmap(int(f.Fd()), 0, int(C.sizeof_mxlGrainInfo), unix.PROT_READ, unix.MAP_SHARED)
+			mem, err := mapGrainInfo(f)
 			if err != nil {
 				f.Close()
 				return err
 			}
-			e.grainMem = append(e.grainMem, mem)
+			e.grainMem[m] = append(e.grainMem[m], mem)
 			e.grains[m] = append(e.grains[m], (*C.mxlGrainInfo)(unsafe.Pointer(&mem[0])))
 			srcs = append(srcs, f)
 		}
@@ -539,12 +578,187 @@ func (e *Engine) MemberIndex(id string) int {
 	return -1
 }
 
+// ErrNoReplace is Replace on a module without MXLFS_IOC_VIEW_REPLACE_SOURCE.
+var ErrNoReplace = errors.New("mxlfs has no MXLFS_IOC_VIEW_REPLACE_SOURCE")
+
+type replaceReq struct {
+	member int
+	done   chan replaced
+}
+
+type replaced struct {
+	ino uint64
+	err error
+}
+
+// Replace serves member from the ring now in its flow directory in place
+// of the one it was started over, and returns the inode of the data file
+// it mapped. A restarted producer recreates its flow directory, and with
+// it every file: the output and the readers holding it stay as they are,
+// only the member's source in each view is replaced. The new ring has to
+// be of the output's geometry. On an error the engine may be left half
+// replaced and has to be closed.
+func (e *Engine) Replace(member int) (uint64, error) {
+	if !e.replaceable {
+		return 0, ErrNoReplace
+	}
+	req := replaceReq{member: member, done: make(chan replaced, 1)}
+	select {
+	case e.replaces <- req:
+	case <-e.done:
+		return 0, errors.New("engine stopped")
+	}
+	r := <-req.done
+	return r.ino, r.err
+}
+
+// aligned reports whether member m's ring has the layout of ref's.
+func aligned(ref, m *header) bool {
+	if m.format() != ref.format() || m.info.config.common.grainRate != ref.info.config.common.grainRate {
+		return false
+	}
+	if ref.format() == formatAudio {
+		c0, l0 := ref.continuous()
+		c, l := m.continuous()
+		return c == c0 && l == l0
+	}
+	return m.discrete() == ref.discrete()
+}
+
+// replace is Replace on the engine's loop. Every slot or page the member
+// serves first moves to a member that holds its grain or samples, or to
+// the INVALID grain or silence: the new ring holds none of them, and a
+// lazily held one may hold no pages at all.
+func (e *Engine) replace(member int) (uint64, error) {
+	dir := flowDir(e.spec.DomainDir, e.spec.Members[member])
+	h, f, err := mapHeader(filepath.Join(dir, "data"), false)
+	if err != nil {
+		return 0, err
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			_ = unix.Munmap(h.mem)
+			f.Close()
+		}
+	}()
+	var st unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &st); err != nil {
+		return 0, err
+	}
+	if !aligned(e.out, h) {
+		return 0, fmt.Errorf("member %s is no longer of the output's geometry", e.spec.Members[member])
+	}
+	var srcs []*os.File
+	var mems [][]byte
+	defer func() {
+		for _, s := range srcs {
+			s.Close()
+		}
+		if !keep {
+			for _, m := range mems {
+				_ = unix.Munmap(m)
+			}
+		}
+	}()
+	if e.disc != nil {
+		for slot := range e.views {
+			s, err := os.Open(filepath.Join(dir, "grains", fmt.Sprintf("data.%d", slot)))
+			if err != nil {
+				return 0, err
+			}
+			srcs = append(srcs, s)
+			mem, err := mapGrainInfo(s)
+			if err != nil {
+				return 0, err
+			}
+			mems = append(mems, mem)
+		}
+	} else {
+		s, err := os.Open(filepath.Join(dir, "channels"))
+		if err != nil {
+			return 0, err
+		}
+		srcs = append(srcs, s)
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.disc != nil {
+		sel := e.disc.Drop(e.discreteMembers(), member)
+		e.selects.Add(uint64(len(sel)))
+		err = e.apply(sel)
+	} else {
+		sel := e.audio.Drop(member)
+		e.selects.Add(uint64(len(sel)))
+		err = e.selectPages(sel)
+	}
+	if err != nil {
+		return 0, err
+	}
+	for k, v := range e.views {
+		if err := replaceSource(v, member, srcs[k]); err != nil {
+			return 0, fmt.Errorf("%s: %w", v.Name(), err)
+		}
+	}
+	_ = unix.Munmap(e.members[member].mem)
+	e.files[member].Close()
+	e.members[member], e.files[member] = h, f
+	if e.disc != nil {
+		for k, m := range e.grainMem[member] {
+			_ = unix.Munmap(m)
+			e.grains[member][k] = (*C.mxlGrainInfo)(unsafe.Pointer(&mems[k][0]))
+		}
+		e.grainMem[member] = mems
+	}
+	keep = true
+	e.log.Info("replaced a member's ring", "member", e.spec.Members[member], "inode", st.Ino)
+	return st.Ino, nil
+}
+
+// discreteMembers is what the discrete policy sees of the members now.
+func (e *Engine) discreteMembers() []Member {
+	ms := make([]Member, len(e.members))
+	for i, m := range e.members {
+		i := i
+		ms[i] = Member{Head: m.head(), Grain: func(slot uint) Grain {
+			g := e.grains[i][slot]
+			return Grain{Index: uint64(atomic.LoadUint64((*uint64)(unsafe.Pointer(&g.index)))),
+				Invalid:     uint32(g.flags)&flagInvalid != 0,
+				ValidSlices: uint16(g.validSlices), TotalSlices: uint16(g.totalSlices)}
+		}}
+	}
+	return ms
+}
+
+// selectPages points page slots of every channel at their sources.
+func (e *Engine) selectPages(sel []PageSelect) error {
+	channels, length := e.members[0].continuous()
+	for _, s := range sel {
+		for c := uint64(0); c < uint64(channels); c++ {
+			if err := selectRange(e.views[0], s.Source, (c*uint64(length)+s.Page*PageSamples)*4, 4096); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (e *Engine) run(ctx context.Context) {
 	defer close(e.done)
 	waits := make([]futexWaitv, len(e.members))
 	lastHead := make([]uint64, len(e.members))
 	report := time.Now()
 	for ctx.Err() == nil {
+		select {
+		case req := <-e.replaces:
+			ino, err := e.replace(req.member)
+			if err == nil {
+				lastHead[req.member] = 0 // the new ring's head is no advance
+			}
+			req.done <- replaced{ino, err}
+		default:
+		}
 		if time.Since(report) >= time.Minute {
 			report = time.Now()
 			e.log.Info("merging", "head", e.out.head(), "selects", e.selects.Load())
@@ -559,16 +773,7 @@ func (e *Engine) run(ctx context.Context) {
 		var wait time.Duration
 		var err error
 		if e.disc != nil {
-			ms := make([]Member, len(e.members))
-			for i, m := range e.members {
-				i := i
-				ms[i] = Member{Head: m.head(), Grain: func(slot uint) Grain {
-					g := e.grains[i][slot]
-					return Grain{Index: uint64(atomic.LoadUint64((*uint64)(unsafe.Pointer(&g.index)))),
-						Invalid:     uint32(g.flags)&flagInvalid != 0,
-						ValidSlices: uint16(g.validSlices), TotalSlices: uint16(g.totalSlices)}
-				}}
-			}
+			ms := e.discreteMembers()
 			var sel []Select
 			sel, head, wait = e.disc.Step(ms, now)
 			// Retire looks as far as the index due, so the engine must
@@ -597,12 +802,7 @@ func (e *Engine) run(ctx context.Context) {
 			sel, head, wait = e.audio.Step(now)
 			sel = append(sel, e.audio.Retire(mxl.CurrentIndex(e.mxlRate()))...)
 			e.selects.Add(uint64(len(sel)))
-			channels, length := e.members[0].continuous()
-			for _, s := range sel {
-				for c := uint64(0); c < uint64(channels) && err == nil; c++ {
-					err = selectRange(e.views[0], s.Source, (c*uint64(length)+s.Page*PageSamples)*4, 4096)
-				}
-			}
+			err = e.selectPages(sel)
 			e.mu.Unlock()
 		}
 		if err != nil {
@@ -720,8 +920,10 @@ func (e *Engine) release() {
 	for _, v := range e.views {
 		v.Close()
 	}
-	for _, m := range e.grainMem {
-		_ = unix.Munmap(m)
+	for _, ms := range e.grainMem {
+		for _, m := range ms {
+			_ = unix.Munmap(m)
+		}
 	}
 	for _, m := range e.members {
 		_ = unix.Munmap(m.mem)

@@ -300,3 +300,109 @@ func TestReconcilerLeavesAnOutputIDAWriterHolds(t *testing.T) {
 	require.FileExists(t, filepath.Join(flowDir(dir, output), "data"), "the writer's flow was removed")
 	require.Empty(t, r.engines)
 }
+
+// fakeReplace replaces Engine.Replace: it records the engine members it
+// was asked to replace and answers with err, or with the inode now in
+// the member's directory. then, if set, runs before it answers.
+func fakeReplace(t *testing.T, dir string, err error, then func()) *[]int {
+	t.Helper()
+	var asked []int
+	orig := replace
+	replace = func(e *Engine, m int) (uint64, error) {
+		asked = append(asked, m)
+		if then != nil {
+			then()
+		}
+		if err != nil {
+			return 0, err
+		}
+		id := e.spec.Members[m]
+		return inodes(dir, []mxlv1alpha1.RedundancyFlowRef{{FlowID: id}})[0], nil
+	}
+	t.Cleanup(func() { replace = orig })
+	return &asked
+}
+
+// startWithSpec is fakeStart whose engines keep their spec, which
+// fakeReplace reads.
+func startWithSpec(t *testing.T) *[][]string {
+	t.Helper()
+	var started [][]string
+	orig := start
+	start = func(_ context.Context, spec Spec, _ logr.Logger) (*Engine, error) {
+		started = append(started, spec.Members)
+		return &Engine{spec: spec, outDir: flowDir(spec.DomainDir, spec.OutputID)}, nil
+	}
+	t.Cleanup(func() { start = orig })
+	return &started
+}
+
+// A producer that restarts recreates its flow directory. Building the
+// output again for it removes the output under every reader, which then
+// reopens and loses grains the other member covered all along; the
+// engine takes the new ring in place of the old instead.
+func TestReconcilerReplacesARestartedMemberInPlace(t *testing.T) {
+	started := startWithSpec(t)
+	dir := t.TempDir()
+	asked := fakeReplace(t, dir, nil, nil)
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+	engine := r.engines["programme"].engine
+	// The engine keeps each member file open, so its inode is not reused.
+	f, err := os.Open(filepath.Join(flowDir(dir, memberB), "data"))
+	require.NoError(t, err)
+	t.Cleanup(func() { f.Close() })
+
+	require.NoError(t, os.RemoveAll(flowDir(dir, memberB)))
+	reconcileSet(t, r)
+	memberDir(t, dir, memberB, videoDef(memberB))
+	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter)
+	require.Equal(t, []int{1}, *asked)
+	require.Len(t, *started, 1, "a restarted member rebuilt the output")
+	require.Same(t, engine, r.engines["programme"].engine)
+
+	reconcileSet(t, r)
+	require.Equal(t, []int{1}, *asked, "a member replaced once was replaced again with nothing changed")
+}
+
+// Without MXLFS_IOC_VIEW_REPLACE_SOURCE, or on any failed replacement,
+// which may leave the views half replaced, the output is built again as
+// before, even when the member is gone again by then. A member restarted
+// in another geometry is never put in place: the output's geometry is
+// decided on a build.
+func TestReconcilerRebuildsForARestartedMemberItCannotReplace(t *testing.T) {
+	for name, tc := range map[string]struct {
+		def   func(string) string
+		err   error
+		gone  bool
+		asked []int
+	}{
+		"no ioctl":                {videoDef, ErrNoReplace, false, []int{0}},
+		"failed, then gone again": {videoDef, unix.EINVAL, true, []int{0}},
+		"another geometry":        {func(id string) string { return strings.Replace(videoDef(id), "320", "160", 1) }, nil, false, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			started := startWithSpec(t)
+			dir := t.TempDir()
+			var then func()
+			if tc.gone {
+				then = func() { require.NoError(t, os.RemoveAll(flowDir(dir, memberA))) }
+			}
+			asked := fakeReplace(t, dir, tc.err, then)
+			memberDir(t, dir, memberA, videoDef(memberA))
+			memberDir(t, dir, memberB, videoDef(memberB))
+			r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+			reconcileSet(t, r)
+			f, err := os.Open(filepath.Join(flowDir(dir, memberA), "data"))
+			require.NoError(t, err)
+			t.Cleanup(func() { f.Close() })
+
+			memberDir(t, dir, memberA, tc.def(memberA))
+			reconcileSet(t, r)
+			require.Equal(t, tc.asked, *asked)
+			require.Len(t, *started, 2, "the output was not built again")
+		})
+	}
+}

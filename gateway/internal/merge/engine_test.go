@@ -595,3 +595,160 @@ func TestWithIDSetsOnlyTheFlowsID(t *testing.T) {
 	_, err = withID([]byte("not json"), output)
 	require.Error(t, err)
 }
+
+// A module that predates MXLFS_IOC_VIEW_REPLACE_SOURCE does not know the
+// command, as no other file does: the engine then reports it cannot
+// replace a member, and the reconciler builds the output again.
+func TestEngineCannotReplaceWithoutTheIoctl(t *testing.T) {
+	f, err := os.Create(filepath.Join(t.TempDir(), "view"))
+	require.NoError(t, err)
+	defer f.Close()
+	require.False(t, canReplace(f))
+	_, err = (&Engine{}).Replace(0)
+	require.ErrorIs(t, err, ErrNoReplace)
+}
+
+// producer writes a flow from a goroutine until stopped.
+type producer struct {
+	stop, done chan struct{}
+	once       sync.Once
+}
+
+// Stop stops the producer and closes its writer, which removes the flow
+// directory as a producer's exit does.
+func (p *producer) Stop() {
+	p.once.Do(func() { close(p.stop) })
+	<-p.done
+}
+
+// produce writes flow def at the clock. Video grains carry tag and their
+// index in the first word; audio samples carry a mark, tag and their
+// index.
+func produce(t *testing.T, inst *mxl.Instance, def string, tag uint64) *producer {
+	t.Helper()
+	w, _, err := inst.NewWriter(def)
+	require.NoError(t, err)
+	p := &producer{stop: make(chan struct{}), done: make(chan struct{})}
+	stop := p.stop
+	go func() {
+		defer close(p.done)
+		defer w.Close()
+		rate := w.Config().Common.GrainRate
+		if w.Config().Common.Format == mxl.FormatAudio {
+			const batch = 480
+			for end := (mxl.CurrentIndex(rate)/batch + 1) * batch; ; end += batch {
+				select {
+				case <-stop:
+					return
+				case <-time.After(time.Duration(mxl.NsUntilIndex(end, rate))):
+				}
+				s, err := w.OpenSamples(end, batch)
+				require.NoError(t, err)
+				for ch := uint64(0); ch < 2; ch++ {
+					f1, f2, err := s.ChannelFragments(ch)
+					require.NoError(t, err)
+					idx := end - batch
+					for _, f := range [][]byte{f1, f2} {
+						for o := 0; o+4 <= len(f); o += 4 {
+							binary.LittleEndian.PutUint32(f[o:], 0x80000000|uint32(tag)<<28|uint32(idx&0x0fffffff))
+							idx++
+						}
+					}
+				}
+				require.NoError(t, s.Commit())
+			}
+		}
+		for i := mxl.CurrentIndex(rate); ; i++ {
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Duration(mxl.NsUntilIndex(i, rate))):
+			}
+			g, err := w.OpenGrain(i)
+			require.NoError(t, err)
+			binary.LittleEndian.PutUint64(g.Payload, tag<<56|i)
+			require.NoError(t, g.Commit(g.TotalSlices, 0))
+		}
+	}()
+	return p
+}
+
+func dataInode(t *testing.T, domain, id string) uint64 {
+	t.Helper()
+	var st unix.Stat_t
+	require.NoError(t, unix.Stat(filepath.Join(flowDir(domain, id), "data"), &st))
+	return st.Ino
+}
+
+// A producer that restarts recreates its flow directory, every file in
+// it new. The engine puts the new ring in place of the old one in every
+// view: readers of the output keep their flow, never told it went away,
+// and once the other member stops too, everything they read comes from
+// the restarted producer's new ring.
+func TestEngineTakesARestartedMembersRingInPlace(t *testing.T) {
+	for name, def := range map[string]func(string) string{"video": videoDef, "audio": audioDef} {
+		t.Run(name, func(t *testing.T) {
+			domain := mxlfsDomain(t)
+			inst, err := mxl.NewInstance(domain, "")
+			require.NoError(t, err)
+			defer inst.Close()
+			a, b := produce(t, inst, def(memberA), 0), produce(t, inst, def(memberB), 1)
+			defer func() { a.Stop(); b.Stop() }()
+			time.Sleep(300 * time.Millisecond)
+
+			lazily(t, domain)
+			e, err := Start(context.Background(), Spec{DomainDir: domain, OutputID: output, Members: []string{memberA, memberB},
+				Skew: 40 * time.Millisecond, Ordered: true}, logr.Discard())
+			require.NoError(t, err)
+			defer e.Close()
+			if !e.replaceable {
+				t.Skip("this mxlfs has no MXLFS_IOC_VIEW_REPLACE_SOURCE")
+			}
+			r, err := inst.NewReader(output)
+			require.NoError(t, err)
+			defer r.Close()
+			out := dataInode(t, domain, output)
+
+			a.Stop()
+			_, err = os.Stat(flowDir(domain, memberA))
+			require.True(t, os.IsNotExist(err), "the producer's exit left its flow directory")
+			a = produce(t, inst, def(memberA), 2)
+			ino, err := e.Replace(0)
+			require.NoError(t, err)
+			require.Equal(t, dataInode(t, domain, memberA), ino)
+
+			b.Stop()
+
+			if name == "audio" {
+				const batch = 480
+				rate := mxl.Rational{Num: 48000, Den: 1}
+				first := (mxl.CurrentIndex(rate)/batch + 4) * batch
+				for end := first; end < first+100*batch; end += batch {
+					v, err := r.GetSamples(end, batch, time.Second)
+					require.NoError(t, err, "samples up to %d", end)
+					for ch := uint64(0); ch < 2; ch++ {
+						buf, err := v.CopyChannel(ch)
+						require.NoError(t, err)
+						for o := 0; o < len(buf); o += 4 {
+							s := binary.LittleEndian.Uint32(buf[o:])
+							idx := end - batch + uint64(o/4)
+							require.Equal(t, 0x80000000|uint32(2)<<28|uint32(idx&0x0fffffff), s,
+								"sample %d of channel %d is not the restarted producer's", idx, ch)
+						}
+					}
+				}
+			} else {
+				rate := mxl.Rational{Num: 50, Den: 1}
+				start := mxl.CurrentIndex(rate) + 2
+				for i := start; i < start+100; i++ {
+					g, err := r.GetGrain(i, time.Second)
+					require.NoError(t, err, "grain %d", i)
+					require.False(t, g.Invalid(), "grain %d is INVALID though the restarted producer had it", i)
+					require.Equal(t, uint64(2)<<56|i, binary.LittleEndian.Uint64(g.Payload),
+						"grain %d is not the restarted producer's", i)
+				}
+			}
+			require.Equal(t, out, dataInode(t, domain, output), "the output was built again")
+		})
+	}
+}

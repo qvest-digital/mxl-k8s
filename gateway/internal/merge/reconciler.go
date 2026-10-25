@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	"golang.org/x/sys/unix"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -36,7 +37,8 @@ type Domains interface {
 // placeholder's unallocated ring is never mapped through the output, and
 // a mirror filling it later is seen through the same files. A member
 // that goes away for good, its producer gone and its placeholder or copy
-// with it, leaves the engine serving from the others.
+// with it, leaves the engine serving from the others; one that comes back
+// in a new directory is put in place of its old ring.
 type Reconciler struct {
 	Client   client.Client
 	NodeName string
@@ -54,17 +56,19 @@ type running struct {
 	def     []byte   // the flow definition the output was built from
 	seen    []uint64 // per spec member, its data file's inode at build; 0 for none
 	started []int    // the spec members the engine was started over
+	failed  bool     // a Replace failed, which may leave the engine half replaced
 }
 
 // serves reports whether cur still serves set as it stands: the same
 // object at the same generation, with no member directory appeared or
-// replaced since the engine was built. One removed is no reason to
+// replaced since the engine was built, or since it took the replacement
+// in place, and no Replace failed. One removed is no reason to
 // rebuild: the engine keeps its ring mapped, which stops advancing, and
 // the other members serve. Once every member it was started over is
 // gone, a member it left out, of another geometry, is the only one still
 // delivering, and the output is built again over it.
 func (cur *running) serves(set *mxlv1alpha1.MxlFlowRedundancySet) bool {
-	if cur == nil || cur.uid != set.UID || cur.gen != set.Generation {
+	if cur == nil || cur.failed || cur.uid != set.UID || cur.gen != set.Generation {
 		return false
 	}
 	startedLeft, leftOut := false, false
@@ -102,6 +106,41 @@ func inodes(domain string, members []mxlv1alpha1.RedundancyFlowRef) []uint64 {
 	return out
 }
 
+// replace is (*Engine).Replace; tests replace it.
+var replace = (*Engine).Replace
+
+// replaceRestarted puts each member the engine was started over whose
+// directory was replaced since, by a producer restarted in the output's
+// geometry, into the engine in place of its old ring. A restarted
+// producer recreates its flow directory; building the output again for
+// it would remove the output under every reader. A member the engine
+// cannot take that way, in another geometry or on an mxlfs without
+// MXLFS_IOC_VIEW_REPLACE_SOURCE, is left to serves, which rebuilds.
+func (cur *running) replaceRestarted(l logr.Logger, set *mxlv1alpha1.MxlFlowRedundancySet) {
+	if cur == nil || cur.uid != set.UID || cur.gen != set.Generation {
+		return
+	}
+	for i, ino := range inodes(cur.domain, set.Spec.Members) {
+		m := slices.Index(cur.started, i)
+		if ino == 0 || ino == cur.seen[i] || m < 0 {
+			continue
+		}
+		id := set.Spec.Members[i].FlowID
+		def, err := os.ReadFile(filepath.Join(flowDir(cur.domain, id), "flow_def.json"))
+		if err != nil || !placeholder.SameGeometry(cur.def, def) {
+			continue
+		}
+		got, err := replace(cur.engine, m)
+		if err != nil {
+			l.Info("cannot replace a restarted member in place; building the output again", "member", id,
+				"error", err.Error())
+			cur.failed = true
+			return
+		}
+		cur.seen[i] = got
+	}
+}
+
 // recheck is how often a served set is looked at again for a member
 // that appeared or was replaced underneath its engine, which raises no
 // event on the set.
@@ -128,6 +167,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	r.mu.Lock()
 	cur := r.engines[req.Name]
 	r.mu.Unlock()
+	cur.replaceRestarted(l, &set)
 	if cur.serves(&set) {
 		return ctrl.Result{RequeueAfter: recheck}, nil
 	}
