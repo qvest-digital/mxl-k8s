@@ -49,11 +49,6 @@ type Config struct {
 	// ephemeral volume. Empty disables it.
 	CSIEndpoint string
 
-	// ClaimStatusLabel is the pod label that names a pod's
-	// MediaFunctionClaim, whose status.io the agent then writes from the
-	// flows the pod is observed to read and write. Empty disables it.
-	ClaimStatusLabel string
-
 	// MaterializeTimeout caps the per-request wait the intent
 	// dispatcher allows before giving up on a mirror reaching
 	// Ready.
@@ -105,9 +100,6 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 			"start, for consumers that preload it off the node. Empty disables.")
 	fs.StringVar(&c.CSIEndpoint, "csi-endpoint", "",
 		"Unix socket for the CSI node plugin that mounts the domain into pods. Empty disables.")
-	fs.StringVar(&c.ClaimStatusLabel, "claim-status-label", "",
-		"Pod label naming a pod's MediaFunctionClaim, whose status.io the agent "+
-			"writes from observed flow use. Empty disables.")
 	fs.BoolVar(&c.Mxlfs, "mxlfs", false,
 		"Run what a domain on mxlfs needs: mirrors for opened placeholders and "+
 			"waited-for flows, and MxlFlowRedundancySet demand. Off, every domain is "+

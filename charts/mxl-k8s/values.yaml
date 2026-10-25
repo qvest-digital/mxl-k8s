@@ -329,13 +329,6 @@ agent:
     # -- Client-side burst above kubeApiQps. 0 leaves the client-go
     # default in place.
     kubeApiBurst: 100
-    # -- Pod label naming a pod's dmf-k8s MediaFunctionClaim, in the
-    # pod's namespace. When set, the agent writes each such claim's
-    # status.io from the flows its pods on the node are observed to
-    # read and write, and gets RBAC for mediafunctionclaims. dmf-k8s
-    # names a function's Helm release after its claim, so
-    # app.kubernetes.io/instance names it. Empty disables.
-    claimStatusLabel: ""
     # @schema
     # enum: ["", "tcp", "verbs", "efa", "shm", "auto"]
     # @schema

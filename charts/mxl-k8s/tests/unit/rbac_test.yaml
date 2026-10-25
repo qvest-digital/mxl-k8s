@@ -114,27 +114,3 @@ tests:
             apiGroups: [mxl.qvest-digital.com]
             resources: [mxldomains]
             verbs: [get, list, watch, delete]
-
-  - it: grants the agent claim status only when it writes status.io
-    template: templates/rbac-agent.yaml
-    documentIndex: 0
-    set:
-      agent.flags.claimStatusLabel: app.kubernetes.io/instance
-    asserts:
-      - contains:
-          path: rules
-          content:
-            apiGroups: [dmf.qvest-digital.com]
-            resources: [mediafunctionclaims/status]
-            verbs: [patch]
-
-  - it: grants the agent nothing on claims by default
-    template: templates/rbac-agent.yaml
-    documentIndex: 0
-    asserts:
-      - notContains:
-          path: rules
-          content:
-            apiGroups: [dmf.qvest-digital.com]
-            resources: [mediafunctionclaims/status]
-            verbs: [patch]
