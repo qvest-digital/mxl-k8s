@@ -10,16 +10,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/qvest-digital/mxl-k8s/api/selection"
@@ -63,6 +68,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if !set.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil
 	}
+	nodes, err := r.existingNodes(ctx, set.Status.Nodes)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	pruned := len(nodes) != len(set.Status.Nodes)
+	set.Status.Nodes = nodes
 	flows, cond := r.validate(ctx, &set)
 	res := ctrl.Result{}
 	if cond.Status == metav1.ConditionTrue {
@@ -75,13 +86,36 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		res = ctrl.Result{RequeueAfter: 10 * time.Second}
 	}
 	cond.ObservedGeneration = set.Generation
-	if meta.SetStatusCondition(&set.Status.Conditions, cond) || set.Status.ObservedGeneration != set.Generation {
+	if meta.SetStatusCondition(&set.Status.Conditions, cond) || set.Status.ObservedGeneration != set.Generation || pruned {
 		set.Status.ObservedGeneration = set.Generation
 		if err := r.Status().Update(ctx, &set); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 	return res, nil
+}
+
+// existingNodes drops the nodes that are gone from the cluster: no agent
+// is left there to remove its own, and the member mirrors onto it would
+// be kept claimed.
+func (r *Reconciler) existingNodes(ctx context.Context, nodes []string) ([]string, error) {
+	out := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		var node corev1.Node
+		err := r.Get(ctx, types.NamespacedName{Name: n}, &node)
+		switch {
+		case apierrors.IsNotFound(err):
+			log.FromContext(ctx).Info("dropping a node that is gone from the redundancy set", "node", n)
+		case err != nil:
+			return nil, err
+		default:
+			out = append(out, n)
+		}
+	}
+	if len(out) == 0 {
+		out = nil
+	}
+	return out, nil
 }
 
 func (r *Reconciler) validate(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet) ([]*mxlv1alpha1.MxlFlow, metav1.Condition) {
@@ -222,6 +256,7 @@ func (r *Reconciler) provider(ctx context.Context, source, target string) (mxlv1
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowredundancysets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowredundancysets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 
 // SetupWithManager registers the controller. A set waiting for a member
 // or its producer requeues itself; a change to a member's or the output's
@@ -232,7 +267,29 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&mxlv1alpha1.MxlFlowRedundancySet{}).
 		Owns(&mxlv1alpha1.MxlFlowMirror{}).
 		Watches(&mxlv1alpha1.MxlFlow{}, handler.EnqueueRequestsFromMapFunc(r.setsOf)).
+		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.setsOn),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc:  func(event.CreateEvent) bool { return false },
+				UpdateFunc:  func(event.UpdateEvent) bool { return false },
+				GenericFunc: func(event.GenericEvent) bool { return false },
+			})).
 		Complete(r)
+}
+
+// setsOn maps a deleted Node to the sets that list it in status.nodes.
+func (r *Reconciler) setsOn(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+	var sets mxlv1alpha1.MxlFlowRedundancySetList
+	if err := r.List(ctx, &sets); err != nil {
+		log.FromContext(ctx).Error(err, "list redundancy sets for a node", "node", obj.GetName())
+		return nil
+	}
+	var reqs []ctrlreconcile.Request
+	for _, s := range sets.Items {
+		if slices.Contains(s.Status.Nodes, obj.GetName()) {
+			reqs = append(reqs, ctrlreconcile.Request{NamespacedName: types.NamespacedName{Name: s.Name}})
+		}
+	}
+	return reqs
 }
 
 // setsOf maps an MxlFlow to the sets that name it as a member or output.

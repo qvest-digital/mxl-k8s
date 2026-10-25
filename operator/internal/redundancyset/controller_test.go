@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -57,6 +58,10 @@ func harness(t *testing.T, objs ...client.Object) (*Reconciler, client.Client) {
 	t.Helper()
 	s := runtime.NewScheme()
 	utilruntime.Must(mxlv1alpha1.AddToScheme(s))
+	utilruntime.Must(corev1.AddToScheme(s))
+	for _, n := range []string{"reader", "node-a", "node-b", "node-c"} {
+		objs = append(objs, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: n}})
+	}
 	c := fake.NewClientBuilder().WithScheme(s).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowRedundancySet{}).
 		WithObjects(objs...).Build()
@@ -238,4 +243,21 @@ func TestAMemberFlowChangeChecksItsSetAgain(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, c.Get(ctx, req.NamespacedName, &got))
 	assert.Equal(t, metav1.ConditionTrue, meta.FindStatusCondition(got.Status.Conditions, ConditionValid).Status)
+}
+
+// No agent is left on a deleted node to take it out of status.nodes,
+// and while it is listed the set keeps its member mirrors onto it
+// claimed.
+func TestDropsANodeThatIsGone(t *testing.T) {
+	r, c := harness(t, newSet("reader", "gone"),
+		flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-b"))
+
+	reconcile(t, r)
+
+	var got mxlv1alpha1.MxlFlowRedundancySet
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "programme"}, &got))
+	assert.Equal(t, []string{"reader"}, got.Status.Nodes)
+	for key := range mirrors(t, c) {
+		assert.NotContains(t, key, "->gone")
+	}
 }

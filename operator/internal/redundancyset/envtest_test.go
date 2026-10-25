@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -92,6 +93,7 @@ func TestRedundancySetAgainstAnAPIServer(t *testing.T) {
 
 	t.Run("reconcile", func(t *testing.T) {
 		mirrorNS := env.NewNamespace(t)
+		require.NoError(t, env.Client.Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "reader"}}))
 		for _, f := range []*mxlv1alpha1.MxlFlow{flow(memberA, video1080, ""), flow(memberB, video1080, "")} {
 			require.NoError(t, env.Client.Create(ctx, f))
 			origin := map[string]string{memberA: "node-a", memberB: "node-b"}[f.Name]
