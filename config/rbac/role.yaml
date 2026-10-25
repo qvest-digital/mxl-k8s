@@ -45,6 +45,7 @@ rules:
   resources:
   - mxldomains/status
   - mxlflowmirrors/status
+  - mxlflowredundancysets/status
   - mxlflows/status
   - mxlreceivers/status
   verbs:
@@ -70,6 +71,14 @@ rules:
   - mxlreceivers/finalizers
   verbs:
   - update
+- apiGroups:
+  - mxl.qvest-digital.com
+  resources:
+  - mxlflowredundancysets
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - mxl.qvest-digital.com
   resources:

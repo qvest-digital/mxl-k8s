@@ -59,6 +59,10 @@ type Publisher struct {
 	// existing tests that don't care about Leases continue to work.
 	Lease LeaseRenewer
 
+	// IsOutput reports whether a flow is a redundancy set's output, which
+	// is not published as a location. Nil publishes every flow.
+	IsOutput func(ctx context.Context, domain, flowID string) bool
+
 	// WriterAttached reports whether a writer still holds the flow's
 	// directory on this node. Nil takes the flock probe in
 	// agent/internal/flowlock, which is libmxl's own test; tests
@@ -99,7 +103,7 @@ func FlowIDFromDirName(name string) (string, bool) {
 }
 
 // PublishAppeared loads flow_def.json from a freshly observed flow
-// directory and writes an MxlFlow describing it. status.locations
+// directory and, for an Origin, writes an MxlFlow describing it. status.locations
 // for this node is set to Origin when the agent saw the directory
 // before any MxlFlowMirror claims this node as target, otherwise to
 // Ready (the gateway target reconciler created the local copy as a
@@ -114,6 +118,19 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 		l.V(1).Info("ignoring non-flow entry", "name", dirName)
 		return nil
 	}
+	// A placeholder only lists the flow here; nothing feeds it until a
+	// mirror fills it or a local writer takes it over, and either removes
+	// the marker, which brings the directory back through here.
+	if mxlv1alpha1.IsPlaceholder(p.DomainPath, flowID) {
+		l.V(1).Info("ignoring placeholder", "flowID", flowID)
+		return nil
+	}
+	// A redundancy set's output is merged on each node it is read on and
+	// is never a location other nodes mirror from.
+	if p.IsOutput != nil && p.IsOutput(ctx, p.Domain, flowID) {
+		l.V(1).Info("ignoring redundancy set output", "flowID", flowID)
+		return nil
+	}
 
 	defPath := filepath.Join(p.DomainPath, dirName, FlowDefName)
 	raw, err := os.ReadFile(defPath)
@@ -122,27 +139,6 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	}
 	if !json.Valid(raw) {
 		return fmt.Errorf("%s: not valid JSON", defPath)
-	}
-
-	now := metav1.Now()
-	desired := &mxlv1alpha1.MxlFlow{
-		ObjectMeta: metav1.ObjectMeta{Name: p.key(flowID)},
-		Spec: mxlv1alpha1.MxlFlowSpec{
-			ID:         flowID,
-			Domain:     p.Domain,
-			Definition: runtime.RawExtension{Raw: raw},
-		},
-	}
-
-	if err := p.Client.Create(ctx, desired); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create MxlFlow: %w", err)
-		}
-		// Already there -- leave spec alone (writers may have richer
-		// metadata than us), just refresh our location entry.
-		l.V(1).Info("MxlFlow already exists", "flowID", flowID)
-	} else {
-		l.Info("created MxlFlow", "flowID", flowID)
 	}
 
 	attached, err := p.writerAttached(flowID)
@@ -174,6 +170,50 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	} else if isMirror {
 		phase = mxlv1alpha1.MxlFlowLocationReady
 	}
+
+	// Only the Origin creates the MxlFlow. Any other copy holds the
+	// definition the object had when the copy was made, so a copy that
+	// recreated a deleted object would bring back a geometry the
+	// producer may since have changed, and a mirror built from it would
+	// recreate the stale copy in turn.
+	if phase == mxlv1alpha1.MxlFlowLocationOrigin {
+		desired := &mxlv1alpha1.MxlFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: p.key(flowID)},
+			Spec: mxlv1alpha1.MxlFlowSpec{
+				ID:         flowID,
+				Domain:     p.Domain,
+				Definition: runtime.RawExtension{Raw: raw},
+			},
+		}
+		if err := p.Client.Create(ctx, desired); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("create MxlFlow: %w", err)
+			}
+			l.V(1).Info("MxlFlow already exists", "flowID", flowID)
+		} else {
+			l.Info("created MxlFlow", "flowID", flowID)
+		}
+	}
+
+	// The object outlives its directory: a producer that comes back in
+	// a different format publishes a new flow directory under the same
+	// name, and Create above leaves the spec of an MxlFlow that already
+	// exists untouched. The object then describes a format
+	// nothing produces any more, and every consumer reading it -- a
+	// compositor sizing its tiles, an NMOS registry, a UI -- is told
+	// the wrong one. Only the Origin refreshes it: a mirror target's
+	// copy is not authoritative about what the flow is. It does so
+	// before claiming Origin, since placeholders and redundancy-set
+	// mirrors elsewhere are built from the definition the moment the
+	// Origin appears.
+	refreshed := phase == mxlv1alpha1.MxlFlowLocationOrigin
+	if refreshed {
+		if err := p.refreshDefinition(ctx, flowID, raw); err != nil {
+			l.Error(err, "refresh flow definition", "flowID", flowID)
+		}
+	}
+
+	now := metav1.Now()
 	// The phase actually written, not the one asked for: upsertLocation
 	// refuses to demote an Origin this node already claimed, so a
 	// mirror-target inference can come back out as Origin.
@@ -188,15 +228,9 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 			l.Error(err, "renew origin lease", "flowID", flowID)
 		}
 	}
-	// The object outlives its directory: a producer that comes back in
-	// a different format publishes a new flow directory under the same
-	// name, and Create above leaves the spec of an MxlFlow that already
-	// exists untouched. The object then describes a format
-	// nothing produces any more, and every consumer reading it -- a
-	// compositor sizing its tiles, an NMOS registry, a UI -- is told
-	// the wrong one. Only the Origin refreshes it: a mirror target's
-	// copy is not authoritative about what the flow is.
-	if written == mxlv1alpha1.MxlFlowLocationOrigin {
+	// A copy inferred to be a mirror target can come back out as the
+	// Origin this node already held.
+	if written == mxlv1alpha1.MxlFlowLocationOrigin && !refreshed {
 		if err := p.refreshDefinition(ctx, flowID, raw); err != nil {
 			l.Error(err, "refresh flow definition", "flowID", flowID)
 		}
@@ -528,7 +562,7 @@ func (p *Publisher) localFlowIDs() (map[string]struct{}, error) {
 			continue
 		}
 		id, ok := FlowIDFromDirName(e.Name())
-		if !ok {
+		if !ok || mxlv1alpha1.IsPlaceholder(p.DomainPath, id) {
 			continue
 		}
 		out[id] = struct{}{}

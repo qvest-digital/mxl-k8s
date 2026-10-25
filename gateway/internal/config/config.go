@@ -143,6 +143,11 @@ type Config struct {
 	// KubeAPIBurst is the burst ceiling of the Kubernetes API client
 	// rate limiter.
 	KubeAPIBurst int
+
+	// Mxlfs runs what a domain on mxlfs needs: placeholders, lazy
+	// allocation, the redundancy set merge engine. Off, every domain is
+	// a plain directory.
+	Mxlfs bool
 }
 
 // FromFlags populates a Config from command-line flags.
@@ -190,6 +195,10 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 			"still refreshes every --resync-period from the last result. Each enumeration "+
 			"sweeps every provider libfabric was built with and warns about those it finds "+
 			"no device for.")
+	fs.BoolVar(&c.Mxlfs, "mxlfs", false,
+		"Run what a domain on mxlfs needs: placeholders for absent flows, lazy ring "+
+			"allocation and the MxlFlowRedundancySet merge engine. Off, every domain is "+
+			"treated as a plain directory.")
 	fs.BoolVar(&c.RDMAEnumerationLiveness, "rdma-enumeration-liveness", false,
 		"Fail the liveness probe while the host exposes RDMA devices that no enumerated "+
 			"provider accounts for. libfabric fixes a provider's device list at the first "+

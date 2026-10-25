@@ -48,3 +48,24 @@ func (w *Watcher) Run(ctx context.Context, out chan<- Event) error {
 	close(out)
 	return ErrUnsupported
 }
+
+// Open is the cross-platform shape of an open event.
+type Open struct {
+	PID  int32
+	Path string
+}
+
+// OpenWatcher is a placeholder so the package compiles on non-Linux.
+type OpenWatcher struct{}
+
+// NewOpenWatcher always returns ErrUnsupported on non-Linux.
+func NewOpenWatcher(path string) (*OpenWatcher, error) { return nil, ErrUnsupported }
+
+// Close is a no-op on non-Linux.
+func (w *OpenWatcher) Close() error { return nil }
+
+// Run always returns ErrUnsupported on non-Linux.
+func (w *OpenWatcher) Run(ctx context.Context, out chan<- Open) error {
+	close(out)
+	return ErrUnsupported
+}

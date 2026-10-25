@@ -2,10 +2,12 @@ package mirror
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,7 +29,10 @@ import (
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/mxlfs"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/placeholder"
 )
 
 // TargetFinalizerName is the finalizer the target-side reconciler
@@ -253,6 +258,30 @@ type TargetReconciler struct {
 	// defaultStuckHandshakeAfter.
 	StuckHandshakeAfter time.Duration
 
+	// SamplesCommitted is told every audio sample range a target commits:
+	// the domain directory, the flow id and the samples [start, end).
+	// A redundancy set merging that flow learns its arrivals from it.
+	SamplesCommitted func(domain, id string, start, end uint64)
+
+	// Unfilled is told when a mirror is deleted, with the domain
+	// directory and the flow id, so a placeholder the mirror filled
+	// becomes one again rather than a copy nothing feeds. Nil leaves it
+	// out.
+	Unfilled func(domain, id string)
+
+	// Filled is told when a target's ring on an mxlfs domain has been
+	// allocated, with the domain directory and the flow id, so a
+	// placeholder there becomes a published copy. Nil leaves it out.
+	Filled func(domain, id string)
+
+	// Retire is told, with the domain directory and the flow id, before a
+	// target replaces a directory laid out in another geometry than the
+	// flow's definition, so a placeholder held there is released first.
+	// It is set with --mxlfs, and only then is a live target whose ring
+	// no longer matches the flow's definition replaced. Nil leaves both
+	// out.
+	Retire func(domain, id string)
+
 	// TeardownGrace bounds how long a teardown waits for the per-mirror
 	// goroutines it cancelled to return before giving up on releasing
 	// their libmxl handles. Defaults to defaultTeardownGrace.
@@ -333,6 +362,9 @@ type targetEntry struct {
 	// flow serialises commits into the local flow with every other
 	// entry writing it; see sharedFlow.
 	flow *sharedFlow
+
+	// def is the flow definition the entry was opened with.
+	def string
 
 	// commits counts grains the progress loop has committed, and
 	// arrivals of grains a sibling mirror of the flow committed shortly
@@ -556,9 +588,13 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// does not remove finalizers either. Abandoned handles cost
 		// one node's memory until the gateway restarts, which is
 		// recoverable; an undeletable object is not.
+		domain := r.entryDomain(req.NamespacedName)
 		if !r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Ref().Name())) {
 			l.Info("target-side teardown timed out; abandoning libmxl handles to let the mirror be deleted",
 				"grace", r.teardownGrace())
+		}
+		if r.Unfilled != nil && domain != "" {
+			r.Unfilled(domain, mirror.Spec.FlowID)
 		}
 		controllerutil.RemoveFinalizer(&mirror, TargetFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
@@ -599,6 +635,9 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// recent commits means the fabric side has likely died silently
 	// (no fatal ReadGrain error to trigger recoverFromFatalError) and
 	// the flow file in the consumer pod is no longer being filled.
+	if r.Retire != nil {
+		r.replaceOtherGeometry(ctx, req.NamespacedName, mirror.Ref().Name())
+	}
 	r.mu.Lock()
 	live := r.targets[req.NamespacedName] != nil
 	r.mu.Unlock()
@@ -674,6 +713,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 	entry.domain = mirror.Spec.Domain
 	entry.flowID = mirror.Spec.FlowID
+	entry.def = string(flow.Spec.Definition.Raw)
 	entry.peerNode = mirror.Spec.SourceNode
 	r.targets[req.NamespacedName] = entry
 	delete(r.attempts, req.NamespacedName)
@@ -727,9 +767,38 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef 
 		return nil, fmt.Errorf("mxl instance closed")
 	}
 
+	// A flow another process on this node writes belongs to that
+	// process: the local writer wins, and a mirror into it would write
+	// over a producer's ring.
+	if handles.OnMxlfs() {
+		if id, ok := flowIDFromDef(flowDef); ok {
+			n, err := flowlocks.ForeignWriters(filepath.Join(handles.DomainPath(), id+".mxl-flow", "data"))
+			if err != nil {
+				return nil, fmt.Errorf("%w: check local writers: %w", errOpenWriterFailed, err)
+			}
+			if n > 0 {
+				return nil, fmt.Errorf("%w: %w", errOpenWriterFailed, errLocalWriter)
+			}
+			if err := clearOtherGeometry(filepath.Join(handles.DomainPath(), id+".mxl-flow"), flowDef, r.Retire); err != nil {
+				return nil, err
+			}
+		}
+	}
 	writer, _, err := mxlInst.NewWriter(flowDef)
 	if err != nil {
 		return nil, fmt.Errorf("%w: NewWriter: %w", errOpenWriterFailed, err)
+	}
+	// The ring has to be in place before the fabric side registers it:
+	// pinning a lazily allocated mxlfs ring would fault it in page by page.
+	if handles.OnMxlfs() {
+		dir := mxlfs.FlowDir(handles.DomainPath(), writer.Config().Common.ID)
+		if err := mxlfs.AllocateFlow(dir); err != nil {
+			_ = writer.Close()
+			return nil, fmt.Errorf("%w: allocate ring: %w", errOpenWriterFailed, err)
+		}
+		if r.Filled != nil {
+			r.Filled(handles.DomainPath(), strings.TrimSuffix(filepath.Base(dir), ".mxl-flow"))
+		}
 	}
 	target, info, s, err := r.openFabricSideDispatch(handles, writer, provider)
 	if err != nil {
@@ -983,23 +1052,26 @@ func (r *TargetReconciler) startProgressLoop(
 	// cached config is the source of truth for which API is valid.
 	if writer.Config().Common.Format == mxl.FormatAudio {
 		readFn := func() (uint64, int, error) { return target.ReadSamples(targetReadTimeout) }
+		id := writer.Config().Common.ID
+		flowID := fmt.Sprintf("%x-%x-%x-%x-%x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16])
 		commitFn := func(head uint64, count int) error {
 			n, err := flow.commitSamples(writer, head, count, entry)
 			entry.bytes.Add(n)
+			if err == nil && r.SamplesCommitted != nil && entry.handles != nil {
+				r.SamplesCommitted(entry.handles.DomainPath(), flowID, head-uint64(count), head)
+			}
 			return err
 		}
 		go runTargetSampleProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)
 	} else {
 		readFn := func() (uint64, error) { return target.ReadGrain(targetReadTimeout) }
+		data := writer.Config().Common.Format == mxl.FormatData
 		completeFn := func(idx uint64) (bool, error) {
 			g, err := flow.grainInfo(writer, idx)
 			if err != nil {
 				return false, err
 			}
-			// TotalSlices == 0 is a grain the source never subdivides
-			// and never transfers in ranges, so there is nothing to
-			// wait for; Complete() reports false for it.
-			return g.TotalSlices == 0 || g.Complete(), nil
+			return arrivalComplete(g, data), nil
 		}
 		commitFn := func(idx uint64) error {
 			n, err := flow.commitGrain(writer, idx, entry)
@@ -1162,6 +1234,17 @@ func runTargetProgressLoop(
 	}
 }
 
+// arrivalComplete reports whether an arrived grain may be committed. A
+// video grain the source paced arrives as several slice ranges and is
+// committed once all of them are in. A data grain is never complete,
+// its valid slices being its length, and the source sends it in one
+// write, so it is committed as it arrives. TotalSlices == 0 is a grain
+// the source never subdivides, so there is nothing to wait for;
+// Complete() reports false for it.
+func arrivalComplete(g mxl.Grain, data bool) bool {
+	return data || g.TotalSlices == 0 || g.Complete()
+}
+
 // commitArrivedGrain advances the local flow's HeadIndex for a grain
 // whose payload + header were already filled in by the remote
 // initiator's RDMA write. OpenGrain returns a writable handle aliasing
@@ -1178,7 +1261,18 @@ func runTargetProgressLoop(
 // first already has.
 var errGrainAlreadyCommitted = errors.New("grain already committed")
 
+// A data grain is committed with the valid slices the initiator's write
+// carried, none included: they are its length, and libmxl data writers
+// never complete a grain. OpenGrain clears them, so they are read first.
+// Any other grain, and a data grain whose header is not this index's,
+// is committed whole.
 func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, error) {
+	valid, carried := uint16(0), false
+	if writer.Config().Common.Format == mxl.FormatData {
+		if g, err := writer.GrainInfo(idx); err == nil && g.Index == idx {
+			valid, carried = g.ValidSlices, true
+		}
+	}
 	ga, err := writer.OpenGrain(idx)
 	if err != nil {
 		if errors.Is(err, mxl.ErrInvalidArg) {
@@ -1186,7 +1280,10 @@ func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, error) {
 		}
 		return 0, fmt.Errorf("OpenGrain(%d): %w", idx, err)
 	}
-	if err := ga.Commit(ga.TotalSlices, 0); err != nil {
+	if !carried {
+		valid = ga.TotalSlices
+	}
+	if err := ga.Commit(valid, 0); err != nil {
 		return 0, fmt.Errorf("Commit(%d): %w", idx, err)
 	}
 	return uint64(ga.GrainSize), nil
@@ -1309,6 +1406,105 @@ func commitArrivedSamples(writer *mxl.Writer, head uint64, count int) (uint64, e
 		return 0, nil
 	}
 	return uint64(count) * (sa.Stride / bufferLength) * sa.ChannelCount, nil
+}
+
+// errLocalWriter is why a target does not open on a flow a process on
+// this node already writes.
+var errLocalWriter = errors.New("a process on this node writes the flow")
+
+// errOtherGeometry is why a target does not open yet on a directory
+// laid out in another geometry that a writer here still holds.
+var errOtherGeometry = errors.New("the flow directory here has another geometry and a writer still holds it")
+
+// clearOtherGeometry removes the flow directory dir when it was laid out
+// from a definition of another geometry than def. libmxl opens a flow
+// that exists as it is, so the target would otherwise write the flow
+// into a ring of the old layout. A placeholder held there is retired
+// first; a directory another writer still holds is left, and the open
+// fails until it is released.
+func clearOtherGeometry(dir, def string, retire func(domain, id string)) error {
+	onDisk, err := os.ReadFile(filepath.Join(dir, "flow_def.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err == nil && placeholder.SameGeometry(onDisk, []byte(def)) {
+		return nil
+	}
+	if retire != nil {
+		retire(filepath.Dir(dir), strings.TrimSuffix(filepath.Base(dir), ".mxl-flow"))
+	}
+	n, err := flowlocks.Writers(filepath.Join(dir, "data"))
+	if err != nil {
+		return fmt.Errorf("check writers of %s: %w", dir, err)
+	}
+	if n > 0 {
+		return errOtherGeometry
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove %s: %w", dir, err)
+	}
+	return nil
+}
+
+// replaceOtherGeometry closes the live target of key when the flow's
+// definition has since changed geometry: the producer came back in
+// another layout, and the ring the target registered can only take the
+// old one. The open that follows lays the flow out anew.
+func (r *TargetReconciler) replaceOtherGeometry(ctx context.Context, key types.NamespacedName, flowName string) {
+	r.mu.Lock()
+	entry := r.targets[key]
+	r.mu.Unlock()
+	if entry == nil || entry.def == "" {
+		return
+	}
+	var flow mxlv1alpha1.MxlFlow
+	if err := r.Get(ctx, types.NamespacedName{Name: flowName}, &flow); err != nil || len(flow.Spec.Definition.Raw) == 0 {
+		return
+	}
+	if placeholder.SameGeometry([]byte(entry.def), flow.Spec.Definition.Raw) {
+		return
+	}
+	log.FromContext(ctx).Info("flow changed geometry; replacing the target", "flow", flowName)
+	r.closeEntry(key, r.localFlowDisposition(ctx, flowName))
+}
+
+// flowIDFromDef reads the id a flow definition carries.
+func flowIDFromDef(def string) (string, bool) {
+	var v struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal([]byte(def), &v) != nil || v.ID == "" {
+		return "", false
+	}
+	return strings.ToLower(v.ID), true
+}
+
+// StopFlow tears down every target writing flow id in the domain at
+// directory domain, leaving the flow in place: a local writer has taken
+// it over.
+func (r *TargetReconciler) StopFlow(domain, id string) {
+	r.mu.Lock()
+	var keys []types.NamespacedName
+	for key, e := range r.targets {
+		if e.handles != nil && e.handles.DomainPath() == domain && strings.EqualFold(e.flowID, id) {
+			keys = append(keys, key)
+		}
+	}
+	r.mu.Unlock()
+	for _, key := range keys {
+		r.closeEntry(key, keepFlow)
+	}
+}
+
+// entryDomain is the domain directory of a live mirror, or "" for one
+// that is not live.
+func (r *TargetReconciler) entryDomain(key types.NamespacedName) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e := r.targets[key]; e != nil && e.handles != nil {
+		return e.handles.DomainPath()
+	}
+	return ""
 }
 
 // closeEntry drops a mirror from the live set and tears its handles

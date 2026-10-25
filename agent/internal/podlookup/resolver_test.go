@@ -1,9 +1,17 @@
 package podlookup
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // parsePodUID is what stands between a UDS request and the correct
@@ -75,4 +83,36 @@ func TestParsePodUID(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// The client is uncached and every placeholder open resolves a pid, so
+// a list of every pod in the cluster per open would load the API server
+// with the cluster's size; only this node's pods can own a local pid.
+func TestPodForUIDListsOnlyThisNodesPods(t *testing.T) {
+	pod := func(name, uid, node string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", UID: types.UID(uid)},
+			Spec: corev1.PodSpec{NodeName: node}}
+	}
+	var selectors []string
+	c := fake.NewClientBuilder().
+		WithObjects(pod("here", "11111111-2222-3333-4444-555555555555", "n1"),
+			pod("there", "66666666-2222-3333-4444-555555555555", "n2")).
+		WithIndex(&corev1.Pod{}, "spec.nodeName", func(o client.Object) []string {
+			return []string{o.(*corev1.Pod).Spec.NodeName}
+		}).
+		WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, l client.ObjectList, opts ...client.ListOption) error {
+			lo := (&client.ListOptions{}).ApplyOptions(opts)
+			sel := ""
+			if lo.FieldSelector != nil {
+				sel = lo.FieldSelector.String()
+			}
+			selectors = append(selectors, sel)
+			return c.List(ctx, l, opts...)
+		}}).Build()
+	r := &Resolver{Client: c, NodeName: "n1"}
+
+	p, err := r.podForUID(context.Background(), "11111111-2222-3333-4444-555555555555")
+	require.NoError(t, err)
+	assert.Equal(t, "here", p.Name)
+	assert.Equal(t, []string{"spec.nodeName=n1"}, selectors)
 }

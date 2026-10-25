@@ -11,6 +11,7 @@ tests:
           path: spec.template.spec.dnsPolicy
           value: ClusterFirstWithHostNet
 
+
   - it: mounts the primary domain and domains/, not the rest of the runtime root
     asserts:
       - contains:
@@ -53,9 +54,9 @@ tests:
           path: spec.template.spec.containers[0].args
           content: --bind-address=
 
-  - it: default pprofBindAddress renders a bare --pprof-bind-address= arg
+  - it: default pprofBindAddress renders no --pprof-bind-address arg
     asserts:
-      - contains:
+      - notContains:
           path: spec.template.spec.containers[0].args
           content: --pprof-bind-address=
       - notContains:
@@ -191,3 +192,19 @@ tests:
           path: spec.template.spec.hostNetwork
           value: false
 
+
+  # The template renders updateStrategy whole; a scalar would reach the
+  # API server as an invalid DaemonSet rather than fail the render.
+  - it: rejects an updateStrategy that is no object
+    set:
+      gateway.updateStrategy: foo
+    asserts:
+      - failedTemplate:
+          errorPattern: "at '/gateway/updateStrategy': got string, want object"
+
+  - it: rejects a values file that drops updateStrategy
+    set:
+      gateway.updateStrategy: null
+    asserts:
+      - failedTemplate:
+          errorPattern: "at '/gateway': missing property 'updateStrategy'"

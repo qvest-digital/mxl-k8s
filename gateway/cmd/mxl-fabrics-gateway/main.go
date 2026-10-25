@@ -11,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
@@ -30,7 +32,9 @@ import (
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/config"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/domaingc"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/merge"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/mirror"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/placeholder"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/rdma"
 )
 
@@ -73,7 +77,7 @@ func run(args []string) error {
 
 	// Open libmxl handles up front so any misconfiguration (bad
 	// domain path, missing .so) fails before the manager comes up.
-	handles, err := instance.Open(cfg.DomainPath)
+	handles, err := instance.Open(cfg.DomainPath, cfg.Mxlfs)
 	if err != nil {
 		return fmt.Errorf("open libmxl: %w", err)
 	}
@@ -99,6 +103,7 @@ func run(args []string) error {
 			}
 			return d.Spec.Path(), nil
 		},
+		Mxlfs: cfg.Mxlfs,
 	}
 	defer func() { _ = domains.Close() }()
 
@@ -136,6 +141,17 @@ func run(args []string) error {
 	}
 	if err := targetReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup target reconciler: %w", err)
+	}
+
+	if cfg.Mxlfs {
+		if err := requireKind(mgr.GetRESTMapper(), "MxlFlowRedundancySet"); err != nil {
+			return fmt.Errorf("--mxlfs needs the redundancy set CRD: %w", err)
+		}
+	}
+	for _, c := range mxlfsComponents(cfg.Mxlfs, mgr.GetClient(), cfg.NodeName, domains, targetReconciler) {
+		if err := c.setup(mgr); err != nil {
+			return fmt.Errorf("setup %s: %w", c.name, err)
+		}
 	}
 	sourceReconciler := &mirror.SourceReconciler{
 		Client:           mgr.GetClient(),
@@ -262,4 +278,85 @@ func providerNames(providers []fabrics.Provider) []string {
 		out = append(out, p.String())
 	}
 	return out
+}
+
+// setDomains resolves an MxlDomain name to its directory for the merge
+// reconciler, opening the domain as a mirror would.
+type setDomains struct{ s *instance.Set }
+
+func (d setDomains) DomainPath(ctx context.Context, name string) (string, bool, error) {
+	h, err := d.s.For(ctx, name)
+	if err != nil {
+		return "", false, err
+	}
+	return h.DomainPath(), h.OnMxlfs(), nil
+}
+
+type component struct {
+	name  string
+	setup func(ctrl.Manager) error
+}
+
+// mxlfsComponents wires what a domain on mxlfs needs into the target
+// reconciler and returns the controllers and runnables that go with it.
+// Without mxlfs it returns none and leaves the target's hooks nil.
+func mxlfsComponents(on bool, c client.Client, node string, domains *instance.Set,
+	target *mirror.TargetReconciler) []component {
+
+	if !on {
+		return nil
+	}
+	// On an mxlfs domain every MxlFlow absent here gets a placeholder,
+	// so every pod on the node sees the whole domain.
+	placeholders := &placeholder.Manager{
+		Client:      c,
+		NodeName:    node,
+		Domain:      placeholder.FromSet(domains),
+		LocalWriter: target.StopFlow,
+	}
+	target.Filled = placeholders.Filled
+	target.Unfilled = placeholders.Unfilled
+	target.Retire = placeholders.Retire
+
+	// Redundancy sets whose output a reader wants on this node.
+	sets := &merge.Reconciler{
+		Client:   c,
+		NodeName: node,
+		Domains:  setDomains{domains},
+	}
+	target.SamplesCommitted = sets.SamplesCommitted
+
+	return []component{
+		// Before any placeholder controller runs: the gateway holds no
+		// placeholder in a domain it just opened, so every marker there
+		// is left over from a gateway that did not drop its own.
+		{"stale placeholder markers", func(ctrl.Manager) error {
+			domains.Watch(func(h *instance.Handles) {
+				if err := placeholder.ClearMarkers(h.DomainPath()); err != nil {
+					setupLog.Error(err, "clear stale placeholder markers", "domain", h.DomainPath())
+				}
+			})
+			return nil
+		}},
+		{"redundancy set reconciler", sets.SetupWithManager},
+		{"placeholder reconciler", func(mgr ctrl.Manager) error {
+			if err := ctrl.NewControllerManagedBy(mgr).
+				Named("placeholder").
+				For(&mxlv1alpha1.MxlFlow{}).
+				Complete(placeholders); err != nil {
+				return err
+			}
+			return mgr.Add(placeholders)
+		}},
+	}
+}
+
+// requireKind fails when the API server does not serve kind: a
+// controller for it would otherwise wait for its cache without end.
+func requireKind(mapper meta.RESTMapper, kind string) error {
+	gk := schema.GroupKind{Group: mxlv1alpha1.GroupVersion.Group, Kind: kind}
+	if _, err := mapper.RESTMapping(gk, mxlv1alpha1.GroupVersion.Version); err != nil {
+		return fmt.Errorf("%s is not served (is its CRD installed?): %w", gk, err)
+	}
+	return nil
 }

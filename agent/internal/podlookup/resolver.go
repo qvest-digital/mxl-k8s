@@ -32,9 +32,14 @@ func (r *Resolver) PodForPID(ctx context.Context, pid int32) (*corev1.Pod, error
 	if !ok {
 		return nil, fmt.Errorf("pid %d is not under a kubepods cgroup", pid)
 	}
+	return r.podForUID(ctx, uid)
+}
 
+// podForUID lists only this node's pods: the client is uncached, and a
+// placeholder open resolves its pid every time.
+func (r *Resolver) podForUID(ctx context.Context, uid string) (*corev1.Pod, error) {
 	var pods corev1.PodList
-	if err := r.Client.List(ctx, &pods); err != nil {
+	if err := r.Client.List(ctx, &pods, client.MatchingFields{"spec.nodeName": r.NodeName}); err != nil {
 		return nil, fmt.Errorf("list pods: %w", err)
 	}
 	for i := range pods.Items {

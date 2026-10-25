@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -106,6 +107,11 @@ type Reconciler struct {
 	// or a receiver created a moment ago. Nil falls back to the cached
 	// Client; production wires mgr.GetAPIReader().
 	APIReader client.Reader
+
+	// RedundancySets counts an owning MxlFlowRedundancySet as a claim.
+	// Off, such an owner reference is not read: the operator then has no
+	// access to sets, and the kind may not be installed.
+	RedundancySets bool
 }
 
 // liveReader returns the APIReader when set, otherwise the cached
@@ -315,6 +321,29 @@ func (r *Reconciler) claimFrom(ctx context.Context, reader client.Reader, m *mxl
 			ok:      true,
 			reason:  mxlv1alpha1.ReasonReceiverOwned,
 			message: fmt.Sprintf("MxlReceiver %s/%s owns this mirror", m.Namespace, recv.Name),
+		}, nil
+	}
+
+	for _, or := range m.OwnerReferences {
+		if !r.RedundancySets || or.Kind != "MxlFlowRedundancySet" || or.APIVersion != mxlv1alpha1.GroupVersion.String() {
+			continue
+		}
+		var set mxlv1alpha1.MxlFlowRedundancySet
+		err := reader.Get(ctx, types.NamespacedName{Name: or.Name}, &set)
+		switch {
+		case apierrors.IsNotFound(err):
+			continue
+		case err != nil:
+			return judgement{}, fmt.Errorf("get owning MxlFlowRedundancySet %s: %w", or.Name, err)
+		}
+		if set.UID != or.UID || !slices.Contains(set.Status.Nodes, m.Spec.TargetNode) {
+			continue // a reused name, or the output is no longer wanted there
+		}
+		return judgement{
+			ok:     true,
+			reason: mxlv1alpha1.ReasonRedundancySetOwned,
+			message: fmt.Sprintf("MxlFlowRedundancySet %s merges this flow on %s",
+				set.Name, m.Spec.TargetNode),
 		}, nil
 	}
 
@@ -800,7 +829,7 @@ func requeueAt(deadline time.Time) ctrl.Result {
 // work. The only thing that changes with no event behind it is a Lease
 // passing its window, which the requeue in collect covers.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&mxlv1alpha1.MxlFlowMirror{}).
 		Watches(
 			&corev1.Pod{},
@@ -824,9 +853,17 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&corev1.Node{},
 			handler.EnqueueRequestsFromMapFunc(r.nodeToMirrors),
 			builder.WithPredicates(nodeDeletedOnly()),
-		).
-		Named("mxlflowmirror").
-		Complete(r)
+		)
+	// A set that stops wanting its output on a node leaves the member
+	// mirrors there unclaimed. Without redundancy sets the kind need not
+	// be served, and a watch on it would never sync.
+	if r.RedundancySets {
+		b = b.Watches(
+			&mxlv1alpha1.MxlFlowRedundancySet{},
+			handler.EnqueueRequestsFromMapFunc(r.setToMirrors),
+		)
+	}
+	return b.Named("mxlflowmirror").Complete(r)
 }
 
 // mirrorsMatching enqueues every mirror the predicate accepts. The
@@ -872,6 +909,21 @@ func (r *Reconciler) receiverToMirrors(ctx context.Context, obj client.Object) [
 		}
 		for _, or := range m.OwnerReferences {
 			if or.UID == recv.UID {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func (r *Reconciler) setToMirrors(ctx context.Context, obj client.Object) []reconcile.Request {
+	set, ok := obj.(*mxlv1alpha1.MxlFlowRedundancySet)
+	if !ok {
+		return nil
+	}
+	return r.mirrorsMatching(ctx, func(m *mxlv1alpha1.MxlFlowMirror) bool {
+		for _, or := range m.OwnerReferences {
+			if or.Kind == "MxlFlowRedundancySet" && or.UID == set.UID {
 				return true
 			}
 		}

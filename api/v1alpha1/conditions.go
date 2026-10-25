@@ -106,6 +106,20 @@ const (
 	// provider will build an endpoint on, so the gateway reports the
 	// difference rather than acting on it.
 	ConditionTypeRDMADevicesEnumerated = "RDMADevicesEnumerated"
+
+	// ConditionTypeValid reports whether an MxlFlowRedundancySet's
+	// members can be merged. Owned by the operator; a gateway serves a
+	// set's output only while it is True for the set's generation. Once
+	// True for a generation, a member going away or changing geometry
+	// does not make it False; ConditionTypeMembersReady reports that.
+	ConditionTypeValid = "Valid"
+
+	// ConditionTypeMembersReady reports whether every member of an
+	// MxlFlowRedundancySet has an MxlFlow with an Origin, in the
+	// geometry of the first member that has one. Owned by the operator.
+	// A False condition names the members the output is served
+	// without.
+	ConditionTypeMembersReady = "MembersReady"
 )
 
 // Condition reason constants for MxlFlowMirror and MxlFlow status.
@@ -215,6 +229,11 @@ const (
 	// ReasonReceiverOwned marks an MxlFlowMirror claimed by an owner
 	// reference to a live MxlReceiver.
 	ReasonReceiverOwned = "ReceiverOwned"
+
+	// ReasonRedundancySetOwned marks an MxlFlowMirror claimed by an owner
+	// reference to an MxlFlowRedundancySet whose output is wanted on the
+	// mirror's target node.
+	ReasonRedundancySetOwned = "RedundancySetOwned"
 
 	// ReasonRequestorLive marks an MxlFlowMirror claimed by a
 	// spec.requestor pod that is still present with the recorded UID.

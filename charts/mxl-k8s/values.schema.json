@@ -77,6 +77,93 @@
           "title": "containerSecurityContext",
           "type": "object"
         },
+        "csi": {
+          "description": "CSI node plugin that delivers the domain to pods as an inline ephemeral volume (driver mxl.qvest-digital.com), with the volume attributes domain (an MxlDomain name; empty for the primary domain) and access (read, the default, or write). Requires mxlfs.enabled. A publish is refused, and retried by the kubelet, until the agent has mounted the domain or left it plain. Write access is granted to any pod that asks for it in its volume attributes, and the domain directory is mode 0777, so a pod with write access can create, overwrite or remove any flow in the domain.",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "title": "enabled",
+              "type": "boolean"
+            },
+            "kubeletDir": {
+              "default": "/var/lib/kubelet",
+              "description": "The kubelet's root directory on the node.",
+              "pattern": "^/.+",
+              "required": [],
+              "title": "kubeletDir"
+            },
+            "registrar": {
+              "properties": {
+                "image": {
+                  "properties": {
+                    "repository": {
+                      "default": "registry.k8s.io/sig-storage/csi-node-driver-registrar",
+                      "title": "repository",
+                      "type": "string"
+                    },
+                    "tag": {
+                      "default": "v2.15.0",
+                      "title": "tag",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "repository",
+                    "tag"
+                  ],
+                  "title": "image",
+                  "type": "object"
+                },
+                "resources": {
+                  "properties": {
+                    "limits": {
+                      "required": [],
+                      "title": "limits",
+                      "type": "object"
+                    },
+                    "requests": {
+                      "properties": {
+                        "cpu": {
+                          "default": "5m",
+                          "title": "cpu",
+                          "type": "string"
+                        },
+                        "memory": {
+                          "default": "16Mi",
+                          "title": "memory",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "cpu",
+                        "memory"
+                      ],
+                      "title": "requests",
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "requests",
+                    "limits"
+                  ],
+                  "title": "resources",
+                  "type": "object"
+                }
+              },
+              "required": [
+                "image",
+                "resources"
+              ],
+              "title": "registrar",
+              "type": "object"
+            }
+          },
+          "required": [
+            "enabled",
+            "registrar"
+          ],
+          "title": "csi"
+        },
         "enabled": {
           "default": true,
           "title": "enabled",
@@ -112,6 +199,12 @@
         },
         "flags": {
           "properties": {
+            "claimStatusLabel": {
+              "default": "",
+              "description": "Pod label naming a pod's dmf-k8s MediaFunctionClaim, in the pod's namespace. When set, the agent writes each such claim's status.io from the flows its pods on the node are observed to read and write, and gets RBAC for mediafunctionclaims. dmf-k8s names a function's Helm release after its claim, so app.kubernetes.io/instance names it. Empty disables.",
+              "required": [],
+              "title": "claimStatusLabel"
+            },
             "domainPath": {
               "default": "/run/mxl/domain",
               "description": " pattern: ^/.+ @schema",
@@ -205,7 +298,7 @@
         },
         "hostPID": {
           "default": "true",
-          "description": "Run the agent in the host PID namespace. Required for the intent socket's SO_PEERCRED-based pod identification: without it the connecting consumer pod's PID is not visible to the agent and the on-demand mirror materialization path silently fails.",
+          "description": "Run the agent in the host PID namespace. Required for the intent socket's SO_PEERCRED-based pod identification: without it the connecting consumer pod's PID is not visible to the agent and the on-demand mirror materialization path silently fails. mxlfs.enabled requires it.",
           "required": [],
           "title": "hostPID"
         },
@@ -2033,6 +2126,7 @@
           "type": "array"
         },
         "updateStrategy": {
+          "description": "DaemonSet update strategy. With mxlfs one gateway per node is assumed: a gateway clears every placeholder marker in a domain as it opens it, so a second gateway on the node would clear the markers of the first one's placeholders. With mxlfs.enabled the chart refuses a rollingUpdate.maxSurge other than 0.",
           "properties": {
             "rollingUpdate": {
               "properties": {
@@ -2323,6 +2417,61 @@
         "image"
       ],
       "title": "global"
+    },
+    "mxlfs": {
+      "description": "mxlfs, a memory filesystem for MXL domains, on every domain. Off, every domain is a plain directory and the chart renders none of the following.  On, the agent mounts an mxlfs (mode=0777,wait=5000) on each domain directory it materialises, before writing into it, and runs privileged for Bidirectional propagation of the runtime root. A directory that is already an mxlfs is left alone. Where the mount fails, as on a node whose kernel has no mxlfs module, or where the directory already holds flows, the domain stays a plain directory: the agent logs the error and records a MxlfsUnavailable warning event on the Node.  The agent, gateway and operator run with --mxlfs, which adds placeholders for flows absent on a node, lazy ring allocation and MxlFlowRedundancySets, with the RBAC they need; the CRD must be installed. The gateway runs in the host PID namespace, so it sees the flocks of local producers through /proc/locks. The gateway and the exporter wait in an init container for mxlfs.ready, which the agent writes to the runtime root once it has mounted or left plain the domains known at its start, and see later mounts through HostToContainer propagation. agent.csi.enabled requires this.  A placeholder is a libmxl writer the gateway holds open, one per flow with no copy on the node, and libmxl maps every grain of a discrete flow on its own: a video or data flow costs the gateway its grain count plus two memory mappings (250 + 2 for 5s of history at 50 fps), an audio flow two. Mirrors and merged outputs in the gateway add their own. The kernel caps mappings per process at vm.max_map_count, 65530 by default, which at that history is about 250 such flows across the node's mxlfs domains; past it, creating a placeholder or a mirror fails. Raise vm.max_map_count on the nodes for more.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "waitImage": {
+          "default": "busybox:1.38",
+          "description": "Image of the init container that waits for mxlfs.ready. Needs a POSIX sh, test and sleep.",
+          "required": [],
+          "title": "waitImage"
+        },
+        "waitResources": {
+          "description": "Resources of that init container.",
+          "properties": {
+            "limits": {
+              "required": [],
+              "title": "limits",
+              "type": "object"
+            },
+            "requests": {
+              "properties": {
+                "cpu": {
+                  "default": "1m",
+                  "title": "cpu",
+                  "type": "string"
+                },
+                "memory": {
+                  "default": "4Mi",
+                  "title": "memory",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cpu",
+                "memory"
+              ],
+              "title": "requests",
+              "type": "object"
+            }
+          },
+          "required": [
+            "requests",
+            "limits"
+          ],
+          "title": "waitResources"
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "title": "mxlfs"
     },
     "namespace": {
       "description": "Namespace handling. Most Flux users set createNamespace on the HelmRelease and leave namespace.create=false here.",
