@@ -32,8 +32,8 @@ const (
 	iocViewSelect      = 1<<30 | 4<<16 | 'x'<<8 | 2  // _IOW('x', 2, __u32)
 	iocViewSelectRange = 1<<30 | 24<<16 | 'x'<<8 | 9 // _IOW('x', 9, struct mxlfs_view_range)
 	iocAllocate        = 'x'<<8 | 8                  // _IO('x', 8)
-	// _IOW('x', 10, struct mxlfs_view_replace), which mxlfs 0.1.0-rc.2
-	// does not have.
+	// _IOW('x', 10, struct mxlfs_view_replace); an mxlfs without
+	// MXLFS_IOC_VIEW_REPLACE_SOURCE answers it with ENOTTY.
 	iocViewReplaceSource = 1<<30 | 12<<16 | 'x'<<8 | 10
 	maxSources           = 8
 
@@ -96,23 +96,29 @@ func mapHeader(path string, write bool) (*header, *os.File, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	st, err := f.Stat()
+	h, err := mapHeaderFile(f, prot)
 	if err != nil {
 		f.Close()
 		return nil, nil, err
 	}
+	return h, f, nil
+}
+
+// mapHeaderFile maps the flow header f holds.
+func mapHeaderFile(f *os.File, prot int) (*header, error) {
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
 	if st.Size() < int64(C.sizeof_mxlFlowInfo)+int64(unsafe.Sizeof(flowState{})) {
-		f.Close()
-		return nil, nil, fmt.Errorf("%s: %d bytes is no flow header", path, st.Size())
+		return nil, fmt.Errorf("%s: %d bytes is no flow header", f.Name(), st.Size())
 	}
 	mem, err := unix.Mmap(int(f.Fd()), 0, int(st.Size()), prot, unix.MAP_SHARED)
 	if err != nil {
-		f.Close()
-		return nil, nil, err
+		return nil, err
 	}
-	h := &header{mem: mem, info: (*C.mxlFlowInfo)(unsafe.Pointer(&mem[0])),
-		state: (*flowState)(unsafe.Pointer(&mem[C.sizeof_mxlFlowInfo]))}
-	return h, f, nil
+	return &header{mem: mem, info: (*C.mxlFlowInfo)(unsafe.Pointer(&mem[0])),
+		state: (*flowState)(unsafe.Pointer(&mem[C.sizeof_mxlFlowInfo]))}, nil
 }
 
 func (h *header) head() uint64 {
@@ -229,22 +235,8 @@ func Start(ctx context.Context, spec Spec, log logr.Logger) (*Engine, error) {
 func (e *Engine) checkAligned() error {
 	m0 := e.members[0]
 	for i, m := range e.members[1:] {
-		if m.format() != m0.format() ||
-			m.info.config.common.grainRate != m0.info.config.common.grainRate {
-			return fmt.Errorf("member %s differs from %s in format or rate", e.spec.Members[i+1], e.spec.Members[0])
-		}
-		switch m0.format() {
-		case formatAudio:
-			c0, l0 := m0.continuous()
-			c, l := m.continuous()
-			if c != c0 || l != l0 {
-				return fmt.Errorf("member %s has %d channels of %d samples, %s %d of %d: not sample-aligned",
-					e.spec.Members[i+1], c, l, e.spec.Members[0], c0, l0)
-			}
-		default:
-			if m.discrete() != m0.discrete() {
-				return fmt.Errorf("member %s has %d grains, %s %d", e.spec.Members[i+1], m.discrete(), e.spec.Members[0], m0.discrete())
-			}
+		if !aligned(m0, m) {
+			return fmt.Errorf("member %s differs from %s in format, rate or ring geometry", e.spec.Members[i+1], e.spec.Members[0])
 		}
 	}
 	e.rate = m0.info.config.common.grainRate
@@ -578,38 +570,136 @@ func (e *Engine) MemberIndex(id string) int {
 	return -1
 }
 
-// ErrNoReplace is Replace on a module without MXLFS_IOC_VIEW_REPLACE_SOURCE.
+// ErrNoReplace is Replace on an mxlfs without
+// MXLFS_IOC_VIEW_REPLACE_SOURCE.
 var ErrNoReplace = errors.New("mxlfs has no MXLFS_IOC_VIEW_REPLACE_SOURCE")
+
+// ErrNotOpened is Replace failing before it touched the engine: the
+// member's new ring could not be opened, or is not of the output's
+// geometry. The engine serves on as it was.
+var ErrNotOpened = errors.New("the member's ring could not be taken")
 
 type replaceReq struct {
 	member int
-	done   chan replaced
+	ring   *memberRing
+	done   chan error
 }
 
-type replaced struct {
-	ino uint64
-	err error
+// memberRing is a member's ring, opened for the engine to take.
+type memberRing struct {
+	h    *header
+	f    *os.File
+	ino  uint64
+	srcs []*os.File // the grain files or the channels file, one per view
+	mems [][]byte   // the mapped grain headers of a discrete ring
+}
+
+// close releases what the engine did not take: the source files always,
+// the mappings and the data file unless taken.
+func (r *memberRing) close(taken bool) {
+	for _, s := range r.srcs {
+		s.Close()
+	}
+	if taken {
+		return
+	}
+	for _, m := range r.mems {
+		_ = unix.Munmap(m)
+	}
+	if r.h != nil {
+		_ = unix.Munmap(r.h.mem)
+	}
+	if r.f != nil {
+		r.f.Close()
+	}
 }
 
 // Replace serves member from the ring now in its flow directory in place
 // of the one it was started over, and returns the inode of the data file
 // it mapped. A restarted producer recreates its flow directory, and with
 // it every file: the output and the readers holding it stay as they are,
-// only the member's source in each view is replaced. The new ring has to
-// be of the output's geometry. On an error the engine may be left half
-// replaced and has to be closed.
+// only the member's source in each view is replaced. The ring is opened
+// here, so the engine's loop is held only for the selects and the swap.
+// ErrNotOpened leaves the engine as it was; any other error may leave
+// it half replaced, and then it has to be closed.
 func (e *Engine) Replace(member int) (uint64, error) {
 	if !e.replaceable {
 		return 0, ErrNoReplace
 	}
-	req := replaceReq{member: member, done: make(chan replaced, 1)}
+	r, err := e.openRing(member)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %w", ErrNotOpened, err)
+	}
+	req := replaceReq{member: member, ring: r, done: make(chan error, 1)}
 	select {
 	case e.replaces <- req:
 	case <-e.done:
+		r.close(false)
 		return 0, errors.New("engine stopped")
 	}
-	r := <-req.done
-	return r.ino, r.err
+	if err := <-req.done; err != nil {
+		return 0, err
+	}
+	return r.ino, nil
+}
+
+// openRing opens and maps the ring in member's flow directory. Every file
+// is opened relative to the one directory, so all of them are of the one
+// ring even while the directory is being replaced again.
+func (e *Engine) openRing(member int) (_ *memberRing, err error) {
+	dir, err := os.Open(flowDir(e.spec.DomainDir, e.spec.Members[member]))
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	open := func(name string) (*os.File, error) {
+		fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return nil, fmt.Errorf("open %s: %w", filepath.Join(dir.Name(), name), err)
+		}
+		return os.NewFile(uintptr(fd), filepath.Join(dir.Name(), name)), nil
+	}
+	r := &memberRing{}
+	defer func() {
+		if err != nil {
+			r.close(false)
+		}
+	}()
+	if r.f, err = open("data"); err != nil {
+		return nil, err
+	}
+	if r.h, err = mapHeaderFile(r.f, unix.PROT_READ); err != nil {
+		return nil, err
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(int(r.f.Fd()), &st); err != nil {
+		return nil, err
+	}
+	r.ino = st.Ino
+	if !aligned(e.out, r.h) {
+		return nil, fmt.Errorf("member %s is not of the output's geometry", e.spec.Members[member])
+	}
+	if e.disc == nil {
+		s, err := open("channels")
+		if err != nil {
+			return nil, err
+		}
+		r.srcs = append(r.srcs, s)
+		return r, nil
+	}
+	for slot := range e.views {
+		s, err := open(fmt.Sprintf("grains/data.%d", slot))
+		if err != nil {
+			return nil, err
+		}
+		r.srcs = append(r.srcs, s)
+		mem, err := mapGrainInfo(s)
+		if err != nil {
+			return nil, err
+		}
+		r.mems = append(r.mems, mem)
+	}
+	return r, nil
 }
 
 // aligned reports whether member m's ring has the layout of ref's.
@@ -625,95 +715,49 @@ func aligned(ref, m *header) bool {
 	return m.discrete() == ref.discrete()
 }
 
-// replace is Replace on the engine's loop. Every slot or page the member
-// serves first moves to a member that holds its grain or samples, or to
-// the INVALID grain or silence: the new ring holds none of them, and a
-// lazily held one may hold no pages at all.
-func (e *Engine) replace(member int) (uint64, error) {
-	dir := flowDir(e.spec.DomainDir, e.spec.Members[member])
-	h, f, err := mapHeader(filepath.Join(dir, "data"), false)
-	if err != nil {
-		return 0, err
-	}
-	keep := false
-	defer func() {
-		if !keep {
-			_ = unix.Munmap(h.mem)
-			f.Close()
-		}
-	}()
-	var st unix.Stat_t
-	if err := unix.Fstat(int(f.Fd()), &st); err != nil {
-		return 0, err
-	}
-	if !aligned(e.out, h) {
-		return 0, fmt.Errorf("member %s is no longer of the output's geometry", e.spec.Members[member])
-	}
-	var srcs []*os.File
-	var mems [][]byte
-	defer func() {
-		for _, s := range srcs {
-			s.Close()
-		}
-		if !keep {
-			for _, m := range mems {
-				_ = unix.Munmap(m)
-			}
-		}
-	}()
-	if e.disc != nil {
-		for slot := range e.views {
-			s, err := os.Open(filepath.Join(dir, "grains", fmt.Sprintf("data.%d", slot)))
-			if err != nil {
-				return 0, err
-			}
-			srcs = append(srcs, s)
-			mem, err := mapGrainInfo(s)
-			if err != nil {
-				return 0, err
-			}
-			mems = append(mems, mem)
-		}
-	} else {
-		s, err := os.Open(filepath.Join(dir, "channels"))
-		if err != nil {
-			return 0, err
-		}
-		srcs = append(srcs, s)
-	}
-
+// take is Replace on the engine's loop: it moves every slot or page the
+// member serves to a member that holds its grain or samples, or to the
+// INVALID grain or silence, as the new ring holds none of them and a
+// lazily held one may hold no pages at all; then puts the new ring in
+// place of the old in every view and in the engine.
+func (e *Engine) take(member int, r *memberRing) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.disc != nil {
-		sel := e.disc.Drop(e.discreteMembers(), member)
-		e.selects.Add(uint64(len(sel)))
-		err = e.apply(sel)
-	} else {
-		sel := e.audio.Drop(member)
-		e.selects.Add(uint64(len(sel)))
-		err = e.selectPages(sel)
-	}
-	if err != nil {
-		return 0, err
+	if err := e.drop(member); err != nil {
+		r.close(false)
+		return err
 	}
 	for k, v := range e.views {
-		if err := replaceSource(v, member, srcs[k]); err != nil {
-			return 0, fmt.Errorf("%s: %w", v.Name(), err)
+		if err := replaceSource(v, member, r.srcs[k]); err != nil {
+			r.close(false)
+			return fmt.Errorf("%s: %w", v.Name(), err)
 		}
 	}
 	_ = unix.Munmap(e.members[member].mem)
 	e.files[member].Close()
-	e.members[member], e.files[member] = h, f
+	e.members[member], e.files[member] = r.h, r.f
 	if e.disc != nil {
 		for k, m := range e.grainMem[member] {
 			_ = unix.Munmap(m)
-			e.grains[member][k] = (*C.mxlGrainInfo)(unsafe.Pointer(&mems[k][0]))
+			e.grains[member][k] = (*C.mxlGrainInfo)(unsafe.Pointer(&r.mems[k][0]))
 		}
-		e.grainMem[member] = mems
+		e.grainMem[member] = r.mems
 	}
-	keep = true
-	e.log.Info("replaced a member's ring", "member", e.spec.Members[member], "inode", st.Ino)
-	return st.Ino, nil
+	r.close(true)
+	e.log.Info("replaced a member's ring", "member", e.spec.Members[member], "inode", r.ino)
+	return nil
+}
+
+// drop moves every slot or page member serves off it.
+func (e *Engine) drop(member int) error {
+	if e.disc != nil {
+		sel := e.disc.Drop(e.discreteMembers(), member)
+		e.selects.Add(uint64(len(sel)))
+		return e.apply(sel)
+	}
+	sel := e.audio.Drop(member)
+	e.selects.Add(uint64(len(sel)))
+	return e.selectPages(sel)
 }
 
 // discreteMembers is what the discrete policy sees of the members now.
@@ -752,11 +796,11 @@ func (e *Engine) run(ctx context.Context) {
 	for ctx.Err() == nil {
 		select {
 		case req := <-e.replaces:
-			ino, err := e.replace(req.member)
+			err := e.take(req.member, req.ring)
 			if err == nil {
 				lastHead[req.member] = 0 // the new ring's head is no advance
 			}
-			req.done <- replaced{ino, err}
+			req.done <- err
 		default:
 		}
 		if time.Since(report) >= time.Minute {

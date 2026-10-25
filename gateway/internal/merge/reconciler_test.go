@@ -2,6 +2,7 @@ package merge
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -405,4 +406,43 @@ func TestReconcilerRebuildsForARestartedMemberItCannotReplace(t *testing.T) {
 			require.Len(t, *started, 2, "the output was not built again")
 		})
 	}
+}
+
+// A restarted member's directory can be read before it is whole, or be
+// gone again by the time the engine opens it. Nothing has been touched
+// then: the engine keeps serving and the member is tried again at the
+// next recheck, rather than the output being built again under its
+// readers.
+func TestReconcilerTriesAgainForARingItCouldNotOpen(t *testing.T) {
+	started := startWithSpec(t)
+	dir := t.TempDir()
+	fail := true
+	var asked []int
+	orig := replace
+	replace = func(e *Engine, m int) (uint64, error) {
+		asked = append(asked, m)
+		if fail {
+			return 0, fmt.Errorf("%w: %w", ErrNotOpened, unix.ENOENT)
+		}
+		return inodes(dir, []mxlv1alpha1.RedundancyFlowRef{{FlowID: e.spec.Members[m]}})[0], nil
+	}
+	t.Cleanup(func() { replace = orig })
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+	f, err := os.Open(filepath.Join(flowDir(dir, memberA), "data"))
+	require.NoError(t, err)
+	t.Cleanup(func() { f.Close() })
+
+	memberDir(t, dir, memberA, videoDef(memberA))
+	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter)
+	require.Len(t, *started, 1, "a ring not yet opened rebuilt the output")
+
+	fail = false
+	reconcileSet(t, r)
+	require.Equal(t, []int{0, 0}, asked)
+	require.Len(t, *started, 1)
+	reconcileSet(t, r)
+	require.Equal(t, []int{0, 0}, asked, "a member replaced once was tried again")
 }

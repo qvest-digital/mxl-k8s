@@ -2,6 +2,7 @@ package merge
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -57,12 +58,17 @@ type running struct {
 	seen    []uint64 // per spec member, its data file's inode at build; 0 for none
 	started []int    // the spec members the engine was started over
 	failed  bool     // a Replace failed, which may leave the engine half replaced
+	// retrying holds the spec members replaced underneath the engine
+	// whose new ring could not be opened yet; serves keeps the engine
+	// for them until the next recheck tries again.
+	retrying map[int]bool
 }
 
 // serves reports whether cur still serves set as it stands: the same
 // object at the same generation, with no member directory appeared or
 // replaced since the engine was built, or since it took the replacement
-// in place, and no Replace failed. One removed is no reason to
+// in place, and no Replace failed. A member whose new ring is still to be
+// opened keeps the engine as well. One removed is no reason to
 // rebuild: the engine keeps its ring mapped, which stops advancing, and
 // the other members serve. Once every member it was started over is
 // gone, a member it left out, of another geometry, is the only one still
@@ -75,7 +81,7 @@ func (cur *running) serves(set *mxlv1alpha1.MxlFlowRedundancySet) bool {
 	for i, ino := range inodes(cur.domain, set.Spec.Members) {
 		switch {
 		case ino == 0:
-		case ino != cur.seen[i]:
+		case ino != cur.seen[i] && !cur.retrying[i]:
 			return false
 		case slices.Contains(cur.started, i):
 			startedLeft = true
@@ -115,11 +121,14 @@ var replace = (*Engine).Replace
 // producer recreates its flow directory; building the output again for
 // it would remove the output under every reader. A member the engine
 // cannot take that way, in another geometry or on an mxlfs without
-// MXLFS_IOC_VIEW_REPLACE_SOURCE, is left to serves, which rebuilds.
+// MXLFS_IOC_VIEW_REPLACE_SOURCE, is left to serves, which rebuilds. One
+// whose directory could not be read, gone again or not yet whole, is
+// tried again at the next recheck, and is in retrying until then.
 func (cur *running) replaceRestarted(l logr.Logger, set *mxlv1alpha1.MxlFlowRedundancySet) {
 	if cur == nil || cur.uid != set.UID || cur.gen != set.Generation {
 		return
 	}
+	cur.retrying = map[int]bool{}
 	for i, ino := range inodes(cur.domain, set.Spec.Members) {
 		m := slices.Index(cur.started, i)
 		if ino == 0 || ino == cur.seen[i] || m < 0 {
@@ -127,17 +136,27 @@ func (cur *running) replaceRestarted(l logr.Logger, set *mxlv1alpha1.MxlFlowRedu
 		}
 		id := set.Spec.Members[i].FlowID
 		def, err := os.ReadFile(filepath.Join(flowDir(cur.domain, id), "flow_def.json"))
-		if err != nil || !placeholder.SameGeometry(cur.def, def) {
+		if err != nil {
+			l.Info("cannot read a restarted member's definition; trying again", "member", id, "error", err.Error())
+			cur.retrying[i] = true
+			continue
+		}
+		if !placeholder.SameGeometry(cur.def, def) {
 			continue
 		}
 		got, err := replace(cur.engine, m)
-		if err != nil {
+		switch {
+		case errors.Is(err, ErrNotOpened):
+			l.Info("cannot open a restarted member's ring; trying again", "member", id, "error", err.Error())
+			cur.retrying[i] = true
+		case err != nil:
 			l.Info("cannot replace a restarted member in place; building the output again", "member", id,
 				"error", err.Error())
 			cur.failed = true
 			return
+		default:
+			cur.seen[i] = got
 		}
-		cur.seen[i] = got
 	}
 }
 
