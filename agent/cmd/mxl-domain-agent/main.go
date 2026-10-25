@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -98,22 +99,75 @@ func run(args []string) error {
 	var ready atomic.Bool
 
 	leaseMgr := originlease.New(kClient, cfg.NodeName)
+	flowPub, sets := newFlowPublisher(cfg, kClient, leaseMgr)
 
 	// Every domain written on the node other than the primary gets its own
 	// tracker: a fanotify mark, a flow publisher and its lease loops, the
-	// same set the primary domain gets below.
+	// same set the primary domain gets below, and on mxlfs what runMxlfs
+	// starts. Each starts as its domain is materialised, below.
 	root := filepath.Dir(filepath.Clean(cfg.DomainPath))
 	primaryDir := filepath.Base(filepath.Clean(cfg.DomainPath))
-	trackers := &tracker.Manager{
-		PrimaryDir: primaryDir,
-		Start: func(ctx context.Context, name, dir string) (tracker.Tracker, error) {
-			return startTracker(ctx, kClient, cfg.NodeName, leaseMgr, name, filepath.Join(root, dir))
-		},
-	}
+	trackers := &tracker.Manager{PrimaryDir: primaryDir}
 	defer trackers.StopAll()
 
 	var domainsMu sync.Mutex
 	current := intent.Domains{Root: root, Primary: primaryDir, ByDir: map[string]string{}}
+
+	pods := &podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName}
+	ns, _ := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	own := ownPod(strings.TrimSpace(string(ns)))
+	var intentDispatcher *intent.Dispatcher
+	if cfg.IntentSocketPath != "" || cfg.Mxlfs {
+		intentDispatcher = &intent.Dispatcher{
+			Client:             kClient,
+			Resolver:           pods,
+			DomainPath:         cfg.DomainPath,
+			NodeName:           cfg.NodeName,
+			Provider:           mxlv1alpha1.MxlFabricsProvider(cfg.Provider),
+			MaterializeTimeout: cfg.MaterializeTimeout,
+			Lease:              leaseMgr,
+			Origin:             originClaims{primary: flowPub, trackers: trackers},
+			Own:                own,
+			Domains: func() intent.Domains {
+				domainsMu.Lock()
+				defer domainsMu.Unlock()
+				return current
+			},
+		}
+	}
+	// A redundancy set's output is merged where a reader waits for it, in
+	// whichever domain it is in, rather than mirrored.
+	claim := func(ctx context.Context, flowDir string) bool {
+		domainsMu.Lock()
+		doms := current
+		domainsMu.Unlock()
+		ref, ok := doms.FlowRefFromPath(flowDir)
+		if !ok {
+			return false
+		}
+		isOutput, err := sets.Want(ctx, ref.Domain, ref.ID)
+		if err != nil {
+			setupLog.Error(err, "record redundancy set demand", "flowID", ref.ID)
+		}
+		return isOutput
+	}
+	startMxlfs := func(ctx context.Context, dir string, fp *flowpublisher.Publisher) (func(), error) {
+		return runMxlfs(ctx, dir, fp, intentDispatcher, claim, ours(pods, own))
+	}
+	tracking := domainTracking{
+		Client: kClient,
+		Node:   cfg.NodeName,
+		Lease:  leaseMgr,
+		WatchFlows: func(ctx context.Context, dir string, fp *flowpublisher.Publisher) (func(), error) {
+			return watchFlows(ctx, dir, fp, ctrl.Log.WithName("tracker").WithValues("directory", dir))
+		},
+	}
+	if cfg.Mxlfs {
+		tracking.Mxlfs = &trackerMxlfs{IsMxlfs: mxlfswatch.IsMxlfs, IsOutput: sets.IsOutput, Run: startMxlfs}
+	}
+	trackers.Start = func(ctx context.Context, name, dir string) (tracker.Tracker, error) {
+		return tracking.start(ctx, name, filepath.Join(root, dir))
+	}
 
 	domainPub := domainpublisher.NewFromDomainPath(kClient, cfg.NodeName,
 		cfg.DomainPath, statfs.Stats, ready.Load)
@@ -170,7 +224,6 @@ func run(args []string) error {
 		}
 	}
 
-	flowPub, sets := newFlowPublisher(cfg, kClient, leaseMgr)
 	if err := flowPub.InitialSync(ctx); err != nil {
 		// Initial sync failures are logged, not fatal -- the fanotify
 		// stream will reconcile when entries change.
@@ -203,29 +256,6 @@ func run(args []string) error {
 
 	go flowPub.RunLocalRescan(ctx, 30*time.Second)
 
-	onMxlfs := cfg.Mxlfs && mxlfswatch.IsMxlfs(cfg.DomainPath)
-	pods := &podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName}
-	ns, _ := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-	own := ownPod(strings.TrimSpace(string(ns)))
-	var intentDispatcher *intent.Dispatcher
-	if cfg.IntentSocketPath != "" || onMxlfs {
-		intentDispatcher = &intent.Dispatcher{
-			Client:             kClient,
-			Resolver:           pods,
-			DomainPath:         cfg.DomainPath,
-			NodeName:           cfg.NodeName,
-			Provider:           mxlv1alpha1.MxlFabricsProvider(cfg.Provider),
-			MaterializeTimeout: cfg.MaterializeTimeout,
-			Lease:              leaseMgr,
-			Origin:             originClaims{primary: flowPub, trackers: trackers},
-			Own:                own,
-			Domains: func() intent.Domains {
-				domainsMu.Lock()
-				defer domainsMu.Unlock()
-				return current
-			},
-		}
-	}
 	if cfg.IntentSocketPath != "" {
 		intentServer := &intentsock.Server{
 			SocketPath: cfg.IntentSocketPath,
@@ -238,22 +268,8 @@ func run(args []string) error {
 		}()
 	}
 
-	if onMxlfs {
-		claim := func(ctx context.Context, flowDir string) bool {
-			domainsMu.Lock()
-			doms := current
-			domainsMu.Unlock()
-			ref, ok := doms.FlowRefFromPath(flowDir)
-			if !ok {
-				return false
-			}
-			isOutput, err := sets.Want(ctx, ref.Domain, ref.ID)
-			if err != nil {
-				setupLog.Error(err, "record redundancy set demand", "flowID", ref.ID)
-			}
-			return isOutput
-		}
-		if err := runMxlfs(ctx, cfg.DomainPath, flowPub, intentDispatcher, claim, ours(pods, own)); err != nil {
+	if cfg.Mxlfs && mxlfswatch.IsMxlfs(cfg.DomainPath) {
+		if _, err := startMxlfs(ctx, cfg.DomainPath, flowPub); err != nil {
 			return err
 		}
 	}
@@ -443,55 +459,77 @@ func runProbes(ctx context.Context, addr string, ready *atomic.Bool) {
 	}
 }
 
-// startTracker tracks the flows of one domain other than the primary: the
-// same fanotify mark, flow publisher and lease loops the primary domain gets.
-// It returns once the mark is in place, so a domain is reported mirrored only
-// when its flows are being tracked.
-func startTracker(ctx context.Context, c client.Client, node string,
-	lease *originlease.Manager, name, dir string) (tracker.Tracker, error) {
+// domainTracking starts the tracker of one domain other than the primary.
+type domainTracking struct {
+	Client client.Client
+	Node   string
+	Lease  flowpublisher.LeaseRenewer
+	// WatchFlows feeds fp the flow directories coming and going in dir
+	// until ctx ends. It returns once they are watched, with what waits
+	// for the watch to end.
+	WatchFlows func(ctx context.Context, dir string, fp *flowpublisher.Publisher) (wait func(), err error)
+	// Mxlfs is nil without --mxlfs.
+	Mxlfs *trackerMxlfs
+}
 
+// trackerMxlfs is what a tracked domain on mxlfs gets beyond its flow
+// watch: the same placeholder and redundancy set handling as the
+// primary domain.
+type trackerMxlfs struct {
+	IsMxlfs  func(dir string) bool
+	IsOutput func(ctx context.Context, domain, flowID string) bool
+	// Run starts runMxlfs for dir and returns what waits for it to end
+	// once ctx has.
+	Run func(ctx context.Context, dir string, fp *flowpublisher.Publisher) (wait func(), err error)
+}
+
+// start tracks the flows of the domain name in dir: the same fanotify
+// mark, flow publisher and lease loops the primary domain gets, and on
+// mxlfs what runMxlfs starts. It returns once all of it is in place, so a
+// domain is reported mirrored only when its flows are being tracked.
+func (d domainTracking) start(ctx context.Context, name, dir string) (tracker.Tracker, error) {
 	l := ctrl.Log.WithName("tracker").WithValues("domain", name, "directory", dir)
 	fp := &flowpublisher.Publisher{
-		Client:     c,
+		Client:     d.Client,
 		DomainPath: dir,
 		Domain:     name,
-		NodeName:   node,
-		Lease:      lease,
+		NodeName:   d.Node,
+		Lease:      d.Lease,
 	}
-	w, err := fanotify.New()
-	if err != nil {
-		return tracker.Tracker{}, fmt.Errorf("fanotify init: %w", err)
-	}
-	if err := w.MarkInode(dir,
-		fanotify.MaskCreate|fanotify.MaskMovedTo|fanotify.MaskDelete|fanotify.MaskMovedFrom|fanotify.MaskOnDir,
-	); err != nil {
-		w.Close()
-		return tracker.Tracker{}, fmt.Errorf("fanotify mark %s: %w", dir, err)
-	}
-	if err := fp.InitialSync(ctx); err != nil {
-		l.Error(err, "initial flow sync failed")
+	onMxlfs := d.Mxlfs != nil && d.Mxlfs.IsMxlfs(dir)
+	if onMxlfs {
+		fp.IsOutput = d.Mxlfs.IsOutput
 	}
 
 	tctx, cancel := context.WithCancel(ctx)
-	events := make(chan fanotify.Event, 32)
+	waitWatch, err := d.WatchFlows(tctx, dir, fp)
+	if err != nil {
+		cancel()
+		return tracker.Tracker{}, err
+	}
+	if err := fp.InitialSync(tctx); err != nil {
+		l.Error(err, "initial flow sync failed")
+	}
 	var wg sync.WaitGroup
-	wg.Add(4)
-	go func() {
-		defer wg.Done()
-		// Run closes events when it returns, which ends the dispatcher.
-		if err := w.Run(tctx, events); err != nil && tctx.Err() == nil {
-			l.Error(err, "fanotify watcher")
-		}
-	}()
-	go func() { defer wg.Done(); runDispatcher(tctx, events, fp) }()
+	wg.Add(2)
 	go func() { defer wg.Done(); fp.RunRenewLoop(tctx, originlease.DefaultRenewInterval) }()
 	go func() { defer wg.Done(); fp.RunLocalRescan(tctx, 30*time.Second) }()
-	l.Info("tracking domain")
+	waitMxlfs := func() {}
+	if onMxlfs {
+		if waitMxlfs, err = d.Mxlfs.Run(tctx, dir, fp); err != nil {
+			cancel()
+			wg.Wait()
+			waitWatch()
+			return tracker.Tracker{}, err
+		}
+	}
+	l.Info("tracking domain", "mxlfs", onMxlfs)
 
 	stop := func() {
 		cancel()
 		wg.Wait()
-		w.Close()
+		waitWatch()
+		waitMxlfs()
 		// The node no longer serves this domain's flows as their origin.
 		rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer rcancel()
@@ -501,6 +539,33 @@ func startTracker(ctx context.Context, c client.Client, node string,
 		l.Info("stopped tracking domain")
 	}
 	return tracker.Tracker{Stop: stop, ClaimOrigin: fp.ClaimOrigin}, nil
+}
+
+// watchFlows marks dir for flow directories coming and going and feeds
+// them to fp until ctx ends.
+func watchFlows(ctx context.Context, dir string, fp *flowpublisher.Publisher, l logr.Logger) (func(), error) {
+	w, err := fanotify.New()
+	if err != nil {
+		return nil, fmt.Errorf("fanotify init: %w", err)
+	}
+	if err := w.MarkInode(dir,
+		fanotify.MaskCreate|fanotify.MaskMovedTo|fanotify.MaskDelete|fanotify.MaskMovedFrom|fanotify.MaskOnDir,
+	); err != nil {
+		w.Close()
+		return nil, fmt.Errorf("fanotify mark %s: %w", dir, err)
+	}
+	events := make(chan fanotify.Event, 32)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		// Run closes events when it returns, which ends the dispatcher.
+		if err := w.Run(ctx, events); err != nil && ctx.Err() == nil {
+			l.Error(err, "fanotify watcher")
+		}
+	}()
+	go func() { defer wg.Done(); runDispatcher(ctx, events, fp) }()
+	return func() { wg.Wait(); w.Close() }, nil
 }
 
 // originClaims sends a producer's claim to the publisher of its flow's
@@ -576,54 +641,57 @@ func flowsInUse(ctx context.Context, c client.Client, node string, own func(*cor
 // runMxlfs starts what a domain on mxlfs needs beyond fanotify on the
 // domain directory: a mirror for every placeholder a pod opens, one for
 // every flow a path walk waits for, and a publish for every placeholder
-// that stops being one.
+// that stops being one. It returns what waits for all of it to end once
+// ctx has.
 func runMxlfs(ctx context.Context, domain string, fp *flowpublisher.Publisher,
 	d *intent.Dispatcher, claim func(context.Context, string) bool,
-	ours func(ctx context.Context, pid int32) bool) error {
+	ours func(ctx context.Context, pid int32) bool) (func(), error) {
 
-	l := ctrl.Log.WithName("mxlfs")
-	trigger := &mxlfswatch.Trigger{
-		Dispatcher: d,
-		Ours:       ours,
-		Log:        l,
+	l := ctrl.Log.WithName("mxlfs").WithValues("domain", domain)
+	markers, err := mxlfswatch.MarkerDir(domain)
+	if err != nil {
+		return nil, fmt.Errorf("placeholder marker directory: %w", err)
 	}
+	w, err := fanotify.New()
+	if err != nil {
+		return nil, fmt.Errorf("fanotify init: %w", err)
+	}
+	if err := w.MarkInode(markers, fanotify.MaskDelete|fanotify.MaskMovedFrom|fanotify.MaskCreate|fanotify.MaskMovedTo); err != nil {
+		w.Close()
+		return nil, fmt.Errorf("fanotify mark %s: %w", markers, err)
+	}
+
+	trigger := &mxlfswatch.Trigger{Dispatcher: d, Ours: ours, Log: l}
+	events := make(chan fanotify.Event, 32)
+	var wg sync.WaitGroup
+	wg.Add(4)
 	go func() {
+		defer wg.Done()
 		if err := trigger.Run(ctx, domain); err != nil && ctx.Err() == nil {
 			l.Error(err, "placeholder open watcher exited")
 		}
 	}()
 	go func() {
-		if err := mxlfswatch.RunWanted(ctx, domain, d, claim, trigger.Ours, l); err != nil && ctx.Err() == nil {
+		defer wg.Done()
+		if err := mxlfswatch.RunWanted(ctx, domain, d, claim, ours, l); err != nil && ctx.Err() == nil {
 			l.Error(err, "wanted flow loop exited")
 		}
 	}()
-
-	markers, err := mxlfswatch.MarkerDir(domain)
-	if err != nil {
-		return fmt.Errorf("placeholder marker directory: %w", err)
-	}
-	w, err := fanotify.New()
-	if err != nil {
-		return fmt.Errorf("fanotify init: %w", err)
-	}
-	if err := w.MarkInode(markers, fanotify.MaskDelete|fanotify.MaskMovedFrom|fanotify.MaskCreate|fanotify.MaskMovedTo); err != nil {
-		w.Close()
-		return fmt.Errorf("fanotify mark %s: %w", markers, err)
-	}
-	events := make(chan fanotify.Event, 32)
 	go func() {
+		defer wg.Done()
 		defer w.Close()
 		if err := w.Run(ctx, events); err != nil && ctx.Err() == nil {
 			l.Error(err, "placeholder marker watcher exited")
 		}
 	}()
 	go func() {
+		defer wg.Done()
 		for ev := range events {
 			if err := mxlfswatch.MarkerChanged(ctx, fp, ev.Name, ev.IsCreate()); err != nil {
 				l.Error(err, "publish placeholder change", "flowID", ev.Name)
 			}
 		}
 	}()
-	l.Info("watching mxlfs placeholders", "domain", domain)
-	return nil
+	l.Info("watching mxlfs placeholders")
+	return wg.Wait, nil
 }

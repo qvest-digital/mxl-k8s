@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/config"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/flowpublisher"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/mxlfsmount"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/observed"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -116,4 +117,83 @@ func TestFlowsInUseLeavesOutMxlK8sComponents(t *testing.T) {
 	got, err := flowsInUse(context.Background(), c, "n1", ownPod("mxl-system"), scan)
 	require.NoError(t, err)
 	assert.Equal(t, map[mxlv1alpha1.FlowRef]bool{{Domain: "studio", ID: other}: true}, got)
+}
+
+// A domain other than the primary on mxlfs gets the placeholder and
+// redundancy set handling the primary gets, for as long as it is
+// tracked: the gateway lists placeholders and merges set outputs in
+// every domain it opens. A domain left plain gets none.
+func TestTrackerRunsMxlfsForATrackedDomainOnMxlfs(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	onMxlfs, plain := t.TempDir(), t.TempDir()
+	watched := map[string]*flowpublisher.Publisher{}
+	type run struct {
+		ctx context.Context
+		dir string
+		fp  *flowpublisher.Publisher
+	}
+	var runs []run
+	waited := 0
+	tracking := domainTracking{
+		Client: c,
+		Node:   "n1",
+		WatchFlows: func(_ context.Context, dir string, fp *flowpublisher.Publisher) (func(), error) {
+			watched[dir] = fp
+			return func() {}, nil
+		},
+		Mxlfs: &trackerMxlfs{
+			IsMxlfs:  func(dir string) bool { return dir == onMxlfs },
+			IsOutput: func(context.Context, string, string) bool { return true },
+			Run: func(ctx context.Context, dir string, fp *flowpublisher.Publisher) (func(), error) {
+				runs = append(runs, run{ctx, dir, fp})
+				return func() { <-ctx.Done(); waited++ }, nil
+			},
+		},
+	}
+	ctx := context.Background()
+
+	tr, err := tracking.start(ctx, "studio", onMxlfs)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	assert.Equal(t, onMxlfs, runs[0].dir)
+	assert.Same(t, watched[onMxlfs], runs[0].fp, "placeholder changes go to the domain's own publisher")
+	assert.Equal(t, "studio", runs[0].fp.Domain)
+	assert.NotNil(t, runs[0].fp.IsOutput, "a set's output merged here is no location to publish")
+	require.NoError(t, runs[0].ctx.Err())
+	tr.Stop()
+	assert.Error(t, runs[0].ctx.Err(), "stopping the tracker stops its mxlfs handling")
+	assert.Equal(t, 1, waited, "and waits for it to end")
+
+	tr, err = tracking.start(ctx, "local", plain)
+	require.NoError(t, err)
+	tr.Stop()
+	assert.Len(t, runs, 1, "a plain domain has no placeholders to watch")
+	assert.Nil(t, watched[plain].IsOutput)
+}
+
+// A tracked domain whose mxlfs handling cannot start is not tracked:
+// the manager retries it on the next sync, and the flow watch already
+// started ends.
+func TestTrackerFailsWhenMxlfsCannotStart(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	var watchCtx context.Context
+	tracking := domainTracking{
+		Client: c,
+		Node:   "n1",
+		WatchFlows: func(ctx context.Context, _ string, _ *flowpublisher.Publisher) (func(), error) {
+			watchCtx = ctx
+			return func() {}, nil
+		},
+		Mxlfs: &trackerMxlfs{
+			IsMxlfs:  func(string) bool { return true },
+			IsOutput: func(context.Context, string, string) bool { return false },
+			Run: func(context.Context, string, *flowpublisher.Publisher) (func(), error) {
+				return nil, errors.New("no marker directory")
+			},
+		},
+	}
+
+	_, err := tracking.start(context.Background(), "studio", t.TempDir())
+	require.Error(t, err)
+	assert.Error(t, watchCtx.Err())
 }
