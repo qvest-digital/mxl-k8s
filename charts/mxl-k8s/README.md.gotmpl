@@ -33,7 +33,21 @@ helm install mxl oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
 <!-- x-release-please-end -->
 
 The chart installs the CRDs from its `crds/` directory on first
-install. Helm itself never updates or removes them.
+install. Helm itself never updates or removes them, and a `helm upgrade`
+of a release installed before a CRD existed does not create it either.
+`mxlfs.enabled=true` needs the `MxlFlowRedundancySet` CRD, without which
+the agent, gateway and operator refuse to start; on such a release,
+apply the chart's CRDs before enabling mxlfs:
+
+<!-- x-release-please-start-version -->
+```sh
+helm show crds oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
+  --version 1.1.0-rc.25 | kubectl apply --server-side -f -
+```
+<!-- x-release-please-end -->
+
+The FluxCD example below sets `upgrade.crds: CreateReplace`, which
+creates and updates them on every upgrade.
 
 ## Install via FluxCD
 

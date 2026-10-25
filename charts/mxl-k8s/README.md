@@ -26,7 +26,21 @@ helm install mxl oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
 <!-- x-release-please-end -->
 
 The chart installs the CRDs from its `crds/` directory on first
-install. Helm itself never updates or removes them.
+install. Helm itself never updates or removes them, and a `helm upgrade`
+of a release installed before a CRD existed does not create it either.
+`mxlfs.enabled=true` needs the `MxlFlowRedundancySet` CRD, without which
+the agent, gateway and operator refuse to start; on such a release,
+apply the chart's CRDs before enabling mxlfs:
+
+<!-- x-release-please-start-version -->
+```sh
+helm show crds oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
+  --version 1.1.0-rc.25 | kubectl apply --server-side -f -
+```
+<!-- x-release-please-end -->
+
+The FluxCD example below sets `upgrade.crds: CreateReplace`, which
+creates and updates them on every upgrade.
 
 ## Install via FluxCD
 
@@ -286,8 +300,9 @@ Kubernetes: `>=1.28-0`
 | global.image.pullPolicy | string | `"IfNotPresent"` | Default imagePullPolicy. Per-component override wins. @schema enum: ["Always", "IfNotPresent", "Never"] @schema |
 | global.image.pullSecrets | list | `[]` | Image pull secrets, applied to every Pod. |
 | global.image.registry | string | `"ghcr.io/qvest-digital/mxl-k8s"` | Container registry prefix. Per-component image.repository is appended to this. |
-| mxlfs | object | `{"enabled":false,"waitImage":"busybox:1.38"}` | mxlfs, a memory filesystem for MXL domains, on every domain. Off, every domain is a plain directory and the chart renders none of the following.  On, the agent mounts an mxlfs (mode=0777,wait=5000) on each domain directory it materialises, before writing into it, and runs privileged for Bidirectional propagation of the runtime root. A directory that is already an mxlfs is left alone. Where the mount fails, as on a node whose kernel has no mxlfs module, or where the directory already holds flows, the domain stays a plain directory: the agent logs the error and records a MxlfsUnavailable warning event on the Node.  The agent, gateway and operator run with --mxlfs, which adds placeholders for flows absent on a node, lazy ring allocation and MxlFlowRedundancySets, with the RBAC they need; the CRD must be installed. The gateway runs in the host PID namespace, so it sees the flocks of local producers through /proc/locks. The gateway and the exporter wait in an init container for mxlfs.ready, which the agent writes to the runtime root once it has mounted or left plain the domains known at its start, and see later mounts through HostToContainer propagation. agent.csi.enabled requires this. |
+| mxlfs | object | `{"enabled":false,"waitImage":"busybox:1.38","waitResources":{"limits":{},"requests":{"cpu":"1m","memory":"4Mi"}}}` | mxlfs, a memory filesystem for MXL domains, on every domain. Off, every domain is a plain directory and the chart renders none of the following.  On, the agent mounts an mxlfs (mode=0777,wait=5000) on each domain directory it materialises, before writing into it, and runs privileged for Bidirectional propagation of the runtime root. A directory that is already an mxlfs is left alone. Where the mount fails, as on a node whose kernel has no mxlfs module, or where the directory already holds flows, the domain stays a plain directory: the agent logs the error and records a MxlfsUnavailable warning event on the Node.  The agent, gateway and operator run with --mxlfs, which adds placeholders for flows absent on a node, lazy ring allocation and MxlFlowRedundancySets, with the RBAC they need; the CRD must be installed. The gateway runs in the host PID namespace, so it sees the flocks of local producers through /proc/locks. The gateway and the exporter wait in an init container for mxlfs.ready, which the agent writes to the runtime root once it has mounted or left plain the domains known at its start, and see later mounts through HostToContainer propagation. agent.csi.enabled requires this. |
 | mxlfs.waitImage | string | `"busybox:1.38"` | Image of the init container that waits for mxlfs.ready. Needs a POSIX sh, test and sleep. |
+| mxlfs.waitResources | object | `{"limits":{},"requests":{"cpu":"1m","memory":"4Mi"}}` | Resources of that init container. |
 | namespace | object | `{"create":false,"name":""}` | Namespace handling. Most Flux users set createNamespace on the HelmRelease and leave namespace.create=false here. |
 | namespace.name | string | `""` | Namespace the chart's namespaced resources land in. Falls back to .Release.Namespace when empty. |
 | operator | object | `{"affinity":{},"args":[],"containerSecurityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"runAsNonRoot":true},"enabled":true,"extraContainers":[],"extraEnv":[],"extraVolumeMounts":[],"extraVolumes":[],"flags":{"gcGracePeriod":"5m","healthProbeBindAddress":":8081","leaderElect":false,"metricsBindAddress":":8080","zapDevel":false,"zapLogLevel":"info"},"image":{"digest":"","pullPolicy":"","repository":"operator","tag":""},"initContainers":[],"livenessProbe":{"httpGet":{"path":"/healthz","port":"probe"},"initialDelaySeconds":5},"metrics":{"service":{"enabled":true,"port":8080,"type":"ClusterIP"},"serviceMonitor":{"enabled":false,"interval":"30s","labels":{},"metricRelabelings":[],"relabelings":[],"scrapeTimeout":"10s"}},"nodeSelector":{},"podAnnotations":{},"podDisruptionBudget":{"enabled":false,"minAvailable":1},"podLabels":{},"podSecurityContext":{},"priorityClassName":"","readinessProbe":{"httpGet":{"path":"/readyz","port":"probe"},"initialDelaySeconds":2},"replicaCount":1,"resources":{"limits":{},"requests":{"cpu":"50m","memory":"64Mi"}},"serviceAccount":{"annotations":{},"automountServiceAccountToken":true,"create":true,"labels":{},"name":""},"tolerations":[],"topologySpreadConstraints":[]}` | Operator: cluster-wide reconciler for MxlReceiver, MxlFlowMirror, and related CRDs. Single Deployment. |
