@@ -96,6 +96,17 @@ domains:
 # writes to the runtime root once it has mounted or left plain the
 # domains known at its start, and see later mounts through
 # HostToContainer propagation. agent.csi.enabled requires this.
+#
+# A placeholder is a libmxl writer the gateway holds open, one per flow
+# with no copy on the node, and libmxl maps every grain of a discrete
+# flow on its own: a video or data flow costs the gateway its grain
+# count plus two memory mappings (250 + 2 for 5s of history at 50
+# fps), an audio flow two. Mirrors and merged outputs in the gateway
+# add their own. The kernel caps mappings per process at
+# vm.max_map_count, 65530 by default, which at that history is about
+# 250 such flows across the node's mxlfs domains; past it, creating a
+# placeholder or a mirror fails. Raise vm.max_map_count on the nodes
+# for more.
 mxlfs:
   enabled: false
   # -- Image of the init container that waits for mxlfs.ready. Needs a
