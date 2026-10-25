@@ -108,18 +108,20 @@ Call as: include "mxlk8s.serviceAccountName" (dict "Context" . "component" "oper
 
 {{/*
 Render a flags map as a sorted list of --key=value args. Boolean true
-becomes --key (no value); boolean false omits the flag. An explicit
-empty string emits --key= (bare equals) so a caller can suppress a
-binary's downward-API fallback (for example,
-gateway.flags.bindAddress: "" turns off the POD_IP default and lets
-libfabric pick the interface). An absent key (parent map set to {})
-still omits the flag entirely. Lists join on commas. Keys render in
-lexical order so diff-on-rerender is stable.
+becomes --key (no value); boolean false omits the flag. An empty
+string omits the flag too, so a flag left at "" never reaches an image
+that predates it, unless its key is in keepEmpty: there it emits --key=
+(bare equals), for a flag whose empty value turns off a non-empty
+binary default (gateway.flags.bindAddress: "" turns off the POD_IP
+default and lets libfabric pick the interface). Lists join on commas.
+Keys render in lexical order so diff-on-rerender is stable.
 
 Call as: include "mxlk8s.flags.render" (dict "flags" .Values.operator.flags)
+or (dict "flags" .Values.gateway.flags "keepEmpty" (list "bindAddress"))
 */}}
 {{- define "mxlk8s.flags.render" -}}
 {{- $flags := .flags -}}
+{{- $keepEmpty := .keepEmpty | default list -}}
 {{- $lines := list -}}
 {{- range $k := (keys $flags | sortAlpha) -}}
   {{- $v := index $flags $k -}}
@@ -133,7 +135,9 @@ Call as: include "mxlk8s.flags.render" (dict "flags" .Values.operator.flags)
       {{- $lines = append $lines (printf "- --%s=%s" $kebab (join "," $v)) -}}
     {{- end -}}
   {{- else if eq (kindOf $v) "string" -}}
-    {{- $lines = append $lines (printf "- --%s=%s" $kebab $v) -}}
+    {{- if or (ne $v "") (has $k $keepEmpty) -}}
+      {{- $lines = append $lines (printf "- --%s=%s" $kebab $v) -}}
+    {{- end -}}
   {{- else -}}
     {{- $lines = append $lines (printf "- --%s=%v" $kebab $v) -}}
   {{- end -}}

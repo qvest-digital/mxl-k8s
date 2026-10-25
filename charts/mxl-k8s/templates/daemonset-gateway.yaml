@@ -115,7 +115,7 @@ spec:
           image: {{ include "mxlk8s.image" (dict "Context" $ctx "image" $g.image) }}
           imagePullPolicy: {{ include "mxlk8s.imagePullPolicy" (dict "global" $ctx.Values.global "image" $g.image) }}
           args:
-            {{- include "mxlk8s.flags.render" (dict "flags" $g.flags) | nindent 12 }}
+            {{- include "mxlk8s.flags.render" (dict "flags" $g.flags "keepEmpty" (list "bindAddress")) | nindent 12 }}
             {{- if $ctx.Values.mxlfs.enabled }}
             - --mxlfs
             {{- end }}
