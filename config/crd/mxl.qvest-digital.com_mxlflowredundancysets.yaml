@@ -43,8 +43,10 @@ spec:
           boundary; a gateway that gets no CPU for longer than a grain can leave
           the oldest grain of the output reading the next ring period's picture.
           Readers at the output's head are unaffected. A member that goes away
-          leaves the output to the others. One that comes back or changes
-          geometry, or a set created again, builds the output again, and its
+          leaves the output to the others. One that comes back in the output's
+          geometry takes its old place in the output where the node's mxlfs has
+          MXLFS_IOC_VIEW_REPLACE_SOURCE. Elsewhere, or when a member changes
+          geometry, or a set is created again, the output is built again, and its
           readers have to reopen it; a member whose geometry differs from the
           output's is left out of it while another member keeps that geometry.
         properties:
