@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.1.0-rc.22](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.21...api/v1.1.0-rc.22) (2026-10-25)
+
+
+### Features
+
+* serve MXL domains from mxlfs behind mxlfs.enabled, with redundancy sets ([5aa764d](https://github.com/qvest-digital/mxl-k8s/commit/5aa764dad4aa82b5ed86c8225a0648479f185e6b))
+
+
+### Bug Fixes
+
+* **agent:** create an MxlFlow only from the Origin's copy ([5aa764d](https://github.com/qvest-digital/mxl-k8s/commit/5aa764dad4aa82b5ed86c8225a0648479f185e6b))
+* **agent:** refresh a flow's definition before claiming its Origin ([5aa764d](https://github.com/qvest-digital/mxl-k8s/commit/5aa764dad4aa82b5ed86c8225a0648479f185e6b))
+* **chart:** render no argument for an empty string flag ([5aa764d](https://github.com/qvest-digital/mxl-k8s/commit/5aa764dad4aa82b5ed86c8225a0648479f185e6b))
+* **gateway:** mirror an empty data grain as an empty grain ([5aa764d](https://github.com/qvest-digital/mxl-k8s/commit/5aa764dad4aa82b5ed86c8225a0648479f185e6b))
+* **gateway:** mirror ANC data grains by their committed length ([5aa764d](https://github.com/qvest-digital/mxl-k8s/commit/5aa764dad4aa82b5ed86c8225a0648479f185e6b))
+
 ## [1.1.0-rc.21](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.20...api/v1.1.0-rc.21) (2026-09-24)
 
 
