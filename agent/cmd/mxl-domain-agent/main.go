@@ -479,7 +479,7 @@ type trackerMxlfs struct {
 	IsMxlfs  func(dir string) bool
 	IsOutput func(ctx context.Context, domain, flowID string) bool
 	// Run starts runMxlfs for dir and returns what waits for it to end
-	// once ctx has.
+	// once ctx has, or fails with none of it running.
 	Run func(ctx context.Context, dir string, fp *flowpublisher.Publisher) (wait func(), err error)
 }
 
@@ -641,8 +641,9 @@ func flowsInUse(ctx context.Context, c client.Client, node string, own func(*cor
 // runMxlfs starts what a domain on mxlfs needs beyond fanotify on the
 // domain directory: a mirror for every placeholder a pod opens, one for
 // every flow a path walk waits for, and a publish for every placeholder
-// that stops being one. It returns what waits for all of it to end once
-// ctx has.
+// that stops being one. Each watch is set up before it returns, so a
+// domain whose watches cannot all be set up fails with nothing left
+// running. It returns what waits for all of it to end once ctx has.
 func runMxlfs(ctx context.Context, domain string, fp *flowpublisher.Publisher,
 	d *intent.Dispatcher, claim func(context.Context, string) bool,
 	ours func(ctx context.Context, pid int32) bool) (func(), error) {
@@ -660,20 +661,31 @@ func runMxlfs(ctx context.Context, domain string, fp *flowpublisher.Publisher,
 		w.Close()
 		return nil, fmt.Errorf("fanotify mark %s: %w", markers, err)
 	}
-
 	trigger := &mxlfswatch.Trigger{Dispatcher: d, Ours: ours, Log: l}
+	opens, err := trigger.Watch(domain)
+	if err != nil {
+		w.Close()
+		return nil, fmt.Errorf("placeholder open watch: %w", err)
+	}
+	wanted, err := mxlfswatch.OpenWanted(domain)
+	if err != nil {
+		opens.Close()
+		w.Close()
+		return nil, fmt.Errorf("wanted flow queue: %w", err)
+	}
+
 	events := make(chan fanotify.Event, 32)
 	var wg sync.WaitGroup
 	wg.Add(4)
 	go func() {
 		defer wg.Done()
-		if err := trigger.Run(ctx, domain); err != nil && ctx.Err() == nil {
+		if err := opens.Run(ctx); err != nil && ctx.Err() == nil {
 			l.Error(err, "placeholder open watcher exited")
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if err := mxlfswatch.RunWanted(ctx, domain, d, claim, ours, l); err != nil && ctx.Err() == nil {
+		if err := wanted.Run(ctx, d, claim, ours, l); err != nil && ctx.Err() == nil {
 			l.Error(err, "wanted flow loop exited")
 		}
 	}()

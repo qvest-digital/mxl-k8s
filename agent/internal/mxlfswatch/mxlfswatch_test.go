@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/fanotify"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -147,6 +148,120 @@ func TestWantedOutputIsClaimedNotMirrored(t *testing.T) {
 	wanted(context.Background(), "/d/"+id+".mxl-flow", 7, r,
 		func(context.Context, string) bool { return true }, nil, logr.Discard())
 	require.Empty(t, r.calls)
+}
+
+// A module that predates MXLFS_IOC_WANTED_NEXT answers it with ENOTTY,
+// as any directory that is no mxlfs does. Opening the queue asks once, so
+// the domain fails to start rather than run without its wanted flows.
+func TestOpeningTheWantedQueueFailsWithoutTheIoctl(t *testing.T) {
+	f, err := os.Open(t.TempDir())
+	require.NoError(t, err)
+	defer f.Close()
+	_, err = newWanted(Mount{}, f, wantedNext(f))
+	require.ErrorIs(t, err, unix.ENOTTY)
+
+	_, err = OpenWanted(t.TempDir())
+	require.ErrorContains(t, err, "no mxlfs mount holds")
+}
+
+// fakeQueue hands out queued paths, then times out as an empty queue does.
+type fakeQueue struct {
+	mu     sync.Mutex
+	queued []string
+}
+
+func (q *fakeQueue) next(req *wantedReq) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.queued) == 0 {
+		time.Sleep(time.Millisecond)
+		return unix.ETIMEDOUT
+	}
+	copy(req.Path[:], q.queued[0])
+	req.PID = 7
+	q.queued = q.queued[1:]
+	return nil
+}
+
+// The probe takes the entry it finds; the kernel reports each flow once,
+// so Run has to handle it or the walk waits for a mirror nobody starts.
+func TestWantedRunHandlesTheEntryTheProbeTook(t *testing.T) {
+	q := &fakeQueue{queued: []string{"/domain/" + id + ".mxl-flow"}}
+	w, err := newWanted(Mount{Root: "/", MountPoint: "/run/mxl"}, nil, q.next)
+	require.NoError(t, err)
+	require.NotNil(t, w.first)
+
+	r := &recorder{done: make(chan struct{}, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = w.Run(ctx, r, nil, nil, logr.Discard()) }()
+	select {
+	case <-r.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no mirror for the probed flow")
+	}
+	require.Equal(t, []string{"/run/mxl/domain/" + id + ".mxl-flow/data"}, r.calls)
+}
+
+// blocking holds every Materialize until release is closed.
+type blocking struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *blocking) Materialize(context.Context, int32, string) error {
+	b.started <- struct{}{}
+	<-b.release
+	return nil
+}
+
+// A tracker's stop releases the domain's leases once runMxlfs has ended;
+// a mirror request still running then would act on a domain no longer
+// tracked.
+func requireRunWaitsForRequests(t *testing.T, run func(ctx context.Context, d Materializer) error) {
+	t.Helper()
+	b := &blocking{started: make(chan struct{}, 1), release: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = run(ctx, b); close(done) }()
+	<-b.started
+	cancel()
+	select {
+	case <-done:
+		t.Fatal("Run returned while a mirror request was running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(b.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return once the request ended")
+	}
+}
+
+func TestWantedRunWaitsForTheRequestsItStarted(t *testing.T) {
+	requireRunWaitsForRequests(t, func(ctx context.Context, d Materializer) error {
+		q := &fakeQueue{queued: []string{"/domain/" + id + ".mxl-flow"}}
+		w := &Wanted{mount: Mount{Root: "/", MountPoint: "/run/mxl"}, next: q.next}
+		return w.Run(ctx, d, nil, nil, logr.Discard())
+	})
+}
+
+func TestOpenWatchRunWaitsForTheRequestsItStarted(t *testing.T) {
+	d := domainWithPlaceholder(t)
+	requireRunWaitsForRequests(t, func(ctx context.Context, m Materializer) error {
+		o := &OpenWatch{
+			t: &Trigger{Domain: d, Dispatcher: m, Log: logr.Discard()},
+			run: func(ctx context.Context, out chan<- fanotify.Open) error {
+				defer close(out)
+				out <- fanotify.Open{PID: 77, Path: filepath.Join(d, id+".mxl-flow", "channels")}
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			close: func() error { return nil },
+		}
+		return o.Run(ctx)
+	})
 }
 
 type locations struct{ appeared, vanished []string }

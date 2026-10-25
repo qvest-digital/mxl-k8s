@@ -64,12 +64,14 @@ type Trigger struct {
 	// flow is found by its name below Domain, not by the path's prefix.
 	Domain string
 
-	mu   sync.Mutex
-	seen map[string]time.Time
+	mu       sync.Mutex
+	seen     map[string]time.Time
+	requests sync.WaitGroup // the mirror requests Handle started
 }
 
 // Handle starts a mirror for an open of a placeholder's ring, once per
-// process and flow per Window. It does not wait for the mirror.
+// process and flow per Window. It does not wait for the mirror; the
+// OpenWatch running the trigger does, before Run returns.
 func (t *Trigger) Handle(ctx context.Context, o fanotify.Open) bool {
 	m := ringFile.FindStringSubmatch(o.Path)
 	if m == nil || o.PID <= 0 {
@@ -104,7 +106,9 @@ func (t *Trigger) Handle(ctx context.Context, o fanotify.Open) bool {
 		return false
 	}
 	flowDir := filepath.Join(domain, id+".mxl-flow")
+	t.requests.Add(1)
 	go func() {
+		defer t.requests.Done()
 		if err := t.Dispatcher.Materialize(ctx, o.PID, filepath.Join(flowDir, "data")); err != nil {
 			t.Log.Info("placeholder opened, no mirror", "flowID", id, "pid", o.PID, "reason", err.Error())
 		}
@@ -112,24 +116,44 @@ func (t *Trigger) Handle(ctx context.Context, o fanotify.Open) bool {
 	return true
 }
 
-// Run feeds every open on the filesystem holding domain to Handle until
-// ctx ends. domain is the root of that filesystem, as an mxlfs domain
-// is, and becomes t.Domain.
-func (t *Trigger) Run(ctx context.Context, domain string) error {
-	t.Domain = domain
+// OpenWatch feeds a Trigger the opens on one filesystem.
+type OpenWatch struct {
+	t *Trigger
+	// run forwards opens until ctx ends, then closes out; close releases
+	// the watch. Seams for tests, which cannot mark a filesystem.
+	run   func(ctx context.Context, out chan<- fanotify.Open) error
+	close func() error
+}
+
+// Watch marks the filesystem holding domain for opens and makes domain
+// t.Domain. domain is the root of that filesystem, as an mxlfs domain
+// is. Opens are handled once Run runs.
+func (t *Trigger) Watch(domain string) (*OpenWatch, error) {
 	w, err := fanotify.NewOpenWatcher(domain)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer w.Close()
+	t.Domain = domain
+	return &OpenWatch{t: t, run: w.Run, close: w.Close}, nil
+}
+
+// Run feeds every open on the watched filesystem to Handle until ctx
+// ends, waits for the mirror requests Handle started, and releases the
+// watch.
+func (o *OpenWatch) Run(ctx context.Context) error {
+	defer o.close()
 	opens := make(chan fanotify.Open, 256)
 	errc := make(chan error, 1)
-	go func() { errc <- w.Run(ctx, opens) }()
-	for o := range opens {
-		t.Handle(ctx, o)
+	go func() { errc <- o.run(ctx, opens) }()
+	for op := range opens {
+		o.t.Handle(ctx, op)
 	}
+	o.t.requests.Wait()
 	return <-errc
 }
+
+// Close releases a watch Run never ran.
+func (o *OpenWatch) Close() error { return o.close() }
 
 // wantedReq mirrors struct mxlfs_wanted_req in mxlfs_uapi.h.
 type wantedReq struct {
@@ -198,41 +222,106 @@ func (m Mount) Local(fsPath string) (string, bool) {
 	return filepath.Join(m.MountPoint, strings.TrimPrefix(fsPath, root)), true
 }
 
-// RunWanted asks the mxlfs holding domain for flows path walks wait for
-// and starts a mirror for each, until ctx ends. A flow nobody publishes
-// yet gets none; the walk then waits until its placeholder appears, or
-// fails when wait= runs out. claim, when set, is offered each wanted flow
-// directory first and takes it when it reports true: a redundancy set's
-// output is merged here, not mirrored. A walk by a process ours reports
-// as mxl-k8s's own is no reader and starts nothing.
-func RunWanted(ctx context.Context, domain string, d Materializer, claim func(ctx context.Context, flowDir string) bool,
-	ours func(ctx context.Context, pid int32) bool, l logr.Logger) error {
+// Wanted is the queue of flows path walks on an mxlfs wait for.
+type Wanted struct {
+	mount Mount
+	f     *os.File
+	// next is wantedNext(f); a seam for tests, which have no mxlfs.
+	next  func(req *wantedReq) error
+	first *wantedReq // taken by the probe, handed to Run
+}
+
+// OpenWanted opens the queue of the mxlfs holding domain. It takes the
+// first entry without waiting, so a module without MXLFS_IOC_WANTED_NEXT
+// fails here rather than once Run runs.
+func OpenWanted(domain string) (*Wanted, error) {
 	mount, err := MountOf(domain)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	f, err := os.Open(domain)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer f.Close()
+	w, err := newWanted(mount, f, wantedNext(f))
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return w, nil
+}
+
+// wantedNext is MXLFS_IOC_WANTED_NEXT on f.
+func wantedNext(f *os.File) func(req *wantedReq) error {
+	return func(req *wantedReq) error {
+		_, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), iocWantedNext, uintptr(unsafe.Pointer(req)))
+		if errno != 0 {
+			return errno
+		}
+		return nil
+	}
+}
+
+// newWanted probes the queue next reads, on f, the directory of mount's
+// root.
+func newWanted(mount Mount, f *os.File, next func(req *wantedReq) error) (*Wanted, error) {
+	w := &Wanted{mount: mount, f: f, next: next}
+	req := wantedReq{} // a zero timeout takes a queued entry, or none
+	switch err := w.next(&req); {
+	case err == nil:
+		w.first = &req
+	case errors.Is(err, unix.ETIMEDOUT), errors.Is(err, unix.EINTR):
+	default:
+		return nil, fmt.Errorf("MXLFS_IOC_WANTED_NEXT: %w", err)
+	}
+	return w, nil
+}
+
+// Run starts a mirror for each flow a path walk waits for, until ctx
+// ends, waits for the requests it started, and closes the queue. A flow
+// nobody publishes yet gets none; the walk then waits until its
+// placeholder appears, or fails when wait= runs out. claim, when set, is
+// offered each wanted flow directory first and takes it when it reports
+// true: a redundancy set's output is merged here, not mirrored. A walk by
+// a process ours reports as mxl-k8s's own is no reader and starts nothing.
+func (w *Wanted) Run(ctx context.Context, d Materializer, claim func(ctx context.Context, flowDir string) bool,
+	ours func(ctx context.Context, pid int32) bool, l logr.Logger) error {
+	defer w.Close()
+	var requests sync.WaitGroup
+	defer requests.Wait()
+	handle := func(req *wantedReq) {
+		local, ok := w.mount.Local(unix.ByteSliceToString(req.Path[:]))
+		if !ok {
+			return
+		}
+		requests.Add(1)
+		go func() {
+			defer requests.Done()
+			wanted(ctx, local, int32(req.PID), d, claim, ours, l)
+		}()
+	}
+	if w.first != nil {
+		handle(w.first)
+	}
 	for ctx.Err() == nil {
 		req := wantedReq{TimeoutMs: 1000}
-		_, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), iocWantedNext, uintptr(unsafe.Pointer(&req)))
-		if errno != 0 {
-			if errors.Is(errno, unix.ETIMEDOUT) || errors.Is(errno, unix.EINTR) {
+		if err := w.next(&req); err != nil {
+			if errors.Is(err, unix.ETIMEDOUT) || errors.Is(err, unix.EINTR) {
 				continue
 			}
-			return fmt.Errorf("MXLFS_IOC_WANTED_NEXT: %w", errno)
+			return fmt.Errorf("MXLFS_IOC_WANTED_NEXT: %w", err)
 		}
-		fsPath := unix.ByteSliceToString(req.Path[:])
-		local, ok := mount.Local(fsPath)
-		if !ok {
-			continue
-		}
-		go wanted(ctx, local, int32(req.PID), d, claim, ours, l)
+		handle(&req)
 	}
 	return ctx.Err()
+}
+
+// Close releases a queue Run never ran.
+func (w *Wanted) Close() error {
+	if w.f == nil {
+		return nil
+	}
+	return w.f.Close()
 }
 
 // wanted handles one flow a path walk waits for: nothing when the walker

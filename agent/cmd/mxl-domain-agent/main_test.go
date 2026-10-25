@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -196,4 +197,20 @@ func TestTrackerFailsWhenMxlfsCannotStart(t *testing.T) {
 	_, err := tracking.start(context.Background(), "studio", t.TempDir())
 	require.Error(t, err)
 	assert.Error(t, watchCtx.Err())
+}
+
+// Every watch of a domain on mxlfs is set up before runMxlfs returns. On
+// a directory that is no mxlfs one of them cannot be, so runMxlfs fails,
+// the tracker with it, and the manager retries on its next sync; nothing
+// of what it set up is left running.
+func TestRunMxlfsFailsOnADirectoryThatIsNoMxlfs(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	dir := t.TempDir()
+
+	wait, err := runMxlfs(ctx, dir, &flowpublisher.Publisher{Client: c, DomainPath: dir}, nil, nil, nil)
+	require.Error(t, err)
+	assert.Nil(t, wait)
 }
