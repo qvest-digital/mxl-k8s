@@ -829,7 +829,7 @@ func requeueAt(deadline time.Time) ctrl.Result {
 // work. The only thing that changes with no event behind it is a Lease
 // passing its window, which the requeue in collect covers.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&mxlv1alpha1.MxlFlowMirror{}).
 		Watches(
 			&corev1.Pod{},
@@ -853,9 +853,17 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&corev1.Node{},
 			handler.EnqueueRequestsFromMapFunc(r.nodeToMirrors),
 			builder.WithPredicates(nodeDeletedOnly()),
-		).
-		Named("mxlflowmirror").
-		Complete(r)
+		)
+	// A set that stops wanting its output on a node leaves the member
+	// mirrors there unclaimed. Without redundancy sets the kind need not
+	// be served, and a watch on it would never sync.
+	if r.RedundancySets {
+		b = b.Watches(
+			&mxlv1alpha1.MxlFlowRedundancySet{},
+			handler.EnqueueRequestsFromMapFunc(r.setToMirrors),
+		)
+	}
+	return b.Named("mxlflowmirror").Complete(r)
 }
 
 // mirrorsMatching enqueues every mirror the predicate accepts. The
@@ -901,6 +909,21 @@ func (r *Reconciler) receiverToMirrors(ctx context.Context, obj client.Object) [
 		}
 		for _, or := range m.OwnerReferences {
 			if or.UID == recv.UID {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func (r *Reconciler) setToMirrors(ctx context.Context, obj client.Object) []reconcile.Request {
+	set, ok := obj.(*mxlv1alpha1.MxlFlowRedundancySet)
+	if !ok {
+		return nil
+	}
+	return r.mirrorsMatching(ctx, func(m *mxlv1alpha1.MxlFlowMirror) bool {
+		for _, or := range m.OwnerReferences {
+			if or.Kind == "MxlFlowRedundancySet" && or.UID == set.UID {
 				return true
 			}
 		}

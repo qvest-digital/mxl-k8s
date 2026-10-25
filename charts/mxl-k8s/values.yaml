@@ -420,6 +420,7 @@ agent:
   # intent socket's SO_PEERCRED-based pod identification: without it
   # the connecting consumer pod's PID is not visible to the agent
   # and the on-demand mirror materialization path silently fails.
+  # mxlfs.enabled requires it.
   hostPID: true
   podAnnotations: {}
   podLabels: {}
@@ -489,6 +490,10 @@ agent:
 # endpoint binds the node interface.
 gateway:
   enabled: true
+  # -- DaemonSet update strategy. With mxlfs one gateway per node is
+  # assumed: a gateway clears every placeholder marker in a domain as it
+  # opens it, so a second gateway on the node would clear the markers of
+  # the first one's placeholders. rollingUpdate.maxSurge has to stay 0.
   updateStrategy:
     # @schema
     # enum: ["RollingUpdate", "OnDelete"]
