@@ -31,11 +31,11 @@ type Member struct {
 // data grain is complete.
 //
 // The primary, at first the first member, serves every grain it has.
-// Another member serves a grain the primary skipped at once, and one the
-// primary is merely late with after Tolerance, and then becomes the
-// primary. An index no member
-// delivers within Skew grains of the leading member is published from
-// the INVALID placeholder, source Placeholder.
+// Another member serves a grain the primary skipped at once, and one
+// the primary is merely late with after Tolerance, and then becomes the
+// primary. An index no member delivers within Skew grains of the
+// leading member is published from the INVALID placeholder, source
+// Placeholder.
 type Discrete struct {
 	Grains      uint   // ring depth
 	Data        bool   // a data flow: committed means complete
@@ -226,9 +226,10 @@ type coverage struct {
 // Audio decides, page by page of every channel's ring, which member a
 // view page shows, from the sample ranges members are reported to have
 // committed. A page takes the primary, at first the first member, while
-// it holds the page without a gap, another member that does when the primary has a gap or is late
-// beyond Tolerance, and the silence source when no member holds it whole
-// within Skew samples of the leading member.
+// it holds the page without a gap, another member that does when the
+// primary has a gap or is late beyond Tolerance, and the silence source
+// when no member holds it whole within Skew samples of the leading
+// member.
 type Audio struct {
 	Pages     uint64 // pages per channel ring
 	Skew      uint64 // in samples

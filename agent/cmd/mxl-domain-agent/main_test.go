@@ -96,8 +96,6 @@ func TestOursIsOnlyMxlK8sComponents(t *testing.T) {
 	assert.False(t, o(ctx, 6), "a pid with no resolvable pod")
 }
 
-// The gateway maps the output it merges and the exporter reads every
-// flow; counted as readers they would keep every output in use forever.
 // The primary domain is materialised by an MxlDomain of its own name,
 // but its flows, and the outputs of sets in it, are spelled with no
 // domain name. Reported under that name, a reader of a set's output was
@@ -115,6 +113,8 @@ func TestDomainDevicesSpellsThePrimaryDomainWithoutAName(t *testing.T) {
 	assert.Equal(t, map[string]string{dev: ""}, got)
 }
 
+// The gateway maps the output it merges and the exporter reads every
+// flow; counted as readers they would keep every output in use forever.
 func TestFlowsInUseLeavesOutMxlK8sComponents(t *testing.T) {
 	pod := func(name, ns, uid, node, component string) *corev1.Pod {
 		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: types.UID(uid),

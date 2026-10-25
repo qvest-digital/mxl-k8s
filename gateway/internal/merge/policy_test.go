@@ -390,9 +390,10 @@ func TestDiscreteRetiresSlotsTheMembersOverwriteWhileItLags(t *testing.T) {
 }
 
 // A member that commits each grain a period after its boundary is never
-// about to write the index due. Taken to, it retired the oldest grain readers trust every grain,
-// a remap in every reader each time. After a loss it writes on at its
-// own lag, and the slot that write overwrites still moves first.
+// about to write the index due. Taken for one, it retired the oldest
+// grain readers trust on every grain, a remap in every reader each
+// time. After a loss it writes on at its own lag, and the slot that
+// write overwrites still moves first.
 func TestDiscreteRetiresForAMemberBehindTheClockOnlyWhatItOverwrites(t *testing.T) {
 	const grains = 20
 	a, b := newRing(grains), newRing(grains)
