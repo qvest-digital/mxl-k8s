@@ -18,7 +18,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/qvest-digital/mxl-k8s/api/selection"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -222,10 +224,33 @@ func (r *Reconciler) provider(ctx context.Context, source, target string) (mxlv1
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors,verbs=get;list;watch;create;patch
 
 // SetupWithManager registers the controller. A set waiting for a member
-// or its producer requeues itself.
+// or its producer requeues itself; a change to a member's or the output's
+// MxlFlow checks the set again, since members a producer restarted in
+// another geometry agree again only once both definitions have followed.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&mxlv1alpha1.MxlFlowRedundancySet{}).
 		Owns(&mxlv1alpha1.MxlFlowMirror{}).
+		Watches(&mxlv1alpha1.MxlFlow{}, handler.EnqueueRequestsFromMapFunc(r.setsOf)).
 		Complete(r)
+}
+
+// setsOf maps an MxlFlow to the sets that name it as a member or output.
+func (r *Reconciler) setsOf(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+	var sets mxlv1alpha1.MxlFlowRedundancySetList
+	if err := r.List(ctx, &sets); err != nil {
+		log.FromContext(ctx).Error(err, "list redundancy sets for a flow", "flow", obj.GetName())
+		return nil
+	}
+	var reqs []ctrlreconcile.Request
+	for _, s := range sets.Items {
+		refs := append([]mxlv1alpha1.RedundancyFlowRef{s.Spec.Output}, s.Spec.Members...)
+		for _, ref := range refs {
+			if (mxlv1alpha1.FlowRef{Domain: ref.Domain, ID: ref.FlowID}).Name() == obj.GetName() {
+				reqs = append(reqs, ctrlreconcile.Request{NamespacedName: types.NamespacedName{Name: s.Name}})
+				break
+			}
+		}
+	}
+	return reqs
 }

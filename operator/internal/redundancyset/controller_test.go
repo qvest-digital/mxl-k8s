@@ -14,6 +14,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -200,4 +201,41 @@ func TestNoMirrorsWithoutAReadingNode(t *testing.T) {
 	_, cond := reconcile(t, r)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 	assert.Empty(t, mirrors(t, c))
+}
+
+// A producer restarted in another geometry reaches the two members'
+// MxlFlows one after the other, so a check in between finds them apart.
+// A change to either flow must bring the set back for another check, or
+// it stays MembersMisaligned and unmirrored once both have followed.
+func TestAMemberFlowChangeChecksItsSetAgain(t *testing.T) {
+	other := newSet()
+	other.Name, other.UID = "other", "other-uid"
+	other.Spec.Members = []mxlv1alpha1.RedundancyFlowRef{
+		{FlowID: "44444444-4444-4444-8444-444444444444"}, {FlowID: "55555555-5555-4555-8555-555555555555"}}
+	other.Spec.Output = mxlv1alpha1.RedundancyFlowRef{FlowID: "66666666-6666-4666-8666-666666666666"}
+	studio := newSet()
+	studio.Name, studio.UID = "studio", "studio-uid"
+	studio.Spec.Members = []mxlv1alpha1.RedundancyFlowRef{{Domain: "studio-b", FlowID: memberA}, {Domain: "studio-b", FlowID: memberB}}
+	studio.Spec.Output = mxlv1alpha1.RedundancyFlowRef{Domain: "studio-b", FlowID: output}
+
+	a, b := flow(memberA, video1080, "node-a"), flow(memberB, video720, "node-b")
+	r, c := harness(t, newSet("reader"), other, studio, a, b)
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "programme"}}
+	_, err := r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	var got mxlv1alpha1.MxlFlowRedundancySet
+	require.NoError(t, c.Get(ctx, req.NamespacedName, &got))
+	require.Equal(t, ReasonMisaligned, meta.FindStatusCondition(got.Status.Conditions, ConditionValid).Reason)
+
+	b.Spec.Definition.Raw = []byte(video1080)
+	require.NoError(t, c.Update(ctx, b))
+	assert.Equal(t, []ctrlreconcile.Request{req}, r.setsOf(ctx, b), "only the set naming the flow in its own domain")
+	assert.Equal(t, []ctrlreconcile.Request{req}, r.setsOf(ctx, &mxlv1alpha1.MxlFlow{ObjectMeta: metav1.ObjectMeta{Name: output}}))
+	assert.Empty(t, r.setsOf(ctx, &mxlv1alpha1.MxlFlow{ObjectMeta: metav1.ObjectMeta{Name: "77777777-7777-4777-8777-777777777777"}}))
+
+	_, err = r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	require.NoError(t, c.Get(ctx, req.NamespacedName, &got))
+	assert.Equal(t, metav1.ConditionTrue, meta.FindStatusCondition(got.Status.Conditions, ConditionValid).Status)
 }
