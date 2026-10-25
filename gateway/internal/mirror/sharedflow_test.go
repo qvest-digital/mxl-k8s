@@ -120,6 +120,40 @@ func TestCommitArrivedGrain_DataGrainKeepsItsLength(t *testing.T) {
 	require.Equal(t, uint16(64), g.ValidSlices)
 }
 
+// Gateways of two versions mirror a data flow. A source from before data
+// grains went by their length reads with GetGrainNonBlocking, which
+// hands out no data grain short of all its slices, so it never sends a
+// target a short one; this source reads what the grain holds. A target
+// from before commits only a complete grain, the rule arrivalComplete
+// applies without data, so a short grain from this source is never
+// committed there at the length of a full one.
+func TestDataGrainAcrossGatewayVersions(t *testing.T) {
+	inst, err := mxl.NewInstance(t.TempDir(), "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = inst.Close() })
+	w, _, err := inst.NewWriter(sharedFlowDataDef)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = w.Close() })
+	r, err := inst.NewReader("5d1a7c2e-3f4b-4e8a-9c6d-2b7e1f0a9d35")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+
+	const idx = 1000
+	ga, err := w.OpenGrain(idx)
+	require.NoError(t, err)
+	require.NoError(t, ga.Commit(64, 0))
+
+	_, err = r.GetGrainNonBlocking(idx)
+	require.Error(t, err, "the older source's read never returns a short data grain")
+
+	g, err := r.GetGrainSliceNonBlocking(idx, 1)
+	require.NoError(t, err)
+	require.Equal(t, uint16(64), g.ValidSlices)
+	require.Less(t, g.ValidSlices, g.TotalSlices)
+	require.False(t, arrivalComplete(g, false), "an older target leaves a short grain uncommitted")
+	require.True(t, arrivalComplete(g, true))
+}
+
 func TestArrivalComplete(t *testing.T) {
 	partial := mxl.Grain{TotalSlices: 4096, ValidSlices: 64}
 	require.True(t, arrivalComplete(partial, true), "a data grain is committed as it arrives")
