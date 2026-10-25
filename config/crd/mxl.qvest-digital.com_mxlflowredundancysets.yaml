@@ -33,7 +33,18 @@ spec:
         description: |-
           MxlFlowRedundancySet serves one flow from several member flows,
           switching members per grain, or per page of audio, wherever one fails
-          to deliver.
+          to deliver. The output's members all have to be on an mxlfs domain of
+          the reading node, and to agree in format, rate and geometry.
+
+          While the output waits up to the skew budget for a grain no member has,
+          the members keep writing a ring period ahead, into slots the output
+          still offers as its oldest grains. The gateway moves each such slot to
+          a member that still holds it, or to an INVALID grain, at every grain
+          boundary; a gateway that gets no CPU for longer than a grain can leave
+          the oldest grain of the output reading the next ring period's picture.
+          Readers at the output's head are unaffected. A member that changes
+          geometry, or a set created again, builds the output again, and its
+          readers have to reopen it.
         properties:
           apiVersion:
             description: |-
