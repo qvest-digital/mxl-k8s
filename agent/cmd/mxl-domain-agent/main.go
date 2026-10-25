@@ -12,7 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
@@ -132,14 +134,12 @@ func run(args []string) error {
 		setupLog.Error(err, "initial domain sync failed")
 	}
 
-	sets := &redundancy.Sets{Client: kClient, NodeName: cfg.NodeName}
-	flowPub := &flowpublisher.Publisher{
-		Client:     kClient,
-		DomainPath: cfg.DomainPath,
-		NodeName:   cfg.NodeName,
-		Lease:      leaseMgr,
-		IsOutput:   sets.IsOutput,
+	if cfg.Mxlfs {
+		if err := requireKind(kClient.RESTMapper(), "MxlFlowRedundancySet"); err != nil {
+			return fmt.Errorf("--mxlfs needs the redundancy set CRD: %w", err)
+		}
 	}
+	flowPub, sets := newFlowPublisher(cfg, kClient, leaseMgr)
 	if err := flowPub.InitialSync(ctx); err != nil {
 		// Initial sync failures are logged, not fatal -- the fanotify
 		// stream will reconcile when entries change.
@@ -172,8 +172,9 @@ func run(args []string) error {
 
 	go flowPub.RunLocalRescan(ctx, 30*time.Second)
 
+	onMxlfs := cfg.Mxlfs && mxlfswatch.IsMxlfs(cfg.DomainPath)
 	var intentDispatcher *intent.Dispatcher
-	if cfg.IntentSocketPath != "" || mxlfswatch.IsMxlfs(cfg.DomainPath) {
+	if cfg.IntentSocketPath != "" || onMxlfs {
 		intentDispatcher = &intent.Dispatcher{
 			Client:             kClient,
 			Resolver:           &podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName},
@@ -202,7 +203,7 @@ func run(args []string) error {
 		}()
 	}
 
-	if mxlfswatch.IsMxlfs(cfg.DomainPath) {
+	if onMxlfs {
 		claim := func(ctx context.Context, flowDir string) bool {
 			domainsMu.Lock()
 			doms := current
@@ -296,6 +297,35 @@ func run(args []string) error {
 	defer cancelRelease()
 	if err := flowPub.ReleaseAll(releaseCtx); err != nil {
 		setupLog.Error(err, "release leases on shutdown")
+	}
+	return nil
+}
+
+// newFlowPublisher builds the primary domain's flow publisher. With
+// mxlfs it keeps redundancy set outputs out of what it publishes, and
+// the sets it consults are returned; without, it publishes every flow
+// and asks the API server about no set.
+func newFlowPublisher(cfg *config.Config, c client.Client, lease *originlease.Manager) (*flowpublisher.Publisher, *redundancy.Sets) {
+	fp := &flowpublisher.Publisher{
+		Client:     c,
+		DomainPath: cfg.DomainPath,
+		NodeName:   cfg.NodeName,
+		Lease:      lease,
+	}
+	if !cfg.Mxlfs {
+		return fp, nil
+	}
+	sets := &redundancy.Sets{Client: c, NodeName: cfg.NodeName}
+	fp.IsOutput = sets.IsOutput
+	return fp, sets
+}
+
+// requireKind fails when the API server does not serve kind: every
+// request for it would fail for as long as the agent runs.
+func requireKind(mapper meta.RESTMapper, kind string) error {
+	gk := schema.GroupKind{Group: mxlv1alpha1.GroupVersion.Group, Kind: kind}
+	if _, err := mapper.RESTMapping(gk, mxlv1alpha1.GroupVersion.Version); err != nil {
+		return fmt.Errorf("%s is not served (is its CRD installed?): %w", gk, err)
 	}
 	return nil
 }

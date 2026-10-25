@@ -76,6 +76,11 @@ type Config struct {
 	// KubeAPIBurst is the burst ceiling of the Kubernetes API client
 	// rate limiter.
 	KubeAPIBurst int
+
+	// Mxlfs runs what a domain on mxlfs needs: placeholder and wanted
+	// flow watchers, redundancy set demand. Off, every domain is a plain
+	// directory.
+	Mxlfs bool
 }
 
 // FromFlags populates a Config from command-line flags.
@@ -103,6 +108,10 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.StringVar(&c.ClaimStatusLabel, "claim-status-label", "",
 		"Pod label naming a pod's MediaFunctionClaim, whose status.io the agent "+
 			"writes from observed flow use. Empty disables.")
+	fs.BoolVar(&c.Mxlfs, "mxlfs", false,
+		"Run what a domain on mxlfs needs: mirrors for opened placeholders and "+
+			"waited-for flows, and MxlFlowRedundancySet demand. Off, every domain is "+
+			"treated as a plain directory.")
 	fs.DurationVar(&c.MaterializeTimeout, "materialize-timeout", 5*time.Second,
 		"Per-request budget for the intent dispatcher waiting for a mirror Ready.")
 	fs.StringVar(&c.Provider, "provider", "",
