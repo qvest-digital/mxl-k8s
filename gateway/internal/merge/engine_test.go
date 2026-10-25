@@ -391,6 +391,68 @@ func TestEngineReaderNeverFaultsOnAReplacedMember(t *testing.T) {
 	}
 }
 
+// A member that goes away for good, its producer gone and its directory
+// with it, leaves the engine serving from the others: the reconciler
+// keeps the engine rather than rebuild the output under every reader.
+// Losing the primary must neither stall the output nor blank it.
+func TestEngineServesOnWhenAMemberIsRemoved(t *testing.T) {
+	domain := mxlfsDomain(t)
+	inst, err := mxl.NewInstance(domain, "")
+	require.NoError(t, err)
+	defer inst.Close()
+	rate := mxl.Rational{Num: 50, Den: 1}
+	stop := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	done := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	for m, id := range []string{memberA, memberB} {
+		w, _, err := inst.NewWriter(videoDef(id))
+		require.NoError(t, err)
+		go func() {
+			defer close(done[m])
+			defer w.Close()
+			for i := mxl.CurrentIndex(rate); ; i++ {
+				select {
+				case <-stop[m]:
+					return
+				case <-time.After(time.Duration(mxl.NsUntilIndex(i, rate))):
+				}
+				g, err := w.OpenGrain(i)
+				require.NoError(t, err)
+				binary.LittleEndian.PutUint64(g.Payload, uint64(m)<<56|i)
+				require.NoError(t, g.Commit(g.TotalSlices, 0))
+			}
+		}()
+	}
+	defer func() { close(stop[1]); <-done[1] }()
+	time.Sleep(300 * time.Millisecond)
+
+	lazily(t, domain)
+	e, err := Start(context.Background(), Spec{DomainDir: domain, OutputID: output, Members: []string{memberA, memberB},
+		Skew: 40 * time.Millisecond, Ordered: true}, logr.Discard())
+	require.NoError(t, err)
+	defer e.Close()
+	r, err := inst.NewReader(output)
+	require.NoError(t, err)
+	defer r.Close()
+	before := mxl.CurrentIndex(rate) + 2
+	g, err := r.GetGrain(before, time.Second)
+	require.NoError(t, err)
+	require.Zero(t, binary.LittleEndian.Uint64(g.Payload)>>56, "the output is not served from the primary")
+
+	close(stop[0])
+	<-done[0]
+	require.NoError(t, os.RemoveAll(flowDir(domain, memberA)))
+
+	start := mxl.CurrentIndex(rate) + 2
+	for i := start; i < start+150; i++ {
+		g, err := r.GetGrain(i, time.Second)
+		require.NoError(t, err, "grain %d", i)
+		require.False(t, g.Invalid(), "grain %d is INVALID though member B had it", i)
+		v := binary.LittleEndian.Uint64(g.Payload)
+		require.Equal(t, i, v&(1<<56-1), "grain %d shows grain %d", i, v&(1<<56-1))
+		require.Equal(t, uint64(1), v>>56, "grain %d not from member B", i)
+	}
+}
+
 // A pass that moves the head on by more than one, after a tolerance or
 // skew wait, selects the slot of index i while the published head is
 // below i - 1. Readers still trust that slot as i - Grains, so a reader
