@@ -64,3 +64,17 @@ func TestDeviceMatchesProcFormat(t *testing.T) {
 	require.NoError(t, err)
 	require.Regexp(t, `^[0-9a-f]{2,}:[0-9a-f]{2,}$`, d)
 }
+
+// A flow file removed while a reader still maps it is in use by that
+// reader until it unmaps it.
+func TestScanCountsMappingsOfDeletedFiles(t *testing.T) {
+	root := proc(t, "", map[int][2]string{
+		22: {"0::/kubepods/besteffort/pod" + podR + "/cri-2\n",
+			"7f02-7f03 r--s 00000000 00:2a 102 /run/mxl/domain/" + flowA + ".mxl-flow/grains/data.0 (deleted)\n"},
+	})
+	s := &Scanner{ProcRoot: root, Domains: func() map[string]string { return map[string]string{"00:2a": ""} }}
+
+	got, err := s.Scan()
+	require.NoError(t, err)
+	require.Equal(t, map[string][]Use{podR: {{FlowID: flowA, Direction: Input}}}, got)
+}

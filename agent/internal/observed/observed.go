@@ -48,8 +48,10 @@ type Scanner struct {
 }
 
 // flowFile matches a file libmxl maps: the flow header, a grain, or the
-// channels of a continuous flow.
-var flowFile = regexp.MustCompile(`/([0-9a-fA-F-]{36})\.mxl-flow/(data|grains/data\.[0-9]+|channels)$`)
+// channels of a continuous flow. The kernel appends " (deleted)" to the
+// path of a mapped file that has been unlinked; a process still reading
+// one still uses the flow.
+var flowFile = regexp.MustCompile(`/([0-9a-fA-F-]{36})\.mxl-flow/(data|grains/data\.[0-9]+|channels)( \(deleted\))?$`)
 
 // podUID matches the pod UID in a kubepods cgroup path, in either the
 // systemd ("pod<uid with underscores>.slice") or the cgroupfs ("pod<uid>")
