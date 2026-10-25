@@ -299,7 +299,13 @@ func TestEngineCountsOnlyWhatTheMappedRingHolds(t *testing.T) {
 	setHead(1, end)
 	e.Committed(0, start, end)
 	e.Committed(1, start, end)
-	sel, head, _ := e.audio.Step(time.Now())
+	now := time.Now()
+	sel, head, wait := e.audio.Step(now)
+	if wait > 0 { // member 0, the first, is waited for
+		var more []PageSelect
+		more, head, _ = e.audio.Step(now.Add(wait))
+		sel = append(sel, more...)
+	}
 	sel = append(sel, e.audio.Retire(end)...)
 	for _, s := range sel {
 		require.NotEqual(t, 0, s.Source, "page %d selected to a ring that holds none of it", s.Page)

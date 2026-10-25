@@ -30,9 +30,10 @@ type Member struct {
 // are valid. A data grain's valid slices are its length, so a committed
 // data grain is complete.
 //
-// The primary serves every grain it has. Another member serves a grain
-// the primary skipped at once, and one the primary is merely late with
-// after Tolerance, and then becomes the primary. An index no member
+// The primary, at first the first member, serves every grain it has.
+// Another member serves a grain the primary skipped at once, and one the
+// primary is merely late with after Tolerance, and then becomes the
+// primary. An index no member
 // delivers within Skew grains of the leading member is published from
 // the INVALID placeholder, source Placeholder.
 type Discrete struct {
@@ -44,7 +45,7 @@ type Discrete struct {
 	Placeholder int  // the source index of the INVALID grain
 
 	Head    uint64 // published head; 0 until the first grain
-	Primary int    // -1 until chosen
+	Primary int    // -1 until chosen; an ordered set starts on member 0
 	Current []int  // source selected per slot
 
 	waitingIndex uint64
@@ -91,6 +92,9 @@ func (d *Discrete) serves(m Member, index uint64) bool {
 // It returns the selects to apply before the new head is published, and
 // how long until a pending decision times out (0 when none waits).
 func (d *Discrete) Step(members []Member, now time.Time) (selects []Select, head uint64, wait time.Duration) {
+	if d.Ordered && d.Primary < 0 {
+		d.Primary = 0
+	}
 	var lead uint64
 	for _, m := range members {
 		if m.Head > lead {
@@ -203,8 +207,8 @@ type coverage struct {
 
 // Audio decides, page by page of every channel's ring, which member a
 // view page shows, from the sample ranges members are reported to have
-// committed. A page takes the primary while it holds the page without a
-// gap, another member that does when the primary has a gap or is late
+// committed. A page takes the primary, at first the first member, while
+// it holds the page without a gap, another member that does when the primary has a gap or is late
 // beyond Tolerance, and the silence source when no member holds it whole
 // within Skew samples of the leading member.
 type Audio struct {
@@ -228,7 +232,7 @@ type Audio struct {
 
 // NewAudio returns a policy for members rings of pages pages each.
 func NewAudio(members int, pages uint64, silence int) *Audio {
-	a := &Audio{Pages: pages, Silence: silence, Primary: -1, Tolerance: 2 * time.Millisecond,
+	a := &Audio{Pages: pages, Silence: silence, Primary: 0, Tolerance: 2 * time.Millisecond,
 		Current: make([]int, pages), cov: make([][]coverage, members), evHead: make([]uint64, members),
 		batch: make([]uint64, members), waitingPage: ^uint64(0)}
 	for i := range a.Current {
@@ -303,7 +307,7 @@ func (a *Audio) Step(now time.Time) (selects []PageSelect, head uint64, wait tim
 			if a.waitingPage != n {
 				a.waitingPage, a.waitingSince = n, now
 			}
-			gap := a.Primary < 0 || (a.cov[a.Primary][p].valid && a.cov[a.Primary][p].n == n && a.cov[a.Primary][p].broken) ||
+			gap := (a.cov[a.Primary][p].valid && a.cov[a.Primary][p].n == n && a.cov[a.Primary][p].broken) ||
 				a.evHead[a.Primary] > a.Head
 			switch {
 			case gap:
@@ -321,9 +325,6 @@ func (a *Audio) Step(now time.Time) (selects []PageSelect, head uint64, wait tim
 			pick = a.Silence
 			upto = append(upto[:0:0], make([]uint64, len(a.cov)+1)...)
 			upto[pick] = min((n+1)*PageSamples, lead)
-		}
-		if a.Primary < 0 && pick != a.Silence {
-			a.Primary = pick
 		}
 		if a.Current[p] != pick {
 			a.Current[p] = pick

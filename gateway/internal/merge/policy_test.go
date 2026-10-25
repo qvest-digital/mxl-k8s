@@ -158,6 +158,42 @@ func TestDiscreteRidesOutJitterWithinTheBudget(t *testing.T) {
 	require.Equal(t, uint64(339), d.Head)
 }
 
+// Mirrors over separate paths deliver the members a little apart. An
+// ordered set starts on its first member, even when the second's grain
+// is there first, as long as the first follows within the tolerance;
+// starting on whichever arrived first left the set on the second member
+// for as long as that one delivered.
+func TestDiscreteOrderedStartsOnTheFirstMember(t *testing.T) {
+	for name, tc := range map[string]struct {
+		ordered bool
+		late    time.Duration // how long after b's grain a's arrives
+		want    int
+	}{
+		"ordered, first member within the tolerance": {true, 3 * time.Millisecond, 0},
+		"ordered, first member beyond the tolerance": {true, 30 * time.Millisecond, 1},
+		"first arrival": {false, 3 * time.Millisecond, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, b := newRing(20), newRing(20)
+			d := NewDiscrete(20, 2)
+			d.Ordered, d.Skew, d.Tolerance = tc.ordered, 2, ToleranceFor(40*time.Millisecond)
+			now := time.Unix(0, 0)
+			b.commit(10)
+			_, _, wait := d.Step([]Member{a.member(), b.member()}, now)
+			if wait > 0 && wait < tc.late {
+				d.Step([]Member{a.member(), b.member()}, now.Add(wait))
+			}
+			a.commit(10)
+			d.Step([]Member{a.member(), b.member()}, now.Add(tc.late))
+			require.Equal(t, uint64(10), d.Head)
+			require.Equal(t, tc.want, d.Current[10])
+			if tc.ordered {
+				require.Equal(t, tc.want, d.Primary)
+			}
+		})
+	}
+}
+
 // A data grain's valid slices are its length, so a committed data grain
 // counts as complete; a video grain with half its slices does not.
 func TestDiscreteJudgesDataGrainsByCommit(t *testing.T) {
@@ -233,6 +269,33 @@ func TestAudioStartsAtAPageBoundaryWithoutSilence(t *testing.T) {
 	require.NotEmpty(t, shown)
 	require.Zero(t, first%PageSamples, "publishing started mid-page, at %d", first)
 	require.NotContains(t, shown, 1, "a published sample was silence though the member held it")
+}
+
+// Audio starts on its first member in the same way, rather than on the
+// member whose batch was reported first.
+func TestAudioStartsOnTheFirstMember(t *testing.T) {
+	for name, tc := range map[string]struct {
+		late time.Duration
+		want int
+	}{
+		"within the tolerance": {3 * time.Millisecond, 0},
+		"beyond the tolerance": {30 * time.Millisecond, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := NewAudio(2, 38, 2)
+			a.Skew, a.Tolerance = 2048, ToleranceFor(40*time.Millisecond)
+			now := time.Unix(0, 0)
+			a.Committed(1, 10*PageSamples, 11*PageSamples)
+			if _, _, wait := a.Step(now); wait > 0 && wait < tc.late {
+				a.Step(now.Add(wait))
+			}
+			a.Committed(0, 10*PageSamples, 11*PageSamples)
+			a.Step(now.Add(tc.late))
+			require.Equal(t, uint64(11*PageSamples), a.Head)
+			require.Equal(t, tc.want, a.Current[10])
+			require.Equal(t, tc.want, a.Primary)
+		})
+	}
 }
 
 func TestAudioSilencesAPageNoMemberHoldsWhole(t *testing.T) {
