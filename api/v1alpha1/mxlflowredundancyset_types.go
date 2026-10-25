@@ -123,7 +123,8 @@ type MxlFlowRedundancySetStatus struct {
 // MxlFlowRedundancySet serves one flow from several member flows,
 // switching members per grain, or per page of audio, wherever one fails
 // to deliver. The output's members all have to be on an mxlfs domain of
-// the reading node, and to agree in format, rate and geometry.
+// the reading node, and to agree in format, rate, geometry and ring
+// depth.
 //
 // While the output waits up to the skew budget for a grain no member has,
 // the members keep writing a ring period ahead, into slots the output
@@ -137,12 +138,13 @@ type MxlFlowRedundancySetStatus struct {
 // node's mxlfs has MXLFS_IOC_VIEW_REPLACE_SOURCE. The output is built
 // again, and its readers have to reopen it, without that ioctl; when a
 // replacement fails part-way, or its new ring cannot be opened for
-// several rechecks in a row; when a member comes back in another
+// several attempts in a row; when a member comes back in another
 // geometry, or with another ring depth after the domain's history
 // duration changed; when a member that was absent or left out when the
 // output was built comes back; and when a set is created again. A member
-// whose geometry differs from the output's is left out of it while
-// another member keeps that geometry.
+// whose geometry or ring depth differs from the output's is left out of
+// it while another member keeps those, and so is a member whose ring
+// cannot be opened.
 type MxlFlowRedundancySet struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
