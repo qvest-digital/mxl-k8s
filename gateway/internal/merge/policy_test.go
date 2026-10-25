@@ -251,3 +251,207 @@ func TestAudioSilencesAPageNoMemberHoldsWhole(t *testing.T) {
 	require.Equal(t, 2, a.Current[50%a.Pages])
 	require.NotEqual(t, 2, a.Current[49%a.Pages])
 }
+
+// While an index both members dropped holds the output back by up to the
+// skew, the members keep writing, each grain into the slot of the index
+// a ring period back. Every grain the output still offers its readers
+// must stay the grain of that index through the members' next write.
+func TestDiscreteRetiresSlotsTheMembersOverwriteWhileItLags(t *testing.T) {
+	const grains = 20
+	a, b := newRing(grains), newRing(grains)
+	d := NewDiscrete(grains, 2)
+	d.Ordered, d.Skew = true, 8
+	now := time.Unix(0, 0)
+	retired := 0
+	for i := uint64(100); i < 160; i++ {
+		// The members write at the clock, so the index due is their head.
+		if i != 120 {
+			a.commit(i)
+			b.commit(i)
+		}
+		ms := []Member{a.member(), b.member()}
+		now = now.Add(20 * time.Millisecond)
+		d.Step(ms, now)
+		sel := d.Retire(ms, i)
+		if d.Head == i {
+			require.Empty(t, sel, "an output keeping up with the clock moved slots at index %d", i)
+		}
+		retired += len(sel)
+
+		// The members' next grain lands before the next pass.
+		next := map[*ring]Grain{}
+		for _, r := range []*ring{a, b} {
+			next[r] = r.slots[uint((i+1)%grains)]
+			r.slots[uint((i+1)%grains)] = Grain{Index: i + 1, TotalSlices: 10, ValidSlices: 10}
+		}
+		for j := max(d.Head+2, grains) - grains; j <= d.Head; j++ {
+			src := d.Current[uint(j%grains)]
+			if src == d.Placeholder {
+				continue
+			}
+			g := []*ring{a, b}[src].slots[uint(j%grains)]
+			require.Equal(t, j, g.Index, "after index %d the output offers index %d from member %d, whose slot holds %d",
+				i, j, src, g.Index)
+		}
+		for r, g := range next {
+			r.slots[uint((i+1)%grains)] = g
+		}
+	}
+	require.Equal(t, uint64(159), d.Head)
+	require.NotZero(t, retired, "the output never lagged")
+}
+
+// A member writing ahead of the clock overwrites sooner than one at the
+// clock: a slot it serves moves to the member that still holds the index,
+// and only to INVALID where both would overwrite it.
+func TestDiscreteRetiresToTheMemberThatStillHoldsTheIndex(t *testing.T) {
+	const grains = 20
+	a, b := newRing(grains), newRing(grains)
+	for i := uint64(90); i <= 128; i++ {
+		if i != 120 {
+			a.commit(i)
+		}
+	}
+	for i := uint64(90); i <= 123; i++ {
+		if i != 120 {
+			b.commit(i)
+		}
+	}
+	d := NewDiscrete(grains, 2)
+	d.Ordered, d.Skew, d.Head, d.Primary = true, 10, 119, 0
+	for i := range d.Current {
+		d.Current[i] = 0
+	}
+	sel := d.Retire([]Member{a.member(), b.member()}, 123)
+
+	// a writes 129 next, into the slot of 109; b writes 124, into 104's.
+	want := map[uint]int{}
+	for i := uint64(101); i <= 109; i++ {
+		want[uint(i%grains)] = 1
+		if i <= 104 {
+			want[uint(i%grains)] = 2
+		}
+	}
+	got := map[uint]int{}
+	for _, s := range sel {
+		got[s.Slot] = s.Source
+	}
+	require.Equal(t, want, got)
+	for slot, src := range want {
+		require.Equal(t, src, d.Current[slot])
+	}
+}
+
+// Readers of an audio output trust half its buffer behind the head. With
+// a skew budget past that, an output held back by a page both members
+// broke lags members that keep writing, each sample over the one a
+// buffer back. Every sample the output still offers must stay true
+// through the members' next batch.
+func TestAudioRetiresPagesTheMembersOverwriteWhileItLags(t *testing.T) {
+	const (
+		pages  = 8
+		length = pages * PageSamples
+		batch  = 256
+	)
+	a := NewAudio(2, pages, 2)
+	a.Skew = 6000 // past the 4096 samples readers trust
+	rings := [2][]uint64{make([]uint64, length), make([]uint64, length)}
+	write := func(m int, start, end uint64) {
+		for s := start; s < end; s++ {
+			rings[m][s%length] = s
+		}
+	}
+	drop := func(b uint64) bool { return b == 80 } // both members break page 20
+	now := time.Unix(0, 0)
+	retired := 0
+	for b := uint64(32); b < 200; b++ {
+		if !drop(b) {
+			for m := 0; m < 2; m++ {
+				write(m, b*batch, (b+1)*batch)
+				a.Committed(m, b*batch, (b+1)*batch)
+			}
+		}
+		now = now.Add(5 * time.Millisecond)
+		a.Step(now)
+		// The members write at the clock: what is due is what they wrote.
+		sel := a.Retire((b + 1) * batch)
+		if a.Head+length/2 >= (b+2)*batch {
+			require.Empty(t, sel, "an output within half the buffer of the clock moved pages at batch %d", b)
+		}
+		retired += len(sel)
+
+		// The members' next batch lands before the next pass.
+		if !drop(b + 1) {
+			for m := 0; m < 2; m++ {
+				write(m, (b+1)*batch, (b+2)*batch)
+			}
+		}
+		for s := a.Head - min(a.Head, length/2); s < a.Head; s++ {
+			src := a.Current[(s/PageSamples)%pages]
+			if src == a.Silence {
+				continue
+			}
+			require.Equal(t, s, rings[src][s%length], "after batch %d the output offers sample %d from member %d, which holds %d there",
+				b, s, src, rings[src][s%length])
+		}
+	}
+	require.Equal(t, uint64(200*batch), a.Head)
+	require.NotZero(t, retired, "the output never lagged")
+}
+
+// A member writing ahead of the clock overwrites sooner: a page it serves
+// moves to the member that still holds it whole, and to silence once
+// that one would overwrite it too.
+func TestAudioRetiresToTheMemberThatStillHoldsThePage(t *testing.T) {
+	const (
+		pages = 8
+		batch = 256
+	)
+	a := NewAudio(2, pages, 2)
+	a.Skew = 1 << 20
+	for b := uint64(32); b < 102; b++ {
+		if b == 80 {
+			continue // both members break page 20
+		}
+		a.Committed(0, b*batch, (b+1)*batch)
+		if b < 86 {
+			a.Committed(1, b*batch, (b+1)*batch)
+		}
+		a.Step(time.Unix(0, 0))
+	}
+	require.Equal(t, uint64(20*PageSamples), a.Head)
+	require.Equal(t, 0, a.Primary)
+
+	// a reaches sample 26112 + 256 - 8192 = 18176, into page 17; b, at
+	// the clock, 14080. Readers trust from 16384, page 16.
+	sel := a.Retire(86 * batch)
+	require.ElementsMatch(t, []PageSelect{{Page: 16 % pages, Source: 1}, {Page: 17 % pages, Source: 1}}, sel)
+
+	// With the clock where a is, b would overwrite them as well.
+	sel = a.Retire(102 * batch)
+	require.ElementsMatch(t, []PageSelect{{Page: 16 % pages, Source: 2}, {Page: 17 % pages, Source: 2}}, sel)
+}
+
+// A local member's head can jump over a gap in one pass. That one range
+// says nothing about the batches that follow, and an output that keeps
+// up must not keep retiring its oldest pages because of it.
+func TestAudioRetireForgetsAJumpOnceTheBatchesResume(t *testing.T) {
+	const batch = 480
+	a := NewAudio(1, 8, 1)
+	a.Skew, a.Ahead = 2048, 960
+	end := uint64(40 * batch)
+	commit := func(n uint64) []PageSelect {
+		a.Committed(0, end, end+n)
+		end += n
+		a.Step(time.Unix(0, 0))
+		return a.Retire(end)
+	}
+	for i := 0; i < 40; i++ {
+		require.Empty(t, commit(batch), "an output keeping up moved pages")
+	}
+	commit(4096) // the head moved over a gap
+	commit(batch)
+	for i := 0; i < 40; i++ {
+		require.Empty(t, commit(batch), "pages still move %d batches after the jump", i+2)
+	}
+}

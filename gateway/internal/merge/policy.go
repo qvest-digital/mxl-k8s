@@ -148,6 +148,47 @@ func (d *Discrete) Step(members []Member, now time.Time) (selects []Select, head
 	return selects, d.Head, 0
 }
 
+// overwrites reports whether m may write index next before the engine's
+// next pass: the grain after its head, or, writing at the clock after a
+// loss, the one after the index due now.
+func overwrites(m Member, due, next uint64) bool { return max(m.Head, due)+1 >= next }
+
+// Retire returns the selects that keep the output's oldest grains true
+// while it lags its members. Readers trust every index from
+// Head - Grains + 2 on, but a member writes index i + Grains into the
+// slot of i. A slot whose source may do that before the next pass moves
+// to a member that still holds i and will not, or to the placeholder,
+// rather than show the next ring period's grain as i. due is the index
+// the clock is at; nothing moves while the output keeps up with the
+// members and the clock.
+func (d *Discrete) Retire(members []Member, due uint64) (selects []Select) {
+	reach := due
+	for _, m := range members {
+		reach = max(reach, m.Head)
+	}
+	from := uint64(1)
+	if d.Head+2 > uint64(d.Grains) {
+		from = d.Head + 2 - uint64(d.Grains)
+	}
+	for i := from; i <= d.Head && i+uint64(d.Grains) <= reach+1; i++ {
+		slot := uint(i % uint64(d.Grains))
+		cur := d.Current[slot]
+		if cur == d.Placeholder || !overwrites(members[cur], due, i+uint64(d.Grains)) {
+			continue
+		}
+		to := d.Placeholder
+		for m := range members {
+			if m != cur && d.serves(members[m], i) && !overwrites(members[m], due, i+uint64(d.Grains)) {
+				to = m
+				break
+			}
+		}
+		d.Current[slot] = to
+		selects = append(selects, Select{Slot: slot, Source: to})
+	}
+	return selects
+}
+
 // PageSamples is how many 32-bit samples one page of a channel holds.
 const PageSamples = 4096 / 4
 
@@ -170,6 +211,7 @@ type Audio struct {
 	Skew      uint64 // in samples
 	Tolerance time.Duration
 	Silence   int
+	Ahead     uint64 // samples the clock advances between two passes
 
 	Head    uint64 // published head: the exclusive end of the samples
 	Primary int
@@ -177,6 +219,7 @@ type Audio struct {
 
 	cov          [][]coverage
 	evHead       []uint64
+	batch        []uint64 // per member, the range it last committed at once
 	started      bool
 	waitingPage  uint64
 	waitingSince time.Time
@@ -186,7 +229,7 @@ type Audio struct {
 func NewAudio(members int, pages uint64, silence int) *Audio {
 	a := &Audio{Pages: pages, Silence: silence, Primary: -1, Tolerance: 2 * time.Millisecond,
 		Current: make([]int, pages), cov: make([][]coverage, members), evHead: make([]uint64, members),
-		waitingPage: ^uint64(0)}
+		batch: make([]uint64, members), waitingPage: ^uint64(0)}
 	for i := range a.Current {
 		a.Current[i] = silence
 	}
@@ -219,6 +262,9 @@ func (a *Audio) Committed(member int, start, end uint64) {
 	if end > a.evHead[member] {
 		a.evHead[member] = end
 	}
+	// libmxl writes at most half the buffer at once; a longer range is a
+	// local member's head moving over a gap.
+	a.batch[member] = min(end-start, a.Pages*PageSamples/2)
 }
 
 // PageSelect is one page slot to point at a source in every channel.
@@ -285,4 +331,52 @@ func (a *Audio) Step(now time.Time) (selects []PageSelect, head uint64, wait tim
 		a.Head = upto[pick]
 	}
 	return selects, a.Head, 0
+}
+
+// Retire returns the page selects that keep the output's oldest samples
+// true while it lags its members by more than half the buffer. Readers
+// trust samples from Head minus half the buffer on, but a member writing
+// sample s overwrites s minus the buffer. A page whose source may write
+// over its trusted samples before the next pass moves to a member that
+// holds the page whole and will not, or to silence. A member is taken to
+// write its next batch as long as its last one. due is the sample index
+// the clock is at.
+func (a *Audio) Retire(due uint64) (selects []PageSelect) {
+	if !a.started {
+		return nil
+	}
+	length := a.Pages * PageSamples
+	// reach is the first sample member m does not overwrite before the
+	// next pass: past its last batch, or past what is due by then.
+	reach := func(m int) uint64 {
+		w := max(a.evHead[m], due) + a.Ahead + a.batch[m]
+		return w - min(w, length)
+	}
+	var most uint64
+	for m := range a.cov {
+		most = max(most, reach(m))
+	}
+	lo := a.Head - min(a.Head, length/2)
+	for n := lo / PageSamples; ; n++ {
+		first := max(lo, n*PageSamples)
+		if first >= a.Head || first >= most {
+			break
+		}
+		p := n % a.Pages
+		cur := a.Current[p]
+		if cur == a.Silence || first >= reach(cur) {
+			continue
+		}
+		to := a.Silence
+		for m := range a.cov {
+			c := a.cov[m][p]
+			if m != cur && c.valid && c.n == n && !c.broken && c.to >= min((n+1)*PageSamples, a.Head) && first >= reach(m) {
+				to = m
+				break
+			}
+		}
+		a.Current[p] = to
+		selects = append(selects, PageSelect{Page: p, Source: to})
+	}
+	return selects
 }

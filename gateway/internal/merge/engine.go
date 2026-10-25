@@ -20,6 +20,7 @@ import (
 	"unsafe"
 
 	"github.com/go-logr/logr"
+	"github.com/qvest-digital/go-mxl/mxl"
 	"golang.org/x/sys/unix"
 )
 
@@ -30,6 +31,9 @@ const (
 	iocViewSelectRange = 1<<30 | 24<<16 | 'x'<<8 | 9 // _IOW('x', 9, struct mxlfs_view_range)
 	iocAllocate        = 'x'<<8 | 8                  // _IO('x', 8)
 	maxSources         = 8
+
+	// maxSleep is the longest the engine waits between two passes.
+	maxSleep = 20 * time.Millisecond
 
 	sysFutexWaitv = 449 // the same number on every architecture
 	futex2SizeU32 = 0x02
@@ -152,7 +156,8 @@ type Engine struct {
 	audio    *Audio
 	disc     *Discrete
 	rate     C.mxlRational
-	feeds    []bool // members the gateway reports arrivals for
+	period   time.Duration // of a grain
+	feeds    []bool        // members the gateway reports arrivals for
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -431,8 +436,8 @@ func (e *Engine) buildDiscrete(tmp, src0 string) error {
 	e.disc = NewDiscrete(grains, placeholder)
 	e.disc.Data = e.members[0].format() == formatData
 	e.disc.Ordered = e.spec.Ordered
-	period := time.Duration(float64(time.Second) * float64(e.rate.denominator) / float64(e.rate.numerator))
-	e.disc.Skew = max(uint64(e.spec.Skew/period), 1)
+	e.period = time.Duration(float64(time.Second) * float64(e.rate.denominator) / float64(e.rate.numerator))
+	e.disc.Skew = max(uint64(e.spec.Skew/e.period), 1)
 	e.disc.Tolerance = ToleranceFor(e.spec.Skew)
 	return nil
 }
@@ -473,6 +478,7 @@ func (e *Engine) buildAudio(tmp, src0 string) error {
 	e.audio = NewAudio(len(e.members), uint64(length)/PageSamples, silence)
 	e.audio.Skew = uint64(e.spec.Skew.Seconds() * float64(e.rate.numerator) / float64(e.rate.denominator))
 	e.audio.Tolerance = ToleranceFor(e.spec.Skew)
+	e.audio.Ahead = uint64(maxSleep.Seconds()*float64(e.rate.numerator)/float64(e.rate.denominator)) + 1
 	return nil
 }
 
@@ -512,7 +518,7 @@ func (e *Engine) run(ctx context.Context) {
 			report = time.Now()
 			e.log.Info("merging", "head", e.out.head(), "selects", e.selects.Load())
 		}
-		timeout := 20 * time.Millisecond
+		timeout := maxSleep
 		for i, m := range e.members {
 			waits[i] = futexWaitv{Val: uint64(atomic.LoadUint32(m.syncWord())),
 				Uaddr: uint64(uintptr(unsafe.Pointer(m.syncWord()))), Flags: futex2SizeU32}
@@ -534,6 +540,13 @@ func (e *Engine) run(ctx context.Context) {
 			}
 			var sel []Select
 			sel, head, wait = e.disc.Step(ms, now)
+			// Retire looks one grain past the clock, so the engine must
+			// pass at least once a grain.
+			timeout = min(timeout, e.period)
+			for i, m := range e.members {
+				ms[i].Head = m.head()
+			}
+			sel = append(sel, e.disc.Retire(ms, mxl.CurrentIndex(e.mxlRate()))...)
 			e.selects.Add(uint64(len(sel)))
 			for _, s := range sel {
 				if err = selectAll(e.views[s.Slot], s.Source); err != nil {
@@ -554,6 +567,7 @@ func (e *Engine) run(ctx context.Context) {
 			}
 			var sel []PageSelect
 			sel, head, wait = e.audio.Step(now)
+			sel = append(sel, e.audio.Retire(mxl.CurrentIndex(e.mxlRate()))...)
 			e.selects.Add(uint64(len(sel)))
 			channels, length := e.members[0].continuous()
 			for _, s := range sel {
@@ -580,6 +594,10 @@ func (e *Engine) run(ctx context.Context) {
 		_, _, _ = unix.Syscall6(sysFutexWaitv, uintptr(unsafe.Pointer(&waits[0])), uintptr(len(waits)), 0,
 			uintptr(unsafe.Pointer(&abs)), unix.CLOCK_MONOTONIC, 0)
 	}
+}
+
+func (e *Engine) mxlRate() mxl.Rational {
+	return mxl.Rational{Num: int64(e.rate.numerator), Den: int64(e.rate.denominator)}
 }
 
 // fed reports whether the gateway reports member i's arrivals.
