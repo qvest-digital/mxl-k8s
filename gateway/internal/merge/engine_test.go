@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/go-logr/logr"
 	"github.com/qvest-digital/go-mxl/mxl"
@@ -261,5 +264,117 @@ func TestEngineBacksWhatNoMemberHolds(t *testing.T) {
 		}
 		_ = unix.Munmap(mem)
 		t.Logf("%s: %d bytes mapped and read, first bytes of each page sum to %d", tc.file, st.Size(), sum)
+	}
+}
+
+// The gateway reports an audio arrival by flow id, and the directory at
+// that id may no longer hold the ring the engine mapped: a placeholder
+// is retired for a ring of another geometry and created again, and a
+// mirror fills the new one. The mapped ring then never got the samples
+// and, held lazily, has no pages, so a page of the output selected to it
+// faults SIGBUS in every reader. It runs without mxlfs: the decision is
+// the engine's, from the mapped ring's own head.
+func TestEngineCountsOnlyWhatTheMappedRingHolds(t *testing.T) {
+	const pages = 4
+	e := &Engine{audio: NewAudio(2, pages, 2)}
+	for range 2 {
+		path := filepath.Join(t.TempDir(), "data")
+		require.NoError(t, os.WriteFile(path, make([]byte, 4096), 0o644))
+		h, f, err := mapHeader(path, true)
+		require.NoError(t, err)
+		e.members, e.files = append(e.members, h), append(e.files, f)
+	}
+	t.Cleanup(e.release)
+	setHead := func(m int, head uint64) {
+		atomic.StoreUint64((*uint64)(unsafe.Pointer(&e.members[m].info.runtime.headIndex)), head)
+	}
+
+	// Member 0's mapped ring was replaced before anything was written to
+	// it; member 1's mapped ring holds what it reports.
+	const start, end = PageSamples, 3 * PageSamples
+	setHead(1, end)
+	e.Committed(0, start, end)
+	e.Committed(1, start, end)
+	sel, head, _ := e.audio.Step(time.Now())
+	sel = append(sel, e.audio.Retire(end)...)
+	for _, s := range sel {
+		require.NotEqual(t, 0, s.Source, "page %d selected to a ring that holds none of it", s.Page)
+	}
+	require.Contains(t, sel, PageSelect{Page: 1, Source: 1})
+	require.Equal(t, uint64(end), head)
+}
+
+// The same on mxlfs, through a reader: member A's lazily held
+// placeholder is replaced by an allocated copy a mirror writes, while
+// the engine still maps the placeholder. Reading what the output then
+// publishes must not touch a page of the placeholder, which has none.
+func TestEngineReaderNeverFaultsOnAReplacedMember(t *testing.T) {
+	domain := mxlfsDomain(t)
+	inst, err := mxl.NewInstance(domain, "")
+	require.NoError(t, err)
+	defer inst.Close()
+	lazily(t, domain) // the gateway holds placeholders lazily
+	var held []*mxl.Writer
+	for _, id := range []string{memberA, memberB} {
+		w, _, err := inst.NewWriter(audioDef(id))
+		require.NoError(t, err)
+		held = append(held, w)
+	}
+	defer func() {
+		for _, w := range held {
+			_ = w.Close()
+		}
+	}()
+	e, err := Start(context.Background(), Spec{DomainDir: domain, OutputID: output, Members: []string{memberA, memberB},
+		Skew: 40 * time.Millisecond, Ordered: true}, logr.Discard())
+	require.NoError(t, err)
+	defer e.Close()
+
+	require.NoError(t, held[0].Close())
+	require.NoError(t, os.RemoveAll(flowDir(domain, memberA)))
+	w, _, err := inst.NewWriter(audioDef(memberA))
+	require.NoError(t, err)
+	held[0] = w
+	require.NoError(t, mxlfs.AllocateFlow(flowDir(domain, memberA)))
+	require.True(t, e.Stale(), "member A is still the mapped placeholder")
+
+	const batch = 480
+	rate := mxl.Rational{Num: 48000, Den: 1}
+	first := (mxl.CurrentIndex(rate)/batch + 1) * batch
+	for end := first; end < first+20*batch; end += batch {
+		s, err := w.OpenSamples(end, batch)
+		require.NoError(t, err)
+		require.NoError(t, s.Commit())
+		e.Committed(0, end-batch, end)
+	}
+
+	r, err := inst.NewReader(output)
+	require.NoError(t, err)
+	defer r.Close()
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+	read := func(end uint64) (err error) {
+		defer func() {
+			if p := recover(); p != nil {
+				err = fmt.Errorf("fault: %v", p)
+			}
+		}()
+		v, err := r.GetSamples(end, batch, 50*time.Millisecond)
+		if err != nil {
+			return nil // nothing published there
+		}
+		for ch := uint64(0); ch < 2; ch++ {
+			if _, err := v.CopyChannel(ch); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for end := first + 4*batch; end < first+20*batch; end += batch {
+		require.NoError(t, read(end), "samples up to %d", end)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for p, src := range e.audio.Current {
+		require.NotEqual(t, 0, src, "page %d selected to the replaced placeholder", p)
 	}
 }
