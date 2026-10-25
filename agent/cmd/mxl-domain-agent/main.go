@@ -278,16 +278,7 @@ func run(args []string) error {
 		domainsMu.Lock()
 		doms := current
 		domainsMu.Unlock()
-		byDev := map[string]string{}
-		if dev, err := observed.Device(cfg.DomainPath); err == nil {
-			byDev[dev] = ""
-		}
-		for dir, name := range doms.ByDir {
-			if dev, err := observed.Device(filepath.Join(doms.Root, dir)); err == nil {
-				byDev[dev] = name
-			}
-		}
-		return byDev
+		return domainDevices(cfg.DomainPath, doms)
 	}}
 	if sets != nil {
 		inUse := func() (map[mxlv1alpha1.FlowRef]bool, error) {
@@ -611,6 +602,26 @@ func ours(pods interface {
 		pod, err := pods.PodForPID(ctx, pid)
 		return err == nil && own(pod)
 	}
+}
+
+// domainDevices maps each domain directory's device to the domain's name,
+// as the scanner reports flows in. The primary domain's flows are spelled
+// with no domain name, as redundancy sets and every other object name
+// them, though an MxlDomain materialises it too.
+func domainDevices(primary string, doms intent.Domains) map[string]string {
+	byDev := map[string]string{}
+	for dir, name := range doms.ByDir {
+		if dir == doms.Primary {
+			continue
+		}
+		if dev, err := observed.Device(filepath.Join(doms.Root, dir)); err == nil {
+			byDev[dev] = name
+		}
+	}
+	if dev, err := observed.Device(primary); err == nil {
+		byDev[dev] = ""
+	}
+	return byDev
 }
 
 // flowsInUse returns the flows processes on this node map, leaving out

@@ -19,6 +19,7 @@ import (
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/config"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/flowpublisher"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/intent"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/mxlfsmount"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/observed"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -97,6 +98,23 @@ func TestOursIsOnlyMxlK8sComponents(t *testing.T) {
 
 // The gateway maps the output it merges and the exporter reads every
 // flow; counted as readers they would keep every output in use forever.
+// The primary domain is materialised by an MxlDomain of its own name,
+// but its flows, and the outputs of sets in it, are spelled with no
+// domain name. Reported under that name, a reader of a set's output was
+// never seen using it, and the node left the set every grace period:
+// the output was torn down under its readers and the member mirrors
+// collected.
+func TestDomainDevicesSpellsThePrimaryDomainWithoutAName(t *testing.T) {
+	root := t.TempDir()
+	primary := filepath.Join(root, "domain")
+	require.NoError(t, os.Mkdir(primary, 0o755))
+	dev, err := observed.Device(primary)
+	require.NoError(t, err)
+
+	got := domainDevices(primary, intent.Domains{Root: root, Primary: "domain", ByDir: map[string]string{"domain": "default"}})
+	assert.Equal(t, map[string]string{dev: ""}, got)
+}
+
 func TestFlowsInUseLeavesOutMxlK8sComponents(t *testing.T) {
 	pod := func(name, ns, uid, node, component string) *corev1.Pod {
 		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: types.UID(uid),
