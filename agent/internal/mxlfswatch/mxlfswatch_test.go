@@ -41,8 +41,9 @@ func domainWithPlaceholder(t *testing.T) string {
 	return d
 }
 
-func newTrigger(r *recorder, ours bool) *Trigger {
+func newTrigger(r *recorder, ours bool, domain string) *Trigger {
 	return &Trigger{
+		Domain:     domain,
 		Dispatcher: r,
 		Ours:       func(context.Context, int32) bool { return ours },
 		Window:     time.Minute,
@@ -53,7 +54,7 @@ func newTrigger(r *recorder, ours bool) *Trigger {
 func TestOpeningAPlaceholderRingRequestsOneMirror(t *testing.T) {
 	d := domainWithPlaceholder(t)
 	r := &recorder{done: make(chan struct{}, 8)}
-	tr := newTrigger(r, false)
+	tr := newTrigger(r, false, d)
 
 	// libmxl maps every grain of the flow when it opens it.
 	for i := 0; i < 5; i++ {
@@ -64,10 +65,25 @@ func TestOpeningAPlaceholderRingRequestsOneMirror(t *testing.T) {
 	require.Equal(t, []string{filepath.Join(d, id+".mxl-flow", "data")}, r.calls)
 }
 
+// The path of an open is the opener's. A pod that mounts the domain
+// through the CSI volume at /mxl opens /mxl/<id>.mxl-flow/..., which is
+// no path in the agent's mount namespace; the flow is the placeholder
+// of that name in the domain the opens are watched on.
+func TestAnOpenThroughAnotherMountPathRequestsTheMirror(t *testing.T) {
+	d := domainWithPlaceholder(t)
+	r := &recorder{done: make(chan struct{}, 8)}
+	tr := newTrigger(r, false, d)
+
+	require.True(t, tr.Handle(context.Background(),
+		fanotify.Open{PID: 77, Path: "/mxl/" + id + ".mxl-flow/grains/data.0"}))
+	<-r.done
+	require.Equal(t, []string{filepath.Join(d, id+".mxl-flow", "data")}, r.calls)
+}
+
 func TestOpensThatAreNotPlaceholderRingsRequestNothing(t *testing.T) {
 	d := domainWithPlaceholder(t)
 	r := &recorder{done: make(chan struct{}, 8)}
-	tr := newTrigger(r, false)
+	tr := newTrigger(r, false, d)
 
 	notRing := filepath.Join(d, id+".mxl-flow", "flow_def.json")
 	require.False(t, tr.Handle(context.Background(), fanotify.Open{PID: 77, Path: notRing}), "flow_def.json is read by scans")
@@ -80,7 +96,7 @@ func TestOpensThatAreNotPlaceholderRingsRequestNothing(t *testing.T) {
 func TestOwnProcessesRequestNothing(t *testing.T) {
 	d := domainWithPlaceholder(t)
 	r := &recorder{done: make(chan struct{}, 8)}
-	tr := newTrigger(r, true)
+	tr := newTrigger(r, true, d)
 
 	ring := filepath.Join(d, id+".mxl-flow", "channels")
 	require.False(t, tr.Handle(context.Background(), fanotify.Open{PID: 77, Path: ring}))

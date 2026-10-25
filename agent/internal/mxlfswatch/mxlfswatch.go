@@ -41,7 +41,7 @@ func IsMxlfs(path string) bool {
 
 // ringFile matches what libmxl maps when it opens a flow: a grain of a
 // discrete flow or the channels of a continuous one.
-var ringFile = regexp.MustCompile(`^(.*)/([0-9a-fA-F-]{36})\.mxl-flow/(grains/data\.[0-9]+|channels)$`)
+var ringFile = regexp.MustCompile(`/([0-9a-fA-F-]{36})\.mxl-flow/(grains/data\.[0-9]+|channels)$`)
 
 // Materializer is the part of the intent dispatcher a trigger needs.
 type Materializer interface {
@@ -58,6 +58,11 @@ type Trigger struct {
 	// request; libmxl opens every grain file of a flow in a burst.
 	Window time.Duration
 	Log    logr.Logger
+	// Domain is the domain directory, as this process sees it, of the
+	// filesystem the opens are on. An open's path is the opener's: a pod
+	// that mounts the domain at /mxl opens /mxl/<id>.mxl-flow/..., so the
+	// flow is found by its name below Domain, not by the path's prefix.
+	Domain string
 
 	mu   sync.Mutex
 	seen map[string]time.Time
@@ -70,7 +75,7 @@ func (t *Trigger) Handle(ctx context.Context, o fanotify.Open) bool {
 	if m == nil || o.PID <= 0 {
 		return false
 	}
-	domain, id := m[1], strings.ToLower(m[2])
+	domain, id := t.Domain, strings.ToLower(m[1])
 	if !mxlv1alpha1.IsPlaceholder(domain, id) {
 		return false
 	}
@@ -108,8 +113,10 @@ func (t *Trigger) Handle(ctx context.Context, o fanotify.Open) bool {
 }
 
 // Run feeds every open on the filesystem holding domain to Handle until
-// ctx ends.
+// ctx ends. domain is the root of that filesystem, as an mxlfs domain
+// is, and becomes t.Domain.
 func (t *Trigger) Run(ctx context.Context, domain string) error {
+	t.Domain = domain
 	w, err := fanotify.NewOpenWatcher(domain)
 	if err != nil {
 		return err

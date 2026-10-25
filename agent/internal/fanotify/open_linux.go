@@ -17,7 +17,10 @@ type Open struct {
 	// PID is the process that opened the file; 0 if the kernel could not
 	// attribute it to one in this pid namespace.
 	PID int32
-	// Path is the file as this process sees it.
+	// Path is the file as readlink of the event's fd reports it. An open
+	// through a mount this process does not have, a pod's bind mount,
+	// reads as the opener sees it, so only its name below the mount root
+	// is shared with this process's view.
 	Path string
 }
 
