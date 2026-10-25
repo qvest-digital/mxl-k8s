@@ -202,6 +202,8 @@ func TestServesFromTheMembersPublished(t *testing.T) {
 
 	res, cond := reconcile(t, r)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, "members agree in format, rate and geometry as far as published", cond.Message,
+		"one member published was reported as members agreeing")
 	assert.NotZero(t, res.RequeueAfter)
 	assert.Contains(t, mirrors(t, c), memberA+"->reader")
 	ready := membersReadyOf(t, c)
@@ -232,8 +234,10 @@ func TestStaysValidWhenAMemberGoesAway(t *testing.T) {
 }
 
 // A member that comes back in another geometry after the set was
-// served is left out of the output by the gateways; the set stays
-// valid and says which member that is.
+// served is left out of the output by the gateways, or the others are
+// when the output follows it; the set stays valid. Which geometry a
+// gateway keeps is not the operator's to know, so MembersReady lists
+// every member's rather than naming one of them the odd one out.
 func TestStaysValidWhenAMemberComesBackInAnotherGeometry(t *testing.T) {
 	r, c := harness(t, newSet("reader"),
 		flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-b"))
@@ -245,9 +249,11 @@ func TestStaysValidWhenAMemberComesBackInAnotherGeometry(t *testing.T) {
 	require.NoError(t, c.Update(context.Background(), &b))
 	_, cond := reconcile(t, r)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.NotContains(t, cond.Message, "agree in", "members apart were reported as agreeing")
 	ready := membersReadyOf(t, c)
 	assert.Equal(t, ReasonMisaligned, ready.Reason)
-	assert.Contains(t, ready.Message, "frame_width")
+	assert.Equal(t, "members differ in frame_width: "+memberA+" 1920, "+memberB+" 1280; frame_height: "+
+		memberA+" 1080, "+memberB+" 720", ready.Message)
 }
 
 // The mirror of a member whose producer is gone is collected once it

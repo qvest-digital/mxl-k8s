@@ -132,17 +132,14 @@ type member struct {
 	ref    mxlv1alpha1.FlowRef
 	flow   *mxlv1alpha1.MxlFlow // nil while it has no MxlFlow
 	origin mxlv1alpha1.OriginResolution
-	// apart says how the member differs from the first member that has
-	// an MxlFlow; empty when it agrees.
-	apart string
+	def    map[string]any // nil while it has no readable definition
+	// unreadable says why the member's definition cannot be read.
+	unreadable string
 }
 
-// members reads every member's MxlFlow and Origin, and compares each
-// definition with the first member's that has one.
+// members reads every member's MxlFlow, Origin and definition.
 func (r *Reconciler) members(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet) ([]member, error) {
 	ms := make([]member, len(set.Spec.Members))
-	var first map[string]any
-	var firstID string
 	for i, m := range set.Spec.Members {
 		ms[i].ref = mxlv1alpha1.FlowRef{Domain: m.Domain, ID: m.FlowID}
 		var f mxlv1alpha1.MxlFlow
@@ -158,23 +155,43 @@ func (r *Reconciler) members(ctx context.Context, set *mxlv1alpha1.MxlFlowRedund
 			return nil, err
 		}
 		ms[i].origin = origin
-		var def map[string]any
-		if err := json.Unmarshal(f.Spec.Definition.Raw, &def); err != nil {
-			ms[i].apart = fmt.Sprintf("member %s: %v", ms[i].ref.Name(), err)
-			continue
-		}
-		if first == nil {
-			first, firstID = def, m.FlowID
-			continue
-		}
-		for _, k := range alignedKeys {
-			if !reflect.DeepEqual(first[k], def[k]) {
-				ms[i].apart = fmt.Sprintf("member %s differs from %s in %s", ms[i].ref.Name(), firstID, k)
-				break
-			}
+		if err := json.Unmarshal(f.Spec.Definition.Raw, &ms[i].def); err != nil {
+			ms[i].def, ms[i].unreadable = nil, fmt.Sprintf("member %s: %v", ms[i].ref.Name(), err)
 		}
 	}
 	return ms, nil
+}
+
+// disagreement lists, for every aligned key the members' definitions
+// differ in, each member's value; empty when they agree. No member is
+// the reference: the gateways keep whichever geometry their output was
+// built in.
+func disagreement(ms []member) string {
+	var keys []string
+	for _, k := range alignedKeys {
+		var first any
+		var vals []string
+		differ := false
+		for _, m := range ms {
+			if m.def == nil {
+				continue
+			}
+			if vals == nil {
+				first = m.def[k]
+			} else if !reflect.DeepEqual(first, m.def[k]) {
+				differ = true
+			}
+			v, _ := json.Marshal(m.def[k])
+			vals = append(vals, fmt.Sprintf("%s %s", m.ref.Name(), v))
+		}
+		if differ {
+			keys = append(keys, k+": "+strings.Join(vals, ", "))
+		}
+	}
+	if keys == nil {
+		return ""
+	}
+	return "members differ in " + strings.Join(keys, "; ")
 }
 
 // validate reports whether the set can be served. The spec is checked
@@ -196,20 +213,34 @@ func (r *Reconciler) validate(ctx context.Context, set *mxlv1alpha1.MxlFlowRedun
 			return fail(ReasonOtherDomain, fmt.Sprintf("member %s is not in the output's domain; one output selects among pages of one domain", m.FlowID))
 		}
 	}
+	differ := disagreement(ms)
+	published := 0
+	for _, m := range ms {
+		if m.def != nil {
+			published++
+		}
+	}
 	ok := metav1.Condition{Type: ConditionValid, Status: metav1.ConditionTrue, Reason: ReasonMembersAligned,
 		Message: "members agree in format, rate and geometry"}
+	switch {
+	case differ != "":
+		ok.Message = "members agreed when the set was checked; MembersReady names those apart now"
+	case published < len(ms):
+		ok.Message = "members agree in format, rate and geometry as far as published"
+	}
 	if c := meta.FindStatusCondition(set.Status.Conditions, ConditionValid); c != nil &&
 		c.Status == metav1.ConditionTrue && c.ObservedGeneration == set.Generation {
 		return ok
 	}
-	present := false
 	for _, m := range ms {
-		if m.apart != "" {
-			return fail(ReasonMisaligned, m.apart)
+		if m.unreadable != "" {
+			return fail(ReasonMisaligned, m.unreadable)
 		}
-		present = present || m.flow != nil
 	}
-	if !present {
+	if differ != "" {
+		return fail(ReasonMisaligned, differ)
+	}
+	if published == 0 {
 		return fail(ReasonMemberMissing, "no member has an MxlFlow yet")
 	}
 	return ok
@@ -222,11 +253,14 @@ func membersReady(ms []member) metav1.Condition {
 		switch {
 		case m.flow == nil:
 			missing = append(missing, fmt.Sprintf("member %s has no MxlFlow", m.ref.Name()))
-		case m.apart != "":
-			apart = append(apart, m.apart)
+		case m.unreadable != "":
+			apart = append(apart, m.unreadable)
 		case !m.origin.Found:
 			missing = append(missing, fmt.Sprintf("member %s has no producer", m.ref.Name()))
 		}
+	}
+	if d := disagreement(ms); d != "" {
+		apart = append(apart, d)
 	}
 	switch {
 	case len(missing) > 0:
