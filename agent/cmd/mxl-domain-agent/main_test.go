@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/config"
@@ -49,4 +53,37 @@ func TestCSIReadyWaitsOnlyWithMxlfs(t *testing.T) {
 	assert.False(t, ready(dir))
 	require.NoError(t, m.Ensure(dir))
 	assert.True(t, ready(dir))
+}
+
+type podsByPID map[int32]*corev1.Pod
+
+func (p podsByPID) PodForPID(_ context.Context, pid int32) (*corev1.Pod, error) {
+	if pod, ok := p[pid]; ok {
+		return pod, nil
+	}
+	return nil, errors.New("no pod")
+}
+
+// Only the components that open placeholders themselves are skipped. A
+// consumer deployed into the agent's namespace still gets its mirror,
+// and a pid whose pod lookup fails is not silently dropped as ours.
+func TestOursIsOnlyMxlK8sComponents(t *testing.T) {
+	pod := func(ns, component string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns,
+			Labels: map[string]string{"app.kubernetes.io/component": component}}}
+	}
+	o := ours(podsByPID{
+		1: pod("mxl-system", "gateway"),
+		2: pod("mxl-system", "exporter"),
+		3: pod("mxl-system", "agent"),
+		4: pod("mxl-system", ""),
+		5: pod("media", "gateway"),
+	}, "mxl-system")
+	ctx := context.Background()
+	assert.True(t, o(ctx, 1), "gateway")
+	assert.True(t, o(ctx, 2), "exporter")
+	assert.True(t, o(ctx, 3), "agent")
+	assert.False(t, o(ctx, 4), "a consumer in the agent's namespace")
+	assert.False(t, o(ctx, 5), "a gateway-labelled pod elsewhere")
+	assert.False(t, o(ctx, 6), "a pid with no resolvable pod")
 }
