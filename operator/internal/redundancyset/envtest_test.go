@@ -60,6 +60,14 @@ func TestRedundancySetAgainstAnAPIServer(t *testing.T) {
 			{"unknown preference", func(s map[string]any) { s["preference"] = "Random" }, "preference"},
 			{"node name as flow id", func(s map[string]any) { s["output"] = ref("n1") }, "flowID"},
 			{"missing output", func(s map[string]any) { delete(s, "output") }, "output"},
+			{"output is a member", func(s map[string]any) { s["output"] = ref(memberB) }, "output must not be one of the members"},
+			{"output is a member, domain given", func(s map[string]any) {
+				s["members"] = []any{ref(memberA), map[string]any{"flowID": output, "domain": "studio"}}
+				s["output"] = map[string]any{"flowID": output, "domain": "studio"}
+			}, "output must not be one of the members"},
+			{"output id in another domain than the member", func(s map[string]any) {
+				s["members"] = []any{ref(memberA), map[string]any{"flowID": output, "domain": "studio"}}
+			}, ""},
 		}
 		for i, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {

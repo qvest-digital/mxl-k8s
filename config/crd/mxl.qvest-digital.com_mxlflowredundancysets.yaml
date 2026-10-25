@@ -74,6 +74,9 @@ spec:
               geometry and rate, with indices anchored to the same epoch, as two
               copies of one source over separate paths or two producers locked to
               one reference are.
+
+              The output is none of the members: a gateway building the output
+              replaces whatever directory holds its id.
             properties:
               granularity:
                 default: Grain
@@ -148,6 +151,10 @@ spec:
             - members
             - output
             type: object
+            x-kubernetes-validations:
+            - message: output must not be one of the members
+              rule: '!self.members.exists(m, m.flowID == self.output.flowID && has(m.domain)
+                == has(self.output.domain) && (!has(m.domain) || m.domain == self.output.domain))'
           status:
             description: MxlFlowRedundancySetStatus reports where the output is served.
             properties:

@@ -51,6 +51,10 @@ type RedundancyFlowRef struct {
 // geometry and rate, with indices anchored to the same epoch, as two
 // copies of one source over separate paths or two producers locked to
 // one reference are.
+//
+// The output is none of the members: a gateway building the output
+// replaces whatever directory holds its id.
+// +kubebuilder:validation:XValidation:rule="!self.members.exists(m, m.flowID == self.output.flowID && has(m.domain) == has(self.output.domain) && (!has(m.domain) || m.domain == self.output.domain))",message="output must not be one of the members"
 type MxlFlowRedundancySetSpec struct {
 	// Members are the flows the output is served from, in order of
 	// preference. At most seven: a merged flow selects among its members
