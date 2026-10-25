@@ -255,27 +255,49 @@ func run(args []string) error {
 		}
 	}
 
+	scanner := &observed.Scanner{Domains: func() map[string]string {
+		domainsMu.Lock()
+		doms := current
+		domainsMu.Unlock()
+		byDev := map[string]string{}
+		if dev, err := observed.Device(cfg.DomainPath); err == nil {
+			byDev[dev] = ""
+		}
+		for dir, name := range doms.ByDir {
+			if dev, err := observed.Device(filepath.Join(doms.Root, dir)); err == nil {
+				byDev[dev] = name
+			}
+		}
+		return byDev
+	}}
+	if sets != nil {
+		ns, _ := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+		inUse := func() (map[mxlv1alpha1.FlowRef]bool, error) {
+			return flowsInUse(ctx, kClient, cfg.NodeName, strings.TrimSpace(string(ns)), scanner.Scan)
+		}
+		go func() {
+			t := time.NewTicker(10 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+				}
+				if err := sets.Release(ctx, inUse, redundancy.ReleaseGrace); err != nil {
+					setupLog.Error(err, "release unused redundancy set outputs")
+				}
+			}
+		}()
+	}
+
 	if cfg.ClaimStatusLabel != "" {
 		claims := &observed.ClaimWriter{
 			Client:   kClient,
 			NodeName: cfg.NodeName,
 			Label:    cfg.ClaimStatusLabel,
 			Log:      ctrl.Log.WithName("observed"),
-			Scanner: &observed.Scanner{Domains: func() map[string]string {
-				domainsMu.Lock()
-				doms := current
-				domainsMu.Unlock()
-				byDev := map[string]string{}
-				if dev, err := observed.Device(cfg.DomainPath); err == nil {
-					byDev[dev] = ""
-				}
-				for dir, name := range doms.ByDir {
-					if dev, err := observed.Device(filepath.Join(doms.Root, dir)); err == nil {
-						byDev[dev] = name
-					}
-				}
-				return byDev
-			}},
+			Scanner:  scanner,
 		}
 		go claims.Run(ctx, 10*time.Second)
 	}
@@ -509,6 +531,37 @@ func ours(pods interface {
 		pod, err := pods.PodForPID(ctx, pid)
 		return err == nil && pod.Namespace == namespace && ownComponents[pod.Labels["app.kubernetes.io/component"]]
 	}
+}
+
+// flowsInUse returns the flows processes on this node map, leaving out
+// mxl-k8s's own: the gateway writing a merged output and the exporter
+// reading every flow would otherwise keep each output in use for good.
+func flowsInUse(ctx context.Context, c client.Client, node, namespace string,
+	scan func() (map[string][]observed.Use, error)) (map[mxlv1alpha1.FlowRef]bool, error) {
+	uses, err := scan()
+	if err != nil {
+		return nil, err
+	}
+	var pods corev1.PodList
+	if err := c.List(ctx, &pods, client.MatchingFields{"spec.nodeName": node}); err != nil {
+		return nil, err
+	}
+	own := map[string]bool{}
+	for _, p := range pods.Items {
+		if p.Namespace == namespace && ownComponents[p.Labels["app.kubernetes.io/component"]] {
+			own[string(p.UID)] = true
+		}
+	}
+	out := map[mxlv1alpha1.FlowRef]bool{}
+	for uid, us := range uses {
+		if own[uid] {
+			continue
+		}
+		for _, u := range us {
+			out[mxlv1alpha1.FlowRef{Domain: u.Domain, ID: u.FlowID}] = true
+		}
+	}
+	return out, nil
 }
 
 // runMxlfs starts what a domain on mxlfs needs beyond fanotify on the
