@@ -45,6 +45,7 @@ func TestMxlfsComponentsOnlyWithMxlfs(t *testing.T) {
 	assert.Empty(t, mxlfsComponents(false, nil, "n1", &instance.Set{}, target))
 	assert.Nil(t, target.Filled)
 	assert.Nil(t, target.Unfilled)
+	assert.Nil(t, target.Retire, "without mxlfs a target never replaces a directory of another geometry")
 	assert.Nil(t, target.SamplesCommitted)
 
 	var names []string
@@ -54,6 +55,7 @@ func TestMxlfsComponentsOnlyWithMxlfs(t *testing.T) {
 	assert.ElementsMatch(t, []string{"redundancy set reconciler", "placeholder reconciler"}, names)
 	assert.NotNil(t, target.Filled)
 	assert.NotNil(t, target.Unfilled)
+	assert.NotNil(t, target.Retire)
 	assert.NotNil(t, target.SamplesCommitted)
 }
 

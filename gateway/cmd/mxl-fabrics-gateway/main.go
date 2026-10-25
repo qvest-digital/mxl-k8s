@@ -316,6 +316,7 @@ func mxlfsComponents(on bool, c client.Client, node string, domains *instance.Se
 	}
 	target.Filled = placeholders.Filled
 	target.Unfilled = placeholders.Unfilled
+	target.Retire = placeholders.Retire
 
 	// Redundancy sets whose output a reader wants on this node.
 	sets := &merge.Reconciler{

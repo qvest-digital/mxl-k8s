@@ -32,6 +32,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/mxlfs"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/placeholder"
 )
 
 // TargetFinalizerName is the finalizer the target-side reconciler
@@ -273,6 +274,14 @@ type TargetReconciler struct {
 	// placeholder there becomes a published copy. Nil leaves it out.
 	Filled func(domain, id string)
 
+	// Retire is told, with the domain directory and the flow id, before a
+	// target replaces a directory laid out in another geometry than the
+	// flow's definition, so a placeholder held there is released first.
+	// It is set with --mxlfs, and only then is a live target whose ring
+	// no longer matches the flow's definition replaced. Nil leaves both
+	// out.
+	Retire func(domain, id string)
+
 	// TeardownGrace bounds how long a teardown waits for the per-mirror
 	// goroutines it cancelled to return before giving up on releasing
 	// their libmxl handles. Defaults to defaultTeardownGrace.
@@ -353,6 +362,9 @@ type targetEntry struct {
 	// flow serialises commits into the local flow with every other
 	// entry writing it; see sharedFlow.
 	flow *sharedFlow
+
+	// def is the flow definition the entry was opened with.
+	def string
 
 	// commits counts grains the progress loop has committed, and
 	// arrivals of grains a sibling mirror of the flow committed shortly
@@ -623,6 +635,9 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// recent commits means the fabric side has likely died silently
 	// (no fatal ReadGrain error to trigger recoverFromFatalError) and
 	// the flow file in the consumer pod is no longer being filled.
+	if r.Retire != nil {
+		r.replaceOtherGeometry(ctx, req.NamespacedName, mirror.Ref().Name())
+	}
 	r.mu.Lock()
 	live := r.targets[req.NamespacedName] != nil
 	r.mu.Unlock()
@@ -698,6 +713,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 	entry.domain = mirror.Spec.Domain
 	entry.flowID = mirror.Spec.FlowID
+	entry.def = string(flow.Spec.Definition.Raw)
 	entry.peerNode = mirror.Spec.SourceNode
 	r.targets[req.NamespacedName] = entry
 	delete(r.attempts, req.NamespacedName)
@@ -762,6 +778,9 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef 
 			}
 			if n > 0 {
 				return nil, fmt.Errorf("%w: %w", errOpenWriterFailed, errLocalWriter)
+			}
+			if err := clearOtherGeometry(filepath.Join(handles.DomainPath(), id+".mxl-flow"), flowDef, r.Retire); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -1390,6 +1409,62 @@ func commitArrivedSamples(writer *mxl.Writer, head uint64, count int) (uint64, e
 // errLocalWriter is why a target does not open on a flow a process on
 // this node already writes.
 var errLocalWriter = errors.New("a process on this node writes the flow")
+
+// errOtherGeometry is why a target does not open yet on a directory
+// laid out in another geometry that a writer here still holds.
+var errOtherGeometry = errors.New("the flow directory here has another geometry and a writer still holds it")
+
+// clearOtherGeometry removes the flow directory dir when it was laid out
+// from a definition of another geometry than def. libmxl opens a flow
+// that exists as it is, so the target would otherwise write the flow
+// into a ring of the old layout. A placeholder held there is retired
+// first; a directory another writer still holds is left, and the open
+// fails until it is released.
+func clearOtherGeometry(dir, def string, retire func(domain, id string)) error {
+	onDisk, err := os.ReadFile(filepath.Join(dir, "flow_def.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err == nil && placeholder.SameGeometry(onDisk, []byte(def)) {
+		return nil
+	}
+	if retire != nil {
+		retire(filepath.Dir(dir), strings.TrimSuffix(filepath.Base(dir), ".mxl-flow"))
+	}
+	n, err := flowlocks.Writers(filepath.Join(dir, "data"))
+	if err != nil {
+		return fmt.Errorf("check writers of %s: %w", dir, err)
+	}
+	if n > 0 {
+		return errOtherGeometry
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove %s: %w", dir, err)
+	}
+	return nil
+}
+
+// replaceOtherGeometry closes the live target of key when the flow's
+// definition has since changed geometry: the producer came back in
+// another layout, and the ring the target registered can only take the
+// old one. The open that follows lays the flow out anew.
+func (r *TargetReconciler) replaceOtherGeometry(ctx context.Context, key types.NamespacedName, flowName string) {
+	r.mu.Lock()
+	entry := r.targets[key]
+	r.mu.Unlock()
+	if entry == nil || entry.def == "" {
+		return
+	}
+	var flow mxlv1alpha1.MxlFlow
+	if err := r.Get(ctx, types.NamespacedName{Name: flowName}, &flow); err != nil || len(flow.Spec.Definition.Raw) == 0 {
+		return
+	}
+	if placeholder.SameGeometry([]byte(entry.def), flow.Spec.Definition.Raw) {
+		return
+	}
+	log.FromContext(ctx).Info("flow changed geometry; replacing the target", "flow", flowName)
+	r.closeEntry(key, r.localFlowDisposition(ctx, flowName))
+}
 
 // flowIDFromDef reads the id a flow definition carries.
 func flowIDFromDef(def string) (string, bool) {
