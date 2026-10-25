@@ -702,7 +702,8 @@ func trustedWindow(t *testing.T, e *Engine, r *mxl.Reader) {
 	}
 	const batch = 480
 	length := e.audio.Pages * PageSamples
-	for end := (head-length/2)/batch*batch + 2*batch; end <= head; end += batch {
+	from := head - length/2 // the oldest sample readers trust
+	for end := (from+batch-1)/batch*batch + batch; end <= head; end += batch {
 		v, err := r.GetSamples(end, batch, 0)
 		if errors.Is(err, mxl.ErrOutOfRangeLate) {
 			continue
