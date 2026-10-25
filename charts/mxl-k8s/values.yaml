@@ -75,6 +75,33 @@ domains:
     # node.
     nodeSelector: {}
 
+# -- mxlfs, a memory filesystem for MXL domains, on every domain. Off,
+# every domain is a plain directory and the chart renders none of the
+# following.
+#
+# On, the agent mounts an mxlfs (mode=0777,wait=5000) on each domain
+# directory it materialises, before writing into it, and runs privileged
+# for Bidirectional propagation of the runtime root. A directory that is
+# already an mxlfs is left alone. Where the mount fails, as on a node
+# whose kernel has no mxlfs module, or where the directory already
+# holds flows, the domain stays a plain directory: the agent logs the
+# error and records a MxlfsUnavailable warning event on the Node.
+#
+# The agent, gateway and operator run with --mxlfs, which adds
+# placeholders for flows absent on a node, lazy ring allocation and
+# MxlFlowRedundancySets, with the RBAC they need; the CRD must be
+# installed. The gateway runs in the host PID namespace, so it sees the
+# flocks of local producers through /proc/locks. The gateway and the
+# exporter wait in an init container for mxlfs.ready, which the agent
+# writes to the runtime root once it has mounted or left plain the
+# domains known at its start, and see later mounts through
+# HostToContainer propagation. agent.csi.enabled requires this.
+mxlfs:
+  enabled: false
+  # -- Image of the init container that waits for mxlfs.ready. Needs a
+  # POSIX sh, test and sleep.
+  waitImage: busybox:1.38
+
 # -- Pre-delete lifecycle hooks. The domain wipe removes stale
 # .mxl-flow directories under gateway.flags.domainPath at chart
 # uninstall, because they live on a hostPath and survive namespace
@@ -333,9 +360,9 @@ agent:
   # -- CSI node plugin that delivers the domain to pods as an inline
   # ephemeral volume (driver mxl.qvest-digital.com), with the volume
   # attributes domain (an MxlDomain name; empty for the primary domain)
-  # and access (read or write). Mounting into pod volumes needs the
-  # agent container privileged, for Bidirectional mount propagation of
-  # the kubelet pods directory.
+  # and access (read or write). Requires mxlfs.enabled. A publish is
+  # refused, and retried by the kubelet, until the agent has mounted the
+  # domain or left it plain.
   csi:
     enabled: false
     # @schema
@@ -631,12 +658,6 @@ gateway:
   # embeds the host:port a peer dials; a CNI overlay IP would not be
   # reachable cross-node.
   hostNetwork: true
-  # -- Run the gateway in the host PID namespace. On an mxlfs domain the
-  # gateway counts the flocks local producers hold on a flow through
-  # /proc/locks, which lists only lock holders visible in the reader's
-  # PID namespace; without it a producer here goes unseen, and the
-  # gateway holds a placeholder over a flow that has an origin.
-  hostPID: true
   # @schema
   # enum: ["ClusterFirst", "ClusterFirstWithHostNet", "Default", "None"]
   # @schema

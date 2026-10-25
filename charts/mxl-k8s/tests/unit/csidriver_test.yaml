@@ -12,6 +12,7 @@ tests:
   - it: renders an ephemeral CSIDriver with pod info when enabled
     template: templates/csidriver.yaml
     set:
+      mxlfs.enabled: true
       agent.csi.enabled: true
     asserts:
       - isKind:
@@ -41,6 +42,7 @@ tests:
   - it: runs the plugin, a registrar and Bidirectional pod mounts when enabled
     template: templates/daemonset-agent.yaml
     set:
+      mxlfs.enabled: true
       agent.csi.enabled: true
     asserts:
       - contains:
@@ -61,3 +63,13 @@ tests:
       - contains:
           path: spec.template.spec.containers[1].args
           content: --kubelet-registration-path=/var/lib/kubelet/plugins/mxl.qvest-digital.com/csi.sock
+
+  # The plugin binds a domain the agent has mounted as mxlfs; without
+  # the agent mounting anything there is nothing for it to wait on.
+  - it: refuses the plugin without mxlfs
+    template: templates/daemonset-agent.yaml
+    set:
+      agent.csi.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: agent.csi.enabled requires mxlfs.enabled

@@ -16,8 +16,13 @@ rules:
     resources: [mxlflowmirrors/finalizers]
     verbs: [update]
   - apiGroups: [mxl.qvest-digital.com]
-    resources: [mxlflows, mxldomains, mxlflowredundancysets]
+    resources: [mxlflows, mxldomains]
     verbs: [get, list, watch]
+  {{- if .Values.mxlfs.enabled }}
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxlflowredundancysets]
+    verbs: [get, list, watch]
+  {{- end }}
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, list, watch]

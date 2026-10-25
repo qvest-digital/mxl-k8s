@@ -19,6 +19,8 @@ appears in the install snippets that follow.
   `FAN_REPORT_DFID_NAME`).
 - Prometheus Operator CRDs (`monitoring.coreos.com`) optional, only
   when `*.metrics.serviceMonitor.enabled=true`.
+- The mxlfs kernel module optional, only when `mxlfs.enabled=true`. A
+  node without it keeps plain domain directories.
 
 ## Install via Helm CLI
 
@@ -173,6 +175,7 @@ kubectl delete crd \
   mxldomains.mxl.qvest-digital.com \
   mxlflows.mxl.qvest-digital.com \
   mxlflowmirrors.mxl.qvest-digital.com \
+  mxlflowredundancysets.mxl.qvest-digital.com \
   mxlnodecapabilities.mxl.qvest-digital.com \
   mxlreceivers.mxl.qvest-digital.com
 ```

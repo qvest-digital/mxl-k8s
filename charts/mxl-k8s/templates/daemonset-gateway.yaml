@@ -68,7 +68,11 @@ spec:
     spec:
       serviceAccountName: {{ include "mxlk8s.serviceAccountName" (dict "Context" $ctx "component" "gateway" "values" $ctx.Values.gateway) }}
       hostNetwork: {{ $g.hostNetwork }}
-      hostPID: {{ $g.hostPID }}
+      {{- if $ctx.Values.mxlfs.enabled }}
+      # Local producers' flocks, read through /proc/locks, list only
+      # holders visible in the reader's PID namespace.
+      hostPID: true
+      {{- end }}
       dnsPolicy: {{ $g.dnsPolicy }}
       {{- with $ctx.Values.global.image.pullSecrets }}
       imagePullSecrets:
@@ -97,9 +101,14 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with $g.initContainers }}
+      {{- if or $ctx.Values.mxlfs.enabled $g.initContainers }}
       initContainers:
+        {{- if $ctx.Values.mxlfs.enabled }}
+        {{- include "mxlk8s.mxlfs.waitContainer" (dict "Context" $ctx "root" (dir $g.hostPath.domain)) | nindent 8 }}
+        {{- end }}
+        {{- with $g.initContainers }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
       containers:
         - name: gateway
@@ -107,6 +116,9 @@ spec:
           imagePullPolicy: {{ include "mxlk8s.imagePullPolicy" (dict "global" $ctx.Values.global "image" $g.image) }}
           args:
             {{- include "mxlk8s.flags.render" (dict "flags" $g.flags) | nindent 12 }}
+            {{- if $ctx.Values.mxlfs.enabled }}
+            - --mxlfs
+            {{- end }}
             {{- with $g.args }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -165,8 +177,15 @@ spec:
           volumeMounts:
             - name: mxl-domain
               mountPath: {{ $g.hostPath.domain }}
+              {{- if $ctx.Values.mxlfs.enabled }}
+              mountPropagation: HostToContainer
+              {{- end }}
             - name: mxl-domains
               mountPath: {{ $g.hostPath.domains }}
+              {{- if $ctx.Values.mxlfs.enabled }}
+              # The agent mounts each domains/<id> as it appears.
+              mountPropagation: HostToContainer
+              {{- end }}
             {{- if and $g.rdma.enabled $g.rdma.mountInfiniband }}
             - name: infiniband
               mountPath: {{ $g.rdma.infinibandHostPath }}
@@ -186,6 +205,12 @@ spec:
           hostPath:
             path: {{ $g.hostPath.domains }}
             type: {{ $g.hostPath.type }}
+        {{- if $ctx.Values.mxlfs.enabled }}
+        - name: mxl-run
+          hostPath:
+            path: {{ dir $g.hostPath.domain }}
+            type: {{ $g.hostPath.type }}
+        {{- end }}
         {{- if and $g.rdma.enabled $g.rdma.mountInfiniband }}
         - name: infiniband
           hostPath:

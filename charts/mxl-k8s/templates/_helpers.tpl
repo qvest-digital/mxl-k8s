@@ -239,3 +239,25 @@ one pointing at docs slightly ahead of the release.
 {{- define "mxlk8s.gateway.variantDocs" -}}
 https://github.com/qvest-digital/mxl-k8s/blob/main/docs/RDMA.md#clusters-whose-nodes-differ
 {{- end -}}
+
+{{/*
+Init container holding a pod until the agent has mounted the domains
+below the runtime root as mxlfs, or left them plain. A pod that opened a
+domain first would keep the directory beneath the mount. Mounts the
+volume "mxl-run", which has to be the runtime root.
+Call as: include "mxlk8s.mxlfs.waitContainer" (dict "Context" $ "root" "/run/mxl")
+*/}}
+{{- define "mxlk8s.mxlfs.waitContainer" -}}
+- name: wait-for-mxlfs
+  image: {{ .Context.Values.mxlfs.waitImage }}
+  command: ["sh", "-c", "until [ -e \"$0\" ]; do sleep 1; done", "{{ .root }}/mxlfs.ready"]
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  volumeMounts:
+    - name: mxl-run
+      mountPath: {{ .root }}
+      readOnly: true
+{{- end -}}

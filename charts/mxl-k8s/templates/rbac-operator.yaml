@@ -58,12 +58,14 @@ rules:
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxlreceivers]
     verbs: [get, list, patch, update, watch]
+  {{- if .Values.mxlfs.enabled }}
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxlflowredundancysets]
     verbs: [get, list, watch]
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxlflowredundancysets/status]
     verbs: [get, patch, update]
+  {{- end }}
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]

@@ -1,4 +1,7 @@
 {{- if .Values.agent.enabled }}
+{{- if and .Values.agent.csi.enabled (not .Values.mxlfs.enabled) }}
+{{- fail "agent.csi.enabled requires mxlfs.enabled" }}
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -67,6 +70,9 @@ spec:
           imagePullPolicy: {{ include "mxlk8s.imagePullPolicy" (dict "global" .Values.global "image" .Values.agent.image) }}
           args:
             {{- include "mxlk8s.flags.render" (dict "flags" .Values.agent.flags) | nindent 12 }}
+            {{- if .Values.mxlfs.enabled }}
+            - --mxlfs
+            {{- end }}
             {{- if .Values.agent.csi.enabled }}
             - --csi-endpoint=unix:///csi/csi.sock
             {{- end }}
@@ -94,7 +100,9 @@ spec:
           readinessProbe:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- if .Values.agent.csi.enabled }}
+          {{- if .Values.mxlfs.enabled }}
+          # Bidirectional mount propagation is only granted to a
+          # privileged container.
           securityContext:
             privileged: true
             runAsNonRoot: false
@@ -110,10 +118,10 @@ spec:
           volumeMounts:
             - name: mxl-run
               mountPath: {{ .Values.agent.hostPath.run }}
-              {{- if .Values.agent.csi.enabled }}
-              # Pods bind the domain through the plugin; a domain mounted
-              # on the node later has to reach the agent's view too.
-              mountPropagation: HostToContainer
+              {{- if .Values.mxlfs.enabled }}
+              # The mxlfs the agent mounts on each domain has to reach
+              # the host, and every pod that mounts the domain from it.
+              mountPropagation: Bidirectional
               {{- end }}
             {{- if .Values.agent.csi.enabled }}
             - name: csi-socket
