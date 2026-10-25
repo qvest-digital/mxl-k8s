@@ -148,15 +148,19 @@ func (s *Sets) Release(ctx context.Context, inUse func() (map[mxlv1alpha1.FlowRe
 	}
 	s.mu.Unlock()
 	for _, name := range idle {
-		if err := s.leave(ctx, name); err != nil {
+		if err := s.leave(ctx, name, grace); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// leave removes this node from the set's status.nodes.
-func (s *Sets) leave(ctx context.Context, name string) error {
+// leave removes this node from the set's status.nodes, unless the output
+// was used again within grace since Release found it idle. The check and
+// the update hold the lock Want records a use under: a Want that finds
+// the node still listed has then recorded its use before the check, and
+// one that comes after the update finds the node gone and adds it back.
+func (s *Sets) leave(ctx context.Context, name string, grace time.Duration) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var cur mxlv1alpha1.MxlFlowRedundancySet
 		if err := s.Client.Get(ctx, types.NamespacedName{Name: name}, &cur); err != nil {
@@ -164,6 +168,11 @@ func (s *Sets) leave(ctx context.Context, name string) error {
 		}
 		i := slices.Index(cur.Status.Nodes, s.NodeName)
 		if i < 0 {
+			return nil
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if last, ok := s.lastUsed[name]; ok && s.clock().Sub(last) < grace {
 			return nil
 		}
 		cur.Status.Nodes = slices.Delete(cur.Status.Nodes, i, i+1)

@@ -10,7 +10,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -126,4 +128,33 @@ func TestReleaseCountsOnlyTheOutputItself(t *testing.T) {
 	var got mxlv1alpha1.MxlFlowRedundancySet
 	require.NoError(t, s.Client.Get(ctx, types.NamespacedName{Name: set.Name}, &got))
 	require.Equal(t, []string{"node-b"}, got.Status.Nodes, "only this node leaves")
+}
+
+// A reader that waits for the output after Release found it idle, but
+// before this node leaves, finds the node still listed and adds nothing.
+// Leaving then would take the output away under the reader, so leave
+// checks the last use again.
+func TestReleaseStaysForAReaderThatArrivesWhileLeaving(t *testing.T) {
+	s, set := newSets(t, "node-a")
+	ctx := context.Background()
+	now := time.Unix(1000, 0)
+	s.now = func() time.Time { return now }
+	_, err := s.Want(ctx, "", out)
+	require.NoError(t, err)
+	now = now.Add(5 * time.Minute)
+
+	base := s.Client
+	s.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			// The reader's Want records its use as leave reads the set.
+			s.used(set.Name)
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	none := func() (map[mxlv1alpha1.FlowRef]bool, error) { return nil, nil }
+	require.NoError(t, s.Release(ctx, none, time.Minute))
+
+	var got mxlv1alpha1.MxlFlowRedundancySet
+	require.NoError(t, base.Get(ctx, types.NamespacedName{Name: set.Name}, &got))
+	require.Equal(t, []string{"node-a"}, got.Status.Nodes)
 }
