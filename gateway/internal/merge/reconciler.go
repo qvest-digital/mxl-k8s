@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -46,29 +47,39 @@ type Reconciler struct {
 }
 
 type running struct {
-	engine *Engine
-	uid    types.UID
-	gen    int64
-	domain string
-	def    []byte   // the flow definition the output was built from
-	seen   []uint64 // per spec member, its data file's inode at build; 0 for none
+	engine  *Engine
+	uid     types.UID
+	gen     int64
+	domain  string
+	def     []byte   // the flow definition the output was built from
+	seen    []uint64 // per spec member, its data file's inode at build; 0 for none
+	started []int    // the spec members the engine was started over
 }
 
 // serves reports whether cur still serves set as it stands: the same
 // object at the same generation, with no member directory appeared or
 // replaced since the engine was built. One removed is no reason to
 // rebuild: the engine keeps its ring mapped, which stops advancing, and
-// the other members serve.
+// the other members serve. Once every member it was started over is
+// gone, a member it left out, of another geometry, is the only one still
+// delivering, and the output is built again over it.
 func (cur *running) serves(set *mxlv1alpha1.MxlFlowRedundancySet) bool {
 	if cur == nil || cur.uid != set.UID || cur.gen != set.Generation {
 		return false
 	}
+	startedLeft, leftOut := false, false
 	for i, ino := range inodes(cur.domain, set.Spec.Members) {
-		if ino != 0 && ino != cur.seen[i] {
+		switch {
+		case ino == 0:
+		case ino != cur.seen[i]:
 			return false
+		case slices.Contains(cur.started, i):
+			startedLeft = true
+		default:
+			leftOut = true
 		}
 	}
-	return true
+	return startedLeft || !leftOut
 }
 
 // inodes returns, per member, the inode of its data file in domain, or 0
@@ -157,6 +168,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 	def := outputGeometry(prev, defs)
+	var started []int
 	for i, m := range set.Spec.Members {
 		switch {
 		case seen[i] == 0:
@@ -164,6 +176,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			l.Info("leaving out a member with no readable flow definition", "member", m.FlowID)
 		case placeholder.SameGeometry(def, defs[i]):
 			spec.Members = append(spec.Members, m.FlowID)
+			started = append(started, i)
 		default:
 			l.Info("leaving out a member of another geometry than the output", "member", m.FlowID)
 		}
@@ -192,7 +205,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if r.engines == nil {
 		r.engines = map[string]*running{}
 	}
-	r.engines[req.Name] = &running{engine: e, uid: set.UID, gen: set.Generation, domain: dir, def: def, seen: seen}
+	r.engines[req.Name] = &running{engine: e, uid: set.UID, gen: set.Generation, domain: dir, def: def, seen: seen,
+		started: started}
 	r.mu.Unlock()
 	l.Info("serving redundancy set", "output", spec.OutputID, "members", spec.Members)
 	return ctrl.Result{RequeueAfter: recheck}, nil

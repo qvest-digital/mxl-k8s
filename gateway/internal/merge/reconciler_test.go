@@ -187,6 +187,30 @@ func TestReconcilerRebuildsWithTheMembersOfTheOutputsGeometry(t *testing.T) {
 	require.Equal(t, []string{memberA, memberB}, (*started)[2], "both members in the new geometry")
 }
 
+// Once the members an engine serves from are all gone, a member it left
+// out for another geometry is the only one still delivering. Keeping the
+// engine would hold the output frozen on the gone members' rings; it is
+// built again over the one left, in that one's geometry.
+func TestReconcilerRebuildsOverALeftOutMemberOnceTheServedOnesAreGone(t *testing.T) {
+	started := fakeStart(t)
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+
+	small := strings.Replace(videoDef(memberA), `"frame_width":320`, `"frame_width":160`, 1)
+	memberDir(t, dir, memberA, small)
+	reconcileSet(t, r)
+	require.Equal(t, [][]string{{memberA, memberB}, {memberB}}, *started)
+
+	require.NoError(t, os.RemoveAll(flowDir(dir, memberB)))
+	reconcileSet(t, r)
+	require.Equal(t, [][]string{{memberA, memberB}, {memberB}, {memberA}}, *started,
+		"the output stayed on a gone member while a left-out one delivers")
+	require.Equal(t, small, string(r.engines["programme"].def))
+}
+
 // A view selects among pages of one superblock.
 func TestReconcilerRefusesAMemberInAnotherDomain(t *testing.T) {
 	set := wantedSet("reader")
@@ -213,7 +237,8 @@ func TestRunningEngineServesOnlyTheFlowsAndSetItWasBuiltFor(t *testing.T) {
 	f, err := os.Open(filepath.Join(flowDir(dir, memberA), "data"))
 	require.NoError(t, err)
 	t.Cleanup(func() { f.Close() })
-	cur := &running{engine: &Engine{}, uid: set.UID, gen: 1, domain: dir, seen: inodes(dir, set.Spec.Members)}
+	cur := &running{engine: &Engine{}, uid: set.UID, gen: 1, domain: dir, seen: inodes(dir, set.Spec.Members),
+		started: []int{0}}
 	require.True(t, cur.serves(set))
 
 	again := set.DeepCopy()
@@ -222,7 +247,7 @@ func TestRunningEngineServesOnlyTheFlowsAndSetItWasBuiltFor(t *testing.T) {
 
 	memberDir(t, dir, memberB, videoDef(memberB))
 	require.False(t, cur.serves(set), "a member that appeared is not served")
-	cur.seen = inodes(dir, set.Spec.Members)
+	cur.seen, cur.started = inodes(dir, set.Spec.Members), []int{0, 1}
 	require.True(t, cur.serves(set))
 
 	require.NoError(t, os.RemoveAll(flowDir(dir, memberA)))
