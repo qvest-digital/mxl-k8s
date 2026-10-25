@@ -94,3 +94,48 @@ func TestPublishAppeared_LeavesAnUnchangedDefinitionAlone(t *testing.T) {
 	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
 	assert.Zero(t, specUpdates.Load(), "same definition in another key order is not a change")
 }
+
+// Everything that acts on a new Origin -- the gateway building
+// placeholders on other nodes, the operator mirroring members of a
+// redundancy set -- reads the definition when the Origin location
+// appears. Written before the definition, the location had placeholders
+// built in the previous geometry, which a merge engine then mapped and
+// a reader of its output faulted on.
+func TestPublishAppeared_RefreshesTheDefinitionBeforeClaimingOrigin(t *testing.T) {
+	scheme := newScheme(t)
+	domain := t.TempDir()
+	flowDir := filepath.Join(domain, validFlowID+".mxl-flow")
+	require.NoError(t, os.Mkdir(flowDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(flowDir, FlowDefName),
+		[]byte(`{"id":"`+validFlowID+`","channel_count":16}`), 0o644))
+	existing := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: ObjectMeta(validFlowID),
+		Spec: mxlv1alpha1.MxlFlowSpec{ID: validFlowID,
+			Definition: runtime.RawExtension{Raw: []byte(`{"id":"` + validFlowID + `","channel_count":8}`)}},
+	}
+	var defAtOrigin string
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				f := obj.(*mxlv1alpha1.MxlFlow)
+				for _, l := range f.Status.Locations {
+					if l.Phase == mxlv1alpha1.MxlFlowLocationOrigin && defAtOrigin == "" {
+						var cur mxlv1alpha1.MxlFlow
+						require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(f), &cur))
+						defAtOrigin = string(cur.Spec.Definition.Raw)
+					}
+				}
+				return c.SubResource(sub).Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
+	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
+	require.NotEmpty(t, defAtOrigin, "no Origin location was written")
+	assert.JSONEq(t, `{"id":"`+validFlowID+`","channel_count":16}`, defAtOrigin,
+		"the Origin location appeared while the object still held the old definition")
+}

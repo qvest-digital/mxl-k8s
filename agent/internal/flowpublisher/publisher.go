@@ -195,6 +195,24 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 		}
 	}
 
+	// The object outlives its directory: a producer that comes back in
+	// a different format publishes a new flow directory under the same
+	// name, and Create above leaves the spec of an MxlFlow that already
+	// exists untouched. The object then describes a format
+	// nothing produces any more, and every consumer reading it -- a
+	// compositor sizing its tiles, an NMOS registry, a UI -- is told
+	// the wrong one. Only the Origin refreshes it: a mirror target's
+	// copy is not authoritative about what the flow is. It does so
+	// before claiming Origin, since placeholders and redundancy-set
+	// mirrors elsewhere are built from the definition the moment the
+	// Origin appears.
+	refreshed := phase == mxlv1alpha1.MxlFlowLocationOrigin
+	if refreshed {
+		if err := p.refreshDefinition(ctx, flowID, raw); err != nil {
+			l.Error(err, "refresh flow definition", "flowID", flowID)
+		}
+	}
+
 	now := metav1.Now()
 	// The phase actually written, not the one asked for: upsertLocation
 	// refuses to demote an Origin this node already claimed, so a
@@ -210,15 +228,9 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 			l.Error(err, "renew origin lease", "flowID", flowID)
 		}
 	}
-	// The object outlives its directory: a producer that comes back in
-	// a different format publishes a new flow directory under the same
-	// name, and Create above leaves the spec of an MxlFlow that already
-	// exists untouched. The object then describes a format
-	// nothing produces any more, and every consumer reading it -- a
-	// compositor sizing its tiles, an NMOS registry, a UI -- is told
-	// the wrong one. Only the Origin refreshes it: a mirror target's
-	// copy is not authoritative about what the flow is.
-	if written == mxlv1alpha1.MxlFlowLocationOrigin {
+	// A copy inferred to be a mirror target can come back out as the
+	// Origin this node already held.
+	if written == mxlv1alpha1.MxlFlowLocationOrigin && !refreshed {
 		if err := p.refreshDefinition(ctx, flowID, raw); err != nil {
 			l.Error(err, "refresh flow definition", "flowID", flowID)
 		}
