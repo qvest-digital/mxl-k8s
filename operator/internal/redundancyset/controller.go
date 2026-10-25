@@ -28,7 +28,7 @@ import (
 
 // Condition and reasons on a set.
 const (
-	ConditionValid       = "Valid"
+	ConditionValid       = mxlv1alpha1.ConditionTypeValid
 	ReasonMembersAligned = "MembersAligned"
 	ReasonMemberMissing  = "MemberMissing"
 	ReasonOtherDomain    = "MemberInOtherDomain"
