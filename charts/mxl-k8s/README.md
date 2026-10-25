@@ -42,12 +42,6 @@ helm show crds oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
 The FluxCD example below sets `upgrade.crds: CreateReplace`, which
 creates and updates them on every upgrade.
 
-Gateways are upgraded node by node, so a mirror's source and target can
-run different releases for a while. A gateway after 1.1.0-rc.25 sends a
-data grain with no valid slice as an empty one; a target gateway of
-1.1.0-rc.25 or earlier commits that grain as full, with whatever its
-slot held, until it is upgraded too.
-
 ## Install via FluxCD
 
 <!-- x-release-please-start-version -->
@@ -89,6 +83,14 @@ spec:
 Track `:dev` instead of a semver range by setting `version: ">=0.0.0-0"`
 on the HelmRelease. The chart is published as `0.0.0-dev+sha.<short>`
 on every merge to `main`; Helm encodes the `+` as `_` in the OCI tag.
+
+## Upgrading
+
+Gateways are upgraded node by node, so a mirror's source and target can
+run different releases for a while. A gateway after 1.1.0-rc.25 sends a
+data grain with no valid slice as an empty one; a target gateway of
+1.1.0-rc.25 or earlier commits that grain as full, with whatever its
+slot held, until it is upgraded too.
 
 ## Bundled image versions
 
