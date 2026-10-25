@@ -2,6 +2,7 @@ package merge
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/qvest-digital/go-mxl/mxl"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -100,16 +102,44 @@ func fakeStart(t *testing.T) *[][]string {
 }
 
 // memberDir creates flow id's directory in domain, as a copy, a
-// placeholder or a producer leaves it, in the geometry of def. It
-// replaces one there, with files of other inodes, as libmxl does.
+// placeholder or a producer leaves it, in the geometry of def and with
+// the ring of a domain of mxlfsDomain's history duration. It replaces
+// one there, with files of other inodes, as libmxl does.
 func memberDir(t *testing.T, domain, id, def string) {
+	t.Helper()
+	memberDirWith(t, domain, id, def, ringData(t, def, 400000000))
+}
+
+// memberDirWith is memberDir with data as the ring's data file.
+func memberDirWith(t *testing.T, domain, id, def string, data []byte) {
 	t.Helper()
 	tmp, err := os.MkdirTemp(domain, ".tmp-")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(tmp, "flow_def.json"), []byte(def), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(tmp, "data"), nil, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "data"), data, 0o644))
 	require.NoError(t, os.RemoveAll(flowDir(domain, id)))
 	require.NoError(t, os.Rename(tmp, flowDir(domain, id)))
+}
+
+// ringData returns the data file libmxl writes for def in a domain of
+// history nanoseconds: the ring's depth comes from the domain, not from
+// the flow's definition.
+func ringData(t *testing.T, def string, history int) []byte {
+	t.Helper()
+	domain := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(domain, "options.json"),
+		[]byte(fmt.Sprintf(`{"urn:x-mxl:option:history_duration/v1.0": %d}`, history)), 0o644))
+	inst, err := mxl.NewInstance(domain, "")
+	require.NoError(t, err)
+	defer inst.Close()
+	w, _, err := inst.NewWriter(def)
+	require.NoError(t, err)
+	defer w.Close()
+	var flow struct{ ID string }
+	require.NoError(t, json.Unmarshal([]byte(def), &flow))
+	data, err := os.ReadFile(filepath.Join(flowDir(domain, flow.ID), "data"))
+	require.NoError(t, err)
+	return data
 }
 
 // Before any member has a directory here there is nothing to serve
@@ -499,4 +529,84 @@ func TestReconcilerStopsTryingARingItCannotOpen(t *testing.T) {
 	require.Len(t, *asked, maxRetries+1)
 	require.Equal(t, [][]string{{memberA, memberB}, {memberA}}, *started,
 		"the output stayed on a gone member's ring while the other could not be opened")
+}
+
+// alignedStart is startWithSpec that opens the members' rings and
+// refuses them as Start does when they cannot be opened or merged slot
+// for slot.
+func alignedStart(t *testing.T) *[][]string {
+	t.Helper()
+	var started [][]string
+	orig := start
+	start = func(_ context.Context, spec Spec, _ logr.Logger) (*Engine, error) {
+		e := &Engine{spec: spec, outDir: flowDir(spec.DomainDir, spec.OutputID)}
+		defer e.release()
+		for _, id := range spec.Members {
+			h, f, err := mapHeader(filepath.Join(flowDir(spec.DomainDir, id), "data"), false)
+			if err != nil {
+				return nil, err
+			}
+			e.members, e.files = append(e.members, h), append(e.files, f)
+		}
+		if err := e.checkAligned(); err != nil {
+			return nil, err
+		}
+		started = append(started, spec.Members)
+		return &Engine{spec: spec, outDir: e.outDir}, nil
+	}
+	t.Cleanup(func() { start = orig })
+	return &started
+}
+
+// A member restarted after the domain's history duration changed has a
+// ring of another depth, which its definition does not show, and cannot
+// take its old place. The output is built again, and the engine cannot
+// start over rings of two depths: it is built over the member still in
+// the output's, and over the restarted one once that one is gone, rather
+// than over none.
+func TestReconcilerLeavesOutAMemberOfAnotherRingDepth(t *testing.T) {
+	started := alignedStart(t)
+	dir := t.TempDir()
+	asked := fakeReplace(t, dir, fmt.Errorf("%w: 10 grains, the output 20", ErrOtherLayout), nil)
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+	// The engine keeps each member file open, so its inode is not reused.
+	f, err := os.Open(filepath.Join(flowDir(dir, memberA), "data"))
+	require.NoError(t, err)
+	t.Cleanup(func() { f.Close() })
+
+	memberDirWith(t, dir, memberA, videoDef(memberA), ringData(t, videoDef(memberA), 200000000))
+	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter)
+	require.Equal(t, []int{0}, *asked)
+	require.Equal(t, [][]string{{memberA, memberB}, {memberB}}, *started,
+		"the output was not built over the member still in its ring depth")
+	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter)
+	require.Len(t, *started, 2, "the output was built again with nothing changed")
+
+	require.NoError(t, os.RemoveAll(flowDir(dir, memberB)))
+	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter)
+	require.Equal(t, [][]string{{memberA, memberB}, {memberB}, {memberA}}, *started,
+		"the output stayed on a gone member while one of another ring depth delivers")
+}
+
+// A member whose ring cannot be opened, a data file not yet whole, would
+// fail the engine's start and with it the output. It is left out, and
+// taken once a whole ring is in its directory.
+func TestReconcilerLeavesOutAMemberWhoseRingCannotBeOpened(t *testing.T) {
+	started := alignedStart(t)
+	dir := t.TempDir()
+	memberDirWith(t, dir, memberA, videoDef(memberA), nil)
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+
+	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter)
+	require.Equal(t, [][]string{{memberB}}, *started, "the output was not built over the member that can be opened")
+	reconcileSet(t, r)
+	require.Len(t, *started, 1, "the output was built again with nothing changed")
+
+	memberDir(t, dir, memberA, videoDef(memberA))
+	reconcileSet(t, r)
+	require.Equal(t, [][]string{{memberB}, {memberA, memberB}}, *started)
 }

@@ -734,6 +734,18 @@ func (h *header) layout() string {
 	return fmt.Sprintf("format %d at %d/%d, %d grains", h.format(), r.numerator, r.denominator, h.discrete())
 }
 
+// ringLayout returns the layout of the ring in flow id's directory in
+// domain. Two rings are aligned when their layouts are equal.
+func ringLayout(domain, id string) (string, error) {
+	h, f, err := mapHeader(filepath.Join(flowDir(domain, id), "data"), false)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	defer func() { _ = unix.Munmap(h.mem) }()
+	return h.layout(), nil
+}
+
 // aligned reports whether member m's ring has the layout of ref's.
 func aligned(ref, m *header) bool {
 	if m.format() != ref.format() || m.info.config.common.grainRate != ref.info.config.common.grainRate {

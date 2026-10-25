@@ -33,10 +33,11 @@ type Domains interface {
 // is wanted on this node.
 //
 // An engine starts over the members that have a directory here, a copy
-// or the gateway's placeholder, and agree with the output's geometry: a
-// view slot only ever selects a member that delivered the grain, so a
-// placeholder's unallocated ring is never mapped through the output, and
-// a mirror filling it later is seen through the same files. A member
+// or the gateway's placeholder, and agree with the output's geometry and
+// ring layout: a view slot only ever selects a member that delivered the
+// grain, so a placeholder's unallocated ring is never mapped through the
+// output, and a mirror filling it later is seen through the same files.
+// A member whose ring cannot be opened is left out as well. A member
 // that goes away for good, its producer gone and its placeholder or copy
 // with it, leaves the engine serving from the others; one that comes back
 // in a new directory is put in place of its old ring.
@@ -55,6 +56,7 @@ type running struct {
 	gen     int64
 	domain  string
 	def     []byte   // the flow definition the output was built from
+	layout  string   // the ring layout it was built in
 	seen    []uint64 // per spec member, its data file's inode at build; 0 for none
 	started []int    // the spec members the engine was started over
 	failed  bool     // a Replace failed, which may leave the engine half replaced
@@ -73,8 +75,8 @@ type running struct {
 // opened keeps the engine as well. One removed is no reason to
 // rebuild: the engine keeps its ring mapped, which stops advancing, and
 // the other members serve. Once every member it was started over is
-// gone, a member it left out, of another geometry, is the only one still
-// delivering, and the output is built again over it.
+// gone, a member it left out, of another geometry or ring layout, is
+// the only one still delivering, and the output is built again over it.
 func (cur *running) serves(set *mxlv1alpha1.MxlFlowRedundancySet) bool {
 	if cur == nil || cur.failed || cur.uid != set.UID || cur.gen != set.Generation {
 		return false
@@ -218,8 +220,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{RequeueAfter: recheck}, nil
 	}
 	var prev []byte
+	var prevLayout string
 	if cur != nil {
-		prev = cur.def
+		prev, prevLayout = cur.def, cur.layout
 	}
 	r.stop(req.Name) // a changed spec or member builds a new output
 
@@ -254,18 +257,40 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 	def := outputGeometry(prev, defs)
-	var started []int
+	// The flow definition does not carry a ring's depth, which comes from
+	// the domain's history duration: members of one geometry differ in it
+	// once that duration changed between their starts. A ring the engine
+	// cannot open, or cannot align with the others, fails its start and
+	// with it the output; it is left out instead, as a member of another
+	// geometry is.
+	var agree []int
+	layouts := make([]string, len(set.Spec.Members))
 	for i, m := range set.Spec.Members {
 		switch {
 		case seen[i] == 0:
 		case defs[i] == nil:
 			l.Info("leaving out a member with no readable flow definition", "member", m.FlowID)
-		case placeholder.SameGeometry(def, defs[i]):
-			spec.Members = append(spec.Members, m.FlowID)
-			started = append(started, i)
-		default:
+		case !placeholder.SameGeometry(def, defs[i]):
 			l.Info("leaving out a member of another geometry than the output", "member", m.FlowID)
+		default:
+			var err error
+			if layouts[i], err = ringLayout(dir, m.FlowID); err != nil {
+				l.Info("leaving out a member whose ring cannot be opened", "member", m.FlowID, "error", err.Error())
+				continue
+			}
+			agree = append(agree, i)
 		}
+	}
+	layout := outputLayout(prevLayout, agree, layouts)
+	var started []int
+	for _, i := range agree {
+		if layouts[i] != layout {
+			l.Info("leaving out a member of another ring layout than the output", "member", set.Spec.Members[i].FlowID,
+				"layout", layouts[i], "output", layout)
+			continue
+		}
+		spec.Members = append(spec.Members, set.Spec.Members[i].FlowID)
+		started = append(started, i)
 	}
 	if len(spec.Members) == 0 {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
@@ -291,8 +316,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if r.engines == nil {
 		r.engines = map[string]*running{}
 	}
-	r.engines[req.Name] = &running{engine: e, uid: set.UID, gen: set.Generation, domain: dir, def: def, seen: seen,
-		started: started}
+	r.engines[req.Name] = &running{engine: e, uid: set.UID, gen: set.Generation, domain: dir, def: def,
+		layout: layout, seen: seen, started: started}
 	r.mu.Unlock()
 	l.Info("serving redundancy set", "output", spec.OutputID, "members", spec.Members)
 	return ctrl.Result{RequeueAfter: recheck}, nil
@@ -316,6 +341,22 @@ func outputGeometry(prev []byte, defs [][]byte) []byte {
 		}
 	}
 	return first
+}
+
+// outputLayout is the ring layout the output is built in, of the members
+// cands in order of preference: the one it was built in before while one
+// of them still has it, as outputGeometry keeps the geometry; else the
+// first's.
+func outputLayout(prev string, cands []int, layouts []string) string {
+	for _, i := range cands {
+		if layouts[i] == prev {
+			return prev
+		}
+	}
+	if len(cands) == 0 {
+		return ""
+	}
+	return layouts[cands[0]]
 }
 
 // valid reports whether the operator found the set's members mergeable
