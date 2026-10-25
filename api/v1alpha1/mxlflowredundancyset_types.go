@@ -104,7 +104,9 @@ type MxlFlowRedundancySetStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// Conditions: Valid reports whether the members can be merged.
+	// Conditions: Valid reports whether the members can be merged,
+	// MembersReady whether every member is produced in the output's
+	// geometry.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -129,9 +131,11 @@ type MxlFlowRedundancySetStatus struct {
 // a member that still holds it, or to an INVALID grain, at every grain
 // boundary; a gateway that gets no CPU for longer than a grain can leave
 // the oldest grain of the output reading the next ring period's picture.
-// Readers at the output's head are unaffected. A member that changes
+// Readers at the output's head are unaffected. A member that goes away
+// leaves the output to the others. One that comes back or changes
 // geometry, or a set created again, builds the output again, and its
-// readers have to reopen it.
+// readers have to reopen it; a member whose geometry differs from the
+// output's is left out of it while another member keeps that geometry.
 type MxlFlowRedundancySet struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
