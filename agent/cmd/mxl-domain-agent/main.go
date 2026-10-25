@@ -486,7 +486,9 @@ type trackerMxlfs struct {
 // start tracks the flows of the domain name in dir: the same fanotify
 // mark, flow publisher and lease loops the primary domain gets, and on
 // mxlfs what runMxlfs starts. It returns once all of it is in place, so a
-// domain is reported mirrored only when its flows are being tracked.
+// domain is reported mirrored only when its flows are being tracked. When
+// any of it fails, what started ends, the leases the initial sync took
+// are released, and the error leaves the domain for the next sync.
 func (d domainTracking) start(ctx context.Context, name, dir string) (tracker.Tracker, error) {
 	l := ctrl.Log.WithName("tracker").WithValues("domain", name, "directory", dir)
 	fp := &flowpublisher.Publisher{
@@ -514,12 +516,21 @@ func (d domainTracking) start(ctx context.Context, name, dir string) (tracker.Tr
 	wg.Add(2)
 	go func() { defer wg.Done(); fp.RunRenewLoop(tctx, originlease.DefaultRenewInterval) }()
 	go func() { defer wg.Done(); fp.RunLocalRescan(tctx, 30*time.Second) }()
+	// The node no longer serves this domain's flows as their origin.
+	release := func() {
+		rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer rcancel()
+		if err := fp.ReleaseAll(rctx); err != nil {
+			l.Error(err, "releasing leases")
+		}
+	}
 	waitMxlfs := func() {}
 	if onMxlfs {
 		if waitMxlfs, err = d.Mxlfs.Run(tctx, dir, fp); err != nil {
 			cancel()
 			wg.Wait()
 			waitWatch()
+			release()
 			return tracker.Tracker{}, err
 		}
 	}
@@ -530,12 +541,7 @@ func (d domainTracking) start(ctx context.Context, name, dir string) (tracker.Tr
 		wg.Wait()
 		waitWatch()
 		waitMxlfs()
-		// The node no longer serves this domain's flows as their origin.
-		rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer rcancel()
-		if err := fp.ReleaseAll(rctx); err != nil {
-			l.Error(err, "releasing leases")
-		}
+		release()
 		l.Info("stopped tracking domain")
 	}
 	return tracker.Tracker{Stop: stop, ClaimOrigin: fp.ClaimOrigin}, nil

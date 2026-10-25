@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -172,15 +174,31 @@ func TestTrackerRunsMxlfsForATrackedDomainOnMxlfs(t *testing.T) {
 	assert.Nil(t, watched[plain].IsOutput)
 }
 
+type leases struct{ released []string }
+
+func (l *leases) Renew(context.Context, string) error { return nil }
+
+func (l *leases) Release(_ context.Context, key string) error {
+	l.released = append(l.released, key)
+	return nil
+}
+
 // A tracked domain whose mxlfs handling cannot start is not tracked:
-// the manager retries it on the next sync, and the flow watch already
-// started ends.
+// the manager retries it on the next sync, the flow watch already
+// started ends, and the node gives up the leases of the flows the
+// initial sync found, as a stopped tracker does, rather than leave them
+// to run out unrenewed.
 func TestTrackerFailsWhenMxlfsCannotStart(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	dir := t.TempDir()
+	const id = "55555555-5555-4555-8555-555555555555"
+	require.NoError(t, os.Mkdir(filepath.Join(dir, id+".mxl-flow"), 0o755))
+	held := &leases{}
 	var watchCtx context.Context
 	tracking := domainTracking{
 		Client: c,
 		Node:   "n1",
+		Lease:  held,
 		WatchFlows: func(ctx context.Context, _ string, _ *flowpublisher.Publisher) (func(), error) {
 			watchCtx = ctx
 			return func() {}, nil
@@ -194,9 +212,10 @@ func TestTrackerFailsWhenMxlfsCannotStart(t *testing.T) {
 		},
 	}
 
-	_, err := tracking.start(context.Background(), "studio", t.TempDir())
+	_, err := tracking.start(context.Background(), "studio", dir)
 	require.Error(t, err)
 	assert.Error(t, watchCtx.Err())
+	assert.Equal(t, []string{mxlv1alpha1.FlowRef{Domain: "studio", ID: id}.Name()}, held.released)
 }
 
 // Every watch of a domain on mxlfs is set up before runMxlfs returns. On
