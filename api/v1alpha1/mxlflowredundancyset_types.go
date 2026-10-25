@@ -93,6 +93,8 @@ type MxlFlowRedundancySetSpec struct {
 type MxlFlowRedundancySetStatus struct {
 	// Nodes are the nodes a reader asked for the output on. The gateway
 	// on each serves it, from member mirrors the operator creates there.
+	// A node's agent removes it once no reader there has used the output
+	// for a minute; the operator removes a node that is deleted.
 	// +optional
 	// +listType=set
 	Nodes []string `json:"nodes,omitempty"`
