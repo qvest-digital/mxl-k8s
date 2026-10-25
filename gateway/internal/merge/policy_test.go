@@ -252,6 +252,27 @@ func TestAudioSilencesAPageNoMemberHoldsWhole(t *testing.T) {
 	require.NotEqual(t, 2, a.Current[49%a.Pages])
 }
 
+// Mirrored members commit a grain after its period, so in steady state the
+// output's head sits one grain behind the index due. A member writes the
+// due index next, into a slot the output no longer offers, so nothing may
+// move: every select zaps the slot in every reader's mapping.
+func TestDiscreteRetiresNothingWhileTheOutputTrailsTheClockByOne(t *testing.T) {
+	const grains = 20
+	a, b := newRing(grains), newRing(grains)
+	d := NewDiscrete(grains, 2)
+	d.Ordered, d.Skew = true, 8
+	now := time.Unix(0, 0)
+	for i := uint64(100); i < 160; i++ {
+		a.commit(i)
+		b.commit(i)
+		ms := []Member{a.member(), b.member()}
+		now = now.Add(20 * time.Millisecond)
+		d.Step(ms, now)
+		require.Equal(t, i, d.Head)
+		require.Empty(t, d.Retire(ms, i+1), "an output one grain behind the clock moved slots at index %d", i)
+	}
+}
+
 // While an index both members dropped holds the output back by up to the
 // skew, the members keep writing, each grain into the slot of the index
 // a ring period back. Every grain the output still offers its readers
@@ -278,7 +299,11 @@ func TestDiscreteRetiresSlotsTheMembersOverwriteWhileItLags(t *testing.T) {
 		}
 		retired += len(sel)
 
-		// The members' next grain lands before the next pass.
+		// The engine passes at the boundary to i+1, then the members
+		// write i+1, at the clock.
+		now = now.Add(time.Microsecond)
+		d.Step(ms, now)
+		retired += len(d.Retire(ms, i+1))
 		next := map[*ring]Grain{}
 		for _, r := range []*ring{a, b} {
 			next[r] = r.slots[uint((i+1)%grains)]

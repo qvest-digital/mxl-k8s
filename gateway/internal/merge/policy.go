@@ -150,8 +150,9 @@ func (d *Discrete) Step(members []Member, now time.Time) (selects []Select, head
 
 // overwrites reports whether m may write index next before the engine's
 // next pass: the grain after its head, or, writing at the clock after a
-// loss, the one after the index due now.
-func overwrites(m Member, due, next uint64) bool { return max(m.Head, due)+1 >= next }
+// loss, the index due now. The engine passes at every grain boundary, so
+// the clock moves no further before it looks again.
+func overwrites(m Member, due, next uint64) bool { return max(m.Head+1, due) >= next }
 
 // Retire returns the selects that keep the output's oldest grains true
 // while it lags its members. Readers trust every index from
@@ -164,13 +165,13 @@ func overwrites(m Member, due, next uint64) bool { return max(m.Head, due)+1 >= 
 func (d *Discrete) Retire(members []Member, due uint64) (selects []Select) {
 	reach := due
 	for _, m := range members {
-		reach = max(reach, m.Head)
+		reach = max(reach, m.Head+1)
 	}
 	from := uint64(1)
 	if d.Head+2 > uint64(d.Grains) {
 		from = d.Head + 2 - uint64(d.Grains)
 	}
-	for i := from; i <= d.Head && i+uint64(d.Grains) <= reach+1; i++ {
+	for i := from; i <= d.Head && i+uint64(d.Grains) <= reach; i++ {
 		slot := uint(i % uint64(d.Grains))
 		cur := d.Current[slot]
 		if cur == d.Placeholder || !overwrites(members[cur], due, i+uint64(d.Grains)) {

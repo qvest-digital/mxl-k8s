@@ -540,13 +540,14 @@ func (e *Engine) run(ctx context.Context) {
 			}
 			var sel []Select
 			sel, head, wait = e.disc.Step(ms, now)
-			// Retire looks one grain past the clock, so the engine must
-			// pass at least once a grain.
-			timeout = min(timeout, e.period)
+			// Retire looks as far as the index due, so the engine must
+			// pass at every grain boundary.
+			due := mxl.CurrentIndex(e.mxlRate())
+			timeout = min(timeout, time.Duration(mxl.NsUntilIndex(due+1, e.mxlRate())))
 			for i, m := range e.members {
 				ms[i].Head = m.head()
 			}
-			sel = append(sel, e.disc.Retire(ms, mxl.CurrentIndex(e.mxlRate()))...)
+			sel = append(sel, e.disc.Retire(ms, due)...)
 			e.selects.Add(uint64(len(sel)))
 			for _, s := range sel {
 				if err = selectAll(e.views[s.Slot], s.Source); err != nil {
