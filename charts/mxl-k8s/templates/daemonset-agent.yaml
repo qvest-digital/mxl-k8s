@@ -1,3 +1,6 @@
+{{- if and .Values.mxlfs.enabled (not .Values.agent.enabled) }}
+{{- fail "mxlfs.enabled requires agent.enabled: the agent mounts mxlfs and writes the ready marker the gateway and exporter wait for" }}
+{{- end }}
 {{- if .Values.agent.enabled }}
 {{- if and .Values.agent.csi.enabled (not .Values.mxlfs.enabled) }}
 {{- fail "agent.csi.enabled requires mxlfs.enabled" }}

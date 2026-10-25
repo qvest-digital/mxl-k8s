@@ -89,6 +89,18 @@ tests:
 
   # The agent mounts each domain itself, and the mount has to leave its
   # container for the host and every pod that mounts the domain.
+  # Without the agent nothing mounts mxlfs or writes the ready marker,
+  # and the gateway and exporter wait for it in their init containers
+  # for good.
+  - it: refuses mxlfs without the agent
+    template: templates/daemonset-agent.yaml
+    set:
+      mxlfs.enabled: true
+      agent.enabled: false
+    asserts:
+      - failedTemplate:
+          errorMessage: "mxlfs.enabled requires agent.enabled: the agent mounts mxlfs and writes the ready marker the gateway and exporter wait for"
+
   - it: runs the agent privileged with Bidirectional propagation and --mxlfs
     set:
       mxlfs.enabled: true
