@@ -60,8 +60,8 @@ type running struct {
 	failed  bool     // a Replace failed, which may leave the engine half replaced
 	// retrying holds the spec members replaced underneath the engine
 	// whose new ring could not be opened yet; serves keeps the engine
-	// for them until the next recheck tries again. retries counts the
-	// rechecks each has been tried at in a row.
+	// for them until the next reconcile tries again. retries counts the
+	// reconciles each has been tried at in a row.
 	retrying map[int]bool
 	retries  map[int]int
 }
@@ -125,9 +125,9 @@ var replace = (*Engine).Replace
 // cannot take that way, in another geometry or on an mxlfs without
 // MXLFS_IOC_VIEW_REPLACE_SOURCE, is left to serves, which rebuilds. One
 // whose directory could not be read, gone again or not yet whole, is
-// tried again at the next recheck, and is in retrying until then, for at
-// most maxRetries rechecks: the engine is kept for it meanwhile, so it
-// must not hold off a rebuild the other members need for long.
+// tried again at the next reconcile, and is in retrying until then, for
+// at most maxRetries reconciles: the engine is kept for it meanwhile, so
+// it must not hold off a rebuild the other members need for long.
 func (cur *running) replaceRestarted(l logr.Logger, set *mxlv1alpha1.MxlFlowRedundancySet) {
 	if cur == nil || cur.uid != set.UID || cur.gen != set.Generation {
 		return
@@ -181,8 +181,10 @@ func (cur *running) replaceRestarted(l logr.Logger, set *mxlv1alpha1.MxlFlowRedu
 	}
 }
 
-// maxRetries is how many rechecks in a row a restarted member whose ring
-// could not be opened keeps the engine before the output is built again.
+// maxRetries is how many reconciles in a row a restarted member whose
+// ring could not be opened keeps the engine before the output is built
+// again. A reconcile comes at every recheck and at every event on the
+// set, so this bounds the attempts, not the time they take.
 const maxRetries = 3
 
 // recheck is how often a served set is looked at again for a member
