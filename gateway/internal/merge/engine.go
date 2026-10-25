@@ -11,6 +11,7 @@ import "C"
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -258,7 +259,10 @@ func (e *Engine) build() error {
 	if err != nil {
 		return err
 	}
-	def = bytes.ReplaceAll(def, []byte(e.spec.Members[0]), []byte(e.spec.OutputID))
+	def, err = withID(def, e.spec.OutputID)
+	if err != nil {
+		return fmt.Errorf("member %s flow_def.json: %w", e.spec.Members[0], err)
+	}
 	if err := os.WriteFile(filepath.Join(tmp, "flow_def.json"), def, 0o644); err != nil {
 		return err
 	}
@@ -284,6 +288,22 @@ func (e *Engine) build() error {
 	}
 	cleanup = false
 	return nil
+}
+
+// withID returns the flow definition def with its id set to id. Only the
+// top-level id is the flow's: the same uuid can appear anywhere else in
+// a definition, in parents or a label, and in either case.
+func withID(def []byte, id string) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(def, &m); err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(id)
+	if err != nil {
+		return nil, err
+	}
+	m["id"] = raw
+	return json.Marshal(m)
 }
 
 func (e *Engine) buildHeader(tmp string) error {

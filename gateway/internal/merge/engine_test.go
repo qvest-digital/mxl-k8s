@@ -3,10 +3,12 @@ package merge
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -405,4 +407,24 @@ func TestWaitSleepsWhenFutexWaitvFails(t *testing.T) {
 	}
 	require.Equal(t, []time.Duration{maxSleep, maxSleep, maxSleep}, slept)
 	require.Equal(t, 1, logged, "the failure is logged once")
+}
+
+// The output's definition is its first member's with the output's id.
+// The member's id may be written in upper case, and the same uuid may
+// name a parent: a byte replace missed the one and rewrote the other.
+func TestWithIDSetsOnlyTheFlowsID(t *testing.T) {
+	const member = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+	def := []byte(`{"id":"` + strings.ToUpper(member) + `","label":"cam","parents":["` + member + `"],` +
+		`"grain_rate":{"numerator":50,"denominator":1}}`)
+
+	got, err := withID(def, output)
+	require.NoError(t, err)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(got, &m))
+	require.Equal(t, output, m["id"])
+	require.Equal(t, []any{member}, m["parents"])
+	require.Equal(t, map[string]any{"numerator": 50.0, "denominator": 1.0}, m["grain_rate"])
+
+	_, err = withID([]byte("not json"), output)
+	require.Error(t, err)
 }
