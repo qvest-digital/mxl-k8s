@@ -32,6 +32,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/agent/internal/intentsock"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/mxlfsmount"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/mxlfswatch"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/observed"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/originlease"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/podlookup"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/redundancy"
@@ -251,6 +252,31 @@ func run(args []string) error {
 			&podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName}); err != nil {
 			return err
 		}
+	}
+
+	if cfg.ClaimStatusLabel != "" {
+		claims := &observed.ClaimWriter{
+			Client:   kClient,
+			NodeName: cfg.NodeName,
+			Label:    cfg.ClaimStatusLabel,
+			Log:      ctrl.Log.WithName("observed"),
+			Scanner: &observed.Scanner{Domains: func() map[string]string {
+				domainsMu.Lock()
+				doms := current
+				domainsMu.Unlock()
+				byDev := map[string]string{}
+				if dev, err := observed.Device(cfg.DomainPath); err == nil {
+					byDev[dev] = ""
+				}
+				for dir, name := range doms.ByDir {
+					if dev, err := observed.Device(filepath.Join(doms.Root, dir)); err == nil {
+						byDev[dev] = name
+					}
+				}
+				return byDev
+			}},
+		}
+		go claims.Run(ctx, 10*time.Second)
 	}
 
 	if cfg.CSIEndpoint != "" {
