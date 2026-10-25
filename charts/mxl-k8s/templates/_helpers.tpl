@@ -255,6 +255,10 @@ Call as: include "mxlk8s.mxlfs.waitContainer" (dict "Context" $ "root" "/run/mxl
 - name: wait-for-mxlfs
   image: {{ .Context.Values.mxlfs.waitImage }}
   command: ["sh", "-c", "until [ -e \"$0\" ]; do sleep 1; done", "{{ .root }}/mxlfs.ready"]
+  {{- with .Context.Values.mxlfs.waitResources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   securityContext:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true

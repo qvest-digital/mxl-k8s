@@ -157,6 +157,22 @@ tests:
             mountPath: /run/mxl/domains
             mountPropagation: HostToContainer
 
+  # A namespace with a ResourceQuota on requests admits no pod with a
+  # container that sets none, init containers included.
+  - it: gives the wait container requests
+    template: templates/daemonset-gateway.yaml
+    set:
+      mxlfs.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-mxlfs
+      - equal:
+          path: spec.template.spec.initContainers[0].resources.requests
+          value:
+            cpu: 1m
+            memory: 4Mi
+
   - it: keeps the gateway's own init containers after the wait
     set:
       mxlfs.enabled: true

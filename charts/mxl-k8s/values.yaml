@@ -101,6 +101,12 @@ mxlfs:
   # -- Image of the init container that waits for mxlfs.ready. Needs a
   # POSIX sh, test and sleep.
   waitImage: busybox:1.38
+  # -- Resources of that init container.
+  waitResources:
+    requests:
+      cpu: 1m
+      memory: 4Mi
+    limits: {}
 
 # -- Pre-delete lifecycle hooks. The domain wipe removes stale
 # .mxl-flow directories under gateway.flags.domainPath at chart
