@@ -256,6 +256,64 @@ func TestStaysValidWhenAMemberComesBackInAnotherGeometry(t *testing.T) {
 		memberA+" 1080, "+memberB+" 720", ready.Message)
 }
 
+// A producer that stops committing while its pod runs on leaves its
+// MxlFlow, Origin and Lease as they were. Only the gateway merging the
+// output sees its head stand still, and the output is served without it
+// meanwhile: MembersReady has to say so, and say it apart from a member
+// that is gone, and again once the gateway sees it move.
+func TestReportsAMemberAStalledGatewayReports(t *testing.T) {
+	set := newSet("reader", "node-c")
+	set.Status.StalledMembers = []mxlv1alpha1.StalledMembers{
+		{Node: "reader", FlowIDs: []string{memberB}}, {Node: "node-c", FlowIDs: []string{memberB}}}
+	r, c := harness(t, set, flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-b"))
+
+	res, _ := reconcile(t, r)
+	ready := membersReadyOf(t, c)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, ReasonMemberStalled, ready.Reason)
+	assert.Equal(t, "member "+memberB+" has not advanced on reader, node-c", ready.Message)
+	assert.NotZero(t, res.RequeueAfter)
+	assert.Len(t, mirrors(t, c), 4, "a stalled member is still mirrored, to be served once it moves")
+
+	ctx := context.Background()
+	var got mxlv1alpha1.MxlFlowRedundancySet
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "programme"}, &got))
+	got.Status.StalledMembers = nil
+	require.NoError(t, c.Status().Update(ctx, &got))
+	reconcile(t, r)
+	ready = membersReadyOf(t, c)
+	assert.Equal(t, metav1.ConditionTrue, ready.Status)
+	assert.Equal(t, ReasonMembersReady, ready.Reason)
+}
+
+// A member that is gone is reported missing, not stalled, though the
+// gateways still hold its last ring, which stands still.
+func TestReportsAMissingMemberAsMissingWhenItsRingStandsStill(t *testing.T) {
+	set := newSet("reader")
+	set.Status.StalledMembers = []mxlv1alpha1.StalledMembers{{Node: "reader", FlowIDs: []string{memberB}}}
+	r, c := harness(t, set, flow(memberA, video1080, "node-a"), flow(memberB, video1080, ""))
+
+	reconcile(t, r)
+	ready := membersReadyOf(t, c)
+	assert.Equal(t, ReasonMemberMissing, ready.Reason)
+	assert.Equal(t, "member "+memberB+" has no producer", ready.Message)
+}
+
+// No gateway is left to remove the entry of a node the output is no
+// longer served on, or of one deleted: it must neither hold MembersReady
+// False nor stay behind.
+func TestDropsTheStalledMembersOfANodeNotInTheSet(t *testing.T) {
+	set := newSet("reader")
+	set.Status.StalledMembers = []mxlv1alpha1.StalledMembers{{Node: "node-c", FlowIDs: []string{memberB}}}
+	r, c := harness(t, set, flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-b"))
+
+	reconcile(t, r)
+	assert.Equal(t, metav1.ConditionTrue, membersReadyOf(t, c).Status)
+	var got mxlv1alpha1.MxlFlowRedundancySet
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "programme"}, &got))
+	assert.Empty(t, got.Status.StalledMembers)
+}
+
 // The mirror of a member whose producer is gone is collected once it
 // has no source. When the producer comes back it is mirrored again.
 func TestMirrorsAMemberAgainWhenItsProducerReturns(t *testing.T) {

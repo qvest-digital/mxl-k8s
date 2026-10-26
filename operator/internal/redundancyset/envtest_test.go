@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/testutil"
@@ -133,5 +134,54 @@ func TestRedundancySetAgainstAnAPIServer(t *testing.T) {
 			assert.Equal(t, "reader", m.Spec.TargetNode)
 		}
 		assert.Equal(t, 2, n)
+	})
+
+	// Each merging gateway applies its own node's entry under a field
+	// manager of its own node, with the payload merge.reportStalled
+	// sends. The entries must merge by node, survive the operator's
+	// status update, and go when their gateway applies none.
+	t.Run("stalled members", func(t *testing.T) {
+		require.NoError(t, env.Client.Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-c"}}))
+		var set mxlv1alpha1.MxlFlowRedundancySet
+		require.NoError(t, env.Client.Get(ctx, types.NamespacedName{Name: "programme"}, &set))
+		set.Status.Nodes = []string{"reader", "node-c"}
+		require.NoError(t, env.Client.Status().Update(ctx, &set))
+		apply := func(node string, ids ...any) {
+			t.Helper()
+			status := map[string]any{}
+			if len(ids) > 0 {
+				status["stalledMembers"] = []any{map[string]any{"node": node, "flowIDs": ids}}
+			}
+			patch := &unstructured.Unstructured{Object: map[string]any{"status": status}}
+			patch.SetGroupVersionKind(mxlv1alpha1.GroupVersion.WithKind("MxlFlowRedundancySet"))
+			patch.SetName("programme")
+			require.NoError(t, env.Client.Status().Patch(ctx, patch, client.Apply,
+				client.FieldOwner("mxl-merge-gateway-"+node), client.ForceOwnership))
+		}
+		r := &Reconciler{Client: env.Client, Namespace: env.NewNamespace(t)}
+		ready := func() *metav1.Condition {
+			t.Helper()
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "programme"}})
+			require.NoError(t, err)
+			require.NoError(t, env.Client.Get(ctx, types.NamespacedName{Name: "programme"}, &set))
+			return meta.FindStatusCondition(set.Status.Conditions, ConditionMembersReady)
+		}
+
+		apply("reader", memberB)
+		apply("node-c", memberA, memberB)
+		cond := ready()
+		assert.Equal(t, ReasonMemberStalled, cond.Reason)
+		assert.Equal(t, "member "+memberA+" has not advanced on node-c; member "+memberB+
+			" has not advanced on reader, node-c", cond.Message)
+		assert.Len(t, set.Status.StalledMembers, 2, "the operator's status write dropped a gateway's entry")
+
+		apply("reader")
+		require.NoError(t, env.Client.Get(ctx, types.NamespacedName{Name: "programme"}, &set))
+		require.Equal(t, []mxlv1alpha1.StalledMembers{{Node: "node-c", FlowIDs: []string{memberA, memberB}}},
+			set.Status.StalledMembers, "an apply without its entry left it, or took another node's")
+		apply("node-c")
+		cond = ready()
+		assert.Equal(t, metav1.ConditionTrue, cond.Status)
+		assert.Empty(t, set.Status.StalledMembers)
 	})
 }
