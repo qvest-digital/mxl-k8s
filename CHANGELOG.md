@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.30](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.29...v1.1.0-rc.30) (2026-10-26)
+
+
+### Features
+
+* report a redundancy set member that stops advancing ([#371](https://github.com/qvest-digital/mxl-k8s/issues/371)) ([0715ca0](https://github.com/qvest-digital/mxl-k8s/commit/0715ca0aef8b63b045a7aab73d2cd0f97b0ed31a))
+
 ## [1.1.0-rc.29](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.28...v1.1.0-rc.29) (2026-10-26)
 
 
