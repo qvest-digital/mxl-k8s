@@ -263,7 +263,7 @@ func TestStaysValidWhenAMemberComesBackInAnotherGeometry(t *testing.T) {
 // that is gone, and again once the gateway sees it move.
 func TestReportsAMemberAStalledGatewayReports(t *testing.T) {
 	set := newSet("reader", "node-c")
-	set.Status.StalledMembers = []mxlv1alpha1.StalledMembers{
+	set.Status.StalledMembers = []mxlv1alpha1.NodeStalledMembers{
 		{Node: "reader", FlowIDs: []string{memberB}}, {Node: "node-c", FlowIDs: []string{memberB}}}
 	r, c := harness(t, set, flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-b"))
 
@@ -290,7 +290,7 @@ func TestReportsAMemberAStalledGatewayReports(t *testing.T) {
 // gateways still hold its last ring, which stands still.
 func TestReportsAMissingMemberAsMissingWhenItsRingStandsStill(t *testing.T) {
 	set := newSet("reader")
-	set.Status.StalledMembers = []mxlv1alpha1.StalledMembers{{Node: "reader", FlowIDs: []string{memberB}}}
+	set.Status.StalledMembers = []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberB}}}
 	r, c := harness(t, set, flow(memberA, video1080, "node-a"), flow(memberB, video1080, ""))
 
 	reconcile(t, r)
@@ -304,7 +304,7 @@ func TestReportsAMissingMemberAsMissingWhenItsRingStandsStill(t *testing.T) {
 // False nor stay behind.
 func TestDropsTheStalledMembersOfANodeNotInTheSet(t *testing.T) {
 	set := newSet("reader")
-	set.Status.StalledMembers = []mxlv1alpha1.StalledMembers{{Node: "node-c", FlowIDs: []string{memberB}}}
+	set.Status.StalledMembers = []mxlv1alpha1.NodeStalledMembers{{Node: "node-c", FlowIDs: []string{memberB}}}
 	r, c := harness(t, set, flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-b"))
 
 	reconcile(t, r)

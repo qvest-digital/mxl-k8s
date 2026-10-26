@@ -101,13 +101,17 @@ type MxlFlowRedundancySetStatus struct {
 	Nodes []string `json:"nodes,omitempty"`
 
 	// StalledMembers are, per node in nodes, the members the gateway
-	// there merges whose head has not moved for two seconds. Each
-	// gateway applies its own node's entry, under a field manager of
-	// its own, and removes it once none of its members is stalled.
+	// there merges whose head has stood still for the gateway's stall
+	// window. Each gateway applies its own node's entry, under a field
+	// manager of its own, and removes it once none of its members is
+	// stalled or it stops serving the output. An entry stays while its
+	// node is in nodes and its gateway is down. Members of a data
+	// format are not judged: a data flow's head moves only when
+	// ancillary data arrives.
 	// +optional
 	// +listType=map
 	// +listMapKey=node
-	StalledMembers []StalledMembers `json:"stalledMembers,omitempty"`
+	StalledMembers []NodeStalledMembers `json:"stalledMembers,omitempty"`
 
 	// ObservedGeneration is the spec generation last reconciled.
 	// +optional
@@ -122,9 +126,9 @@ type MxlFlowRedundancySetStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// StalledMembers are the members of a set whose head has not moved on
-// one node.
-type StalledMembers struct {
+// NodeStalledMembers are the members of a set whose head has stood still
+// on one node.
+type NodeStalledMembers struct {
 	// Node is the node whose gateway reports the members.
 	// +kubebuilder:validation:Required
 	Node string `json:"node"`

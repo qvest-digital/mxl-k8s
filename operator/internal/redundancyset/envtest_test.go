@@ -137,26 +137,19 @@ func TestRedundancySetAgainstAnAPIServer(t *testing.T) {
 	})
 
 	// Each merging gateway applies its own node's entry under a field
-	// manager of its own node, with the payload merge.reportStalled
-	// sends. The entries must merge by node, survive the operator's
-	// status update, and go when their gateway applies none.
+	// manager of its own node, with the payload and manager the api
+	// package builds for it. The entries must merge by node, survive the
+	// operator's status update, and go when their gateway applies none.
 	t.Run("stalled members", func(t *testing.T) {
 		require.NoError(t, env.Client.Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-c"}}))
 		var set mxlv1alpha1.MxlFlowRedundancySet
 		require.NoError(t, env.Client.Get(ctx, types.NamespacedName{Name: "programme"}, &set))
 		set.Status.Nodes = []string{"reader", "node-c"}
 		require.NoError(t, env.Client.Status().Update(ctx, &set))
-		apply := func(node string, ids ...any) {
+		apply := func(node string, ids ...string) {
 			t.Helper()
-			status := map[string]any{}
-			if len(ids) > 0 {
-				status["stalledMembers"] = []any{map[string]any{"node": node, "flowIDs": ids}}
-			}
-			patch := &unstructured.Unstructured{Object: map[string]any{"status": status}}
-			patch.SetGroupVersionKind(mxlv1alpha1.GroupVersion.WithKind("MxlFlowRedundancySet"))
-			patch.SetName("programme")
-			require.NoError(t, env.Client.Status().Patch(ctx, patch, client.Apply,
-				client.FieldOwner("mxl-merge-gateway-"+node), client.ForceOwnership))
+			require.NoError(t, env.Client.Status().Patch(ctx, mxlv1alpha1.StalledMembersApply("programme", node, ids),
+				client.Apply, client.FieldOwner(mxlv1alpha1.StalledMembersFieldOwner(node)), client.ForceOwnership))
 		}
 		r := &Reconciler{Client: env.Client, Namespace: env.NewNamespace(t)}
 		ready := func() *metav1.Condition {
@@ -177,7 +170,7 @@ func TestRedundancySetAgainstAnAPIServer(t *testing.T) {
 
 		apply("reader")
 		require.NoError(t, env.Client.Get(ctx, types.NamespacedName{Name: "programme"}, &set))
-		require.Equal(t, []mxlv1alpha1.StalledMembers{{Node: "node-c", FlowIDs: []string{memberA, memberB}}},
+		require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "node-c", FlowIDs: []string{memberA, memberB}}},
 			set.Status.StalledMembers, "an apply without its entry left it, or took another node's")
 		apply("node-c")
 		cond = ready()

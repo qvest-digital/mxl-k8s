@@ -132,8 +132,8 @@ func (r *Reconciler) existingNodes(ctx context.Context, nodes []string) ([]strin
 // stalledOn keeps the gateways' stalled entries of the nodes still in
 // the set. A node that left it has no gateway serving the output, and
 // one deleted has none to remove its own entry.
-func stalledOn(entries []mxlv1alpha1.StalledMembers, nodes []string) []mxlv1alpha1.StalledMembers {
-	var out []mxlv1alpha1.StalledMembers
+func stalledOn(entries []mxlv1alpha1.NodeStalledMembers, nodes []string) []mxlv1alpha1.NodeStalledMembers {
+	var out []mxlv1alpha1.NodeStalledMembers
 	for _, s := range entries {
 		if slices.Contains(nodes, s.Node) {
 			out = append(out, s)
@@ -264,7 +264,7 @@ func (r *Reconciler) validate(ctx context.Context, set *mxlv1alpha1.MxlFlowRedun
 // membersReady reports the members the output is served without: those
 // missing, apart in geometry, or stalled on a node the output is served
 // on.
-func membersReady(ms []member, stalled []mxlv1alpha1.StalledMembers) metav1.Condition {
+func membersReady(ms []member, stalled []mxlv1alpha1.NodeStalledMembers) metav1.Condition {
 	var missing, apart, stalls []string
 	for _, m := range ms {
 		switch {
