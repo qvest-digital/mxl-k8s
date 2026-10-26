@@ -212,6 +212,32 @@ func (d *Discrete) Retire(members []Member, due uint64) (selects []Select) {
 	return selects
 }
 
+// Drop returns the selects that move every slot member m serves to
+// another member that holds its grain, or to the placeholder, before m's
+// ring is replaced by one that holds none of them.
+func (d *Discrete) Drop(members []Member, m int) (selects []Select) {
+	for slot, cur := range d.Current {
+		if cur != m {
+			continue
+		}
+		// The index the slot holds below the published head.
+		back := (d.Head%uint64(d.Grains) + uint64(d.Grains) - uint64(slot)) % uint64(d.Grains)
+		to, index := d.Placeholder, uint64(0)
+		if d.Head >= back {
+			index = d.Head - back
+			for o := range members {
+				if o != m && d.serves(members[o], index) {
+					to = o
+					break
+				}
+			}
+		}
+		d.Current[slot] = to
+		selects = append(selects, Select{Slot: uint(slot), Source: to, Index: index})
+	}
+	return selects
+}
+
 // PageSamples is how many 32-bit samples one page of a channel holds.
 const PageSamples = 4096 / 4
 
@@ -352,6 +378,39 @@ func (a *Audio) Step(now time.Time) (selects []PageSelect, head uint64, wait tim
 		a.Head = upto[pick]
 	}
 	return selects, a.Head, 0
+}
+
+// Drop returns the page selects that move every page member m serves to
+// another member that holds it whole, or to silence, before m's ring is
+// replaced by one that holds none of them. It forgets what m committed.
+func (a *Audio) Drop(m int) (selects []PageSelect) {
+	for p, cur := range a.Current {
+		if cur != m {
+			continue
+		}
+		to := a.Silence
+		if a.Head > 0 {
+			// The page the slot holds below the published head.
+			last := (a.Head - 1) / PageSamples
+			if back := (last%a.Pages + a.Pages - uint64(p)) % a.Pages; last >= back {
+				n := last - back
+				for o := range a.cov {
+					c := a.cov[o][p]
+					if o != m && c.valid && c.n == n && !c.broken && c.to >= min((n+1)*PageSamples, a.Head) {
+						to = o
+						break
+					}
+				}
+			}
+		}
+		a.Current[p] = to
+		selects = append(selects, PageSelect{Page: uint64(p), Source: to})
+	}
+	// Its new ring has committed nothing: neither a page nor a head that
+	// would read as the member having skipped what it never wrote.
+	a.cov[m] = make([]coverage, a.Pages)
+	a.evHead[m] = 0
+	return selects
 }
 
 // Retire returns the page selects that keep the output's oldest samples

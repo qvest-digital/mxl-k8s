@@ -2,12 +2,14 @@ package merge
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	"golang.org/x/sys/unix"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -31,12 +33,14 @@ type Domains interface {
 // is wanted on this node.
 //
 // An engine starts over the members that have a directory here, a copy
-// or the gateway's placeholder, and agree with the output's geometry: a
-// view slot only ever selects a member that delivered the grain, so a
-// placeholder's unallocated ring is never mapped through the output, and
-// a mirror filling it later is seen through the same files. A member
+// or the gateway's placeholder, and agree with the output's geometry and
+// ring layout: a view slot only ever selects a member that delivered the
+// grain, so a placeholder's unallocated ring is never mapped through the
+// output, and a mirror filling it later is seen through the same files.
+// A member whose ring cannot be opened is left out as well. A member
 // that goes away for good, its producer gone and its placeholder or copy
-// with it, leaves the engine serving from the others.
+// with it, leaves the engine serving from the others; one that comes back
+// in a new directory is put in place of its old ring.
 type Reconciler struct {
 	Client   client.Client
 	NodeName string
@@ -52,26 +56,36 @@ type running struct {
 	gen     int64
 	domain  string
 	def     []byte   // the flow definition the output was built from
+	layout  string   // the ring layout it was built in
 	seen    []uint64 // per spec member, its data file's inode at build; 0 for none
 	started []int    // the spec members the engine was started over
+	failed  bool     // a Replace failed, which may leave the engine half replaced
+	// retrying holds the spec members replaced underneath the engine
+	// whose new ring could not be opened yet; serves keeps the engine
+	// for them until the next reconcile tries again. retries counts the
+	// reconciles each has been tried at in a row.
+	retrying map[int]bool
+	retries  map[int]int
 }
 
 // serves reports whether cur still serves set as it stands: the same
 // object at the same generation, with no member directory appeared or
-// replaced since the engine was built. One removed is no reason to
+// replaced since the engine was built, or since it took the replacement
+// in place, and no Replace failed. A member whose new ring is still to be
+// opened keeps the engine as well. One removed is no reason to
 // rebuild: the engine keeps its ring mapped, which stops advancing, and
 // the other members serve. Once every member it was started over is
-// gone, a member it left out, of another geometry, is the only one still
-// delivering, and the output is built again over it.
+// gone, a member it left out, of another geometry or ring layout, is
+// the only one still delivering, and the output is built again over it.
 func (cur *running) serves(set *mxlv1alpha1.MxlFlowRedundancySet) bool {
-	if cur == nil || cur.uid != set.UID || cur.gen != set.Generation {
+	if cur == nil || cur.failed || cur.uid != set.UID || cur.gen != set.Generation {
 		return false
 	}
 	startedLeft, leftOut := false, false
 	for i, ino := range inodes(cur.domain, set.Spec.Members) {
 		switch {
 		case ino == 0:
-		case ino != cur.seen[i]:
+		case ino != cur.seen[i] && !cur.retrying[i]:
 			return false
 		case slices.Contains(cur.started, i):
 			startedLeft = true
@@ -102,6 +116,79 @@ func inodes(domain string, members []mxlv1alpha1.RedundancyFlowRef) []uint64 {
 	return out
 }
 
+// replace is (*Engine).Replace; tests replace it.
+var replace = (*Engine).Replace
+
+// replaceRestarted puts each member the engine was started over whose
+// directory was replaced since, by a producer restarted in the output's
+// geometry, into the engine in place of its old ring. A restarted
+// producer recreates its flow directory; building the output again for
+// it would remove the output under every reader. A member the engine
+// cannot take that way, in another geometry or on an mxlfs without
+// MXLFS_IOC_VIEW_REPLACE_SOURCE, is left to serves, which rebuilds. One
+// whose directory could not be read, gone again or not yet whole, is
+// tried again at the next reconcile, and is in retrying until then, for
+// at most maxRetries reconciles: the engine is kept for it meanwhile, so
+// it must not hold off a rebuild the other members need for long.
+func (cur *running) replaceRestarted(l logr.Logger, set *mxlv1alpha1.MxlFlowRedundancySet) {
+	if cur == nil || cur.uid != set.UID || cur.gen != set.Generation {
+		return
+	}
+	if cur.retries == nil {
+		cur.retries = map[int]int{}
+	}
+	cur.retrying = map[int]bool{}
+	retry := func(i int, msg, id string, err error) bool {
+		if cur.retries[i]++; cur.retries[i] > maxRetries {
+			l.Info(msg+"; building the output again", "member", id, "error", err.Error())
+			cur.failed = true
+			return false
+		}
+		l.Info(msg+"; trying again", "member", id, "error", err.Error())
+		cur.retrying[i] = true
+		return true
+	}
+	for i, ino := range inodes(cur.domain, set.Spec.Members) {
+		m := slices.Index(cur.started, i)
+		if ino == 0 || ino == cur.seen[i] || m < 0 {
+			delete(cur.retries, i)
+			continue
+		}
+		id := set.Spec.Members[i].FlowID
+		def, err := os.ReadFile(filepath.Join(flowDir(cur.domain, id), "flow_def.json"))
+		if err != nil {
+			if !retry(i, "cannot read a restarted member's definition", id, err) {
+				return
+			}
+			continue
+		}
+		if !placeholder.SameGeometry(cur.def, def) {
+			continue
+		}
+		got, err := replace(cur.engine, m)
+		switch {
+		case errors.Is(err, ErrNotOpened):
+			if !retry(i, "cannot open a restarted member's ring", id, err) {
+				return
+			}
+		case err != nil:
+			l.Info("cannot replace a restarted member in place; building the output again", "member", id,
+				"error", err.Error())
+			cur.failed = true
+			return
+		default:
+			cur.seen[i] = got
+			delete(cur.retries, i)
+		}
+	}
+}
+
+// maxRetries is how many reconciles in a row a restarted member whose
+// ring could not be opened keeps the engine before the output is built
+// again. A reconcile comes at every recheck and at every event on the
+// set, so this bounds the attempts, not the time they take.
+const maxRetries = 3
+
 // recheck is how often a served set is looked at again for a member
 // that appeared or was replaced underneath its engine, which raises no
 // event on the set.
@@ -128,12 +215,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	r.mu.Lock()
 	cur := r.engines[req.Name]
 	r.mu.Unlock()
+	cur.replaceRestarted(l, &set)
 	if cur.serves(&set) {
 		return ctrl.Result{RequeueAfter: recheck}, nil
 	}
 	var prev []byte
+	var prevLayout string
 	if cur != nil {
-		prev = cur.def
+		prev, prevLayout = cur.def, cur.layout
 	}
 	r.stop(req.Name) // a changed spec or member builds a new output
 
@@ -168,18 +257,40 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 	def := outputGeometry(prev, defs)
-	var started []int
+	// The flow definition does not carry a ring's depth, which comes from
+	// the domain's history duration: members of one geometry differ in it
+	// once that duration changed between their starts. A ring the engine
+	// cannot open, or cannot align with the others, fails its start and
+	// with it the output; it is left out instead, as a member of another
+	// geometry is.
+	var agree []int
+	layouts := make([]string, len(set.Spec.Members))
 	for i, m := range set.Spec.Members {
 		switch {
 		case seen[i] == 0:
 		case defs[i] == nil:
 			l.Info("leaving out a member with no readable flow definition", "member", m.FlowID)
-		case placeholder.SameGeometry(def, defs[i]):
-			spec.Members = append(spec.Members, m.FlowID)
-			started = append(started, i)
-		default:
+		case !placeholder.SameGeometry(def, defs[i]):
 			l.Info("leaving out a member of another geometry than the output", "member", m.FlowID)
+		default:
+			var err error
+			if layouts[i], err = ringLayout(dir, m.FlowID); err != nil {
+				l.Info("leaving out a member whose ring cannot be opened", "member", m.FlowID, "error", err.Error())
+				continue
+			}
+			agree = append(agree, i)
 		}
+	}
+	layout := outputLayout(prevLayout, agree, layouts)
+	var started []int
+	for _, i := range agree {
+		if layouts[i] != layout {
+			l.Info("leaving out a member of another ring layout than the output", "member", set.Spec.Members[i].FlowID,
+				"layout", layouts[i], "output", layout)
+			continue
+		}
+		spec.Members = append(spec.Members, set.Spec.Members[i].FlowID)
+		started = append(started, i)
 	}
 	if len(spec.Members) == 0 {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
@@ -205,8 +316,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if r.engines == nil {
 		r.engines = map[string]*running{}
 	}
-	r.engines[req.Name] = &running{engine: e, uid: set.UID, gen: set.Generation, domain: dir, def: def, seen: seen,
-		started: started}
+	r.engines[req.Name] = &running{engine: e, uid: set.UID, gen: set.Generation, domain: dir, def: def,
+		layout: layout, seen: seen, started: started}
 	r.mu.Unlock()
 	l.Info("serving redundancy set", "output", spec.OutputID, "members", spec.Members)
 	return ctrl.Result{RequeueAfter: recheck}, nil
@@ -230,6 +341,22 @@ func outputGeometry(prev []byte, defs [][]byte) []byte {
 		}
 	}
 	return first
+}
+
+// outputLayout is the ring layout the output is built in, of the members
+// cands in order of preference: the one it was built in before while one
+// of them still has it, as outputGeometry keeps the geometry; else the
+// first's.
+func outputLayout(prev string, cands []int, layouts []string) string {
+	for _, i := range cands {
+		if layouts[i] == prev {
+			return prev
+		}
+	}
+	if len(cands) == 0 {
+		return ""
+	}
+	return layouts[cands[0]]
 }
 
 // valid reports whether the operator found the set's members mergeable

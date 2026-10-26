@@ -594,3 +594,129 @@ func TestAudioRetireForgetsAJumpOnceTheBatchesResume(t *testing.T) {
 		require.Empty(t, commit(batch), "pages still move %d batches after the jump", i+2)
 	}
 }
+
+// A restarted producer's new ring is put in place of its old one in every
+// view, and holds none of the grains the old one served: a slot left on
+// the member would show whatever the new ring has there. Every slot the
+// member serves moves first, to a member that still holds its grain or to
+// the INVALID grain, and the member is served again once its new ring
+// delivers.
+func TestDiscreteDropMovesAReplacedMembersSlotsToWhatStillHoldsThem(t *testing.T) {
+	const grains = 20
+	a, b := newRing(grains), newRing(grains)
+	d := NewDiscrete(grains, 2)
+	d.Ordered, d.Skew = true, 8
+	now := time.Unix(0, 0)
+	var head uint64
+	for i := uint64(100); i <= 119; i++ {
+		a.commit(i)
+		if i < 110 || i > 112 {
+			b.commit(i)
+		}
+		_, head, _ = d.Step([]Member{a.member(), b.member()}, now)
+	}
+	require.Equal(t, uint64(119), head)
+	for slot, src := range d.Current {
+		require.Equal(t, 0, src, "slot %d not on the primary", slot)
+	}
+
+	sel := d.Drop([]Member{a.member(), b.member()}, 0)
+	require.Len(t, sel, grains, "a slot stayed on the replaced member")
+	for _, s := range sel {
+		require.Equal(t, uint64(s.Slot), s.Index%grains, "slot %d named for grain %d", s.Slot, s.Index)
+		switch {
+		case s.Index == 100: // as old as b may be overwriting
+			require.Equal(t, 2, s.Source)
+		case s.Index >= 110 && s.Index <= 112: // b skipped them
+			require.Equal(t, 2, s.Source, "grain %d moved to a member without it", s.Index)
+		default:
+			require.Equal(t, 1, s.Source, "grain %d not moved to b, which holds it", s.Index)
+		}
+		require.Equal(t, s.Source, d.Current[s.Slot])
+	}
+
+	fresh := newRing(grains) // the restarted producer's ring
+	for i := uint64(120); i <= 125; i++ {
+		b.commit(i)
+		if i >= 123 {
+			fresh.commit(i)
+		}
+	}
+	_, head, _ = d.Step([]Member{fresh.member(), b.member()}, now.Add(time.Second))
+	require.Equal(t, uint64(125), head)
+	from := map[uint64]int{}
+	for i := uint64(120); i <= 125; i++ {
+		from[i] = d.Current[i%grains]
+	}
+	require.Equal(t, map[uint64]int{120: 1, 121: 1, 122: 1, 123: 0, 124: 0, 125: 0}, from)
+}
+
+// The same for audio: every page the member serves moves to a member that
+// holds it whole, or to silence, and what the member committed before is
+// forgotten, so the new ring is not taken to hold it.
+func TestAudioDropMovesAReplacedMembersPagesToWhatStillHoldsThem(t *testing.T) {
+	a := NewAudio(2, 38, 2)
+	a.Skew = 2048
+	for n := uint64(10); n <= 40; n++ {
+		a.Committed(0, n*PageSamples, (n+1)*PageSamples)
+		switch n {
+		case 30: // b skipped it
+		case 25: // b holds half of it
+			a.Committed(1, n*PageSamples, n*PageSamples+PageSamples/2)
+		default:
+			a.Committed(1, n*PageSamples, (n+1)*PageSamples)
+		}
+	}
+	_, head, _ := a.Step(time.Unix(0, 0))
+	require.Equal(t, uint64(41*PageSamples), head)
+	// The old ring's last commits, which no pass has published yet.
+	a.Committed(0, 41*PageSamples, 43*PageSamples)
+
+	sel := a.Drop(0)
+	require.Len(t, sel, 31, "a page stayed on the replaced member")
+	for _, s := range sel {
+		want := 1
+		if s.Page == 30 || s.Page == 25 {
+			want = 2 // b does not hold it whole
+		}
+		require.Equal(t, want, s.Source, "page slot %d", s.Page)
+	}
+	for p, src := range a.Current {
+		require.NotEqual(t, 0, src, "page slot %d on the replaced member", p)
+	}
+
+	// The new ring commits from page 43 on; nothing before is taken from it.
+	a.Committed(1, 41*PageSamples, 44*PageSamples)
+	a.Committed(0, 43*PageSamples, 44*PageSamples)
+	sel, head, _ = a.Step(time.Unix(1, 0))
+	require.Equal(t, uint64(44*PageSamples), head)
+	require.Equal(t, []PageSelect{{Page: 41 % 38, Source: 1}, {Page: 42 % 38, Source: 1}, {Page: 43 % 38, Source: 0}}, sel)
+}
+
+// The replaced member's head is forgotten with its pages. Left in place,
+// the old ring's last commit would read as the member having skipped the
+// pages after it, and its new ring would be passed over at once rather
+// than waited for as a late primary.
+func TestAudioDropWaitsForTheNewRingAsALatePrimary(t *testing.T) {
+	a := NewAudio(2, 38, 2)
+	a.Skew, a.Tolerance = 2048, 5*time.Millisecond
+	for n := uint64(10); n <= 20; n++ {
+		a.Committed(0, n*PageSamples, (n+1)*PageSamples)
+		a.Committed(1, n*PageSamples, (n+1)*PageSamples)
+	}
+	now := time.Unix(0, 0)
+	_, head, _ := a.Step(now)
+	require.Equal(t, uint64(21*PageSamples), head)
+	a.Committed(0, 21*PageSamples, 23*PageSamples) // the old ring's last, unpublished
+
+	a.Drop(0)
+	a.Committed(1, 21*PageSamples, 24*PageSamples)
+	sel, head, wait := a.Step(now)
+	require.Empty(t, sel)
+	require.Equal(t, uint64(21*PageSamples), head)
+	require.Equal(t, a.Tolerance, wait, "the restarted primary is taken to have skipped what its old ring wrote")
+
+	_, head, _ = a.Step(now.Add(wait))
+	require.Equal(t, uint64(24*PageSamples), head)
+	require.Equal(t, 1, a.Primary)
+}
