@@ -22,6 +22,10 @@ rules:
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxlflowredundancysets]
     verbs: [get, list, watch]
+  # A merging gateway reports the members it finds stalled.
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxlflowredundancysets/status]
+    verbs: [patch]
   {{- end }}
   - apiGroups: [coordination.k8s.io]
     resources: [leases]

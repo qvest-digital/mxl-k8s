@@ -609,10 +609,13 @@ func TestEngineCannotReplaceWithoutTheIoctl(t *testing.T) {
 	require.ErrorIs(t, err, ErrNoReplace)
 }
 
-// producer writes a flow from a goroutine until stopped.
+// producer writes a flow from a goroutine until stopped. While paused
+// it commits nothing and keeps its writer, as a producer whose process
+// is stopped does.
 type producer struct {
 	stop, done chan struct{}
 	once       sync.Once
+	paused     atomic.Bool
 }
 
 // Stop stops the producer and closes its writer, which removes the flow
@@ -643,6 +646,9 @@ func produce(t *testing.T, inst *mxl.Instance, def string, tag uint64) *producer
 					return
 				case <-time.After(time.Duration(mxl.NsUntilIndex(end, rate))):
 				}
+				if p.paused.Load() {
+					continue
+				}
 				s, err := w.OpenSamples(end, batch)
 				require.NoError(t, err)
 				for ch := uint64(0); ch < 2; ch++ {
@@ -664,6 +670,9 @@ func produce(t *testing.T, inst *mxl.Instance, def string, tag uint64) *producer
 			case <-stop:
 				return
 			case <-time.After(time.Duration(mxl.NsUntilIndex(i, rate))):
+			}
+			if p.paused.Load() {
+				continue
 			}
 			g, err := w.OpenGrain(i)
 			require.NoError(t, err)
@@ -816,6 +825,55 @@ func TestEngineTakesARestartedMembersRingInPlace(t *testing.T) {
 				}
 			}
 			require.Equal(t, out, dataInode(t, domain, output), "the output was built again")
+		})
+	}
+}
+
+// A producer whose process stops keeps its writer, its flow directory
+// and every object of its flow; only its head stands still, a grain
+// ring's and a channel buffer's alike. The engine has to find it stalled
+// after StallAfter, say so the moment it is, and again the moment the
+// producer commits once more.
+func TestEngineFindsAMemberWhoseProducerStopsCommitting(t *testing.T) {
+	for name, def := range map[string]func(string) string{"video": videoDef, "audio": audioDef} {
+		t.Run(name, func(t *testing.T) {
+			domain := mxlfsDomain(t)
+			inst, err := mxl.NewInstance(domain, "")
+			require.NoError(t, err)
+			defer inst.Close()
+			a, b := produce(t, inst, def(memberA), 0), produce(t, inst, def(memberB), 1)
+			defer func() { a.Stop(); b.Stop() }()
+			time.Sleep(300 * time.Millisecond)
+
+			lazily(t, domain)
+			changed := make(chan time.Time, 8)
+			e, err := Start(context.Background(), Spec{DomainDir: domain, OutputID: output, Members: []string{memberA, memberB},
+				Skew: 40 * time.Millisecond, Ordered: true, Stalls: func() { changed <- time.Now() }}, logr.Discard())
+			require.NoError(t, err)
+			defer e.Close()
+			time.Sleep(StallAfter + 500*time.Millisecond)
+			require.Empty(t, e.Stalled(), "members committing at the clock were found stalled")
+			require.Empty(t, changed)
+
+			a.paused.Store(true)
+			paused := time.Now()
+			select {
+			case at := <-changed:
+				require.GreaterOrEqual(t, at.Sub(paused), StallAfter-100*time.Millisecond, "found stalled early")
+			case <-time.After(StallAfter + time.Second):
+				t.Fatal("a member that stopped committing was not found stalled")
+			}
+			require.Equal(t, []string{memberA}, e.Stalled())
+
+			a.paused.Store(false)
+			resumed := time.Now()
+			select {
+			case at := <-changed:
+				require.Less(t, at.Sub(resumed), 500*time.Millisecond)
+			case <-time.After(time.Second):
+				t.Fatal("a member that committed again was not found moving")
+			}
+			require.Empty(t, e.Stalled())
 		})
 	}
 }
