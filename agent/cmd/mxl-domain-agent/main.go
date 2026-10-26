@@ -29,6 +29,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/agent/internal/domainfs"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/domainpublisher"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/fanotify"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/flowlock"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/flowpublisher"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/intent"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/intentsock"
@@ -116,6 +117,9 @@ func run(args []string) error {
 	pods := &podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName}
 	ns, _ := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 	own := ownPod(strings.TrimSpace(string(ns)))
+	if cfg.Mxlfs {
+		flowPub.LocalProducer = localProducer(cfg.DomainPath, producer(pods, own))
+	}
 	var intentDispatcher *intent.Dispatcher
 	if cfg.IntentSocketPath != "" || cfg.Mxlfs {
 		intentDispatcher = &intent.Dispatcher{
@@ -163,7 +167,10 @@ func run(args []string) error {
 		},
 	}
 	if cfg.Mxlfs {
-		tracking.Mxlfs = &trackerMxlfs{IsMxlfs: mxlfswatch.IsMxlfs, IsOutput: sets.IsOutput, Run: startMxlfs}
+		tracking.Mxlfs = &trackerMxlfs{IsMxlfs: mxlfswatch.IsMxlfs, IsOutput: sets.IsOutput, Run: startMxlfs,
+			LocalProducer: func(dir string) func(context.Context, string) bool {
+				return localProducer(dir, producer(pods, own))
+			}}
 	}
 	trackers.Start = func(ctx context.Context, name, dir string) (tracker.Tracker, error) {
 		return tracking.start(ctx, name, filepath.Join(root, dir))
@@ -472,6 +479,8 @@ type trackerMxlfs struct {
 	// Run starts runMxlfs for dir and returns what waits for it to end
 	// once ctx has, or fails with none of it running.
 	Run func(ctx context.Context, dir string, fp *flowpublisher.Publisher) (wait func(), err error)
+	// LocalProducer is the publisher's LocalProducer for dir.
+	LocalProducer func(dir string) func(ctx context.Context, flowID string) bool
 }
 
 // start tracks the flows of the domain name in dir: the same fanotify
@@ -492,6 +501,9 @@ func (d domainTracking) start(ctx context.Context, name, dir string) (tracker.Tr
 	onMxlfs := d.Mxlfs != nil && d.Mxlfs.IsMxlfs(dir)
 	if onMxlfs {
 		fp.IsOutput = d.Mxlfs.IsOutput
+		if d.Mxlfs.LocalProducer != nil {
+			fp.LocalProducer = d.Mxlfs.LocalProducer(dir)
+		}
 	}
 
 	tctx, cancel := context.WithCancel(ctx)
@@ -601,6 +613,36 @@ func ours(pods interface {
 	return func(ctx context.Context, pid int32) bool {
 		pod, err := pods.PodForPID(ctx, pid)
 		return err == nil && own(pod)
+	}
+}
+
+// producer reports a pid as a local producer's when it resolves to a pod
+// that is not mxl-k8s's own. One that does not resolve is no evidence:
+// an Origin claimed for a mirror copy is not demoted by a later publish.
+func producer(pods interface {
+	PodForPID(ctx context.Context, pid int32) (*corev1.Pod, error)
+}, own func(*corev1.Pod) bool) func(ctx context.Context, pid int32) bool {
+	return func(ctx context.Context, pid int32) bool {
+		pod, err := pods.PodForPID(ctx, pid)
+		return err == nil && !own(pod)
+	}
+}
+
+// localProducer reports whether a producer holds a writer on a flow in
+// the domain at dir. The agent runs in the host's PID namespace on
+// mxlfs, so /proc/locks lists every holder.
+func localProducer(dir string, producer func(ctx context.Context, pid int32) bool) func(ctx context.Context, flowID string) bool {
+	return func(ctx context.Context, flowID string) bool {
+		pids, err := flowlock.WriterPIDs(dir, flowID)
+		if err != nil {
+			return false
+		}
+		for _, pid := range pids {
+			if producer(ctx, pid) {
+				return true
+			}
+		}
+		return false
 	}
 }
 

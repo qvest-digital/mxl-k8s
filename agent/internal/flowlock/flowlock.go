@@ -14,10 +14,18 @@
 package flowlock
 
 import (
+	"bufio"
 	"errors"
+	"fmt"
+	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // flowDirSuffix is the directory-name suffix libmxl gives a per-flow
@@ -81,4 +89,54 @@ func WriterAttached(domainPath, flowID string) (bool, error) {
 	// can be, so a writer attaching right now is not held off.
 	_ = syscall.Flock(fd, syscall.LOCK_UN)
 	return false, nil
+}
+
+// ProcLocks is where the kernel lists every file lock.
+var ProcLocks = "/proc/locks"
+
+// WriterPIDs lists the processes holding a writer's flock on flowID's
+// data file under domainPath. A missing file has none.
+//
+// It says who the writers are, which WriterAttached cannot: the
+// gateway filling a mirror target and a producer that took the copy
+// over hold the same lock. The kernel lists only holders visible in
+// the reader's PID namespace, so the answer is complete only in the
+// host's.
+func WriterPIDs(domainPath, flowID string) ([]int32, error) {
+	var st unix.Stat_t
+	if err := unix.Stat(filepath.Join(domainPath, flowID+flowDirSuffix, dataFileName), &st); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	f, err := os.Open(ProcLocks)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return lockHolders(f, unix.Major(st.Dev), unix.Minor(st.Dev), st.Ino)
+}
+
+// lockHolders reads /proc/locks lines such as
+//
+//	1: FLOCK  ADVISORY  READ 514830 08:01:11011342 0 EOF
+//
+// and returns the pid of each FLOCK held on major:minor:ino. The kernel
+// prints the device as hex and the inode as decimal. Waiters, marked
+// "->", hold nothing.
+func lockHolders(r io.Reader, major, minor uint32, ino uint64) ([]int32, error) {
+	want := fmt.Sprintf("%02x:%02x:%d", major, minor, ino)
+	var pids []int32
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 6 || fields[1] != "FLOCK" || fields[5] != want {
+			continue
+		}
+		if pid, err := strconv.ParseInt(fields[4], 10, 32); err == nil && pid > 0 {
+			pids = append(pids, int32(pid))
+		}
+	}
+	return pids, sc.Err()
 }

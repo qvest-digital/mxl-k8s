@@ -3,6 +3,7 @@ package flowlock
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -122,4 +123,37 @@ func TestWriterAttached_UnreadableDataFileReportsAttached(t *testing.T) {
 	attached, err := WriterAttached(domain, flowID)
 	assert.Error(t, err)
 	assert.True(t, attached)
+}
+
+func TestLockHoldersParsesProcLocks(t *testing.T) {
+	const locks = `1: FLOCK  ADVISORY  READ 514830 00:2a:1234 0 EOF
+2: FLOCK  ADVISORY  READ 42 00:2a:1234 0 EOF
+3: FLOCK  ADVISORY  READ 7 00:2a:9999 0 EOF
+4: POSIX  ADVISORY  READ 9 00:2a:1234 0 EOF
+5: FLOCK  ADVISORY  READ 0 00:2a:1234 0 EOF
+5: -> FLOCK  ADVISORY  WRITE 11 00:2a:1234 0 EOF
+`
+	// 7 holds another file, 9 a POSIX lock, 0 is a holder outside this
+	// pid namespace and 11 only waits.
+	pids, err := lockHolders(strings.NewReader(locks), 0, 0x2a, 1234)
+	require.NoError(t, err)
+	require.Equal(t, []int32{514830, 42}, pids)
+}
+
+// A writer's shared flock, taken here, is listed under this process.
+func TestWriterPIDsListsTheHolder(t *testing.T) {
+	domain := t.TempDir()
+	pids, err := WriterPIDs(domain, flowID)
+	require.NoError(t, err)
+	require.Empty(t, pids, "a flow that is not there has no writer")
+
+	dir := makeFlowDir(t, domain, flowID)
+	pids, err = WriterPIDs(domain, flowID)
+	require.NoError(t, err)
+	require.Empty(t, pids)
+
+	holdShared(t, dir)
+	pids, err = WriterPIDs(domain, flowID)
+	require.NoError(t, err)
+	require.Equal(t, []int32{int32(os.Getpid())}, pids)
 }

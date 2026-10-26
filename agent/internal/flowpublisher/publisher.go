@@ -68,6 +68,14 @@ type Publisher struct {
 	// agent/internal/flowlock, which is libmxl's own test; tests
 	// inject a closure so they need no domain on disk.
 	WriterAttached func(flowID string) (bool, error)
+
+	// LocalProducer reports whether a process on this node other than
+	// mxl-k8s's own writes the flow: a producer, even in a directory a
+	// mirror names this node the target of. That is the evidence the
+	// mirror inference lacks once a producer has taken over the copy a
+	// mirror was filling, which on mxlfs it does with no shim to report
+	// the attach. Nil leaves the inference as it is.
+	LocalProducer func(ctx context.Context, flowID string) bool
 }
 
 // ref is the flow a directory id names in this publisher's domain.
@@ -87,6 +95,10 @@ func (p *Publisher) writerAttached(flowID string) (bool, error) {
 		return p.WriterAttached(flowID)
 	}
 	return flowlock.WriterAttached(p.DomainPath, flowID)
+}
+
+func (p *Publisher) localProducer(ctx context.Context, flowID string) bool {
+	return p.LocalProducer != nil && p.LocalProducer(ctx, flowID)
 }
 
 // FlowIDFromDirName extracts the flow UUID from a `<uuid>.mxl-flow`
@@ -162,12 +174,13 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	// Origin unless a mirror explains the copy. The writer above is
 	// attached either way; a mirror naming this node as its target is
 	// the evidence that the writer is the gateway's rather than a
-	// local producer's.
+	// local producer's, unless LocalProducer finds a producer among
+	// the writers.
 	phase := mxlv1alpha1.MxlFlowLocationOrigin
 	isMirror, err := p.isMirrorTarget(ctx, flowID)
 	if err != nil {
 		l.Error(err, "list MxlFlowMirrors; defaulting to Origin", "flowID", flowID)
-	} else if isMirror {
+	} else if isMirror && !p.localProducer(ctx, flowID) {
 		phase = mxlv1alpha1.MxlFlowLocationReady
 	}
 
@@ -631,9 +644,23 @@ func (p *Publisher) localLocationHealthy(flow *mxlv1alpha1.MxlFlow) bool {
 	return false
 }
 
+// producerTookOver reports a location of this node that is not Origin
+// although a local producer writes the flow: a producer that opened the
+// copy a mirror was filling. Nothing in the domain changes when it
+// does, so no event publishes it.
+func (p *Publisher) producerTookOver(ctx context.Context, flow *mxlv1alpha1.MxlFlow) bool {
+	for _, loc := range flow.Status.Locations {
+		if loc.NodeName == p.NodeName {
+			return loc.Phase != mxlv1alpha1.MxlFlowLocationOrigin && p.localProducer(ctx, flow.Spec.ID)
+		}
+	}
+	return false
+}
+
 // promoteStaleLocalOrigins re-publishes any on-disk flow whose
 // location entry for this node is unhealthy per localLocationHealthy
-// -- missing, Stale, or timestamp-less. It is the symmetric repair to
+// -- missing, Stale, or timestamp-less -- or that a local producer
+// writes while it reads other than Origin. It is the symmetric repair to
 // demoteVanishedLocalOrigins: that function heals a location that
 // outlived its directory, this one heals a directory whose location
 // never landed or got stuck, most commonly a status-update conflict
@@ -659,7 +686,7 @@ func (p *Publisher) promoteStaleLocalOrigins(ctx context.Context, onDisk map[str
 			l.Error(err, "get MxlFlow for promote pass", "flowID", id)
 			continue
 		default:
-			if p.localLocationHealthy(&flow) {
+			if p.localLocationHealthy(&flow) && !p.producerTookOver(ctx, &flow) {
 				continue
 			}
 		}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -94,6 +95,46 @@ func TestOursIsOnlyMxlK8sComponents(t *testing.T) {
 	assert.False(t, o(ctx, 4), "a consumer in the agent's namespace")
 	assert.False(t, o(ctx, 5), "a gateway-labelled pod elsewhere")
 	assert.False(t, o(ctx, 6), "a pid with no resolvable pod")
+}
+
+// A producer is positive evidence only: the gateway is not one, and a
+// pid whose pod cannot be resolved is no evidence either way. Counting
+// it would claim Origin for a mirror copy, which no later publish
+// demotes.
+func TestProducerIsAResolvedPodThatIsNotOurs(t *testing.T) {
+	pod := func(ns, component string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns,
+			Labels: map[string]string{"app.kubernetes.io/component": component}}}
+	}
+	p := producer(podsByPID{
+		1: pod("mxl-system", "gateway"),
+		2: pod("media", ""),
+	}, ownPod("mxl-system"))
+	ctx := context.Background()
+	assert.False(t, p(ctx, 1), "the gateway filling a mirror target")
+	assert.True(t, p(ctx, 2), "a media function")
+	assert.False(t, p(ctx, 3), "a pid with no resolvable pod")
+}
+
+// The holders come from /proc/locks; a flow with only the gateway's
+// writer has no producer, one with a media function's has.
+func TestLocalProducerAsksAboutEveryHolder(t *testing.T) {
+	const id = "11111111-2222-3333-4444-555555555555"
+	domain := t.TempDir()
+	dir := filepath.Join(domain, id+".mxl-flow")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	f, err := os.Create(filepath.Join(dir, "data"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = f.Close() })
+	require.NoError(t, syscall.Flock(int(f.Fd()), syscall.LOCK_SH))
+
+	self := int32(os.Getpid())
+	ctx := context.Background()
+	assert.False(t, localProducer(domain, func(_ context.Context, pid int32) bool { return pid != self })(ctx, id),
+		"only this process, standing in for the gateway, holds the flow")
+	assert.True(t, localProducer(domain, func(_ context.Context, pid int32) bool { return pid == self })(ctx, id))
+	assert.False(t, localProducer(domain, func(context.Context, int32) bool { return true })(ctx, "22222222-2222-3333-4444-555555555555"),
+		"a flow that is not there has no producer")
 }
 
 // The primary domain is materialised by an MxlDomain of its own name,
