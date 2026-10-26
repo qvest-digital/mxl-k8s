@@ -869,7 +869,7 @@ func (e *Engine) run(ctx context.Context) {
 				Uaddr: uint64(uintptr(unsafe.Pointer(m.syncWord()))), Flags: futex2SizeU32}
 		}
 		now := time.Now()
-		if e.progress.observe(e.heads(), now) && e.spec.Stalls != nil {
+		if e.progress != nil && e.progress.observe(e.heads(), now) && e.spec.Stalls != nil {
 			e.spec.Stalls()
 		}
 		var head uint64

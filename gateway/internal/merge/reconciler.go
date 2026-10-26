@@ -207,7 +207,7 @@ var start = Start
 
 // Reconcile starts, keeps or stops the engine of one set, and reports
 // the members its engine finds stalled.
-func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, err error) {
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, err error) {
 	l := log.FromContext(ctx).WithValues("set", req.Name)
 	var set mxlv1alpha1.MxlFlowRedundancySet
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: req.Name}, &set); err != nil {
@@ -219,10 +219,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	}
 	// A failed report is tried again at the next recheck; returned, it
 	// would turn the recheck into a backoff that holds off this set's
-	// replacements of restarted members as well.
+	// replacements of restarted members as well. A path that stops the
+	// engine asks for no recheck of its own, and its report is the one
+	// removing this node's entry, so it gets one.
 	defer func() {
-		if err := r.reportStalled(ctx, &set); err != nil {
-			l.Error(err, "report stalled members")
+		if rerr := r.reportStalled(ctx, &set); rerr != nil {
+			l.Error(rerr, "report stalled members")
+			if err == nil && res.IsZero() {
+				res = ctrl.Result{RequeueAfter: recheck}
+			}
 		}
 	}()
 	if !set.DeletionTimestamp.IsZero() || !wantedHere(&set, r.NodeName) || !valid(&set) {

@@ -788,6 +788,32 @@ func TestReconcilerServesOnWhenItsReportFails(t *testing.T) {
 	require.Equal(t, 2, *writes, "a failed report was not tried again at the recheck")
 }
 
+// A node that stops serving the set removes its entry, and asks for no
+// recheck of its own: a failed removal would leave the member reported
+// stalled with nothing to try it again.
+func TestReconcilerTriesAFailedRemovalAgain(t *testing.T) {
+	stalledStart(t, time.Now().Add(-StartGrace))
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+	require.Len(t, stalledOf(t, r), 1)
+
+	var set mxlv1alpha1.MxlFlowRedundancySet
+	require.NoError(t, r.Client.Get(context.Background(), types.NamespacedName{Name: "programme"}, &set))
+	set.Status.Nodes = []string{"elsewhere"}
+	require.NoError(t, r.Client.Status().Update(context.Background(), &set))
+	ok := r.Client
+	writes := countPatches(r, errors.New("apiserver unavailable"))
+	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter, "a failed removal was not tried again")
+	require.Equal(t, 1, *writes)
+	require.Empty(t, r.engines)
+
+	r.Client = ok
+	require.Zero(t, reconcileSet(t, r), "a set not served here was looked at again with nothing to remove")
+	require.Empty(t, stalledOf(t, r))
+}
+
 // An API server with a CRD from before status.stalledMembers accepts the
 // apply and drops the field: nothing would show why no member is ever
 // reported.
