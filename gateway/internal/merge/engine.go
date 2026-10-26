@@ -197,7 +197,9 @@ type Engine struct {
 	selects atomic.Uint64
 
 	// progress follows the members' heads; nil on an engine Start did
-	// not build.
+	// not build, and on a data flow, whose head moves only when an
+	// ancillary packet arrives, which can be seconds apart on a live
+	// source.
 	progress *progress
 }
 
@@ -232,7 +234,9 @@ func Start(ctx context.Context, spec Spec, log logr.Logger) (*Engine, error) {
 		return nil, err
 	}
 	e.replaceable = canReplace(e.views[0])
-	e.progress = newProgress(e.heads(), time.Now())
+	if e.disc == nil || !e.disc.Data {
+		e.progress = newProgress(e.heads(), time.Now(), stallWindow(e.period))
+	}
 	ok = true
 	rctx, cancel := context.WithCancel(ctx)
 	e.cancel, e.done, e.replaces = cancel, make(chan struct{}), make(chan replaceReq)
@@ -1011,17 +1015,18 @@ func (e *Engine) heads() []uint64 {
 	return hs
 }
 
-// Stalled returns the members, by flow id, whose head had not moved for
-// StallAfter at the loop's last pass.
-func (e *Engine) Stalled() []string {
-	if e.progress == nil {
-		return nil
+// Stalled returns, by flow id and as of the loop's last pass, the
+// members stalled, and those not yet decided: not moved since the engine
+// started, within StartGrace.
+func (e *Engine) Stalled() (stalled, undecided []string) {
+	s, u := e.progress.stalled()
+	for _, i := range s {
+		stalled = append(stalled, e.spec.Members[i])
 	}
-	var ids []string
-	for _, i := range e.progress.stalled() {
-		ids = append(ids, e.spec.Members[i])
+	for _, i := range u {
+		undecided = append(undecided, e.spec.Members[i])
 	}
-	return ids
+	return stalled, undecided
 }
 
 // fed reports whether the gateway reports member i's arrivals.

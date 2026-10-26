@@ -315,6 +315,59 @@ func TestEngineCountsOnlyWhatTheMappedRingHolds(t *testing.T) {
 	require.Equal(t, uint64(end), head)
 }
 
+// The engine's loop is what looks at the members' heads; a stall found
+// anywhere else would not reach the set within seconds. It runs without
+// mxlfs: the loop reads the members' headers, which tmpfs maps as well.
+func TestEngineLoopFindsAStalledMember(t *testing.T) {
+	e := &Engine{spec: Spec{Members: []string{memberA, memberB}}, audio: NewAudio(2, 4, 2), done: make(chan struct{})}
+	for range 3 {
+		path := filepath.Join(t.TempDir(), "data")
+		require.NoError(t, os.WriteFile(path, make([]byte, 4096), 0o644))
+		h, f, err := mapHeader(path, true)
+		require.NoError(t, err)
+		if e.out == nil {
+			e.out, e.outFile = h, f
+			continue
+		}
+		e.members, e.files = append(e.members, h), append(e.files, f)
+	}
+	t.Cleanup(e.release)
+	setHead := func(m int, head uint64) {
+		atomic.StoreUint64((*uint64)(unsafe.Pointer(&e.members[m].info.runtime.headIndex)), head)
+	}
+	const window = 100 * time.Millisecond
+	e.progress = newProgress(e.heads(), time.Now(), window)
+	changed := make(chan struct{}, 8)
+	e.spec.Stalls = func() { changed <- struct{}{} }
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := make(chan struct{})
+	go func() {
+		for h := uint64(1); ; h++ {
+			setHead(1, h)
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}()
+	setHead(0, 1)
+	go e.run(ctx)
+	defer func() { cancel(); <-e.done; close(stop) }()
+
+	for {
+		select {
+		case <-changed:
+		case <-time.After(time.Second):
+			t.Fatal("the loop did not report a member that stood still")
+		}
+		if stalled, _ := e.Stalled(); len(stalled) > 0 {
+			require.Equal(t, []string{memberA}, stalled, "a member that kept moving was found stalled")
+			return
+		}
+	}
+}
+
 // The same on mxlfs, through a reader: member A's lazily held
 // placeholder is replaced by an allocated copy a mirror writes, while
 // the engine still maps the placeholder. Reading what the output then
@@ -851,8 +904,11 @@ func TestEngineFindsAMemberWhoseProducerStopsCommitting(t *testing.T) {
 				Skew: 40 * time.Millisecond, Ordered: true, Stalls: func() { changed <- time.Now() }}, logr.Discard())
 			require.NoError(t, err)
 			defer e.Close()
+			<-changed // both members decided on their first commit
 			time.Sleep(StallAfter + 500*time.Millisecond)
-			require.Empty(t, e.Stalled(), "members committing at the clock were found stalled")
+			stalled, undecided := e.Stalled()
+			require.Empty(t, stalled, "members committing at the clock were found stalled")
+			require.Empty(t, undecided)
 			require.Empty(t, changed)
 
 			a.paused.Store(true)
@@ -863,7 +919,8 @@ func TestEngineFindsAMemberWhoseProducerStopsCommitting(t *testing.T) {
 			case <-time.After(StallAfter + time.Second):
 				t.Fatal("a member that stopped committing was not found stalled")
 			}
-			require.Equal(t, []string{memberA}, e.Stalled())
+			stalled, _ = e.Stalled()
+			require.Equal(t, []string{memberA}, stalled)
 
 			a.paused.Store(false)
 			resumed := time.Now()
@@ -873,7 +930,8 @@ func TestEngineFindsAMemberWhoseProducerStopsCommitting(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("a member that committed again was not found moving")
 			}
-			require.Empty(t, e.Stalled())
+			stalled, _ = e.Stalled()
+			require.Empty(t, stalled)
 		})
 	}
 }

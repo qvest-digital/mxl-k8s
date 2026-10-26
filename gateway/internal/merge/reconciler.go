@@ -55,6 +55,7 @@ type Reconciler struct {
 	// stalls brings a set back when its engine finds a member stalled or
 	// moving again, which raises no event on the set.
 	stalls chan event.GenericEvent
+	pruned sync.Once // logs a CRD without status.stalledMembers
 }
 
 type running struct {
@@ -216,9 +217,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		}
 		return ctrl.Result{}, err
 	}
+	// A failed report is tried again at the next recheck; returned, it
+	// would turn the recheck into a backoff that holds off this set's
+	// replacements of restarted members as well.
 	defer func() {
-		if err == nil {
-			err = r.reportStalled(ctx, &set)
+		if err := r.reportStalled(ctx, &set); err != nil {
+			l.Error(err, "report stalled members")
 		}
 	}()
 	if !set.DeletionTimestamp.IsZero() || !wantedHere(&set, r.NodeName) || !valid(&set) {
@@ -339,41 +343,45 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 // reportStalled applies this node's entry in the set's
 // status.stalledMembers when it differs from the engine's stalled
 // members, and removes it when none is, or no engine serves the set
-// here. Every gateway applies under a field manager of its own node:
-// one shared manager would release every other node's entry with each
-// apply that leaves it out.
+// here. A member the engine has not decided on yet, one not moved since
+// the engine started, keeps what the entry said: an engine rebuilt
+// under a stalled member must not report it moving, nor one built under
+// a moving member report it stalled.
 func (r *Reconciler) reportStalled(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet) error {
 	r.mu.Lock()
 	cur := r.engines[set.Name]
 	r.mu.Unlock()
-	var stalled, reported []string
+	var stalled, undecided, reported []string
 	if cur != nil {
-		stalled = cur.engine.Stalled()
+		stalled, undecided = cur.engine.Stalled()
 	}
 	for _, s := range set.Status.StalledMembers {
 		if s.Node == r.NodeName {
 			reported = s.FlowIDs
 		}
 	}
+	for _, id := range reported {
+		if slices.Contains(undecided, id) {
+			stalled = append(stalled, id)
+		}
+	}
 	slices.Sort(stalled)
 	if slices.Equal(stalled, slices.Sorted(slices.Values(reported))) {
 		return nil
 	}
-	// An apply that leaves the entry out removes it.
-	status := map[string]any{}
-	if len(stalled) > 0 {
-		ids := make([]any, len(stalled))
-		for i, id := range stalled {
-			ids[i] = id
-		}
-		status["stalledMembers"] = []any{map[string]any{"node": r.NodeName, "flowIDs": ids}}
-	}
 	log.FromContext(ctx).Info("reporting stalled members", "set", set.Name, "members", stalled)
-	patch := &unstructured.Unstructured{Object: map[string]any{"status": status}}
-	patch.SetGroupVersionKind(mxlv1alpha1.GroupVersion.WithKind("MxlFlowRedundancySet"))
-	patch.SetName(set.Name)
-	return r.Client.Status().Patch(ctx, patch, client.Apply, client.FieldOwner("mxl-merge-gateway-"+r.NodeName),
-		client.ForceOwnership)
+	patch := mxlv1alpha1.StalledMembersApply(set.Name, r.NodeName, stalled)
+	if err := r.Client.Status().Patch(ctx, patch, client.Apply,
+		client.FieldOwner(mxlv1alpha1.StalledMembersFieldOwner(r.NodeName)), client.ForceOwnership); err != nil {
+		return err
+	}
+	if got, _, _ := unstructured.NestedSlice(patch.Object, "status", "stalledMembers"); len(stalled) > 0 && len(got) == 0 {
+		r.pruned.Do(func() {
+			log.FromContext(ctx).Info("the API server dropped status.stalledMembers; its MxlFlowRedundancySet CRD " +
+				"predates the field, so no stalled member is reported")
+		})
+	}
+	return nil
 }
 
 // outputGeometry is the definition whose geometry the output is built
