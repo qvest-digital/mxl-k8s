@@ -24,20 +24,30 @@ type Resolver struct {
 // PodForPID returns the Pod scheduled on this node whose
 // metadata.uid matches the kubepods slice for the given host PID.
 func (r *Resolver) PodForPID(ctx context.Context, pid int32) (*corev1.Pod, error) {
+	uid, err := r.UIDForPID(pid)
+	if err != nil {
+		return nil, err
+	}
+	return r.PodForUID(ctx, uid)
+}
+
+// UIDForPID returns the UID of the pod whose kubepods slice holds the
+// given host PID, from /proc alone.
+func (r *Resolver) UIDForPID(pid int32) (string, error) {
 	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
 	if err != nil {
-		return nil, fmt.Errorf("read cgroup for pid %d: %w", pid, err)
+		return "", fmt.Errorf("read cgroup for pid %d: %w", pid, err)
 	}
 	uid, ok := parsePodUID(string(raw))
 	if !ok {
-		return nil, fmt.Errorf("pid %d is not under a kubepods cgroup", pid)
+		return "", fmt.Errorf("pid %d is not under a kubepods cgroup", pid)
 	}
-	return r.podForUID(ctx, uid)
+	return uid, nil
 }
 
-// podForUID lists only this node's pods: the client is uncached, and a
+// PodForUID lists only this node's pods: the client is uncached, and a
 // placeholder open resolves its pid every time.
-func (r *Resolver) podForUID(ctx context.Context, uid string) (*corev1.Pod, error) {
+func (r *Resolver) PodForUID(ctx context.Context, uid string) (*corev1.Pod, error) {
 	var pods corev1.PodList
 	if err := r.Client.List(ctx, &pods, client.MatchingFields{"spec.nodeName": r.NodeName}); err != nil {
 		return nil, fmt.Errorf("list pods: %w", err)

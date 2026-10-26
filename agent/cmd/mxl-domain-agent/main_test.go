@@ -96,6 +96,64 @@ func TestOursIsOnlyMxlK8sComponents(t *testing.T) {
 	assert.False(t, o(ctx, 6), "a pid with no resolvable pod")
 }
 
+// pidsInPods resolves pids to pod UIDs and UIDs to pods as /proc and
+// the API server would, counting the API lookups.
+type pidsInPods struct {
+	uid     map[int32]string
+	pod     map[string]*corev1.Pod
+	lookups int
+}
+
+func (p *pidsInPods) UIDForPID(pid int32) (string, error) {
+	if uid, ok := p.uid[pid]; ok {
+		return uid, nil
+	}
+	return "", errors.New("not in a pod")
+}
+
+func (p *pidsInPods) PodForUID(_ context.Context, uid string) (*corev1.Pod, error) {
+	p.lookups++
+	if pod, ok := p.pod[uid]; ok {
+		return pod, nil
+	}
+	return nil, errors.New("no pod")
+}
+
+// A producer is positive evidence only: the gateway is not one, and a
+// pid whose pod cannot be resolved is no evidence either way. Counting
+// it would claim Origin for a mirror copy, which no later publish
+// demotes. The rescan asks about every writer of every copy each pass,
+// so each pod is looked up once, not once per pid per pass.
+func TestProducersIsAResolvedPodThatIsNotOurs(t *testing.T) {
+	pod := func(ns, component string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns,
+			Labels: map[string]string{"app.kubernetes.io/component": component}}}
+	}
+	pods := &pidsInPods{
+		uid: map[int32]string{1: "gw", 2: "gw", 3: "mf", 4: "gone"},
+		pod: map[string]*corev1.Pod{"gw": pod("mxl-system", "gateway"), "mf": pod("media", "")},
+	}
+	p, err := newProducers(pods, "mxl-system")
+	require.NoError(t, err)
+	ctx := context.Background()
+	for range 3 {
+		assert.False(t, p.Producer(ctx, 1), "the gateway filling a mirror target")
+		assert.False(t, p.Producer(ctx, 2), "another of the gateway's pids")
+		assert.True(t, p.Producer(ctx, 3), "a media function")
+		assert.False(t, p.Producer(ctx, 4), "a pid whose pod does not resolve")
+		assert.False(t, p.Producer(ctx, 5), "a pid in no pod")
+	}
+	assert.Equal(t, 2+3, pods.lookups,
+		"one lookup per pod that resolves; one that does not is asked about again")
+}
+
+// Without the agent's namespace no pod is mxl-k8s's own, and the gateway
+// filling every mirror copy on the node would be taken for its producer.
+func TestProducersNeedTheAgentsNamespace(t *testing.T) {
+	_, err := newProducers(&pidsInPods{}, "")
+	require.Error(t, err)
+}
+
 // The primary domain is materialised by an MxlDomain of its own name,
 // but its flows, and the outputs of sets in it, are spelled with no
 // domain name. Reported under that name, a reader of a set's output was
@@ -165,6 +223,7 @@ func TestTrackerRunsMxlfsForATrackedDomainOnMxlfs(t *testing.T) {
 		Mxlfs: &trackerMxlfs{
 			IsMxlfs:  func(dir string) bool { return dir == onMxlfs },
 			IsOutput: func(context.Context, string, string) bool { return true },
+			Producer: func(context.Context, int32) bool { return true },
 			Run: func(ctx context.Context, dir string, fp *flowpublisher.Publisher) (func(), error) {
 				runs = append(runs, run{ctx, dir, fp})
 				return func() { <-ctx.Done(); waited++ }, nil
@@ -180,6 +239,7 @@ func TestTrackerRunsMxlfsForATrackedDomainOnMxlfs(t *testing.T) {
 	assert.Same(t, watched[onMxlfs], runs[0].fp, "placeholder changes go to the domain's own publisher")
 	assert.Equal(t, "studio", runs[0].fp.Domain)
 	assert.NotNil(t, runs[0].fp.IsOutput, "a set's output merged here is no location to publish")
+	assert.NotNil(t, runs[0].fp.Producer, "a producer that takes over a mirror's copy here is the Origin")
 	require.NoError(t, runs[0].ctx.Err())
 	tr.Stop()
 	assert.Error(t, runs[0].ctx.Err(), "stopping the tracker stops its mxlfs handling")
@@ -190,6 +250,7 @@ func TestTrackerRunsMxlfsForATrackedDomainOnMxlfs(t *testing.T) {
 	tr.Stop()
 	assert.Len(t, runs, 1, "a plain domain has no placeholders to watch")
 	assert.Nil(t, watched[plain].IsOutput)
+	assert.Nil(t, watched[plain].Producer, "off mxlfs the gateway's locks are not told from a producer's")
 }
 
 type leases struct{ released []string }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -114,8 +115,20 @@ func run(args []string) error {
 	current := intent.Domains{Root: root, Primary: primaryDir, ByDir: map[string]string{}}
 
 	pods := &podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName}
-	ns, _ := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-	own := ownPod(strings.TrimSpace(string(ns)))
+	ns, nsErr := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	namespace := strings.TrimSpace(string(ns))
+	own := ownPod(namespace)
+	var producer func(ctx context.Context, pid int32) bool
+	if cfg.Mxlfs {
+		p, err := newProducers(pods, namespace)
+		if err != nil {
+			if nsErr != nil {
+				err = fmt.Errorf("%w (reading the service account namespace: %v)", err, nsErr)
+			}
+			return fmt.Errorf("--mxlfs: %w", err)
+		}
+		producer = p.Producer
+	}
 	var intentDispatcher *intent.Dispatcher
 	if cfg.IntentSocketPath != "" || cfg.Mxlfs {
 		intentDispatcher = &intent.Dispatcher{
@@ -163,7 +176,8 @@ func run(args []string) error {
 		},
 	}
 	if cfg.Mxlfs {
-		tracking.Mxlfs = &trackerMxlfs{IsMxlfs: mxlfswatch.IsMxlfs, IsOutput: sets.IsOutput, Run: startMxlfs}
+		tracking.Mxlfs = &trackerMxlfs{IsMxlfs: mxlfswatch.IsMxlfs, IsOutput: sets.IsOutput, Run: startMxlfs,
+			Producer: producer}
 	}
 	trackers.Start = func(ctx context.Context, name, dir string) (tracker.Tracker, error) {
 		return tracking.start(ctx, name, filepath.Join(root, dir))
@@ -224,6 +238,10 @@ func run(args []string) error {
 		}
 	}
 
+	// Only once the domain is mounted can it be told to be on mxlfs, the
+	// same test a tracked domain gets.
+	primaryOnMxlfs := tracking.Mxlfs.on(cfg.DomainPath, flowPub)
+
 	if err := flowPub.InitialSync(ctx); err != nil {
 		// Initial sync failures are logged, not fatal -- the fanotify
 		// stream will reconcile when entries change.
@@ -268,7 +286,7 @@ func run(args []string) error {
 		}()
 	}
 
-	if cfg.Mxlfs && mxlfswatch.IsMxlfs(cfg.DomainPath) {
+	if primaryOnMxlfs {
 		if _, err := startMxlfs(ctx, cfg.DomainPath, flowPub); err != nil {
 			return err
 		}
@@ -472,6 +490,19 @@ type trackerMxlfs struct {
 	// Run starts runMxlfs for dir and returns what waits for it to end
 	// once ctx has, or fails with none of it running.
 	Run func(ctx context.Context, dir string, fp *flowpublisher.Publisher) (wait func(), err error)
+	// Producer is the publisher's Producer.
+	Producer func(ctx context.Context, pid int32) bool
+}
+
+// on reports whether dir is on mxlfs, and if it is gives fp what a
+// domain on mxlfs needs. Nil, without --mxlfs, no domain is.
+func (m *trackerMxlfs) on(dir string, fp *flowpublisher.Publisher) bool {
+	if m == nil || !m.IsMxlfs(dir) {
+		return false
+	}
+	fp.IsOutput = m.IsOutput
+	fp.Producer = m.Producer
+	return true
 }
 
 // start tracks the flows of the domain name in dir: the same fanotify
@@ -489,10 +520,7 @@ func (d domainTracking) start(ctx context.Context, name, dir string) (tracker.Tr
 		NodeName:   d.Node,
 		Lease:      d.Lease,
 	}
-	onMxlfs := d.Mxlfs != nil && d.Mxlfs.IsMxlfs(dir)
-	if onMxlfs {
-		fp.IsOutput = d.Mxlfs.IsOutput
-	}
+	onMxlfs := d.Mxlfs.on(dir, fp)
 
 	tctx, cancel := context.WithCancel(ctx)
 	waitWatch, err := d.WatchFlows(tctx, dir, fp)
@@ -602,6 +630,68 @@ func ours(pods interface {
 		pod, err := pods.PodForPID(ctx, pid)
 		return err == nil && own(pod)
 	}
+}
+
+// maxProducerUIDs bounds the pods producers remembers. Past it the
+// memory starts over, which costs one lookup per pod still writing.
+const maxProducerUIDs = 1024
+
+// producers tells a producer's pid from mxl-k8s's own by the pod it runs
+// in. The rescan asks about every writer of every copy on the node each
+// pass and the pod client is uncached, so a pid is resolved to its pod's
+// UID through /proc and each UID is looked up once: a pod's namespace
+// never changes, and its component label is not expected to.
+type producers struct {
+	pods interface {
+		UIDForPID(pid int32) (string, error)
+		PodForUID(ctx context.Context, uid string) (*corev1.Pod, error)
+	}
+	own func(*corev1.Pod) bool
+
+	mu    sync.Mutex
+	byUID map[string]bool
+}
+
+// newProducers needs the agent's namespace: without it no pod is
+// mxl-k8s's own, and the gateway filling every mirror copy on the node
+// would read as a producer of it.
+func newProducers(pods interface {
+	UIDForPID(pid int32) (string, error)
+	PodForUID(ctx context.Context, uid string) (*corev1.Pod, error)
+}, namespace string) (*producers, error) {
+	if namespace == "" {
+		return nil, errors.New("the agent's namespace is unknown, so its own pods cannot be told from producers")
+	}
+	return &producers{pods: pods, own: ownPod(namespace), byUID: map[string]bool{}}, nil
+}
+
+// Producer reports a pid as a producer's when it runs in a pod that is
+// not mxl-k8s's own. One whose pod does not resolve is no evidence, and
+// is asked about again next time: an Origin claimed for a mirror copy is
+// not demoted by a later publish.
+func (p *producers) Producer(ctx context.Context, pid int32) bool {
+	uid, err := p.pods.UIDForPID(pid)
+	if err != nil {
+		return false
+	}
+	p.mu.Lock()
+	known, ok := p.byUID[uid]
+	p.mu.Unlock()
+	if ok {
+		return known
+	}
+	pod, err := p.pods.PodForUID(ctx, uid)
+	if err != nil {
+		return false
+	}
+	known = !p.own(pod)
+	p.mu.Lock()
+	if len(p.byUID) >= maxProducerUIDs {
+		clear(p.byUID)
+	}
+	p.byUID[uid] = known
+	p.mu.Unlock()
+	return known
 }
 
 // domainDevices maps each domain directory's device to the domain's name,

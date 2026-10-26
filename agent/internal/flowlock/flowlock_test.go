@@ -3,6 +3,7 @@ package flowlock
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -122,4 +123,44 @@ func TestWriterAttached_UnreadableDataFileReportsAttached(t *testing.T) {
 	attached, err := WriterAttached(domain, flowID)
 	assert.Error(t, err)
 	assert.True(t, attached)
+}
+
+func TestParseLocksKeepsOnlyWritersLocks(t *testing.T) {
+	const locks = `1: FLOCK  ADVISORY  READ 514830 00:2a:1234 0 EOF
+2: FLOCK  ADVISORY  READ 42 00:2a:1234 0 EOF
+2: FLOCK  ADVISORY  READ 42 00:2a:1234 0 EOF
+3: FLOCK  ADVISORY  READ 7 00:2a:9999 0 EOF
+4: POSIX  ADVISORY  READ 9 00:2a:1234 0 EOF
+5: FLOCK  ADVISORY  READ 0 00:2a:1234 0 EOF
+5: -> FLOCK  ADVISORY  WRITE 11 00:2a:1234 0 EOF
+6: FLOCK  ADVISORY  WRITE 13 00:2a:1234 0 EOF
+`
+	// 7 holds another file, 9 a POSIX lock, 0 is a holder outside this
+	// pid namespace and 11 only waits. 13 holds the exclusive lock of a
+	// probe for whether the flow is active, which a reader runs as
+	// readily as a writer: taken for a writer it reads as a producer.
+	// 42 holds the file twice, as the gateway does, and is one writer.
+	got, err := parseLocks(strings.NewReader(locks))
+	require.NoError(t, err)
+	require.Equal(t, Locks{"00:2a:1234": {514830, 42}, "00:2a:9999": {7}}, got)
+}
+
+// A writer's shared flock, taken here, is listed under this process.
+func TestWriterPIDsListsTheHolder(t *testing.T) {
+	domain := t.TempDir()
+	pids := func() []int32 {
+		t.Helper()
+		l, err := ReadLocks()
+		require.NoError(t, err)
+		p, err := l.WriterPIDs(domain, flowID)
+		require.NoError(t, err)
+		return p
+	}
+	require.Empty(t, pids(), "a flow that is not there has no writer")
+
+	dir := makeFlowDir(t, domain, flowID)
+	require.Empty(t, pids())
+
+	holdShared(t, dir)
+	require.Equal(t, []int32{int32(os.Getpid())}, pids())
 }

@@ -19,9 +19,9 @@ component, showing the workflow rather than a labelled rectangle.
 The RBAC verbs that encode this table live in
 `+kubebuilder:rbac` markers next to each reconciler -- most
 authoritatively
-[`operator/internal/receiver/controller.go:35-40`](../../operator/internal/receiver/controller.go)
+[`operator/internal/receiver/controller.go`](../../operator/internal/receiver/controller.go)
 and
-[`gateway/internal/mirror/target.go:81-84`](../../gateway/internal/mirror/target.go).
+[`gateway/internal/mirror/target.go`](../../gateway/internal/mirror/target.go).
 
 ## Operator
 
@@ -140,17 +140,26 @@ Three transitions in particular are easy to miss:
 - **A target that will not open** counts consecutive failures in
   `status.targetAttemptCount` and leaves `Materializing` for
   `Degraded` past `maxTargetOpenAttempts`
-  ([`target.go:516`](../../gateway/internal/mirror/target.go)):
+  ([`target.go`](../../gateway/internal/mirror/target.go)):
   `Materializing` is the state a consumer waits through, so a mirror
-  parked there reads as one about to go `Ready`. When the failure came
-  from the local writer, that threshold also reclaims the flow
+  parked there reads as one about to go `Ready`. When the target's
+  own writer would not open, that threshold also reclaims the flow
   directory -- a gateway restart part-way through materialising a
   target leaves a grain ring shorter than the flow header declares,
-  and libmxl fails every later open of that path. Only a directory
-  this node is not the flow's `Origin` for is removed; an `Origin`
-  location means a local producer has taken it over.
+  and libmxl fails every later open of that path. A directory this
+  node is the flow's `Origin` for is never removed, and on mxlfs,
+  where the gateway sees every process's locks, neither is one
+  another process on the node holds a writer on: either means a
+  local producer has taken it over.
+- **A process on the node writing the flow**, on mxlfs, makes the
+  target stand down instead of failing: `Degraded` with reason
+  `LocalWriter`, no attempt counted, no writer opened and the
+  directory left alone, retried every few seconds. The agent
+  publishes the node as `Origin` once a writer on the flow resolves
+  to a pod that is not mxl-k8s's own, and the operator then deletes
+  the mirror.
 - **Fatal `ReadGrain`** triggers `recoverFromFatalError`
-  ([`target.go:924`](../../gateway/internal/mirror/target.go)),
+  ([`target.go`](../../gateway/internal/mirror/target.go)),
   which closes only the fabric triple
   (`Regions`/`Target`/`Info`). The `mxl.Writer` is intentionally
   retained -- the on-disk flow definition and any consumer
@@ -262,7 +271,9 @@ The eight steps in order:
    `Origin` vs `Ready` is decided by whether an `MxlFlowMirror`
    already names this node as `target`: producer-side directories
    get `Origin`, mirror-target directories get `Ready` so
-   `resolveSourceNode` keeps pointing at the real writer.
+   `resolveSourceNode` keeps pointing at the real writer. On mxlfs a
+   producer among the directory's writers makes it `Origin` either
+   way.
 3. **User applies an `MxlReceiver`.** Spec carries `flowID` plus
    exactly one of `podSelector` / `podRef`.
 4. **Operator's `receiver.Reconciler` wakes** on the watch event,
