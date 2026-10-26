@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.0-rc.28](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.27...v1.1.0-rc.28) (2026-10-26)
+
+
+### Bug Fixes
+
+* **agent:** publish Origin for a producer in a mirror's copy ([#367](https://github.com/qvest-digital/mxl-k8s/issues/367)) ([ee6fe35](https://github.com/qvest-digital/mxl-k8s/commit/ee6fe359524d31f51a4ae4df9996266f7b218b54))
+* **gateway:** count only shared flocks as writers ([#367](https://github.com/qvest-digital/mxl-k8s/issues/367)) ([ee6fe35](https://github.com/qvest-digital/mxl-k8s/commit/ee6fe359524d31f51a4ae4df9996266f7b218b54))
+* **gateway:** stand a target down for a local writer, never reclaim ([#367](https://github.com/qvest-digital/mxl-k8s/issues/367)) ([ee6fe35](https://github.com/qvest-digital/mxl-k8s/commit/ee6fe359524d31f51a4ae4df9996266f7b218b54))
+
 ## [1.1.0-rc.27](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.26...v1.1.0-rc.27) (2026-10-26)
 
 
