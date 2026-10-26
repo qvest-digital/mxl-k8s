@@ -19,9 +19,9 @@ component, showing the workflow rather than a labelled rectangle.
 The RBAC verbs that encode this table live in
 `+kubebuilder:rbac` markers next to each reconciler -- most
 authoritatively
-[`operator/internal/receiver/controller.go:35-40`](../../operator/internal/receiver/controller.go)
+[`operator/internal/receiver/controller.go`](../../operator/internal/receiver/controller.go)
 and
-[`gateway/internal/mirror/target.go:81-84`](../../gateway/internal/mirror/target.go).
+[`gateway/internal/mirror/target.go`](../../gateway/internal/mirror/target.go).
 
 ## Operator
 
@@ -159,7 +159,7 @@ Three transitions in particular are easy to miss:
   to a pod that is not mxl-k8s's own, and the operator then deletes
   the mirror.
 - **Fatal `ReadGrain`** triggers `recoverFromFatalError`
-  ([`target.go:924`](../../gateway/internal/mirror/target.go)),
+  ([`target.go`](../../gateway/internal/mirror/target.go)),
   which closes only the fabric triple
   (`Regions`/`Target`/`Info`). The `mxl.Writer` is intentionally
   retained -- the on-disk flow definition and any consumer

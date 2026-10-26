@@ -634,8 +634,8 @@ const maxProducerUIDs = 1024
 // producers tells a producer's pid from mxl-k8s's own by the pod it runs
 // in. The rescan asks about every writer of every copy on the node each
 // pass and the pod client is uncached, so a pid is resolved to its pod's
-// UID through /proc and each UID is looked up once: which namespace a
-// pod is in and what component it is never change.
+// UID through /proc and each UID is looked up once: a pod's namespace
+// never changes, and its component label is not expected to.
 type producers struct {
 	pods interface {
 		UIDForPID(pid int32) (string, error)

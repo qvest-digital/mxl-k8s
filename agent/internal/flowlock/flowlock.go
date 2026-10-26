@@ -139,6 +139,10 @@ func (l Locks) WriterPIDs(domainPath, flowID string) ([]int32, error) {
 // exclusive one is libmxl testing whether a flow is active, which its
 // garbage collection, mxlIsFlowActive and WriterAttached here all do
 // and which any reader may run.
+//
+// Waiters and holders listed with pid 0 are dropped, unlike in the
+// gateway's parser: here a doubtful writer must not become a producer,
+// since an Origin claimed for a mirror's copy is not demoted.
 func parseLocks(r io.Reader) (Locks, error) {
 	locks := Locks{}
 	sc := bufio.NewScanner(r)

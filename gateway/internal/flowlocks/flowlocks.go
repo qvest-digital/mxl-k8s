@@ -58,6 +58,10 @@ func writers(dataPath string, self int) (int, error) {
 // whether a flow is active, which its garbage collection and
 // mxlIsFlowActive do and which any reader may run: counted, it would
 // read as a producer for as long as the probe holds it.
+//
+// Waiters and holders listed with pid 0 count, unlike in the agent's
+// parser: here a doubtful writer keeps a directory rather than removing
+// a live ring.
 func count(r io.Reader, major, minor uint32, ino uint64, self int) (int, error) {
 	want := fmt.Sprintf("%02x:%02x:%d", major, minor, ino)
 	n := 0
