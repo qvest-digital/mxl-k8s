@@ -146,10 +146,11 @@ Three transitions in particular are easy to miss:
   own writer would not open, that threshold also reclaims the flow
   directory -- a gateway restart part-way through materialising a
   target leaves a grain ring shorter than the flow header declares,
-  and libmxl fails every later open of that path. A directory another
-  process on the node holds a writer on is never removed, nor one
-  this node is the flow's `Origin` for: either means a local producer
-  has taken it over.
+  and libmxl fails every later open of that path. A directory this
+  node is the flow's `Origin` for is never removed, and on mxlfs,
+  where the gateway sees every process's locks, neither is one
+  another process on the node holds a writer on: either means a
+  local producer has taken it over.
 - **A process on the node writing the flow**, on mxlfs, makes the
   target stand down instead of failing: `Degraded` with reason
   `LocalWriter`, no attempt counted, no writer opened and the

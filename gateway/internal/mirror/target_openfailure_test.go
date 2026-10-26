@@ -407,3 +407,17 @@ func TestTarget_WriterFailureKeepsFlowDirAForeignProcessWrites(t *testing.T) {
 	assert.Equal(t, mxlv1alpha1.MxlFlowMirrorDegraded, f.mirror(t).Status.Phase,
 		"the failure still escalates; only the reclaim is withheld")
 }
+
+func TestTarget_LocalWriterClosesALiveTarget(t *testing.T) {
+	// A target still live when the open path finds a local writer would
+	// go on writing over the producer's ring; it gives its writer up as
+	// StopFlow does for a placeholder taken over.
+	f := newOpenFailureFixture(t, errLocalWriter, mxlv1alpha1.MxlFlowLocationReady)
+	f.r.targets[f.key] = &targetEntry{flowID: openFailureFlowID}
+
+	_, err := f.r.Reconcile(context.Background(), f.req)
+	require.NoError(t, err)
+
+	assert.NotContains(t, f.r.targets, f.key)
+	assert.Equal(t, ReasonLocalWriter, f.mirror(t).Status.Conditions[0].Reason)
+}

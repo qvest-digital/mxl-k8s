@@ -854,8 +854,21 @@ func (r *TargetReconciler) openTargetDispatch(key types.NamespacedName, domain, 
 // reads Origin; until then the open is tried again every
 // localWriterRecheckInterval, which also resumes the mirror should the
 // process exit first.
+//
+// A target still live here gives its writer up, as StopFlow does for a
+// placeholder taken over: it would write over the producer's ring.
+// status.targetInfo is left as it is: the source side waits on an empty
+// one rather than tearing its half down, and the mirror goes with the
+// operator's delete either way.
+//
+// The operator deletes the mirror only once it resolves the flow's
+// Origin to this node. While it resolves it to another node, which a
+// second producer of the same flow still renewing its Lease there does,
+// the target stays stood down and costs one look at the node's locks
+// per recheck; it resumes from that node once the producer here exits.
 func (r *TargetReconciler) standDown(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, inputs targetOpenInputs) (ctrl.Result, error) {
 	key := client.ObjectKeyFromObject(mirror)
+	r.closeEntry(key, keepFlow)
 	r.mu.Lock()
 	r.attempts[key] = attempt[targetOpenInputs]{notBefore: r.now().Add(localWriterRecheckInterval), inputs: inputs}
 	r.mu.Unlock()
@@ -943,10 +956,13 @@ func (r *TargetReconciler) handleOpenTargetFailure(ctx context.Context, mirror *
 // and every later open of that path fails, so retrying the open
 // against the same directory can only keep failing.
 //
-// Two gates keep a producer's flow out of it. A directory another
-// process on this node writes is that process's flow, whatever the
-// MxlFlow says: the location this node publishes lags a producer that
-// has just opened the flow. And a flow this node is Origin for belongs
+// Two gates keep a producer's flow out of it. On mxlfs, where the
+// gateway runs in the host's PID namespace and so sees every process's
+// locks, a directory another process on this node writes is that
+// process's flow, whatever the MxlFlow says: the location this node
+// publishes lags a producer that has just opened the flow. Without
+// mxlfs no other process's lock is visible and only the second gate
+// applies. And a flow this node is Origin for belongs
 // to a local producer even while that producer is not attached. Only a
 // directory this gateway owns as a mirror copy is reclaimed, which is
 // the same ownership test teardown applies.
