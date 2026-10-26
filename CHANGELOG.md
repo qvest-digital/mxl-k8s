@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.29](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.28...v1.1.0-rc.29) (2026-10-26)
+
+
+### Features
+
+* **gateway:** log whether a merge engine can replace members in place ([#369](https://github.com/qvest-digital/mxl-k8s/issues/369)) ([ddf2036](https://github.com/qvest-digital/mxl-k8s/commit/ddf2036add2b664e0a2be078603884e05d867945))
+
 ## [1.1.0-rc.28](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.27...v1.1.0-rc.28) (2026-10-26)
 
 
