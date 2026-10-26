@@ -34,7 +34,8 @@ spec:
           MxlFlowRedundancySet serves one flow from several member flows,
           switching members per grain, or per page of audio, wherever one fails
           to deliver. The output's members all have to be on an mxlfs domain of
-          the reading node, and to agree in format, rate and geometry.
+          the reading node, and to agree in format, rate, geometry and ring
+          depth.
 
           While the output waits up to the skew budget for a grain no member has,
           the members keep writing a ring period ahead, into slots the output
@@ -43,10 +44,18 @@ spec:
           boundary; a gateway that gets no CPU for longer than a grain can leave
           the oldest grain of the output reading the next ring period's picture.
           Readers at the output's head are unaffected. A member that goes away
-          leaves the output to the others. One that comes back or changes
-          geometry, or a set created again, builds the output again, and its
-          readers have to reopen it; a member whose geometry differs from the
-          output's is left out of it while another member keeps that geometry.
+          leaves the output to the others. One that comes back in the output's
+          geometry and ring depth takes its old place in the output where the
+          node's mxlfs has MXLFS_IOC_VIEW_REPLACE_SOURCE. The output is built
+          again, and its readers have to reopen it, without that ioctl; when a
+          replacement fails part-way, or its new ring cannot be opened for
+          several attempts in a row; when a member comes back in another
+          geometry, or with another ring depth after the domain's history
+          duration changed; when a member that was absent or left out when the
+          output was built comes back; and when a set is created again. A member
+          whose geometry or ring depth differs from the output's is left out of
+          it while another member keeps those, and so is a member whose ring
+          cannot be opened.
         properties:
           apiVersion:
             description: |-
