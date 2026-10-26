@@ -122,7 +122,10 @@ func run(args []string) error {
 	if cfg.Mxlfs {
 		p, err := newProducers(pods, namespace)
 		if err != nil {
-			return fmt.Errorf("--mxlfs: %w (reading the service account namespace: %v)", err, nsErr)
+			if nsErr != nil {
+				err = fmt.Errorf("%w (reading the service account namespace: %v)", err, nsErr)
+			}
+			return fmt.Errorf("--mxlfs: %w", err)
 		}
 		producer = p.Producer
 	}
