@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.27](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.26...v1.1.0-rc.27) (2026-10-26)
+
+
+### Bug Fixes
+
+* **gateway:** put a restarted member's ring into the output's views ([#364](https://github.com/qvest-digital/mxl-k8s/issues/364)) ([7eea632](https://github.com/qvest-digital/mxl-k8s/commit/7eea6321813cbb1d19a5d44e398b4b19d0e762e1))
+
 ## [1.1.0-rc.26](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.25...v1.1.0-rc.26) (2026-10-25)
 
 
