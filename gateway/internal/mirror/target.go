@@ -13,6 +13,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -109,9 +110,22 @@ const maxStuckRebuilds uint32 = 3
 // mirror parked there is indistinguishable from one a moment away
 // from Ready: no phase change to alert on and no counter to
 // threshold. From this attempt on the target side publishes
-// Phase=Degraded, and a failure that came from the local writer also
+// Phase=Degraded, and a failure to open the target's own writer also
 // gets the flow directory reclaimed (see reclaimUnusableFlowDir).
 const maxTargetOpenAttempts uint32 = 3
+
+// localWriterRecheckInterval is how often a target that stood down for
+// a process on this node writing its flow looks again. Nothing the
+// target reconciler watches changes when that process exits, so the
+// look is on its own clock.
+const localWriterRecheckInterval = 5 * time.Second
+
+// ReasonLocalWriter marks a target-side mirror that stood down because
+// a process on this node writes the flow. The local writer wins: the
+// mirror opens no writer into the flow and leaves its directory alone
+// for as long as that process writes it. Held here rather than in the
+// api module, like ReasonOpenTargetUnrecoverable.
+const ReasonLocalWriter = "LocalWriter"
 
 // terminalTargetOpenAttempts is the consecutive-failure count past
 // which the target side stops treating an open failure as retryable.
@@ -699,6 +713,9 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	entry, err := r.openTargetDispatch(req.NamespacedName, mirror.Spec.Domain, string(flow.Spec.Definition.Raw), provider)
+	if errors.Is(err, errLocalWriter) {
+		return r.standDown(ctx, &mirror, inputs)
+	}
 	if err != nil {
 		return r.handleOpenTargetFailure(ctx, &mirror, inputs, err)
 	}
@@ -777,7 +794,7 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef 
 				return nil, fmt.Errorf("%w: check local writers: %w", errOpenWriterFailed, err)
 			}
 			if n > 0 {
-				return nil, fmt.Errorf("%w: %w", errOpenWriterFailed, errLocalWriter)
+				return nil, errLocalWriter
 			}
 			if err := clearOtherGeometry(filepath.Join(handles.DomainPath(), id+".mxl-flow"), flowDef, r.Retire); err != nil {
 				return nil, err
@@ -827,6 +844,31 @@ func (r *TargetReconciler) openTargetDispatch(key types.NamespacedName, domain, 
 	return r.openTarget(key, domain, flowDef, provider)
 }
 
+// standDown yields a target to a process on this node that writes its
+// flow. That process is the flow's producer here, so the mirror has
+// nothing to deliver: it opens no writer, its failure run ends instead
+// of escalating, and the flow directory is never reclaimed, whatever
+// the MxlFlow says about this node. The location published for this
+// node lags a producer that has just opened the flow, which is exactly
+// when this path runs. The operator deletes the mirror once this node
+// reads Origin; until then the open is tried again every
+// localWriterRecheckInterval, which also resumes the mirror should the
+// process exit first.
+func (r *TargetReconciler) standDown(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, inputs targetOpenInputs) (ctrl.Result, error) {
+	key := client.ObjectKeyFromObject(mirror)
+	r.mu.Lock()
+	r.attempts[key] = attempt[targetOpenInputs]{notBefore: r.now().Add(localWriterRecheckInterval), inputs: inputs}
+	r.mu.Unlock()
+	// One write per stand-down: each one wakes this reconciler through
+	// its own watch.
+	if c := meta.FindStatusCondition(mirror.Status.Conditions, mxlv1alpha1.ConditionTypeTargetProgress); c == nil || c.Reason != ReasonLocalWriter {
+		r.surfaceTargetFailure(ctx, mirror, mxlv1alpha1.MxlFlowMirrorDegraded, ReasonLocalWriter,
+			errLocalWriter.Error()+"; the mirror stands down")
+		log.FromContext(ctx).Info("standing down: a process on this node writes the flow", "flowID", mirror.Spec.FlowID)
+	}
+	return ctrl.Result{RequeueAfter: localWriterRecheckInterval}, nil
+}
+
 // handleOpenTargetFailure records the failed open, publishes the
 // reason on status, and returns a bounded-backoff requeue.
 //
@@ -837,7 +879,7 @@ func (r *TargetReconciler) openTargetDispatch(key types.NamespacedName, domain, 
 // state a consumer waits through, so a mirror that can never open
 // looks the same as one about to succeed. Past maxTargetOpenAttempts
 // consecutive failures the phase escalates to Degraded and, for a
-// failure that came from the local writer, the flow directory is
+// failure to open the target's own writer, the flow directory is
 // reclaimed so the retry materialises a fresh one.
 func (r *TargetReconciler) handleOpenTargetFailure(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, inputs targetOpenInputs, openErr error) (ctrl.Result, error) {
 	key := client.ObjectKeyFromObject(mirror)
@@ -901,11 +943,13 @@ func (r *TargetReconciler) handleOpenTargetFailure(ctx context.Context, mirror *
 // and every later open of that path fails, so retrying the open
 // against the same directory can only keep failing.
 //
-// The MxlFlow location published for this node is the gate: a flow
-// this node is Origin for belongs to a local producer, and removing
-// it would take the producer's flow with it. Only a directory this
-// gateway owns as a mirror copy is reclaimed, which is the same
-// ownership test teardown applies.
+// Two gates keep a producer's flow out of it. A directory another
+// process on this node writes is that process's flow, whatever the
+// MxlFlow says: the location this node publishes lags a producer that
+// has just opened the flow. And a flow this node is Origin for belongs
+// to a local producer even while that producer is not attached. Only a
+// directory this gateway owns as a mirror copy is reclaimed, which is
+// the same ownership test teardown applies.
 func (r *TargetReconciler) reclaimUnusableFlowDir(ctx context.Context, ref mxlv1alpha1.FlowRef) bool {
 	l := log.FromContext(ctx).WithName("target-reclaim").WithValues("flow", ref.Name())
 	domainPath := r.DomainPath
@@ -930,6 +974,10 @@ func (r *TargetReconciler) reclaimUnusableFlowDir(ctx context.Context, ref mxlv1
 		if !os.IsNotExist(err) {
 			l.Error(err, "stat flow directory", "path", dir)
 		}
+		return false
+	}
+	if n, err := flowlocks.ForeignWriters(filepath.Join(dir, "data")); err != nil || n > 0 {
+		l.Info("leaving flow directory in place: a process on this node writes it", "writers", n, "error", err)
 		return false
 	}
 	// Report how much of the grain ring was there: the shortfall

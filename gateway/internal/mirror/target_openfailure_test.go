@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -20,6 +21,7 @@ import (
 	"github.com/qvest-digital/go-mxl/fabrics"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
 )
 
 const openFailureFlowID = "11111111-2222-3333-4444-555555555555"
@@ -300,4 +302,108 @@ func TestReclaimUnusableFlowDir_UnsetDomainPath(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &TargetReconciler{Client: c, Scheme: scheme, NodeName: "node-a"}
 	assert.False(t, r.reclaimUnusableFlowDir(context.Background(), mxlv1alpha1.FlowRef{ID: openFailureFlowID}))
+}
+
+// fakeForeignWriter makes /proc/locks, as flowlocks reads it, list a
+// shared flock another process holds on dir's data file: what a local
+// producer's libmxl writer looks like to the gateway.
+func fakeForeignWriter(t *testing.T, dir string) {
+	t.Helper()
+	data := filepath.Join(dir, "data")
+	require.NoError(t, os.WriteFile(data, nil, 0o644))
+	var st unix.Stat_t
+	require.NoError(t, unix.Stat(data, &st))
+	locks := filepath.Join(t.TempDir(), "locks")
+	require.NoError(t, os.WriteFile(locks, []byte(fmt.Sprintf("1: FLOCK  ADVISORY  READ %d %02x:%02x:%d 0 EOF\n",
+		os.Getpid()+1, unix.Major(st.Dev), unix.Minor(st.Dev), st.Ino)), 0o644))
+	saved := flowlocks.ProcLocks
+	flowlocks.ProcLocks = locks
+	t.Cleanup(func() { flowlocks.ProcLocks = saved })
+}
+
+func TestTarget_LocalWriterStandsDownAndKeepsTheFlowDir(t *testing.T) {
+	// A producer that restarts onto a node a mirror targets opens the
+	// mirror's directory and takes it over. This node's location still
+	// reads Ready, the mirror copy's, until the agent catches up, and
+	// the target cannot open while the producer writes. Counting that
+	// as an open failure reclaimed the producer's live ring at the
+	// third attempt: the producer went on writing into unlinked files
+	// and the flow was gone cluster-wide. The local writer wins
+	// instead: no reclaim, no escalation, a reason saying why.
+	for name, openErr := range map[string]error{
+		"bare":    errLocalWriter,
+		"wrapped": fmt.Errorf("%w: %w", errOpenWriterFailed, errLocalWriter),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newOpenFailureFixture(t, openErr, mxlv1alpha1.MxlFlowLocationReady)
+			dir := writeTornFlowDir(t, f.domain, openFailureFlowID, 100)
+
+			for range terminalTargetOpenAttempts + 1 {
+				res, err := f.r.Reconcile(context.Background(), f.req)
+				require.NoError(t, err)
+				assert.Equal(t, localWriterRecheckInterval, res.RequeueAfter)
+				f.advance(localWriterRecheckInterval)
+			}
+
+			assert.DirExists(t, dir,
+				"a flow a process on this node writes is that process's, "+
+					"whatever this node's location reads")
+			assert.Equal(t, int(terminalTargetOpenAttempts+1), f.opens,
+				"the target looks again on every recheck, so it resumes "+
+					"should the local writer exit")
+			got := f.mirror(t)
+			assert.Equal(t, mxlv1alpha1.MxlFlowMirrorDegraded, got.Status.Phase,
+				"standing down is not a failure run: it must never reach "+
+					"Failed, which an intent waiting on the mirror reads "+
+					"as permanent")
+			assert.Zero(t, got.Status.TargetAttemptCount)
+			require.Len(t, got.Status.Conditions, 1)
+			assert.Equal(t, ReasonLocalWriter, got.Status.Conditions[0].Reason)
+		})
+	}
+}
+
+func TestTarget_LocalWriterGatesTheRetryWithoutAStatusWrite(t *testing.T) {
+	// The status write wakes this reconciler through its own watch, so
+	// the recheck has to hold on the way in, and a stand-down already
+	// on status must not be written again.
+	f := newOpenFailureFixture(t, errLocalWriter, mxlv1alpha1.MxlFlowLocationReady)
+
+	_, err := f.r.Reconcile(context.Background(), f.req)
+	require.NoError(t, err)
+	written := f.mirror(t).ResourceVersion
+
+	res, err := f.r.Reconcile(context.Background(), f.req)
+	require.NoError(t, err)
+	assert.Equal(t, 1, f.opens, "a pass inside the recheck interval must not open")
+	assert.Positive(t, res.RequeueAfter)
+
+	f.advance(localWriterRecheckInterval)
+	_, err = f.r.Reconcile(context.Background(), f.req)
+	require.NoError(t, err)
+	assert.Equal(t, 2, f.opens)
+	assert.Equal(t, written, f.mirror(t).ResourceVersion,
+		"an unchanged stand-down must not rewrite status")
+}
+
+func TestTarget_WriterFailureKeepsFlowDirAForeignProcessWrites(t *testing.T) {
+	// The reclaim judged ownership by the MxlFlow alone, which lags a
+	// producer that has just opened the flow. Whatever makes the
+	// target's own writer fail, a directory another process on this
+	// node holds a writer on is that process's flow.
+	f := newOpenFailureFixture(t,
+		fmt.Errorf("%w: NewWriter: mxl: unknown error", errOpenWriterFailed),
+		mxlv1alpha1.MxlFlowLocationReady)
+	dir := writeTornFlowDir(t, f.domain, openFailureFlowID, 46)
+	fakeForeignWriter(t, dir)
+
+	for range maxTargetOpenAttempts + 1 {
+		_, err := f.r.Reconcile(context.Background(), f.req)
+		require.NoError(t, err)
+		f.advancePastBackoff()
+	}
+
+	assert.DirExists(t, dir)
+	assert.Equal(t, mxlv1alpha1.MxlFlowMirrorDegraded, f.mirror(t).Status.Phase,
+		"the failure still escalates; only the reclaim is withheld")
 }
