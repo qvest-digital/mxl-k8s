@@ -111,7 +111,7 @@ func TestPodForUIDListsOnlyThisNodesPods(t *testing.T) {
 		}}).Build()
 	r := &Resolver{Client: c, NodeName: "n1"}
 
-	p, err := r.podForUID(context.Background(), "11111111-2222-3333-4444-555555555555")
+	p, err := r.PodForUID(context.Background(), "11111111-2222-3333-4444-555555555555")
 	require.NoError(t, err)
 	assert.Equal(t, "here", p.Name)
 	assert.Equal(t, []string{"spec.nodeName=n1"}, selectors)

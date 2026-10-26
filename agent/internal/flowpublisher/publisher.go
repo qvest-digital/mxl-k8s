@@ -69,13 +69,15 @@ type Publisher struct {
 	// inject a closure so they need no domain on disk.
 	WriterAttached func(flowID string) (bool, error)
 
-	// LocalProducer reports whether a process on this node other than
-	// mxl-k8s's own writes the flow: a producer, even in a directory a
-	// mirror names this node the target of. That is the evidence the
-	// mirror inference lacks once a producer has taken over the copy a
-	// mirror was filling, which on mxlfs it does with no shim to report
-	// the attach. Nil leaves the inference as it is.
-	LocalProducer func(ctx context.Context, flowID string) bool
+	// Producer reports whether a pid holding a writer's lock on a flow
+	// is a producer's: a process in a pod other than mxl-k8s's own. A
+	// producer among the writers makes the node Origin even in a
+	// directory a mirror names this node the target of. That is the
+	// evidence the mirror inference lacks once a producer has taken over
+	// the copy a mirror was filling, which on mxlfs it does with no shim
+	// to report the attach. Nil, as off mxlfs, leaves the inference as
+	// it is.
+	Producer func(ctx context.Context, pid int32) bool
 }
 
 // ref is the flow a directory id names in this publisher's domain.
@@ -97,8 +99,36 @@ func (p *Publisher) writerAttached(flowID string) (bool, error) {
 	return flowlock.WriterAttached(p.DomainPath, flowID)
 }
 
-func (p *Publisher) localProducer(ctx context.Context, flowID string) bool {
-	return p.LocalProducer != nil && p.LocalProducer(ctx, flowID)
+// readLocks is the lock table producerWrites reads, read only where a
+// Producer can ask about it. Unreadable, it holds no writer, which
+// leaves the mirror inference as it is.
+func (p *Publisher) readLocks() flowlock.Locks {
+	if p.Producer == nil {
+		return nil
+	}
+	locks, err := flowlock.ReadLocks()
+	if err != nil {
+		return nil
+	}
+	return locks
+}
+
+// producerWrites reports whether a producer holds a writer's lock on
+// the flow.
+func (p *Publisher) producerWrites(ctx context.Context, locks flowlock.Locks, flowID string) bool {
+	if p.Producer == nil {
+		return false
+	}
+	pids, err := locks.WriterPIDs(p.DomainPath, flowID)
+	if err != nil {
+		return false
+	}
+	for _, pid := range pids {
+		if p.Producer(ctx, pid) {
+			return true
+		}
+	}
+	return false
 }
 
 // FlowIDFromDirName extracts the flow UUID from a `<uuid>.mxl-flow`
@@ -174,13 +204,13 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	// Origin unless a mirror explains the copy. The writer above is
 	// attached either way; a mirror naming this node as its target is
 	// the evidence that the writer is the gateway's rather than a
-	// local producer's, unless LocalProducer finds a producer among
-	// the writers.
+	// local producer's, unless Producer finds a producer among the
+	// writers.
 	phase := mxlv1alpha1.MxlFlowLocationOrigin
 	isMirror, err := p.isMirrorTarget(ctx, flowID)
 	if err != nil {
 		l.Error(err, "list MxlFlowMirrors; defaulting to Origin", "flowID", flowID)
-	} else if isMirror && !p.localProducer(ctx, flowID) {
+	} else if isMirror && !p.producerWrites(ctx, p.readLocks(), flowID) {
 		phase = mxlv1alpha1.MxlFlowLocationReady
 	}
 
@@ -648,10 +678,10 @@ func (p *Publisher) localLocationHealthy(flow *mxlv1alpha1.MxlFlow) bool {
 // although a local producer writes the flow: a producer that opened the
 // copy a mirror was filling. Nothing in the domain changes when it
 // does, so no event publishes it.
-func (p *Publisher) producerTookOver(ctx context.Context, flow *mxlv1alpha1.MxlFlow) bool {
+func (p *Publisher) producerTookOver(ctx context.Context, locks flowlock.Locks, flow *mxlv1alpha1.MxlFlow) bool {
 	for _, loc := range flow.Status.Locations {
 		if loc.NodeName == p.NodeName {
-			return loc.Phase != mxlv1alpha1.MxlFlowLocationOrigin && p.localProducer(ctx, flow.Spec.ID)
+			return loc.Phase != mxlv1alpha1.MxlFlowLocationOrigin && p.producerWrites(ctx, locks, flow.Spec.ID)
 		}
 	}
 	return false
@@ -676,6 +706,8 @@ func (p *Publisher) producerTookOver(ctx context.Context, flow *mxlv1alpha1.MxlF
 // per rescan interval.
 func (p *Publisher) promoteStaleLocalOrigins(ctx context.Context, onDisk map[string]struct{}) error {
 	l := log.FromContext(ctx).WithName("flowpublisher.promote")
+	// One read of the node's locks for the whole pass.
+	locks := p.readLocks()
 	for id := range onDisk {
 		var flow mxlv1alpha1.MxlFlow
 		err := p.Client.Get(ctx, types.NamespacedName{Name: p.key(id)}, &flow)
@@ -686,7 +718,7 @@ func (p *Publisher) promoteStaleLocalOrigins(ctx context.Context, onDisk map[str
 			l.Error(err, "get MxlFlow for promote pass", "flowID", id)
 			continue
 		default:
-			if p.localLocationHealthy(&flow) && !p.producerTookOver(ctx, &flow) {
+			if p.localLocationHealthy(&flow) && !p.producerTookOver(ctx, locks, &flow) {
 				continue
 			}
 		}

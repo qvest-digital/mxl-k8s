@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -94,15 +95,30 @@ func WriterAttached(domainPath, flowID string) (bool, error) {
 // ProcLocks is where the kernel lists every file lock.
 var ProcLocks = "/proc/locks"
 
-// WriterPIDs lists the processes holding a writer's flock on flowID's
-// data file under domainPath. A missing file has none.
+// Locks is one read of ProcLocks: the pids holding a writer's lock, by
+// the file they hold it on.
+type Locks map[string][]int32
+
+// ReadLocks reads every writer's lock on the node once, so a pass over
+// many flows reads the table once rather than once per flow.
 //
 // It says who the writers are, which WriterAttached cannot: the
 // gateway filling a mirror target and a producer that took the copy
 // over hold the same lock. The kernel lists only holders visible in
 // the reader's PID namespace, so the answer is complete only in the
 // host's.
-func WriterPIDs(domainPath, flowID string) ([]int32, error) {
+func ReadLocks() (Locks, error) {
+	f, err := os.Open(ProcLocks)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return parseLocks(f)
+}
+
+// WriterPIDs lists, once each, the processes holding a writer's lock on
+// flowID's data file under domainPath. A missing file has none.
+func (l Locks) WriterPIDs(domainPath, flowID string) ([]int32, error) {
 	var st unix.Stat_t
 	if err := unix.Stat(filepath.Join(domainPath, flowID+flowDirSuffix, dataFileName), &st); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -110,33 +126,32 @@ func WriterPIDs(domainPath, flowID string) ([]int32, error) {
 		}
 		return nil, err
 	}
-	f, err := os.Open(ProcLocks)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	return lockHolders(f, unix.Major(st.Dev), unix.Minor(st.Dev), st.Ino)
+	return l[fmt.Sprintf("%02x:%02x:%d", unix.Major(st.Dev), unix.Minor(st.Dev), st.Ino)], nil
 }
 
-// lockHolders reads /proc/locks lines such as
+// parseLocks reads /proc/locks lines such as
 //
 //	1: FLOCK  ADVISORY  READ 514830 08:01:11011342 0 EOF
 //
-// and returns the pid of each FLOCK held on major:minor:ino. The kernel
-// prints the device as hex and the inode as decimal. Waiters, marked
-// "->", hold nothing.
-func lockHolders(r io.Reader, major, minor uint32, ino uint64) ([]int32, error) {
-	want := fmt.Sprintf("%02x:%02x:%d", major, minor, ino)
-	var pids []int32
+// keeping each shared FLOCK under its major:minor:ino, which the kernel
+// prints with the device in hex and the inode in decimal. Waiters,
+// marked "->", hold nothing. Only shared locks are writers: an
+// exclusive one is libmxl testing whether a flow is active, which its
+// garbage collection, mxlIsFlowActive and WriterAttached here all do
+// and which any reader may run.
+func parseLocks(r io.Reader) (Locks, error) {
+	locks := Locks{}
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
-		if len(fields) < 6 || fields[1] != "FLOCK" || fields[5] != want {
+		if len(fields) < 6 || fields[1] != "FLOCK" || fields[3] != "READ" {
 			continue
 		}
-		if pid, err := strconv.ParseInt(fields[4], 10, 32); err == nil && pid > 0 {
-			pids = append(pids, int32(pid))
+		pid, err := strconv.ParseInt(fields[4], 10, 32)
+		if err != nil || pid <= 0 || slices.Contains(locks[fields[5]], int32(pid)) {
+			continue
 		}
+		locks[fields[5]] = append(locks[fields[5]], int32(pid))
 	}
-	return pids, sc.Err()
+	return locks, sc.Err()
 }
