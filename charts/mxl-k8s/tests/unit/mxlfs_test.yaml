@@ -76,6 +76,16 @@ tests:
             apiGroups: [mxl.qvest-digital.com]
             resources: [mxlflowredundancysets]
             verbs: [get, list, watch]
+  - it: grants the gateway no write to redundancy sets by default
+    template: templates/rbac-gateway.yaml
+    documentIndex: 0
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [mxl.qvest-digital.com]
+            resources: [mxlflowredundancysets/status]
+            verbs: [patch]
   - it: grants the operator no access to redundancy sets by default
     template: templates/rbac-operator.yaml
     documentIndex: 0
@@ -265,6 +275,18 @@ tests:
             apiGroups: [mxl.qvest-digital.com]
             resources: [mxlflowredundancysets]
             verbs: [get, list, watch]
+  - it: lets the gateway report stalled members on a redundancy set
+    set:
+      mxlfs.enabled: true
+    template: templates/rbac-gateway.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [mxl.qvest-digital.com]
+            resources: [mxlflowredundancysets/status]
+            verbs: [patch]
   - it: lets the operator write the status of redundancy sets
     set:
       mxlfs.enabled: true

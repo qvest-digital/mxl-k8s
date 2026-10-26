@@ -116,9 +116,9 @@ const (
 
 	// ConditionTypeMembersReady reports whether every member of an
 	// MxlFlowRedundancySet has an MxlFlow with an Origin, in the
-	// geometry of the first member that has one. Owned by the operator.
-	// A False condition names the members the output is served
-	// without.
+	// geometry of the first member that has one, and is in no node's
+	// status.stalledMembers entry. Owned by the operator. A False
+	// condition names the members the output is served without.
 	ConditionTypeMembersReady = "MembersReady"
 )
 

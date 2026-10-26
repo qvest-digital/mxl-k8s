@@ -3,6 +3,7 @@ package merge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,11 +17,15 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -44,7 +49,8 @@ func reconcilerFor(t *testing.T, set *mxlv1alpha1.MxlFlowRedundancySet, d *fakeD
 	t.Helper()
 	s := runtime.NewScheme()
 	utilruntime.Must(mxlv1alpha1.AddToScheme(s))
-	c := fake.NewClientBuilder().WithScheme(s).WithObjects(set).Build()
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(set).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowRedundancySet{}).Build()
 	return &Reconciler{Client: c, NodeName: "reader", Domains: d}
 }
 
@@ -643,4 +649,234 @@ func TestReconcilerLeavesOutAMemberWhoseRingCannotBeOpened(t *testing.T) {
 	memberDir(t, dir, memberA, videoDef(memberA))
 	reconcileSet(t, r)
 	require.Equal(t, [][]string{{memberB}, {memberA, memberB}}, *started)
+}
+
+// stalledStart replaces the engine with one over the members present
+// that started at started, all heads at zero, and has looked at them
+// now.
+func stalledStart(t *testing.T, started time.Time) **Engine {
+	t.Helper()
+	var e *Engine
+	orig := start
+	start = func(_ context.Context, spec Spec, _ logr.Logger) (*Engine, error) {
+		e = &Engine{spec: spec, outDir: flowDir(spec.DomainDir, spec.OutputID),
+			progress: newProgress(make([]uint64, len(spec.Members)), started, StallAfter)}
+		e.progress.observe(make([]uint64, len(spec.Members)), time.Now())
+		return e, nil
+	}
+	t.Cleanup(func() { start = orig })
+	return &e
+}
+
+func stalledOf(t *testing.T, r *Reconciler) []mxlv1alpha1.NodeStalledMembers {
+	t.Helper()
+	var got mxlv1alpha1.MxlFlowRedundancySet
+	require.NoError(t, r.Client.Get(context.Background(), types.NamespacedName{Name: "programme"}, &got))
+	return got.Status.StalledMembers
+}
+
+// countPatches counts the status writes r makes, which fail with err
+// when it is set.
+func countPatches(r *Reconciler, err error) *int {
+	writes := 0
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch,
+			opts ...client.SubResourcePatchOption) error {
+			writes++
+			if err != nil {
+				return err
+			}
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+		},
+	})
+	return &writes
+}
+
+// A producer that stops committing while its pod runs on, or a mirror
+// that stops delivering, leaves the output served from the other
+// members, with every object of the member reading as before. Only the
+// engine sees the member's head stand still; the set has to carry it
+// for the operator to report, and lose it once the head moves again.
+func TestReconcilerReportsTheMembersItsEngineFindsStalled(t *testing.T) {
+	engine := stalledStart(t, time.Now().Add(-StartGrace))
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+
+	reconcileSet(t, r)
+	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberA, memberB}}},
+		stalledOf(t, r), "members that never moved were not reported after the start grace")
+
+	(*engine).progress.observe([]uint64{1, 0}, time.Now())
+	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter, "a served set is not looked at again in time")
+	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberB}}}, stalledOf(t, r))
+
+	(*engine).progress.observe([]uint64{1, 1}, time.Now())
+	reconcileSet(t, r)
+	require.Empty(t, stalledOf(t, r))
+}
+
+// Every pass of every gateway reconciles every set; one that wrote its
+// status each time would load the API server with nothing to say.
+func TestReconcilerWritesStalledMembersOnlyWhenTheyChange(t *testing.T) {
+	for name, tc := range map[string]struct {
+		started time.Time
+		heads   []uint64
+		writes  int
+	}{
+		"moving":  {time.Now(), []uint64{1}, 0},
+		"stalled": {time.Now().Add(-StartGrace), []uint64{0}, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			engine := stalledStart(t, tc.started)
+			dir := t.TempDir()
+			memberDir(t, dir, memberA, videoDef(memberA))
+			r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+			writes := countPatches(r, nil)
+
+			for range 3 {
+				reconcileSet(t, r)
+				(*engine).progress.observe(tc.heads, time.Now())
+			}
+			require.Equal(t, tc.writes, *writes)
+		})
+	}
+}
+
+// An engine is built again when a member appears or is replaced, and
+// at every gateway restart, over members whose heads it has not seen
+// move yet; a placeholder waits seconds for its mirror. Until it has
+// seen a member move or StartGrace pass, what the node reported stands:
+// clearing a stalled member then reported it ready, and reporting a
+// placeholder stalled flapped MembersReady at every set start.
+func TestReconcilerKeepsItsReportWhileANewEngineHasNotSeenAMemberMove(t *testing.T) {
+	engine := stalledStart(t, time.Now())
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	// What the node's previous engine applied.
+	require.NoError(t, r.Client.Status().Patch(context.Background(),
+		mxlv1alpha1.StalledMembersApply("programme", "reader", []string{memberA}), client.Apply,
+		client.FieldOwner(mxlv1alpha1.StalledMembersFieldOwner("reader")), client.ForceOwnership))
+	writes := countPatches(r, nil)
+
+	reconcileSet(t, r)
+	require.Zero(t, *writes)
+	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberA}}}, stalledOf(t, r))
+
+	(*engine).progress.observe([]uint64{1, 0}, time.Now())
+	reconcileSet(t, r)
+	require.Empty(t, stalledOf(t, r), "a member seen moving stayed reported")
+}
+
+// The report is the set's status, the engine serves its readers: a
+// failed write must neither turn the set's recheck into a backoff, which
+// holds off replacing a restarted member, nor fail the reconcile.
+func TestReconcilerServesOnWhenItsReportFails(t *testing.T) {
+	stalledStart(t, time.Now().Add(-StartGrace))
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	writes := countPatches(r, errors.New("apiserver unavailable"))
+
+	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter)
+	require.Equal(t, 1, *writes)
+	require.Contains(t, r.engines, "programme")
+	reconcileSet(t, r)
+	require.Equal(t, 2, *writes, "a failed report was not tried again at the recheck")
+}
+
+// A node that stops serving the set removes its entry, and asks for no
+// recheck of its own: a failed removal would leave the member reported
+// stalled with nothing to try it again.
+func TestReconcilerTriesAFailedRemovalAgain(t *testing.T) {
+	stalledStart(t, time.Now().Add(-StartGrace))
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+	require.Len(t, stalledOf(t, r), 1)
+
+	var set mxlv1alpha1.MxlFlowRedundancySet
+	require.NoError(t, r.Client.Get(context.Background(), types.NamespacedName{Name: "programme"}, &set))
+	set.Status.Nodes = []string{"elsewhere"}
+	require.NoError(t, r.Client.Status().Update(context.Background(), &set))
+	ok := r.Client
+	writes := countPatches(r, errors.New("apiserver unavailable"))
+	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter, "a failed removal was not tried again")
+	require.Equal(t, 1, *writes)
+	require.Empty(t, r.engines)
+
+	r.Client = ok
+	require.Zero(t, reconcileSet(t, r), "a set not served here was looked at again with nothing to remove")
+	require.Empty(t, stalledOf(t, r))
+}
+
+// An API server with a CRD from before status.stalledMembers accepts the
+// apply and drops the field: nothing would show why no member is ever
+// reported.
+func TestReconcilerSaysOnceWhenTheAPIServerDropsItsReport(t *testing.T) {
+	engine := stalledStart(t, time.Now().Add(-StartGrace))
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, _ string, obj client.Object, _ client.Patch,
+			_ ...client.SubResourcePatchOption) error {
+			unstructured.RemoveNestedField(obj.(*unstructured.Unstructured).Object, "status", "stalledMembers")
+			return nil
+		},
+	})
+	var said int
+	l := funcr.New(func(_, args string) {
+		if strings.Contains(args, "predates the field") {
+			said++
+		}
+	}, funcr.Options{})
+	ctx := log.IntoContext(context.Background(), l)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "programme"}}
+
+	_, err := r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	(*engine).progress.observe([]uint64{1, 0}, time.Now())
+	_, err = r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, 1, said)
+}
+
+// A node whose engine stopped, because no reader wants the output there
+// any more, must take its entry back: nothing else would on a node the
+// output may be wanted on again.
+func TestReconcilerTakesItsStalledMembersBackWhenItStopsServing(t *testing.T) {
+	stalledStart(t, time.Now().Add(-StartGrace))
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+	require.Len(t, stalledOf(t, r), 1)
+
+	var set mxlv1alpha1.MxlFlowRedundancySet
+	require.NoError(t, r.Client.Get(context.Background(), types.NamespacedName{Name: "programme"}, &set))
+	set.Status.Nodes = []string{"elsewhere"}
+	require.NoError(t, r.Client.Status().Update(context.Background(), &set))
+	reconcileSet(t, r)
+	require.Empty(t, r.engines)
+	require.Empty(t, stalledOf(t, r))
+}
+
+// The engine finds a member stalled in its own loop, between the set's
+// rechecks: the set has to come back at once to be reported within the
+// seconds a stall is reported in. The engine's loop must never wait on
+// the queue for it.
+func TestAStallBringsItsSetBack(t *testing.T) {
+	r := &Reconciler{stalls: make(chan event.GenericEvent, 1)}
+	stalls := r.stallsOf("programme")
+
+	stalls()
+	stalls()
+	require.Equal(t, "programme", (<-r.stalls).Object.GetName())
+	require.Empty(t, r.stalls, "a full queue was waited on")
 }

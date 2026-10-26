@@ -156,6 +156,9 @@ type Spec struct {
 	Members   []string // the member flow ids, in preference order
 	Skew      time.Duration
 	Ordered   bool
+	// Stalls, when set, is called from the engine's loop when a member
+	// becomes stalled or moves again; it must not block.
+	Stalls func()
 }
 
 // Engine serves one output.
@@ -192,6 +195,12 @@ type Engine struct {
 	// selects counts the slots or pages the engine pointed at another
 	// source, each one a remap in every reader of the output.
 	selects atomic.Uint64
+
+	// progress follows the members' heads; nil on an engine Start did
+	// not build, and on a data flow, whose head moves only when an
+	// ancillary packet arrives, which can be seconds apart on a live
+	// source.
+	progress *progress
 }
 
 func flowDir(domain, id string) string { return filepath.Join(domain, id+".mxl-flow") }
@@ -225,6 +234,9 @@ func Start(ctx context.Context, spec Spec, log logr.Logger) (*Engine, error) {
 		return nil, err
 	}
 	e.replaceable = canReplace(e.views[0])
+	if e.disc == nil || !e.disc.Data {
+		e.progress = newProgress(e.heads(), time.Now(), stallWindow(e.period))
+	}
 	ok = true
 	rctx, cancel := context.WithCancel(ctx)
 	e.cancel, e.done, e.replaces = cancel, make(chan struct{}), make(chan replaceReq)
@@ -857,6 +869,9 @@ func (e *Engine) run(ctx context.Context) {
 				Uaddr: uint64(uintptr(unsafe.Pointer(m.syncWord()))), Flags: futex2SizeU32}
 		}
 		now := time.Now()
+		if e.progress != nil && e.progress.observe(e.heads(), now) && e.spec.Stalls != nil {
+			e.spec.Stalls()
+		}
 		var head uint64
 		var wait time.Duration
 		var err error
@@ -989,6 +1004,29 @@ func (e *Engine) wait(waits []futexWaitv, timeout time.Duration) {
 
 func (e *Engine) mxlRate() mxl.Rational {
 	return mxl.Rational{Num: int64(e.rate.numerator), Den: int64(e.rate.denominator)}
+}
+
+// heads reads every member's head.
+func (e *Engine) heads() []uint64 {
+	hs := make([]uint64, len(e.members))
+	for i, m := range e.members {
+		hs[i] = m.head()
+	}
+	return hs
+}
+
+// Stalled returns, by flow id and as of the loop's last pass, the
+// members stalled, and those not yet decided: not moved since the engine
+// started, within StartGrace.
+func (e *Engine) Stalled() (stalled, undecided []string) {
+	s, u := e.progress.stalled()
+	for _, i := range s {
+		stalled = append(stalled, e.spec.Members[i])
+	}
+	for _, i := range u {
+		undecided = append(undecided, e.spec.Members[i])
+	}
+	return stalled, undecided
 }
 
 // fed reports whether the gateway reports member i's arrivals.

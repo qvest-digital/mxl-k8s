@@ -39,6 +39,7 @@ const (
 	ReasonMembersAligned  = "MembersAligned"
 	ReasonMembersReady    = "MembersReady"
 	ReasonMemberMissing   = "MemberMissing"
+	ReasonMemberStalled   = "MemberStalled"
 	ReasonOtherDomain     = "MemberInOtherDomain"
 	ReasonMisaligned      = "MembersMisaligned"
 	ReasonOutputTaken     = "OutputIsAFlow"
@@ -75,14 +76,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	pruned := len(nodes) != len(set.Status.Nodes)
-	set.Status.Nodes = nodes
+	stalled := stalledOn(set.Status.StalledMembers, nodes)
+	pruned := len(nodes) != len(set.Status.Nodes) || len(stalled) != len(set.Status.StalledMembers)
+	set.Status.Nodes, set.Status.StalledMembers = nodes, stalled
 	ms, err := r.members(ctx, &set)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	valid := r.validate(ctx, &set, ms)
-	ready := membersReady(ms)
+	ready := membersReady(ms, stalled)
 	res := ctrl.Result{}
 	if ready.Status != metav1.ConditionTrue {
 		res = ctrl.Result{RequeueAfter: 10 * time.Second} // a member or its producer is not up
@@ -125,6 +127,19 @@ func (r *Reconciler) existingNodes(ctx context.Context, nodes []string) ([]strin
 		out = nil
 	}
 	return out, nil
+}
+
+// stalledOn keeps the gateways' stalled entries of the nodes still in
+// the set. A node that left it has no gateway serving the output, and
+// one deleted has none to remove its own entry.
+func stalledOn(entries []mxlv1alpha1.NodeStalledMembers, nodes []string) []mxlv1alpha1.NodeStalledMembers {
+	var out []mxlv1alpha1.NodeStalledMembers
+	for _, s := range entries {
+		if slices.Contains(nodes, s.Node) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // member is what the operator knows of one member of a set.
@@ -246,9 +261,11 @@ func (r *Reconciler) validate(ctx context.Context, set *mxlv1alpha1.MxlFlowRedun
 	return ok
 }
 
-// membersReady reports the members the output is served without.
-func membersReady(ms []member) metav1.Condition {
-	var missing, apart []string
+// membersReady reports the members the output is served without: those
+// missing, apart in geometry, or stalled on a node the output is served
+// on.
+func membersReady(ms []member, stalled []mxlv1alpha1.NodeStalledMembers) metav1.Condition {
+	var missing, apart, stalls []string
 	for _, m := range ms {
 		switch {
 		case m.flow == nil:
@@ -257,6 +274,16 @@ func membersReady(ms []member) metav1.Condition {
 			apart = append(apart, m.unreadable)
 		case !m.origin.Found:
 			missing = append(missing, fmt.Sprintf("member %s has no producer", m.ref.Name()))
+		default:
+			var on []string
+			for _, s := range stalled {
+				if slices.Contains(s.FlowIDs, m.ref.ID) {
+					on = append(on, s.Node)
+				}
+			}
+			if on != nil {
+				stalls = append(stalls, fmt.Sprintf("member %s has not advanced on %s", m.ref.Name(), strings.Join(on, ", ")))
+			}
 		}
 	}
 	if d := disagreement(ms); d != "" {
@@ -265,10 +292,13 @@ func membersReady(ms []member) metav1.Condition {
 	switch {
 	case len(missing) > 0:
 		return metav1.Condition{Type: ConditionMembersReady, Status: metav1.ConditionFalse, Reason: ReasonMemberMissing,
-			Message: strings.Join(append(missing, apart...), "; ")}
+			Message: strings.Join(slices.Concat(missing, apart, stalls), "; ")}
 	case len(apart) > 0:
 		return metav1.Condition{Type: ConditionMembersReady, Status: metav1.ConditionFalse, Reason: ReasonMisaligned,
-			Message: strings.Join(apart, "; ")}
+			Message: strings.Join(append(apart, stalls...), "; ")}
+	case len(stalls) > 0:
+		return metav1.Condition{Type: ConditionMembersReady, Status: metav1.ConditionFalse, Reason: ReasonMemberStalled,
+			Message: strings.Join(stalls, "; ")}
 	}
 	return metav1.Condition{Type: ConditionMembersReady, Status: metav1.ConditionTrue, Reason: ReasonMembersReady,
 		Message: "every member is produced in the output's geometry"}

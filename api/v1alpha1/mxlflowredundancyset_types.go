@@ -100,17 +100,44 @@ type MxlFlowRedundancySetStatus struct {
 	// +listType=set
 	Nodes []string `json:"nodes,omitempty"`
 
+	// StalledMembers are, per node in nodes, the members the gateway
+	// there merges whose head has stood still for the gateway's stall
+	// window. Each gateway applies its own node's entry, under a field
+	// manager of its own, and removes it once none of its members is
+	// stalled or it stops serving the output. An entry stays while its
+	// node is in nodes and its gateway is down. Members of a data
+	// format are not judged: a data flow's head moves only when
+	// ancillary data arrives.
+	// +optional
+	// +listType=map
+	// +listMapKey=node
+	StalledMembers []NodeStalledMembers `json:"stalledMembers,omitempty"`
+
 	// ObservedGeneration is the spec generation last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Conditions: Valid reports whether the members can be merged,
 	// MembersReady whether every member is produced in the output's
-	// geometry.
+	// geometry and advances on every node the output is served on. A
+	// member of a data format is not judged on whether it advances.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// NodeStalledMembers are the members of a set whose head has stood still
+// on one node.
+type NodeStalledMembers struct {
+	// Node is the node whose gateway reports the members.
+	// +kubebuilder:validation:Required
+	Node string `json:"node"`
+
+	// FlowIDs are the stalled members' flow ids.
+	// +kubebuilder:validation:MinItems=1
+	// +listType=set
+	FlowIDs []string `json:"flowIDs"`
 }
 
 // +kubebuilder:object:root=true

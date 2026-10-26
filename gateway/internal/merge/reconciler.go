@@ -14,10 +14,14 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
@@ -48,6 +52,10 @@ type Reconciler struct {
 
 	mu      sync.Mutex
 	engines map[string]*running // by set name
+	// stalls brings a set back when its engine finds a member stalled or
+	// moving again, which raises no event on the set.
+	stalls chan event.GenericEvent
+	pruned sync.Once // logs a CRD without status.stalledMembers
 }
 
 type running struct {
@@ -197,8 +205,9 @@ const recheck = 5 * time.Second
 // start is Start; tests replace it.
 var start = Start
 
-// Reconcile starts, keeps or stops the engine of one set.
-func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// Reconcile starts, keeps or stops the engine of one set, and reports
+// the members its engine finds stalled.
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, err error) {
 	l := log.FromContext(ctx).WithValues("set", req.Name)
 	var set mxlv1alpha1.MxlFlowRedundancySet
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: req.Name}, &set); err != nil {
@@ -208,6 +217,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		return ctrl.Result{}, err
 	}
+	// A failed report is tried again at the next recheck; returned, it
+	// would turn the recheck into a backoff that holds off this set's
+	// replacements of restarted members as well. A path that stops the
+	// engine asks for no recheck of its own, and its report is the one
+	// removing this node's entry, so it gets one.
+	defer func() {
+		if rerr := r.reportStalled(ctx, &set); rerr != nil {
+			l.Error(rerr, "report stalled members")
+			if err == nil && res.IsZero() {
+				res = ctrl.Result{RequeueAfter: recheck}
+			}
+		}
+	}()
 	if !set.DeletionTimestamp.IsZero() || !wantedHere(&set, r.NodeName) || !valid(&set) {
 		r.stop(req.Name)
 		return ctrl.Result{}, nil
@@ -235,7 +257,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 	spec := Spec{DomainDir: dir, OutputID: set.Spec.Output.FlowID, Skew: set.Spec.SkewBudget.Duration,
-		Ordered: set.Spec.Preference != mxlv1alpha1.RedundancyFirstArrival}
+		Ordered: set.Spec.Preference != mxlv1alpha1.RedundancyFirstArrival, Stalls: r.stallsOf(set.Name)}
 	if spec.Skew <= 0 {
 		spec.Skew = 40 * time.Millisecond
 	}
@@ -321,6 +343,50 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	r.mu.Unlock()
 	l.Info("serving redundancy set", "output", spec.OutputID, "members", spec.Members, "replaceable", e.replaceable)
 	return ctrl.Result{RequeueAfter: recheck}, nil
+}
+
+// reportStalled applies this node's entry in the set's
+// status.stalledMembers when it differs from the engine's stalled
+// members, and removes it when none is, or no engine serves the set
+// here. A member the engine has not decided on yet, one not moved since
+// the engine started, keeps what the entry said: an engine rebuilt
+// under a stalled member must not report it moving, nor one built under
+// a moving member report it stalled.
+func (r *Reconciler) reportStalled(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet) error {
+	r.mu.Lock()
+	cur := r.engines[set.Name]
+	r.mu.Unlock()
+	var stalled, undecided, reported []string
+	if cur != nil {
+		stalled, undecided = cur.engine.Stalled()
+	}
+	for _, s := range set.Status.StalledMembers {
+		if s.Node == r.NodeName {
+			reported = s.FlowIDs
+		}
+	}
+	for _, id := range reported {
+		if slices.Contains(undecided, id) {
+			stalled = append(stalled, id)
+		}
+	}
+	slices.Sort(stalled)
+	if slices.Equal(stalled, slices.Sorted(slices.Values(reported))) {
+		return nil
+	}
+	log.FromContext(ctx).Info("reporting stalled members", "set", set.Name, "members", stalled)
+	patch := mxlv1alpha1.StalledMembersApply(set.Name, r.NodeName, stalled)
+	if err := r.Client.Status().Patch(ctx, patch, client.Apply,
+		client.FieldOwner(mxlv1alpha1.StalledMembersFieldOwner(r.NodeName)), client.ForceOwnership); err != nil {
+		return err
+	}
+	if got, _, _ := unstructured.NestedSlice(patch.Object, "status", "stalledMembers"); len(stalled) > 0 && len(got) == 0 {
+		r.pruned.Do(func() {
+			log.FromContext(ctx).Info("the API server dropped status.stalledMembers; its MxlFlowRedundancySet CRD " +
+				"predates the field, so no stalled member is reported")
+		})
+	}
+	return nil
 }
 
 // outputGeometry is the definition whose geometry the output is built
@@ -416,11 +482,27 @@ func (r *Reconciler) Start(ctx context.Context) error {
 	return nil
 }
 
+// stallsOf returns what set's engine calls on a stall: it brings the set
+// back to be reported. An event the queue has no room for is not waited
+// for; the set's recheck reports it.
+func (r *Reconciler) stallsOf(set string) func() {
+	return func() {
+		select {
+		case r.stalls <- event.GenericEvent{Object: &mxlv1alpha1.MxlFlowRedundancySet{
+			ObjectMeta: metav1.ObjectMeta{Name: set}}}:
+		default:
+		}
+	}
+}
+
 // SetupWithManager registers the reconciler.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.Add(r); err != nil {
 		return err
 	}
+	r.stalls = make(chan event.GenericEvent, 16)
 	return ctrl.NewControllerManagedBy(mgr).Named("redundancyset").
-		For(&mxlv1alpha1.MxlFlowRedundancySet{}).Complete(r)
+		For(&mxlv1alpha1.MxlFlowRedundancySet{}).
+		WatchesRawSource(source.Channel(r.stalls, &handler.EnqueueRequestForObject{})).
+		Complete(r)
 }
