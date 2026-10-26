@@ -240,9 +240,7 @@ func run(args []string) error {
 
 	// Only once the domain is mounted can it be told to be on mxlfs, the
 	// same test a tracked domain gets.
-	if cfg.Mxlfs && mxlfswatch.IsMxlfs(cfg.DomainPath) {
-		flowPub.Producer = producer
-	}
+	primaryOnMxlfs := tracking.Mxlfs.on(cfg.DomainPath, flowPub)
 
 	if err := flowPub.InitialSync(ctx); err != nil {
 		// Initial sync failures are logged, not fatal -- the fanotify
@@ -288,7 +286,7 @@ func run(args []string) error {
 		}()
 	}
 
-	if cfg.Mxlfs && mxlfswatch.IsMxlfs(cfg.DomainPath) {
+	if primaryOnMxlfs {
 		if _, err := startMxlfs(ctx, cfg.DomainPath, flowPub); err != nil {
 			return err
 		}
@@ -496,6 +494,17 @@ type trackerMxlfs struct {
 	Producer func(ctx context.Context, pid int32) bool
 }
 
+// on reports whether dir is on mxlfs, and if it is gives fp what a
+// domain on mxlfs needs. Nil, without --mxlfs, no domain is.
+func (m *trackerMxlfs) on(dir string, fp *flowpublisher.Publisher) bool {
+	if m == nil || !m.IsMxlfs(dir) {
+		return false
+	}
+	fp.IsOutput = m.IsOutput
+	fp.Producer = m.Producer
+	return true
+}
+
 // start tracks the flows of the domain name in dir: the same fanotify
 // mark, flow publisher and lease loops the primary domain gets, and on
 // mxlfs what runMxlfs starts. It returns once all of it is in place, so a
@@ -511,11 +520,7 @@ func (d domainTracking) start(ctx context.Context, name, dir string) (tracker.Tr
 		NodeName:   d.Node,
 		Lease:      d.Lease,
 	}
-	onMxlfs := d.Mxlfs != nil && d.Mxlfs.IsMxlfs(dir)
-	if onMxlfs {
-		fp.IsOutput = d.Mxlfs.IsOutput
-		fp.Producer = d.Mxlfs.Producer
-	}
+	onMxlfs := d.Mxlfs.on(dir, fp)
 
 	tctx, cancel := context.WithCancel(ctx)
 	waitWatch, err := d.WatchFlows(tctx, dir, fp)
