@@ -2,6 +2,7 @@ package flowpublisher
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -12,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/qvest-digital/mxl-k8s/agent/internal/flowlock"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -136,6 +138,44 @@ func TestRescan_ProducerOnAnOrigin_LeavesItAlone(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: validFlowID}, &after))
 	assert.Equal(t, before.ResourceVersion, after.ResourceVersion,
 		"a healthy Origin must not be re-published")
+}
+
+// The rescan reads the node's lock table once a pass however many
+// copies it asks about: read per copy, every pass would read every lock
+// on the node once per flow.
+func TestRescan_ReadsTheLockTableOncePerPass(t *testing.T) {
+	ctx := context.Background()
+	domain := t.TempDir()
+	b := fake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{})
+	onDisk := map[string]struct{}{}
+	for i, id := range []string{validFlowID, "11111111-2222-3333-4444-666666666666"} {
+		writeFlowDir(t, domain, id)
+		b = b.WithObjects(
+			&mxlv1alpha1.MxlFlow{ObjectMeta: ObjectMeta(id), Spec: mxlv1alpha1.MxlFlowSpec{ID: id}},
+			&mxlv1alpha1.MxlFlowMirror{
+				ObjectMeta: metaNS("ns", fmt.Sprintf("m%d", i)),
+				Spec:       mxlv1alpha1.MxlFlowMirrorSpec{FlowID: id, SourceNode: "n2", TargetNode: "n1"},
+			})
+		onDisk[id] = struct{}{}
+	}
+	c := b.Build()
+	reads := 0
+	p := &Publisher{
+		Client: c, WriterAttached: writerAttached, Producer: noProducer,
+		DomainPath: domain, NodeName: "n1",
+		ReadLocks: func() (flowlock.Locks, error) { reads++; return flowlock.Locks{}, nil },
+	}
+	for id := range onDisk {
+		require.NoError(t, p.PublishAppeared(ctx, id+".mxl-flow"))
+	}
+	require.Equal(t, mxlv1alpha1.MxlFlowLocationReady, phaseOnNode(t, c, "n1"))
+
+	reads = 0
+	require.NoError(t, p.promoteStaleLocalOrigins(ctx, onDisk))
+
+	assert.Equal(t, 1, reads)
 }
 
 // readyFlowOnN1 is a flow whose copy on n1 a mirror fills, published

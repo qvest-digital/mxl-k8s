@@ -78,6 +78,10 @@ type Publisher struct {
 	// to report the attach. Nil, as off mxlfs, leaves the inference as
 	// it is.
 	Producer func(ctx context.Context, pid int32) bool
+
+	// ReadLocks reads the node's lock table for Producer to be asked
+	// about. Nil reads /proc/locks through agent/internal/flowlock.
+	ReadLocks func() (flowlock.Locks, error)
 }
 
 // ref is the flow a directory id names in this publisher's domain.
@@ -102,12 +106,17 @@ func (p *Publisher) writerAttached(flowID string) (bool, error) {
 // readLocks is the lock table producerWrites reads, read only where a
 // Producer can ask about it. Unreadable, it holds no writer, which
 // leaves the mirror inference as it is.
-func (p *Publisher) readLocks() flowlock.Locks {
+func (p *Publisher) readLocks(ctx context.Context) flowlock.Locks {
 	if p.Producer == nil {
 		return nil
 	}
-	locks, err := flowlock.ReadLocks()
+	read := p.ReadLocks
+	if read == nil {
+		read = flowlock.ReadLocks
+	}
+	locks, err := read()
 	if err != nil {
+		log.FromContext(ctx).Error(err, "read the node's locks; no producer is found on this pass")
 		return nil
 	}
 	return locks
@@ -210,7 +219,7 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	isMirror, err := p.isMirrorTarget(ctx, flowID)
 	if err != nil {
 		l.Error(err, "list MxlFlowMirrors; defaulting to Origin", "flowID", flowID)
-	} else if isMirror && !p.producerWrites(ctx, p.readLocks(), flowID) {
+	} else if isMirror && !p.producerWrites(ctx, p.readLocks(ctx), flowID) {
 		phase = mxlv1alpha1.MxlFlowLocationReady
 	}
 
@@ -707,7 +716,7 @@ func (p *Publisher) producerTookOver(ctx context.Context, locks flowlock.Locks, 
 func (p *Publisher) promoteStaleLocalOrigins(ctx context.Context, onDisk map[string]struct{}) error {
 	l := log.FromContext(ctx).WithName("flowpublisher.promote")
 	// One read of the node's locks for the whole pass.
-	locks := p.readLocks()
+	locks := p.readLocks(ctx)
 	for id := range onDisk {
 		var flow mxlv1alpha1.MxlFlow
 		err := p.Client.Get(ctx, types.NamespacedName{Name: p.key(id)}, &flow)
