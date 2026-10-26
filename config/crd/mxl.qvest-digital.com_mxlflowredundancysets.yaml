@@ -173,7 +173,7 @@ spec:
                 description: |-
                   Conditions: Valid reports whether the members can be merged,
                   MembersReady whether every member is produced in the output's
-                  geometry.
+                  geometry and advances on every node the output is served on.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -247,6 +247,35 @@ spec:
                 description: ObservedGeneration is the spec generation last reconciled.
                 format: int64
                 type: integer
+              stalledMembers:
+                description: |-
+                  StalledMembers are, per node in nodes, the members the gateway
+                  there merges whose head has not moved for two seconds. Each
+                  gateway applies its own node's entry, under a field manager of
+                  its own, and removes it once none of its members is stalled.
+                items:
+                  description: |-
+                    StalledMembers are the members of a set whose head has not moved on
+                    one node.
+                  properties:
+                    flowIDs:
+                      description: FlowIDs are the stalled members' flow ids.
+                      items:
+                        type: string
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: set
+                    node:
+                      description: Node is the node whose gateway reports the members.
+                      type: string
+                  required:
+                  - flowIDs
+                  - node
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - node
+                x-kubernetes-list-type: map
             type: object
         type: object
     served: true

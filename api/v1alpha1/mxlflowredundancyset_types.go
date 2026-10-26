@@ -100,17 +100,39 @@ type MxlFlowRedundancySetStatus struct {
 	// +listType=set
 	Nodes []string `json:"nodes,omitempty"`
 
+	// StalledMembers are, per node in nodes, the members the gateway
+	// there merges whose head has not moved for two seconds. Each
+	// gateway applies its own node's entry, under a field manager of
+	// its own, and removes it once none of its members is stalled.
+	// +optional
+	// +listType=map
+	// +listMapKey=node
+	StalledMembers []StalledMembers `json:"stalledMembers,omitempty"`
+
 	// ObservedGeneration is the spec generation last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Conditions: Valid reports whether the members can be merged,
 	// MembersReady whether every member is produced in the output's
-	// geometry.
+	// geometry and advances on every node the output is served on.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// StalledMembers are the members of a set whose head has not moved on
+// one node.
+type StalledMembers struct {
+	// Node is the node whose gateway reports the members.
+	// +kubebuilder:validation:Required
+	Node string `json:"node"`
+
+	// FlowIDs are the stalled members' flow ids.
+	// +kubebuilder:validation:MinItems=1
+	// +listType=set
+	FlowIDs []string `json:"flowIDs"`
 }
 
 // +kubebuilder:object:root=true
