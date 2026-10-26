@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/qvest-digital/go-mxl/mxl"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
@@ -20,6 +21,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -172,6 +174,38 @@ func TestReconcilerServesFromTheMembersPresent(t *testing.T) {
 	memberDir(t, dir, memberA, videoDef(memberA))
 	reconcileSet(t, r)
 	require.Equal(t, [][]string{{memberB}, {memberA, memberB}}, *started)
+}
+
+// Whether the node's mxlfs can put a restarted member's ring in place,
+// or the output is built again instead, is probed once per engine. The
+// log is the only place it shows before a member restarts.
+func TestReconcilerLogsWhetherTheEngineCanReplaceMembers(t *testing.T) {
+	for _, replaceable := range []bool{true, false} {
+		t.Run(fmt.Sprint(replaceable), func(t *testing.T) {
+			orig := start
+			start = func(_ context.Context, spec Spec, _ logr.Logger) (*Engine, error) {
+				return &Engine{outDir: flowDir(spec.DomainDir, spec.OutputID), replaceable: replaceable}, nil
+			}
+			t.Cleanup(func() { start = orig })
+			dir := t.TempDir()
+			memberDir(t, dir, memberA, videoDef(memberA))
+			r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+			var serving []map[string]any
+			l := funcr.NewJSON(func(obj string) {
+				var entry map[string]any
+				require.NoError(t, json.Unmarshal([]byte(obj), &entry))
+				if entry["msg"] == "serving redundancy set" {
+					serving = append(serving, entry)
+				}
+			}, funcr.Options{})
+
+			_, err := r.Reconcile(log.IntoContext(context.Background(), l),
+				ctrl.Request{NamespacedName: types.NamespacedName{Name: "programme"}})
+			require.NoError(t, err)
+			require.Len(t, serving, 1)
+			require.Equal(t, replaceable, serving[0]["replaceable"])
+		})
+	}
 }
 
 // A member that goes away for good takes its directory with it: its

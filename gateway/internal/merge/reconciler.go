@@ -319,7 +319,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	r.engines[req.Name] = &running{engine: e, uid: set.UID, gen: set.Generation, domain: dir, def: def,
 		layout: layout, seen: seen, started: started}
 	r.mu.Unlock()
-	l.Info("serving redundancy set", "output", spec.OutputID, "members", spec.Members)
+	l.Info("serving redundancy set", "output", spec.OutputID, "members", spec.Members, "replaceable", e.replaceable)
 	return ctrl.Result{RequeueAfter: recheck}, nil
 }
 
