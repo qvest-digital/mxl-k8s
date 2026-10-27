@@ -730,13 +730,89 @@ func TestReconcilerReportsTheMembersItsEngineFindsStalled(t *testing.T) {
 
 	now := time.Now()
 	(*engine).progress.observe([]uint64{1, 0}, now)
-	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter, "a served set is not looked at again in time")
+	require.Equal(t, time.Second, reconcileSet(t, r).RequeueAfter,
+		"a set with a stalled member is not looked at again within a second")
 	require.Len(t, stalledOf(t, r)[0].FlowIDs, 2, "a stalled member's first commit was taken as a recovery")
 	heads := []uint64{1, 0}
 	steadily(t, r, *engine, heads, now, 0)
 	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberB}}}, stalledOf(t, r))
 
 	steadily(t, r, *engine, heads, now.Add(RecoverAfter+tick), 0, 1)
+	require.Empty(t, stalledOf(t, r))
+	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter, "a set with no stalled member kept the short recheck")
+}
+
+// A producer restarted out of a stall, by its liveness probe or as a new
+// pod, recreates its flow directory, which raises no event on the set:
+// the engine takes the new ring at the set's next recheck. Its first
+// grain is where RecoverAfter starts, so MembersReady can be back within
+// its ten seconds only if that recheck comes within a second.
+func TestReconcilerReportsARestartedStalledMemberMovingWithinTenSeconds(t *testing.T) {
+	engine := stalledStart(t, time.Now().Add(-StartGrace))
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	heads := []uint64{0, 0}
+	var replaced []int
+	orig := replace
+	replace = func(e *Engine, m int) (uint64, error) {
+		replaced = append(replaced, m)
+		heads[m] = 1 << 40 // the new ring's head, at the clock
+		return inodes(dir, []mxlv1alpha1.RedundancyFlowRef{{FlowID: e.spec.Members[m]}})[0], nil
+	}
+	t.Cleanup(func() { replace = orig })
+	reconcileSet(t, r)
+	t0 := time.Now()
+	steadily(t, r, *engine, heads, t0, 1)
+	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberA}}}, stalledOf(t, r))
+	// The engine keeps the old ring's file open, so its inode is not reused.
+	f, err := os.Open(filepath.Join(flowDir(dir, memberA), "data"))
+	require.NoError(t, err)
+	t.Cleanup(func() { f.Close() })
+
+	// The producer restarts just after a recheck, which is the latest
+	// its ring is taken.
+	res := reconcileSet(t, r)
+	require.Equal(t, stalledRecheck, res.RequeueAfter)
+	restarted := t0.Add(RecoverAfter + tick)
+	memberDir(t, dir, memberA, videoDef(memberA))
+	at := restarted.Add(res.RequeueAfter)
+	require.Equal(t, stalledRecheck, reconcileSet(t, r).RequeueAfter)
+	require.Equal(t, []int{0}, replaced, "the restarted member's ring was not taken at the recheck")
+	for ; len(stalledOf(t, r)) > 0; at = at.Add(tick) {
+		require.Less(t, at.Sub(restarted), 10*time.Second, "the restarted member was not reported moving in time")
+		heads[0]++
+		heads[1]++
+		if (*engine).progress.observe(heads, at) {
+			reconcileSet(t, r)
+		}
+	}
+	require.LessOrEqual(t, at.Sub(restarted), stalledRecheck+RecoverAfter+tick)
+}
+
+// The engine's report of a member moving again is dropped when its set's
+// queue has no room. The set's own recheck has to report it within the
+// ten seconds MembersReady is held to.
+func TestReconcilerReportsAMovingMemberWhoseEventWasDropped(t *testing.T) {
+	engine := stalledStart(t, time.Now().Add(-StartGrace))
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	res := reconcileSet(t, r)
+	require.Len(t, stalledOf(t, r), 1)
+
+	resumed, heads := time.Now(), []uint64{0}
+	var moving time.Time
+	for at := time.Duration(0); moving.IsZero(); at += tick {
+		heads[0]++
+		if (*engine).progress.observe(heads, resumed.Add(at)) {
+			moving = resumed.Add(at) // reported to a full queue: no reconcile
+		}
+	}
+	require.LessOrEqual(t, moving.Sub(resumed)+res.RequeueAfter, 6*time.Second,
+		"a moving member whose report was dropped waits past the six seconds RecoverAfter states")
+	reconcileSet(t, r)
 	require.Empty(t, stalledOf(t, r))
 }
 

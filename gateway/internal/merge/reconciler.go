@@ -202,6 +202,14 @@ const maxRetries = 3
 // event on the set.
 const recheck = 5 * time.Second
 
+// stalledRecheck replaces recheck while this node reports a member
+// stalled. A producer restarted out of a stall raises no event on the
+// set, nor does a recovery whose report the queue had no room for; at
+// recheck either would reach the set only after the five seconds plus
+// RecoverAfter, past the ten MembersReady is held to. A reconcile of a
+// set whose report is unchanged reads the cache and writes nothing.
+const stalledRecheck = time.Second
+
 // start is Start; tests replace it.
 var start = Start
 
@@ -223,11 +231,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 	// engine asks for no recheck of its own, and its report is the one
 	// removing this node's entry, so it gets one.
 	defer func() {
-		if rerr := r.reportStalled(ctx, &set); rerr != nil {
+		named, rerr := r.reportStalled(ctx, &set)
+		switch {
+		case rerr != nil:
 			l.Error(rerr, "report stalled members")
 			if err == nil && res.IsZero() {
 				res = ctrl.Result{RequeueAfter: recheck}
 			}
+		case named && res.RequeueAfter == recheck:
+			res.RequeueAfter = stalledRecheck
 		}
 	}()
 	if !set.DeletionTimestamp.IsZero() || !wantedHere(&set, r.NodeName) || !valid(&set) {
@@ -353,29 +365,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 // the engine started, keeps what the entry said: an engine rebuilt
 // under a stalled member must not report it moving, nor one built under
 // a moving member report it stalled.
-func (r *Reconciler) reportStalled(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet) error {
+// It returns whether the entry names a member once it is applied.
+func (r *Reconciler) reportStalled(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet) (bool, error) {
 	r.mu.Lock()
 	cur := r.engines[set.Name]
 	r.mu.Unlock()
-	var stalled, undecided, reported []string
+	reported := r.reported(set)
+	var stalled []string
 	if cur != nil {
-		stalled, undecided = cur.engine.Stalled()
+		stalled = reportOf(cur, reported)
 	}
-	reported = r.reported(set)
-	for _, id := range reported {
-		if slices.Contains(undecided, id) {
-			stalled = append(stalled, id)
-		}
-	}
-	slices.Sort(stalled)
 	if slices.Equal(stalled, slices.Sorted(slices.Values(reported))) {
-		return nil
+		return len(stalled) > 0, nil
 	}
 	log.FromContext(ctx).Info("reporting stalled members", "set", set.Name, "members", stalled)
 	patch := mxlv1alpha1.StalledMembersApply(set.Name, r.NodeName, stalled)
 	if err := r.Client.Status().Patch(ctx, patch, client.Apply,
 		client.FieldOwner(mxlv1alpha1.StalledMembersFieldOwner(r.NodeName)), client.ForceOwnership); err != nil {
-		return err
+		return false, err
 	}
 	if got, _, _ := unstructured.NestedSlice(patch.Object, "status", "stalledMembers"); len(stalled) > 0 && len(got) == 0 {
 		r.pruned.Do(func() {
@@ -383,7 +390,20 @@ func (r *Reconciler) reportStalled(ctx context.Context, set *mxlv1alpha1.MxlFlow
 				"predates the field, so no stalled member is reported")
 		})
 	}
-	return nil
+	return len(stalled) > 0, nil
+}
+
+// reportOf returns, sorted, the members cur's engine finds stalled, and
+// those of reported it has not decided on yet.
+func reportOf(cur *running, reported []string) []string {
+	stalled, undecided := cur.engine.Stalled()
+	for _, id := range reported {
+		if slices.Contains(undecided, id) {
+			stalled = append(stalled, id)
+		}
+	}
+	slices.Sort(stalled)
+	return stalled
 }
 
 // reported returns the members this node's entry in the set's
