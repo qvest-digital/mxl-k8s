@@ -207,3 +207,25 @@ func TestProgressBoundsHowOftenAMemberChanges(t *testing.T) {
 		require.LessOrEqual(t, len(changes), limit, "on %v, off %v: %v", cycle.on, cycle.off, changes)
 	}
 }
+
+// A member that recovers delivers with gaps: a mirror catching up, a
+// producer starved for a moment. A gap shorter than half the window is
+// no pause, so such a member is moving once RecoverAfter passed, and
+// stays so, its gaps being shorter than the window too. Here grains of
+// 40 ms come for 1.3 s and then not for 0.7 s, between a quarter and
+// half of the window.
+func TestProgressCountsGapsShorterThanHalfTheWindowAsSteady(t *testing.T) {
+	require.Greater(t, 700*time.Millisecond, StallAfter/4)
+	require.Less(t, 700*time.Millisecond+tick, StallAfter/2)
+	resume := StallAfter + time.Second
+	p := newProgress([]uint64{0}, time.Unix(1000, 0), StallAfter)
+	changes := delivery(t, p, time.Unix(1000, 0), time.Minute, func(at time.Duration) bool {
+		if at < resume {
+			return at == 0
+		}
+		phase := (at - resume) % (2 * time.Second)
+		return phase < 1300*time.Millisecond && phase%(40*time.Millisecond) == 0
+	})
+	require.Equal(t, []time.Duration{0, StallAfter, resume + RecoverAfter}, changes)
+	require.False(t, stalledNow(p))
+}
