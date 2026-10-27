@@ -27,12 +27,17 @@ const StartGrace = 10 * time.Second
 // never standing still for half its stall window, before the member
 // counts as moving again. A producer behind a dead input commits a grain
 // every two seconds or so; counting each commit as a recovery turned the
-// member stalled and back at every one of them. A member is reported
-// stalled within its stall window of its last commit and moving within
-// RecoverAfter of committing steadily again. A member that moves again
-// committed less than half its window before, so it stalls no sooner
-// than that: it changes state at most twice in RecoverAfter plus half
-// its stall window.
+// member stalled and back at every one of them. The pause rule is what
+// keeps such a member stalled; RecoverAfter only has to outlast the
+// bursts it delivers between pauses.
+//
+// Measured from grains resuming steadily, a member is reported moving
+// within RecoverAfter, or within stalledRecheck plus RecoverAfter, six
+// seconds, when nothing raises an event on its set: a restarted producer,
+// whose new ring is found at a recheck, or a report the set's queue had
+// no room for. A member that moves again committed less than half its
+// window before, so it stalls no sooner than that: it changes state at
+// most twice in RecoverAfter plus half its stall window.
 const RecoverAfter = 5 * time.Second
 
 // stallWindow is how long a member of grains of period may stand still
