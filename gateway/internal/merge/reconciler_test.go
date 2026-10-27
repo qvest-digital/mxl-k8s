@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -543,11 +544,22 @@ func TestReconcilerRebuildsOverAMemberRestartedWithAnotherRingDepth(t *testing.T
 	require.Equal(t, [][]string{{memberA, memberB}, {memberA}}, *started)
 }
 
+// fakeClock replaces clock with one that moves only when told to.
+func fakeClock(t *testing.T) *time.Time {
+	t.Helper()
+	at := time.Now()
+	orig := clock
+	clock = func() time.Time { return at }
+	t.Cleanup(func() { clock = orig })
+	return &at
+}
+
 // A ring that cannot be opened keeps the engine while it is tried again,
 // but not for long: meanwhile the restarted member counts as one still
 // served, and the output would stay frozen on the others' rings when
 // they are gone too.
 func TestReconcilerStopsTryingARingItCannotOpen(t *testing.T) {
+	now := fakeClock(t)
 	started := startWithSpec(t)
 	dir := t.TempDir()
 	asked := fakeReplace(t, dir, fmt.Errorf("%w: %w", ErrNotOpened, unix.ENOENT), nil)
@@ -561,12 +573,13 @@ func TestReconcilerStopsTryingARingItCannotOpen(t *testing.T) {
 
 	require.NoError(t, os.RemoveAll(flowDir(dir, memberB)))
 	memberDir(t, dir, memberA, videoDef(memberA))
-	for range maxRetries {
+	for range retryFor / recheck {
 		require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter)
+		*now = now.Add(recheck)
 	}
 	require.Len(t, *started, 1, "the engine was not kept while the ring was tried again")
 	reconcileSet(t, r)
-	require.Len(t, *asked, maxRetries+1)
+	require.Len(t, *asked, int(retryFor/recheck)+1)
 	require.Equal(t, [][]string{{memberA, memberB}, {memberA}}, *started,
 		"the output stayed on a gone member's ring while the other could not be opened")
 }
@@ -652,20 +665,39 @@ func TestReconcilerLeavesOutAMemberWhoseRingCannotBeOpened(t *testing.T) {
 }
 
 // stalledStart replaces the engine with one over the members present
-// that started at started, all heads at zero, and has looked at them
-// now.
+// that started at started, all heads at zero, taking the members its
+// spec names stalled as such, and has looked at them now.
 func stalledStart(t *testing.T, started time.Time) **Engine {
 	t.Helper()
 	var e *Engine
 	orig := start
 	start = func(_ context.Context, spec Spec, _ logr.Logger) (*Engine, error) {
+		reported := make([]bool, len(spec.Members))
+		for i, id := range spec.Members {
+			reported[i] = slices.Contains(spec.Stalled, id)
+		}
 		e = &Engine{spec: spec, outDir: flowDir(spec.DomainDir, spec.OutputID),
-			progress: newProgress(make([]uint64, len(spec.Members)), started, StallAfter)}
+			progress: newProgress(make([]uint64, len(spec.Members)), started, StallAfter).stalledFrom(reported)}
 		e.progress.observe(make([]uint64, len(spec.Members)), time.Now())
 		return e, nil
 	}
 	t.Cleanup(func() { start = orig })
 	return &e
+}
+
+// steadily commits a grain of each of the members at every tick from
+// from on for RecoverAfter, the others' heads standing still,
+// reconciling r whenever the engine reports a change as its loop does.
+func steadily(t *testing.T, r *Reconciler, e *Engine, heads []uint64, from time.Time, members ...int) {
+	t.Helper()
+	for at := time.Duration(0); at <= RecoverAfter; at += tick {
+		for _, i := range members {
+			heads[i]++
+		}
+		if e.progress.observe(heads, from.Add(at)) {
+			reconcileSet(t, r)
+		}
+	}
 }
 
 func stalledOf(t *testing.T, r *Reconciler) []mxlv1alpha1.NodeStalledMembers {
@@ -708,13 +740,210 @@ func TestReconcilerReportsTheMembersItsEngineFindsStalled(t *testing.T) {
 	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberA, memberB}}},
 		stalledOf(t, r), "members that never moved were not reported after the start grace")
 
-	(*engine).progress.observe([]uint64{1, 0}, time.Now())
-	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter, "a served set is not looked at again in time")
+	now := time.Now()
+	(*engine).progress.observe([]uint64{1, 0}, now)
+	require.Equal(t, time.Second, reconcileSet(t, r).RequeueAfter,
+		"a set with a stalled member is not looked at again within a second")
+	require.Len(t, stalledOf(t, r)[0].FlowIDs, 2, "a stalled member's first commit was taken as a recovery")
+	heads := []uint64{1, 0}
+	steadily(t, r, *engine, heads, now, 0)
 	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberB}}}, stalledOf(t, r))
 
-	(*engine).progress.observe([]uint64{1, 1}, time.Now())
+	steadily(t, r, *engine, heads, now.Add(RecoverAfter+tick), 0, 1)
+	require.Empty(t, stalledOf(t, r))
+	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter, "a set with no stalled member kept the short recheck")
+}
+
+// A producer restarted out of a stall, by its liveness probe or as a new
+// pod, recreates its flow directory, which raises no event on the set:
+// the engine takes the new ring at the set's next recheck. Its first
+// grain is where RecoverAfter starts, so MembersReady can be back within
+// its ten seconds only if that recheck comes within a second.
+func TestReconcilerReportsARestartedStalledMemberMovingWithinTenSeconds(t *testing.T) {
+	engine := stalledStart(t, time.Now().Add(-StartGrace))
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	heads := []uint64{0, 0}
+	var replaced []int
+	orig := replace
+	replace = func(e *Engine, m int) (uint64, error) {
+		replaced = append(replaced, m)
+		heads[m] = 1 << 40 // the new ring's head, at the clock
+		return inodes(dir, []mxlv1alpha1.RedundancyFlowRef{{FlowID: e.spec.Members[m]}})[0], nil
+	}
+	t.Cleanup(func() { replace = orig })
+	reconcileSet(t, r)
+	t0 := time.Now()
+	steadily(t, r, *engine, heads, t0, 1)
+	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberA}}}, stalledOf(t, r))
+	// The engine keeps the old ring's file open, so its inode is not reused.
+	f, err := os.Open(filepath.Join(flowDir(dir, memberA), "data"))
+	require.NoError(t, err)
+	t.Cleanup(func() { f.Close() })
+
+	// The producer restarts just after a recheck, which is the latest
+	// its ring is taken.
+	res := reconcileSet(t, r)
+	require.Equal(t, stalledRecheck, res.RequeueAfter)
+	restarted := t0.Add(RecoverAfter + tick)
+	memberDir(t, dir, memberA, videoDef(memberA))
+	at := restarted.Add(res.RequeueAfter)
+	require.Equal(t, stalledRecheck, reconcileSet(t, r).RequeueAfter)
+	require.Equal(t, []int{0}, replaced, "the restarted member's ring was not taken at the recheck")
+	for ; len(stalledOf(t, r)) > 0; at = at.Add(tick) {
+		require.Less(t, at.Sub(restarted), 10*time.Second, "the restarted member was not reported moving in time")
+		heads[0]++
+		heads[1]++
+		if (*engine).progress.observe(heads, at) {
+			reconcileSet(t, r)
+		}
+	}
+	require.LessOrEqual(t, at.Sub(restarted), stalledRecheck+RecoverAfter+tick)
+}
+
+// retryFor bounds tries in a row. A member whose ring was taken in the
+// end, or that went away meanwhile, starts over: one that restarts again
+// later, and whose new ring cannot be opened at once, would otherwise
+// find its time spent and the output built again under every reader.
+func TestReconcilerStartsARingsRetryTimeOverOnceItIsSettled(t *testing.T) {
+	for name, settle := range map[string]func(t *testing.T, dir string, fail *bool){
+		"replaced": func(t *testing.T, _ string, fail *bool) { *fail = false },
+		"gone":     func(t *testing.T, dir string, _ *bool) { require.NoError(t, os.RemoveAll(flowDir(dir, memberA))) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			now := fakeClock(t)
+			started := startWithSpec(t)
+			dir := t.TempDir()
+			fail := true
+			orig := replace
+			replace = func(e *Engine, m int) (uint64, error) {
+				if fail {
+					return 0, fmt.Errorf("%w: %w", ErrNotOpened, unix.ENOENT)
+				}
+				return inodes(dir, []mxlv1alpha1.RedundancyFlowRef{{FlowID: e.spec.Members[m]}})[0], nil
+			}
+			t.Cleanup(func() { replace = orig })
+			memberDir(t, dir, memberA, videoDef(memberA))
+			memberDir(t, dir, memberB, videoDef(memberB))
+			r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+			reconcileSet(t, r)
+			engine := r.engines["programme"].engine
+			// Every ring stays open, so no inode is reused.
+			restart := func() {
+				f, err := os.Open(filepath.Join(flowDir(dir, memberA), "data"))
+				require.NoError(t, err)
+				t.Cleanup(func() { f.Close() })
+				memberDir(t, dir, memberA, videoDef(memberA))
+			}
+
+			restart()
+			reconcileSet(t, r)
+			settle(t, dir, &fail)
+			reconcileSet(t, r)
+			*now = now.Add(retryFor)
+
+			if name == "gone" {
+				memberDir(t, dir, memberA, videoDef(memberA))
+			} else {
+				restart()
+			}
+			fail = true
+			reconcileSet(t, r)
+			require.Len(t, *started, 1, "a ring tried in vain once more took the time of tries before it settled")
+			require.Same(t, engine, r.engines["programme"].engine)
+		})
+	}
+}
+
+// A producer restarted out of a stall can leave a directory whose ring
+// cannot be opened yet. The set is looked at every second while it
+// reports the stall, and each look tries the ring again: counted in
+// tries, the engine gave up on it after three seconds and built the
+// output again under every reader, where it waits fifteen at the
+// five-second recheck. The budget is a time.
+func TestReconcilerKeepsTryingARingAsLongAtTheShortRecheck(t *testing.T) {
+	now := fakeClock(t)
+	engine := stalledStart(t, now.Add(-StartGrace))
+	dir := t.TempDir()
+	fakeReplace(t, dir, fmt.Errorf("%w: %w", ErrNotOpened, unix.ENOENT), nil)
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+	first := *engine
+	require.Len(t, stalledOf(t, r), 1)
+	f, err := os.Open(filepath.Join(flowDir(dir, memberA), "data"))
+	require.NoError(t, err)
+	t.Cleanup(func() { f.Close() })
+
+	memberDir(t, dir, memberA, videoDef(memberA))
+	restarted := *now
+	for now.Sub(restarted) < retryFor {
+		res := reconcileSet(t, r)
+		require.Same(t, first, *engine, "the output was built again %v after the restart", now.Sub(restarted))
+		require.Equal(t, stalledRecheck, res.RequeueAfter)
+		*now = now.Add(res.RequeueAfter)
+	}
+	reconcileSet(t, r)
+	require.NotSame(t, first, *engine, "a ring that could not be opened kept the engine past retryFor")
+}
+
+// The engine's report of a member moving again is dropped when its set's
+// queue has no room. The set's own recheck has to report it within the
+// ten seconds MembersReady is held to.
+func TestReconcilerReportsAMovingMemberWhoseEventWasDropped(t *testing.T) {
+	engine := stalledStart(t, time.Now().Add(-StartGrace))
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	res := reconcileSet(t, r)
+	require.Len(t, stalledOf(t, r), 1)
+
+	resumed, heads := time.Now(), []uint64{0}
+	var moving time.Time
+	for at := time.Duration(0); moving.IsZero(); at += tick {
+		heads[0]++
+		if (*engine).progress.observe(heads, resumed.Add(at)) {
+			moving = resumed.Add(at) // reported to a full queue: no reconcile
+		}
+	}
+	require.LessOrEqual(t, moving.Sub(resumed)+res.RequeueAfter, 6*time.Second,
+		"a moving member whose report was dropped waits past the six seconds RecoverAfter states")
 	reconcileSet(t, r)
 	require.Empty(t, stalledOf(t, r))
+}
+
+// The cache an engine is rebuilt from can still hold the node's entry
+// from before its last write: a member the old engine had just seen
+// recover would be taken as stalled again, and held for RecoverAfter. The
+// old engine's own judgement is newer than the cache.
+func TestReconcilerCarriesItsEnginesJudgementIntoARebuild(t *testing.T) {
+	engine := stalledStart(t, time.Now())
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	stale := func() {
+		require.NoError(t, r.Client.Status().Patch(context.Background(),
+			mxlv1alpha1.StalledMembersApply("programme", "reader", []string{memberA}), client.Apply,
+			client.FieldOwner(mxlv1alpha1.StalledMembersFieldOwner("reader")), client.ForceOwnership))
+	}
+	stale()
+	reconcileSet(t, r)
+	require.Equal(t, []string{memberA}, (*engine).spec.Stalled, "a gateway start did not take the status's report")
+	steadily(t, r, *engine, []uint64{0}, time.Now(), 0)
+	require.Empty(t, stalledOf(t, r))
+	first := *engine
+
+	stale() // the cache has not seen the removal yet
+	memberDir(t, dir, memberB, videoDef(memberB))
+	reconcileSet(t, r)
+	require.NotSame(t, first, *engine, "a member that appeared did not rebuild the engine")
+	require.Empty(t, (*engine).spec.Stalled, "a rebuild took a stale report over its engine's own")
+	(*engine).progress.observe([]uint64{1, 1}, time.Now())
+	reconcileSet(t, r)
+	require.Empty(t, stalledOf(t, r), "a member seen recovering was held again after a rebuild")
 }
 
 // Every pass of every gateway reconciles every set; one that wrote its
@@ -744,6 +973,33 @@ func TestReconcilerWritesStalledMembersOnlyWhenTheyChange(t *testing.T) {
 	}
 }
 
+// A member behind a dead input commits a grain every two seconds or
+// so. Each commit read as a recovery made every gateway merging the set
+// write its entry twice per commit, and the operator its condition.
+// Over two minutes of that, a gateway writes the stall once.
+func TestReconcilerWritesOnceForAMemberThatDeliversNowAndThen(t *testing.T) {
+	engine := stalledStart(t, time.Now())
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+	writes := countPatches(r, nil)
+
+	t0, heads := time.Now(), []uint64{0, 0}
+	for at := time.Duration(0); at <= 2*time.Minute; at += tick {
+		heads[0]++
+		if at%(2100*time.Millisecond) == 0 {
+			heads[1]++
+		}
+		if (*engine).progress.observe(heads, t0.Add(at)) {
+			reconcileSet(t, r)
+		}
+	}
+	require.Equal(t, 1, *writes)
+	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberB}}}, stalledOf(t, r))
+}
+
 // An engine is built again when a member appears or is replaced, and
 // at every gateway restart, over members whose heads it has not seen
 // move yet; a placeholder waits seconds for its mirror. Until it has
@@ -766,9 +1022,15 @@ func TestReconcilerKeepsItsReportWhileANewEngineHasNotSeenAMemberMove(t *testing
 	require.Zero(t, *writes)
 	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberA}}}, stalledOf(t, r))
 
-	(*engine).progress.observe([]uint64{1, 0}, time.Now())
+	now := time.Now()
+	(*engine).progress.observe([]uint64{1, 0}, now)
 	reconcileSet(t, r)
-	require.Empty(t, stalledOf(t, r), "a member seen moving stayed reported")
+	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberA}}}, stalledOf(t, r),
+		"a new engine took the first commit of a member reported stalled as a recovery")
+	require.Zero(t, *writes)
+
+	steadily(t, r, *engine, []uint64{1, 0}, now, 0)
+	require.Empty(t, stalledOf(t, r), "a member seen moving steadily stayed reported")
 }
 
 // The report is the set's status, the engine serves its readers: a

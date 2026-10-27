@@ -23,6 +23,25 @@ const stallGrains = 3
 // restart.
 const StartGrace = 10 * time.Second
 
+// RecoverAfter is how long a stalled member's head has to move steadily,
+// never standing still for half its stall window, before the member
+// counts as moving again. A producer behind a dead input commits a grain
+// every two seconds or so; counting each commit as a recovery turned the
+// member stalled and back at every one of them. The pause rule is what
+// keeps such a member stalled; RecoverAfter only has to outlast the
+// bursts it delivers between pauses.
+//
+// Measured from grains resuming steadily, a member is reported moving
+// within RecoverAfter, or within stalledRecheck plus RecoverAfter, six
+// seconds, when nothing raises an event on its set: a restarted
+// producer, whose new ring is taken at the first recheck it can be
+// opened at, or a report the set's queue had no room for. Both hold
+// unless the engine is rebuilt meanwhile, which starts RecoverAfter
+// over. A member that moves again committed less than half its window
+// before, so it stalls no sooner than that: it changes state at most
+// twice in RecoverAfter plus half its stall window.
+const RecoverAfter = 5 * time.Second
+
 // stallWindow is how long a member of grains of period may stand still
 // once it moved: StallAfter, or stallGrains periods of a slower flow.
 func stallWindow(period time.Duration) time.Duration {
@@ -38,7 +57,8 @@ type progress struct {
 	start  time.Time
 	head   []uint64
 	moved  []time.Time // zero while the head has not moved since start
-	known  []bool      // moved, or StartGrace passed: stall is decided
+	steady []time.Time // since when a stalled member moves steadily; read only while it is stalled
+	known  []bool      // moved, StartGrace passed, or reported stalled: stall is decided
 	stall  []bool
 }
 
@@ -47,7 +67,17 @@ type progress struct {
 func newProgress(heads []uint64, now time.Time, window time.Duration) *progress {
 	n := len(heads)
 	return &progress{window: window, start: now, head: append([]uint64(nil), heads...),
-		moved: make([]time.Time, n), known: make([]bool, n), stall: make([]bool, n)}
+		moved: make([]time.Time, n), steady: make([]time.Time, n), known: make([]bool, n), stall: make([]bool, n)}
+}
+
+// stalledFrom takes the members reported as stalled from the start, so
+// that an engine rebuilt under one does not count its first commit as
+// a recovery.
+func (p *progress) stalledFrom(reported []bool) *progress {
+	for i, r := range reported {
+		p.known[i], p.stall[i] = r, r
+	}
+	return p
 }
 
 // observe records the members' heads at now and reports whether a member
@@ -61,12 +91,23 @@ func (p *progress) observe(heads []uint64, now time.Time) (changed bool) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	pause := p.window / 2
 	for i, h := range heads {
 		if h != p.head[i] {
+			// A stalled member's moves count as steady from the first
+			// one that follows a pause. Its first move after it stalled
+			// does: it stood still for a window then, or never moved.
+			if p.stall[i] && now.Sub(p.moved[i]) >= pause {
+				p.steady[i] = now
+			}
 			p.head[i], p.moved[i] = h, now
 		}
-		known, stall := true, false
+		known, stall := true, p.stall[i]
 		switch {
+		case p.known[i] && stall:
+			// Moving again takes RecoverAfter of moves no pause apart.
+			moving := !p.moved[i].IsZero() && now.Sub(p.moved[i]) < pause
+			stall = !moving || now.Sub(p.steady[i]) < RecoverAfter
 		case !p.moved[i].IsZero():
 			stall = now.Sub(p.moved[i]) >= p.window
 		case now.Sub(p.start) >= StartGrace:

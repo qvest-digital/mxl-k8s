@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -159,6 +160,12 @@ type Spec struct {
 	// Stalls, when set, is called from the engine's loop when a member
 	// becomes stalled or moves again; it must not block.
 	Stalls func()
+	// Stalled are the members this node reports stalled as the engine
+	// starts, as the engine it replaces judged them, else as the set's
+	// status says; they stay stalled until they move steadily. Only that
+	// they are stalled is carried, so a rebuild during a recovery starts
+	// its RecoverAfter over.
+	Stalled []string
 }
 
 // Engine serves one output.
@@ -235,7 +242,11 @@ func Start(ctx context.Context, spec Spec, log logr.Logger) (*Engine, error) {
 	}
 	e.replaceable = canReplace(e.views[0])
 	if e.disc == nil || !e.disc.Data {
-		e.progress = newProgress(e.heads(), time.Now(), stallWindow(e.period))
+		reported := make([]bool, len(spec.Members))
+		for i, id := range spec.Members {
+			reported[i] = slices.Contains(spec.Stalled, id)
+		}
+		e.progress = newProgress(e.heads(), time.Now(), stallWindow(e.period)).stalledFrom(reported)
 	}
 	ok = true
 	rctx, cancel := context.WithCancel(ctx)

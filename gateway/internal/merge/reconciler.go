@@ -70,10 +70,10 @@ type running struct {
 	failed  bool     // a Replace failed, which may leave the engine half replaced
 	// retrying holds the spec members replaced underneath the engine
 	// whose new ring could not be opened yet; serves keeps the engine
-	// for them until the next reconcile tries again. retries counts the
-	// reconciles each has been tried at in a row.
+	// for them until the next reconcile tries again. failing holds when
+	// each was first tried in vain, in a row.
 	retrying map[int]bool
-	retries  map[int]int
+	failing  map[int]time.Time
 }
 
 // serves reports whether cur still serves set as it stands: the same
@@ -136,18 +136,21 @@ var replace = (*Engine).Replace
 // MXLFS_IOC_VIEW_REPLACE_SOURCE, is left to serves, which rebuilds. One
 // whose directory could not be read, gone again or not yet whole, is
 // tried again at the next reconcile, and is in retrying until then, for
-// at most maxRetries reconciles: the engine is kept for it meanwhile, so
-// it must not hold off a rebuild the other members need for long.
+// at most retryFor: the engine is kept for it meanwhile, so it must not
+// hold off a rebuild the other members need for long.
 func (cur *running) replaceRestarted(l logr.Logger, set *mxlv1alpha1.MxlFlowRedundancySet) {
 	if cur == nil || cur.uid != set.UID || cur.gen != set.Generation {
 		return
 	}
-	if cur.retries == nil {
-		cur.retries = map[int]int{}
+	if cur.failing == nil {
+		cur.failing = map[int]time.Time{}
 	}
 	cur.retrying = map[int]bool{}
 	retry := func(i int, msg, id string, err error) bool {
-		if cur.retries[i]++; cur.retries[i] > maxRetries {
+		if _, ok := cur.failing[i]; !ok {
+			cur.failing[i] = clock()
+		}
+		if clock().Sub(cur.failing[i]) >= retryFor {
 			l.Info(msg+"; building the output again", "member", id, "error", err.Error())
 			cur.failed = true
 			return false
@@ -159,7 +162,7 @@ func (cur *running) replaceRestarted(l logr.Logger, set *mxlv1alpha1.MxlFlowRedu
 	for i, ino := range inodes(cur.domain, set.Spec.Members) {
 		m := slices.Index(cur.started, i)
 		if ino == 0 || ino == cur.seen[i] || m < 0 {
-			delete(cur.retries, i)
+			delete(cur.failing, i)
 			continue
 		}
 		id := set.Spec.Members[i].FlowID
@@ -186,21 +189,32 @@ func (cur *running) replaceRestarted(l logr.Logger, set *mxlv1alpha1.MxlFlowRedu
 			return
 		default:
 			cur.seen[i] = got
-			delete(cur.retries, i)
+			delete(cur.failing, i)
 		}
 	}
 }
 
-// maxRetries is how many reconciles in a row a restarted member whose
-// ring could not be opened keeps the engine before the output is built
-// again. A reconcile comes at every recheck and at every event on the
-// set, so this bounds the attempts, not the time they take.
-const maxRetries = 3
+// retryFor is how long a restarted member whose ring could not be opened
+// keeps the engine before the output is built again: three rechecks. It
+// is a time, not a count of reconciles, which come at every event on the
+// set and every stalledRecheck while it reports a stall.
+const retryFor = 3 * recheck
+
+// clock is time.Now; tests replace it.
+var clock = time.Now
 
 // recheck is how often a served set is looked at again for a member
 // that appeared or was replaced underneath its engine, which raises no
 // event on the set.
 const recheck = 5 * time.Second
+
+// stalledRecheck replaces recheck while this node reports a member
+// stalled. A producer restarted out of a stall raises no event on the
+// set, nor does a recovery whose report the queue had no room for; at
+// recheck either would reach the set only after the five seconds plus
+// RecoverAfter, past the ten MembersReady is held to. A reconcile of a
+// set whose report is unchanged reads the cache and writes nothing.
+const stalledRecheck = time.Second
 
 // start is Start; tests replace it.
 var start = Start
@@ -223,11 +237,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 	// engine asks for no recheck of its own, and its report is the one
 	// removing this node's entry, so it gets one.
 	defer func() {
-		if rerr := r.reportStalled(ctx, &set); rerr != nil {
+		named, rerr := r.reportStalled(ctx, &set)
+		switch {
+		case rerr != nil:
 			l.Error(rerr, "report stalled members")
 			if err == nil && res.IsZero() {
 				res = ctrl.Result{RequeueAfter: recheck}
 			}
+		case named && res.RequeueAfter == recheck:
+			res.RequeueAfter = stalledRecheck
 		}
 	}()
 	if !set.DeletionTimestamp.IsZero() || !wantedHere(&set, r.NodeName) || !valid(&set) {
@@ -243,8 +261,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 	}
 	var prev []byte
 	var prevLayout string
+	// The members the new engine takes as stalled: what this node's
+	// engine reported, by its own judgement where it has one, which the
+	// cache may not have caught up with yet.
+	carried := r.reported(&set)
 	if cur != nil {
 		prev, prevLayout = cur.def, cur.layout
+		carried = reportOf(cur, carried)
 	}
 	r.stop(req.Name) // a changed spec or member builds a new output
 
@@ -257,7 +280,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 		return ctrl.Result{}, nil
 	}
 	spec := Spec{DomainDir: dir, OutputID: set.Spec.Output.FlowID, Skew: set.Spec.SkewBudget.Duration,
-		Ordered: set.Spec.Preference != mxlv1alpha1.RedundancyFirstArrival, Stalls: r.stallsOf(set.Name)}
+		Ordered: set.Spec.Preference != mxlv1alpha1.RedundancyFirstArrival, Stalls: r.stallsOf(set.Name),
+		Stalled: carried}
 	if spec.Skew <= 0 {
 		spec.Skew = 40 * time.Millisecond
 	}
@@ -352,39 +376,54 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 // the engine started, keeps what the entry said: an engine rebuilt
 // under a stalled member must not report it moving, nor one built under
 // a moving member report it stalled.
-func (r *Reconciler) reportStalled(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet) error {
+// It returns whether the entry names a member once it is applied.
+func (r *Reconciler) reportStalled(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet) (bool, error) {
 	r.mu.Lock()
 	cur := r.engines[set.Name]
 	r.mu.Unlock()
-	var stalled, undecided, reported []string
+	reported := r.reported(set)
+	var stalled []string
 	if cur != nil {
-		stalled, undecided = cur.engine.Stalled()
+		stalled = reportOf(cur, reported)
 	}
-	for _, s := range set.Status.StalledMembers {
-		if s.Node == r.NodeName {
-			reported = s.FlowIDs
-		}
-	}
-	for _, id := range reported {
-		if slices.Contains(undecided, id) {
-			stalled = append(stalled, id)
-		}
-	}
-	slices.Sort(stalled)
 	if slices.Equal(stalled, slices.Sorted(slices.Values(reported))) {
-		return nil
+		return len(stalled) > 0, nil
 	}
 	log.FromContext(ctx).Info("reporting stalled members", "set", set.Name, "members", stalled)
 	patch := mxlv1alpha1.StalledMembersApply(set.Name, r.NodeName, stalled)
 	if err := r.Client.Status().Patch(ctx, patch, client.Apply,
 		client.FieldOwner(mxlv1alpha1.StalledMembersFieldOwner(r.NodeName)), client.ForceOwnership); err != nil {
-		return err
+		return false, err
 	}
 	if got, _, _ := unstructured.NestedSlice(patch.Object, "status", "stalledMembers"); len(stalled) > 0 && len(got) == 0 {
 		r.pruned.Do(func() {
 			log.FromContext(ctx).Info("the API server dropped status.stalledMembers; its MxlFlowRedundancySet CRD " +
 				"predates the field, so no stalled member is reported")
 		})
+	}
+	return len(stalled) > 0, nil
+}
+
+// reportOf returns, sorted, the members cur's engine finds stalled, and
+// those of reported it has not decided on yet.
+func reportOf(cur *running, reported []string) []string {
+	stalled, undecided := cur.engine.Stalled()
+	for _, id := range reported {
+		if slices.Contains(undecided, id) {
+			stalled = append(stalled, id)
+		}
+	}
+	slices.Sort(stalled)
+	return stalled
+}
+
+// reported returns the members this node's entry in the set's
+// status.stalledMembers names.
+func (r *Reconciler) reported(set *mxlv1alpha1.MxlFlowRedundancySet) []string {
+	for _, s := range set.Status.StalledMembers {
+		if s.Node == r.NodeName {
+			return s.FlowIDs
+		}
 	}
 	return nil
 }
