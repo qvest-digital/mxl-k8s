@@ -85,8 +85,15 @@ type Manager struct {
 type entry struct {
 	domain string // directory
 	id     string
-	writer *mxl.Writer
+	writer flowWriter
 	filled bool
+}
+
+// flowWriter is the part of an mxl.Writer a placeholder uses; tests
+// replace it.
+type flowWriter interface {
+	Close() error
+	Detach() error
 }
 
 func (m *Manager) dataPath(e *entry) string {
@@ -304,10 +311,11 @@ func (m *Manager) drop(l logr.Logger, name string) {
 }
 
 // leaveAll gives every placeholder up on shutdown and leaves its
-// directory in place, so a reader on the node keeps the flow it opened
-// and the next gateway holds the same directory again. Only the marker
-// goes: a gateway that does not come back must not leave the agent
-// taking the directory for a placeholder for good.
+// directory and its marker in place, as a crash does. A reader on the
+// node keeps the flow it opened, a consumer opening the flow before the
+// next gateway is up still finds a placeholder and asks for a mirror,
+// and the next gateway holds the same directory again. A gateway that
+// does not come back leaves the markers to ClearMarkers.
 //
 // Deleting the directories instead is no use to a process that is
 // exiting, and it is slow: libmxl, releasing the last writer of a
@@ -321,12 +329,12 @@ func (m *Manager) leaveAll(l logr.Logger) {
 	m.held = nil
 	m.mu.Unlock()
 	for name, e := range held {
+		// A writer whose data file could not be guarded when it was
+		// created cannot be kept from deleting the flow; it is
+		// released all the same.
 		if err := e.writer.Detach(); errors.Is(err, mxl.ErrNoFlowGuard) {
-			// Without a guard libmxl cannot be kept from deleting the
-			// flow; the writer is released all the same.
 			_ = e.writer.Close()
 		}
-		_ = os.Remove(MarkerPath(e.domain, e.id))
 		l.Info("left placeholder", "flow", name, "domain", e.domain)
 	}
 }

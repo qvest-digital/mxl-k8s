@@ -431,14 +431,56 @@ func TestShutdownLeavesPlaceholdersToTheNextGateway(t *testing.T) {
 
 	require.Empty(t, m.Held())
 	require.DirExists(t, flowDir(h), "the shutdown deleted the placeholder")
-	require.False(t, IsPlaceholder(h.dir, flowID),
-		"the marker outlives the gateway: should it not come back, the agent takes the directory for a placeholder for good")
 
 	next := newManager(t, h, flow(origin))
 	reconcileFlow(t, next)
 	require.Equal(t, []string{flowID}, next.Held())
 	require.True(t, IsPlaceholder(h.dir, flowID))
 	require.Equal(t, before, inode(t, data), "the next gateway holds another flow than the one left")
+}
+
+// Until the next gateway is up, the agent decides from the directory
+// alone. One with a flow definition and no marker it takes for a local
+// copy: a consumer opening it would get no mirror and read a ring
+// nothing fills. With the marker the open asks for a mirror, as it does
+// on a placeholder that is held.
+func TestPlaceholderLeftOnShutdownKeepsItsMarker(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	reconcileFlow(t, m)
+
+	shutDown(t, m)
+
+	require.FileExists(t, filepath.Join(flowDir(h), "flow_def.json"))
+	require.True(t, IsPlaceholder(h.dir, flowID), "the shutdown left the directory looking like a local copy")
+}
+
+type fakeWriter struct {
+	detach           error
+	closed, detached bool
+}
+
+func (w *fakeWriter) Close() error  { w.closed = true; return nil }
+func (w *fakeWriter) Detach() error { w.detached = true; return w.detach }
+
+// A writer whose data file could not be guarded refuses Detach and
+// would stay attached through the shutdown: the flow would look written
+// to the next gateway and to libmxl's garbage collection until the
+// process is gone.
+func TestShutdownReleasesAWriterThatCannotDetach(t *testing.T) {
+	m := &Manager{}
+	unguarded := &fakeWriter{detach: mxl.ErrNoFlowGuard}
+	guarded := &fakeWriter{}
+	m.held = map[string]*entry{
+		"unguarded": {domain: t.TempDir(), id: flowID, writer: unguarded},
+		"guarded":   {domain: t.TempDir(), id: flowID, writer: guarded},
+	}
+
+	shutDown(t, m)
+
+	require.True(t, unguarded.closed, "a writer that cannot detach was not released")
+	require.True(t, guarded.detached)
+	require.False(t, guarded.closed, "a guarded writer was offered for deletion")
 }
 
 // What a shutdown leaves is a flow without a writer, which libmxl's
