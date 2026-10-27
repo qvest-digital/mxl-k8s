@@ -85,8 +85,15 @@ type Manager struct {
 type entry struct {
 	domain string // directory
 	id     string
-	writer *mxl.Writer
+	writer flowWriter
 	filled bool
+}
+
+// flowWriter is the part of an mxl.Writer a placeholder uses; tests
+// replace it.
+type flowWriter interface {
+	Close() error
+	Detach() error
 }
 
 func (m *Manager) dataPath(e *entry) string {
@@ -303,6 +310,35 @@ func (m *Manager) drop(l logr.Logger, name string) {
 	l.Info("dropped placeholder", "domain", e.domain)
 }
 
+// leaveAll gives every placeholder up on shutdown and leaves its
+// directory and its marker in place, as a crash does. A reader on the
+// node keeps the flow it opened, a consumer opening the flow before the
+// next gateway is up still finds a placeholder and asks for a mirror,
+// and the next gateway holds the same directory again. A gateway that
+// does not come back leaves the markers to ClearMarkers.
+//
+// Deleting the directories instead is no use to a process that is
+// exiting, and it is slow: libmxl, releasing the last writer of a
+// discrete flow it just deleted, looks the flow's directory up again,
+// and on an mxlfs mounted with wait= that walk through the missing name
+// waits the whole wait out. Serially, a dozen placeholders outlasted
+// the pod's termination grace period.
+func (m *Manager) leaveAll(l logr.Logger) {
+	m.mu.Lock()
+	held := m.held
+	m.held = nil
+	m.mu.Unlock()
+	for name, e := range held {
+		// A writer whose data file could not be guarded when it was
+		// created cannot be kept from deleting the flow; it is
+		// released all the same.
+		if err := e.writer.Detach(); errors.Is(err, mxl.ErrNoFlowGuard) {
+			_ = e.writer.Close()
+		}
+		l.Info("left placeholder", "flow", name, "domain", e.domain)
+	}
+}
+
 // Retire releases the placeholder of flow id in domain, filled or not,
 // for a mirror that has to replace a directory of another geometry.
 func (m *Manager) Retire(domain, id string) {
@@ -389,7 +425,7 @@ func (m *Manager) period() time.Duration {
 }
 
 // Start runs the local-writer check every Period until ctx ends, then
-// releases every placeholder. Each pass also reconciles every held
+// gives every placeholder up. Each pass also reconciles every held
 // placeholder again: one a mirror released is retired then if its flow
 // lost its Origin or changed geometry while the mirror held it.
 func (m *Manager) Start(ctx context.Context) error {
@@ -399,15 +435,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			m.mu.Lock()
-			names := make([]string, 0, len(m.held))
-			for name := range m.held {
-				names = append(names, name)
-			}
-			m.mu.Unlock()
-			for _, name := range names {
-				m.drop(l, name)
-			}
+			m.leaveAll(l)
 			return nil
 		case <-t.C:
 			m.CheckLocalWriters(l)

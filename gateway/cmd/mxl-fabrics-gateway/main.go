@@ -82,10 +82,15 @@ func run(args []string) error {
 		return fmt.Errorf("open libmxl: %w", err)
 	}
 
+	// Below the pod's default termination grace period of 30s, so a
+	// runnable that does not stop ends the process before the kubelet
+	// kills it.
+	shutdownTimeout := 20 * time.Second
 	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: cfg.MetricsAddr},
-		HealthProbeBindAddress: cfg.ProbeAddr,
+		Scheme:                  scheme,
+		Metrics:                 metricsserver.Options{BindAddress: cfg.MetricsAddr},
+		HealthProbeBindAddress:  cfg.ProbeAddr,
+		GracefulShutdownTimeout: &shutdownTimeout,
 	})
 	if err != nil {
 		_ = handles.Close()
@@ -105,7 +110,24 @@ func run(args []string) error {
 		},
 		Mxlfs: cfg.Mxlfs,
 	}
-	defer func() { _ = domains.Close() }()
+	// Once the manager has run, the domains stay open until the process
+	// exits. Mirror transfer loops are not runnables and still drive the
+	// fabrics instances when the manager returns: destroying one under
+	// a loop faults inside cgo. Closing the libmxl instances would also
+	// offer every mirror copy for deletion, one at a time.
+	//
+	// At exit the kernel does what a crash leaves to it: it releases the
+	// flocks and mappings and closes every descriptor, which closes the
+	// tcp provider's sockets and, for verbs and efa, the device files
+	// whose release destroys the queue pairs and memory registrations.
+	// The mirror copies stay in their domains without a writer until the
+	// next gateway's domain sweeper collects them.
+	managerRan := false
+	defer func() {
+		if !managerRan {
+			_ = domains.Close()
+		}
+	}()
 
 	if cfg.PprofAddr != "" {
 		pprofSrv := &http.Server{
@@ -212,9 +234,8 @@ func run(args []string) error {
 	// half of not collecting a mirror copy the target reconciler has
 	// yet to re-establish; the sweeper's own grace is the second. One
 	// sweeper per open domain, each from the moment it is opened.
-	// The sweepers are joined before the runnable returns, which is
-	// before the deferred Close releases the instances they collect
-	// through.
+	// The sweepers are joined before the runnable returns, so none
+	// collects while the process exits.
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		var sweepers sync.WaitGroup
 		defer sweepers.Wait()
@@ -269,6 +290,7 @@ func run(args []string) error {
 		"rdmaEnumerationLiveness", cfg.RDMAEnumerationLiveness,
 		"rdmaEnumerationGrace", cfg.RDMAEnumerationGrace)
 
+	managerRan = true
 	return mgr.Start(ctrl.SetupSignalHandler())
 }
 
