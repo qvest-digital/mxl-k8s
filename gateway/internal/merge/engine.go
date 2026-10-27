@@ -161,7 +161,8 @@ type Spec struct {
 	// becomes stalled or moves again; it must not block.
 	Stalls func()
 	// Stalled are the members this node reports stalled as the engine
-	// starts; they stay stalled until they move steadily.
+	// starts, as the engine it replaces judged them, else as the set's
+	// status says; they stay stalled until they move steadily.
 	Stalled []string
 }
 

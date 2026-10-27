@@ -816,6 +816,37 @@ func TestReconcilerReportsAMovingMemberWhoseEventWasDropped(t *testing.T) {
 	require.Empty(t, stalledOf(t, r))
 }
 
+// The cache an engine is rebuilt from can still hold the node's entry
+// from before its last write: a member the old engine had just seen
+// recover would be taken as stalled again, and held for RecoverAfter. The
+// old engine's own judgement is newer than the cache.
+func TestReconcilerCarriesItsEnginesJudgementIntoARebuild(t *testing.T) {
+	engine := stalledStart(t, time.Now())
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	stale := func() {
+		require.NoError(t, r.Client.Status().Patch(context.Background(),
+			mxlv1alpha1.StalledMembersApply("programme", "reader", []string{memberA}), client.Apply,
+			client.FieldOwner(mxlv1alpha1.StalledMembersFieldOwner("reader")), client.ForceOwnership))
+	}
+	stale()
+	reconcileSet(t, r)
+	require.Equal(t, []string{memberA}, (*engine).spec.Stalled, "a gateway start did not take the status's report")
+	steadily(t, r, *engine, []uint64{0}, time.Now(), 0)
+	require.Empty(t, stalledOf(t, r))
+	first := *engine
+
+	stale() // the cache has not seen the removal yet
+	memberDir(t, dir, memberB, videoDef(memberB))
+	reconcileSet(t, r)
+	require.NotSame(t, first, *engine, "a member that appeared did not rebuild the engine")
+	require.Empty(t, (*engine).spec.Stalled, "a rebuild took a stale report over its engine's own")
+	(*engine).progress.observe([]uint64{1, 1}, time.Now())
+	reconcileSet(t, r)
+	require.Empty(t, stalledOf(t, r), "a member seen recovering was held again after a rebuild")
+}
+
 // Every pass of every gateway reconciles every set; one that wrote its
 // status each time would load the API server with nothing to say.
 func TestReconcilerWritesStalledMembersOnlyWhenTheyChange(t *testing.T) {
