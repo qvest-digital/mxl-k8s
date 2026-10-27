@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
 )
 
 const flowID = "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
@@ -379,4 +381,142 @@ func TestSameGeometry(t *testing.T) {
 	require.False(t, SameGeometry([]byte(flowDef), []byte(larger)))
 	require.False(t, SameGeometry([]byte(flowDef), []byte(strings.Replace(flowDef, `"numerator":50`, `"numerator":25`, 1))))
 	require.False(t, SameGeometry([]byte(flowDef), []byte("not json")))
+}
+
+// flowNamed is flow under another id: its own MxlFlow and directory.
+func flowNamed(id string, locations ...mxlv1alpha1.MxlFlowLocation) *mxlv1alpha1.MxlFlow {
+	f := flow(locations...)
+	f.Name = id
+	f.Spec.ID = id
+	f.Spec.Definition = runtime.RawExtension{Raw: []byte(strings.ReplaceAll(flowDef, flowID, id))}
+	return f
+}
+
+// shutDown runs m until its context ends, as the manager does on
+// SIGTERM, and reports how long it took to return.
+func shutDown(t *testing.T, m *Manager) time.Duration {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = m.Start(ctx) }()
+	start := time.Now()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Minute):
+		t.Fatal("Start did not return after its context ended")
+	}
+	return time.Since(start)
+}
+
+func inode(t *testing.T, path string) uint64 {
+	t.Helper()
+	var st syscall.Stat_t
+	require.NoError(t, syscall.Stat(path, &st))
+	return st.Ino
+}
+
+// A reader on the node holds the placeholder's flow open. A restarting
+// gateway that deleted it took the flow from under the reader, and the
+// next gateway's placeholder was another flow the reader had to find
+// again.
+func TestShutdownLeavesPlaceholdersToTheNextGateway(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	reconcileFlow(t, m)
+	data := filepath.Join(flowDir(h), "data")
+	before := inode(t, data)
+
+	shutDown(t, m)
+
+	require.Empty(t, m.Held())
+	require.DirExists(t, flowDir(h), "the shutdown deleted the placeholder")
+	require.False(t, IsPlaceholder(h.dir, flowID),
+		"the marker outlives the gateway: should it not come back, the agent takes the directory for a placeholder for good")
+
+	next := newManager(t, h, flow(origin))
+	reconcileFlow(t, next)
+	require.Equal(t, []string{flowID}, next.Held())
+	require.True(t, IsPlaceholder(h.dir, flowID))
+	require.Equal(t, before, inode(t, data), "the next gateway holds another flow than the one left")
+}
+
+// What a shutdown leaves is a flow without a writer, which libmxl's
+// garbage collection reclaims should no gateway hold it again.
+func TestPlaceholderLeftOnShutdownIsCollectable(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	reconcileFlow(t, m)
+	data := filepath.Join(flowDir(h), "data")
+
+	shutDown(t, m)
+
+	require.DirExists(t, flowDir(h), "the shutdown deleted the placeholder")
+	n, err := flowlocks.Writers(data)
+	require.NoError(t, err)
+	require.Zero(t, n, "the shutdown left a writer attached to the placeholder")
+	require.NoError(t, h.inst.GarbageCollect())
+	require.NoDirExists(t, flowDir(h), "garbage collection kept the flow the shutdown left")
+}
+
+// mxlfsWaits reports whether the mxlfs at dir is mounted with a wait=
+// for missing flows.
+func mxlfsWaits(t *testing.T, dir string) bool {
+	t.Helper()
+	raw, err := os.ReadFile("/proc/self/mounts")
+	require.NoError(t, err)
+	for _, line := range strings.Split(string(raw), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 4 && f[1] == filepath.Clean(dir) && f[2] == "mxlfs" {
+			for _, o := range strings.Split(f[3], ",") {
+				if strings.HasPrefix(o, "wait=") && o != "wait=0" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// TestShutdownIsQuickOnMxlfs needs a writable mxlfs mounted with wait=
+// at MXLFS_TEST_DIR; it is skipped otherwise. Deleting a discrete
+// flow's placeholder there waited the mount's wait out in libmxl, one
+// placeholder after the other, so a gateway holding a dozen outlasted
+// its termination grace period and was killed.
+func TestShutdownIsQuickOnMxlfs(t *testing.T) {
+	dir := os.Getenv("MXLFS_TEST_DIR")
+	if dir == "" {
+		t.Skip("MXLFS_TEST_DIR not set")
+	}
+	if !mxlfsWaits(t, dir) {
+		t.Skipf("%s is no mxlfs mounted with wait=", dir)
+	}
+	domain, err := os.MkdirTemp(dir, "placeholder-test-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(domain) })
+	require.NoError(t, os.WriteFile(filepath.Join(domain, "options.json"),
+		[]byte(`{"urn:x-mxl:option:history_duration/v1.0": 200000000}`), 0o644))
+	inst, err := mxl.NewInstance(domain, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = inst.Close() })
+	h := &handles{dir: domain, inst: inst}
+
+	ids := []string{flowID,
+		"5fbec3b1-1b0f-417d-9059-8b94a47197e1",
+		"5fbec3b1-1b0f-417d-9059-8b94a47197e2",
+		"5fbec3b1-1b0f-417d-9059-8b94a47197e3"}
+	var flows []*mxlv1alpha1.MxlFlow
+	for _, id := range ids {
+		flows = append(flows, flowNamed(id, origin))
+	}
+	m := newManager(t, h, flows...)
+	for _, id := range ids {
+		_, err := m.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: id}})
+		require.NoError(t, err)
+	}
+	require.Len(t, m.Held(), len(ids))
+
+	took := shutDown(t, m)
+
+	require.Less(t, took, 2*time.Second, "giving %d placeholders up took %s", len(ids), took)
 }
