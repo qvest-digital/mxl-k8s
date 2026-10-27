@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -652,20 +653,39 @@ func TestReconcilerLeavesOutAMemberWhoseRingCannotBeOpened(t *testing.T) {
 }
 
 // stalledStart replaces the engine with one over the members present
-// that started at started, all heads at zero, and has looked at them
-// now.
+// that started at started, all heads at zero, taking the members its
+// spec names stalled as such, and has looked at them now.
 func stalledStart(t *testing.T, started time.Time) **Engine {
 	t.Helper()
 	var e *Engine
 	orig := start
 	start = func(_ context.Context, spec Spec, _ logr.Logger) (*Engine, error) {
+		reported := make([]bool, len(spec.Members))
+		for i, id := range spec.Members {
+			reported[i] = slices.Contains(spec.Stalled, id)
+		}
 		e = &Engine{spec: spec, outDir: flowDir(spec.DomainDir, spec.OutputID),
-			progress: newProgress(make([]uint64, len(spec.Members)), started, StallAfter)}
+			progress: newProgress(make([]uint64, len(spec.Members)), started, StallAfter).stalledFrom(reported)}
 		e.progress.observe(make([]uint64, len(spec.Members)), time.Now())
 		return e, nil
 	}
 	t.Cleanup(func() { start = orig })
 	return &e
+}
+
+// steadily commits a grain of each of the members at every tick from
+// from on for RecoverAfter, the others' heads standing still,
+// reconciling r whenever the engine reports a change as its loop does.
+func steadily(t *testing.T, r *Reconciler, e *Engine, heads []uint64, from time.Time, members ...int) {
+	t.Helper()
+	for at := time.Duration(0); at <= RecoverAfter; at += tick {
+		for _, i := range members {
+			heads[i]++
+		}
+		if e.progress.observe(heads, from.Add(at)) {
+			reconcileSet(t, r)
+		}
+	}
 }
 
 func stalledOf(t *testing.T, r *Reconciler) []mxlv1alpha1.NodeStalledMembers {
@@ -708,12 +728,15 @@ func TestReconcilerReportsTheMembersItsEngineFindsStalled(t *testing.T) {
 	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberA, memberB}}},
 		stalledOf(t, r), "members that never moved were not reported after the start grace")
 
-	(*engine).progress.observe([]uint64{1, 0}, time.Now())
+	now := time.Now()
+	(*engine).progress.observe([]uint64{1, 0}, now)
 	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter, "a served set is not looked at again in time")
+	require.Len(t, stalledOf(t, r)[0].FlowIDs, 2, "a stalled member's first commit was taken as a recovery")
+	heads := []uint64{1, 0}
+	steadily(t, r, *engine, heads, now, 0)
 	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberB}}}, stalledOf(t, r))
 
-	(*engine).progress.observe([]uint64{1, 1}, time.Now())
-	reconcileSet(t, r)
+	steadily(t, r, *engine, heads, now.Add(RecoverAfter+tick), 0, 1)
 	require.Empty(t, stalledOf(t, r))
 }
 
@@ -744,6 +767,33 @@ func TestReconcilerWritesStalledMembersOnlyWhenTheyChange(t *testing.T) {
 	}
 }
 
+// A member behind a dead input commits a grain every two seconds or
+// so. Each commit read as a recovery made every gateway merging the set
+// write its entry twice per commit, and the operator its condition.
+// Over two minutes of that, a gateway writes the stall once.
+func TestReconcilerWritesOnceForAMemberThatDeliversNowAndThen(t *testing.T) {
+	engine := stalledStart(t, time.Now())
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+	writes := countPatches(r, nil)
+
+	t0, heads := time.Now(), []uint64{0, 0}
+	for at := time.Duration(0); at <= 2*time.Minute; at += tick {
+		heads[0]++
+		if at%(2100*time.Millisecond) == 0 {
+			heads[1]++
+		}
+		if (*engine).progress.observe(heads, t0.Add(at)) {
+			reconcileSet(t, r)
+		}
+	}
+	require.Equal(t, 1, *writes)
+	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberB}}}, stalledOf(t, r))
+}
+
 // An engine is built again when a member appears or is replaced, and
 // at every gateway restart, over members whose heads it has not seen
 // move yet; a placeholder waits seconds for its mirror. Until it has
@@ -766,9 +816,15 @@ func TestReconcilerKeepsItsReportWhileANewEngineHasNotSeenAMemberMove(t *testing
 	require.Zero(t, *writes)
 	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberA}}}, stalledOf(t, r))
 
-	(*engine).progress.observe([]uint64{1, 0}, time.Now())
+	now := time.Now()
+	(*engine).progress.observe([]uint64{1, 0}, now)
 	reconcileSet(t, r)
-	require.Empty(t, stalledOf(t, r), "a member seen moving stayed reported")
+	require.Equal(t, []mxlv1alpha1.NodeStalledMembers{{Node: "reader", FlowIDs: []string{memberA}}}, stalledOf(t, r),
+		"a new engine took the first commit of a member reported stalled as a recovery")
+	require.Zero(t, *writes)
+
+	steadily(t, r, *engine, []uint64{1, 0}, now, 0)
+	require.Empty(t, stalledOf(t, r), "a member seen moving steadily stayed reported")
 }
 
 // The report is the set's status, the engine serves its readers: a
