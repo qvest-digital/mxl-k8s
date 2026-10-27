@@ -114,9 +114,14 @@ func run(args []string) error {
 	// exits. Mirror transfer loops are not runnables and still drive the
 	// fabrics instances when the manager returns: destroying one under
 	// a loop faults inside cgo. Closing the libmxl instances would also
-	// offer every mirror copy for deletion, one at a time. The kernel
-	// drops the locks, mappings and fabric resources at exit, as after a
-	// crash, which the next gateway recovers from.
+	// offer every mirror copy for deletion, one at a time.
+	//
+	// At exit the kernel does what a crash leaves to it: it releases the
+	// flocks and mappings and closes every descriptor, which closes the
+	// tcp provider's sockets and, for verbs and efa, the device files
+	// whose release destroys the queue pairs and memory registrations.
+	// The mirror copies stay in their domains without a writer until the
+	// next gateway's domain sweeper collects them.
 	managerRan := false
 	defer func() {
 		if !managerRan {
