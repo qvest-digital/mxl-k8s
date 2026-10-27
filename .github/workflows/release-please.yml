@@ -38,7 +38,7 @@ jobs:
   # conflict) recovered them. One branch that release-please owns end
   # to end has no sibling to conflict with.
   release-please:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       # The root package's outputs carry no prefix: the action emits
       # `<path>--<key>` for every package except path ".", which gets
