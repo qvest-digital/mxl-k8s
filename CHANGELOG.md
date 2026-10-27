@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.32](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.31...v1.1.0-rc.32) (2026-10-27)
+
+
+### Bug Fixes
+
+* **gateway:** exit within the termination grace period ([#376](https://github.com/qvest-digital/mxl-k8s/issues/376)) ([a056a0b](https://github.com/qvest-digital/mxl-k8s/commit/a056a0ba5d52bc21cc19d0dc74d35401a6276a0b))
+
 ## [1.1.0-rc.31](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.30...v1.1.0-rc.31) (2026-10-27)
 
 
