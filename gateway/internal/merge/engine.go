@@ -162,7 +162,9 @@ type Spec struct {
 	Stalls func()
 	// Stalled are the members this node reports stalled as the engine
 	// starts, as the engine it replaces judged them, else as the set's
-	// status says; they stay stalled until they move steadily.
+	// status says; they stay stalled until they move steadily. Only that
+	// they are stalled is carried, so a rebuild during a recovery starts
+	// its RecoverAfter over.
 	Stalled []string
 }
 
