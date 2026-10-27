@@ -70,10 +70,10 @@ type running struct {
 	failed  bool     // a Replace failed, which may leave the engine half replaced
 	// retrying holds the spec members replaced underneath the engine
 	// whose new ring could not be opened yet; serves keeps the engine
-	// for them until the next reconcile tries again. retries counts the
-	// reconciles each has been tried at in a row.
+	// for them until the next reconcile tries again. failing holds when
+	// each was first tried in vain, in a row.
 	retrying map[int]bool
-	retries  map[int]int
+	failing  map[int]time.Time
 }
 
 // serves reports whether cur still serves set as it stands: the same
@@ -136,18 +136,21 @@ var replace = (*Engine).Replace
 // MXLFS_IOC_VIEW_REPLACE_SOURCE, is left to serves, which rebuilds. One
 // whose directory could not be read, gone again or not yet whole, is
 // tried again at the next reconcile, and is in retrying until then, for
-// at most maxRetries reconciles: the engine is kept for it meanwhile, so
-// it must not hold off a rebuild the other members need for long.
+// at most retryFor: the engine is kept for it meanwhile, so it must not
+// hold off a rebuild the other members need for long.
 func (cur *running) replaceRestarted(l logr.Logger, set *mxlv1alpha1.MxlFlowRedundancySet) {
 	if cur == nil || cur.uid != set.UID || cur.gen != set.Generation {
 		return
 	}
-	if cur.retries == nil {
-		cur.retries = map[int]int{}
+	if cur.failing == nil {
+		cur.failing = map[int]time.Time{}
 	}
 	cur.retrying = map[int]bool{}
 	retry := func(i int, msg, id string, err error) bool {
-		if cur.retries[i]++; cur.retries[i] > maxRetries {
+		if _, ok := cur.failing[i]; !ok {
+			cur.failing[i] = clock()
+		}
+		if clock().Sub(cur.failing[i]) >= retryFor {
 			l.Info(msg+"; building the output again", "member", id, "error", err.Error())
 			cur.failed = true
 			return false
@@ -159,7 +162,7 @@ func (cur *running) replaceRestarted(l logr.Logger, set *mxlv1alpha1.MxlFlowRedu
 	for i, ino := range inodes(cur.domain, set.Spec.Members) {
 		m := slices.Index(cur.started, i)
 		if ino == 0 || ino == cur.seen[i] || m < 0 {
-			delete(cur.retries, i)
+			delete(cur.failing, i)
 			continue
 		}
 		id := set.Spec.Members[i].FlowID
@@ -186,16 +189,19 @@ func (cur *running) replaceRestarted(l logr.Logger, set *mxlv1alpha1.MxlFlowRedu
 			return
 		default:
 			cur.seen[i] = got
-			delete(cur.retries, i)
+			delete(cur.failing, i)
 		}
 	}
 }
 
-// maxRetries is how many reconciles in a row a restarted member whose
-// ring could not be opened keeps the engine before the output is built
-// again. A reconcile comes at every recheck and at every event on the
-// set, so this bounds the attempts, not the time they take.
-const maxRetries = 3
+// retryFor is how long a restarted member whose ring could not be opened
+// keeps the engine before the output is built again: three rechecks. It
+// is a time, not a count of reconciles, which come at every event on the
+// set and every stalledRecheck while it reports a stall.
+const retryFor = 3 * recheck
+
+// clock is time.Now; tests replace it.
+var clock = time.Now
 
 // recheck is how often a served set is looked at again for a member
 // that appeared or was replaced underneath its engine, which raises no
