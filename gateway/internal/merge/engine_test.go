@@ -316,8 +316,9 @@ func TestEngineCountsOnlyWhatTheMappedRingHolds(t *testing.T) {
 }
 
 // The engine's loop is what looks at the members' heads; a stall found
-// anywhere else would not reach the set within seconds. It runs without
-// mxlfs: the loop reads the members' headers, which tmpfs maps as well.
+// anywhere else would not reach the set within seconds, nor a recovery
+// within seconds of RecoverAfter. It runs without mxlfs: the loop reads
+// the members' headers, which tmpfs maps as well.
 func TestEngineLoopFindsAStalledMember(t *testing.T) {
 	e := &Engine{spec: Spec{Members: []string{memberA, memberB}}, audio: NewAudio(2, 4, 2), done: make(chan struct{})}
 	for range 3 {
@@ -341,9 +342,13 @@ func TestEngineLoopFindsAStalledMember(t *testing.T) {
 	e.spec.Stalls = func() { changed <- struct{}{} }
 	ctx, cancel := context.WithCancel(context.Background())
 	stop := make(chan struct{})
+	var resumed atomic.Bool
 	go func() {
 		for h := uint64(1); ; h++ {
 			setHead(1, h)
+			if resumed.Load() {
+				setHead(0, h)
+			}
 			select {
 			case <-stop:
 				return
@@ -363,9 +368,20 @@ func TestEngineLoopFindsAStalledMember(t *testing.T) {
 		}
 		if stalled, _ := e.Stalled(); len(stalled) > 0 {
 			require.Equal(t, []string{memberA}, stalled, "a member that kept moving was found stalled")
-			return
+			break
 		}
 	}
+
+	resumed.Store(true)
+	at := time.Now()
+	select {
+	case <-changed:
+	case <-time.After(RecoverAfter + time.Second):
+		t.Fatal("the loop did not report a member that moved steadily again")
+	}
+	require.GreaterOrEqual(t, time.Since(at), RecoverAfter-100*time.Millisecond, "a recovery was reported early")
+	stalled, _ := e.Stalled()
+	require.Empty(t, stalled)
 }
 
 // The same on mxlfs, through a reader: member A's lazily held
@@ -885,8 +901,8 @@ func TestEngineTakesARestartedMembersRingInPlace(t *testing.T) {
 // A producer whose process stops keeps its writer, its flow directory
 // and every object of its flow; only its head stands still, a grain
 // ring's and a channel buffer's alike. The engine has to find it stalled
-// after StallAfter, say so the moment it is, and again the moment the
-// producer commits once more.
+// after StallAfter, say so the moment it is, and again once the producer
+// has committed steadily for RecoverAfter.
 func TestEngineFindsAMemberWhoseProducerStopsCommitting(t *testing.T) {
 	for name, def := range map[string]func(string) string{"video": videoDef, "audio": audioDef} {
 		t.Run(name, func(t *testing.T) {
@@ -926,8 +942,9 @@ func TestEngineFindsAMemberWhoseProducerStopsCommitting(t *testing.T) {
 			resumed := time.Now()
 			select {
 			case at := <-changed:
-				require.Less(t, at.Sub(resumed), 500*time.Millisecond)
-			case <-time.After(time.Second):
+				require.GreaterOrEqual(t, at.Sub(resumed), RecoverAfter-100*time.Millisecond, "found moving early")
+				require.Less(t, at.Sub(resumed), RecoverAfter+500*time.Millisecond)
+			case <-time.After(RecoverAfter + time.Second):
 				t.Fatal("a member that committed again was not found moving")
 			}
 			stalled, _ = e.Stalled()

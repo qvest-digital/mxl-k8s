@@ -257,7 +257,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 		return ctrl.Result{}, nil
 	}
 	spec := Spec{DomainDir: dir, OutputID: set.Spec.Output.FlowID, Skew: set.Spec.SkewBudget.Duration,
-		Ordered: set.Spec.Preference != mxlv1alpha1.RedundancyFirstArrival, Stalls: r.stallsOf(set.Name)}
+		Ordered: set.Spec.Preference != mxlv1alpha1.RedundancyFirstArrival, Stalls: r.stallsOf(set.Name),
+		Stalled: r.reported(&set)}
 	if spec.Skew <= 0 {
 		spec.Skew = 40 * time.Millisecond
 	}
@@ -360,11 +361,7 @@ func (r *Reconciler) reportStalled(ctx context.Context, set *mxlv1alpha1.MxlFlow
 	if cur != nil {
 		stalled, undecided = cur.engine.Stalled()
 	}
-	for _, s := range set.Status.StalledMembers {
-		if s.Node == r.NodeName {
-			reported = s.FlowIDs
-		}
-	}
+	reported = r.reported(set)
 	for _, id := range reported {
 		if slices.Contains(undecided, id) {
 			stalled = append(stalled, id)
@@ -385,6 +382,17 @@ func (r *Reconciler) reportStalled(ctx context.Context, set *mxlv1alpha1.MxlFlow
 			log.FromContext(ctx).Info("the API server dropped status.stalledMembers; its MxlFlowRedundancySet CRD " +
 				"predates the field, so no stalled member is reported")
 		})
+	}
+	return nil
+}
+
+// reported returns the members this node's entry in the set's
+// status.stalledMembers names.
+func (r *Reconciler) reported(set *mxlv1alpha1.MxlFlowRedundancySet) []string {
+	for _, s := range set.Status.StalledMembers {
+		if s.Node == r.NodeName {
+			return s.FlowIDs
+		}
 	}
 	return nil
 }
