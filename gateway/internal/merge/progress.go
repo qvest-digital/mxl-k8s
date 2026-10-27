@@ -33,11 +33,13 @@ const StartGrace = 10 * time.Second
 //
 // Measured from grains resuming steadily, a member is reported moving
 // within RecoverAfter, or within stalledRecheck plus RecoverAfter, six
-// seconds, when nothing raises an event on its set: a restarted producer,
-// whose new ring is taken at the first recheck it can be opened at, or a
-// report the set's queue had no room for. A member that moves again committed less than half its
-// window before, so it stalls no sooner than that: it changes state at
-// most twice in RecoverAfter plus half its stall window.
+// seconds, when nothing raises an event on its set: a restarted
+// producer, whose new ring is taken at the first recheck it can be
+// opened at, or a report the set's queue had no room for. Both hold
+// unless the engine is rebuilt meanwhile, which starts RecoverAfter
+// over. A member that moves again committed less than half its window
+// before, so it stalls no sooner than that: it changes state at most
+// twice in RecoverAfter plus half its stall window.
 const RecoverAfter = 5 * time.Second
 
 // stallWindow is how long a member of grains of period may stand still
