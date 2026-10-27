@@ -920,7 +920,19 @@ func TestEngineFindsAMemberWhoseProducerStopsCommitting(t *testing.T) {
 				Skew: 40 * time.Millisecond, Ordered: true, Stalls: func() { changed <- time.Now() }}, logr.Discard())
 			require.NoError(t, err)
 			defer e.Close()
-			<-changed // both members decided on their first commit
+			// Each member is decided on its first commit, the two in one
+			// pass of the loop or in two. A pass reports its change after
+			// the state is set, so the reports are drained once the loop
+			// has passed again.
+			select {
+			case <-changed:
+			case <-time.After(time.Second):
+				t.Fatal("the members were not decided on their first commits")
+			}
+			time.Sleep(200 * time.Millisecond)
+			for len(changed) > 0 {
+				<-changed
+			}
 			time.Sleep(StallAfter + 500*time.Millisecond)
 			stalled, undecided := e.Stalled()
 			require.Empty(t, stalled, "members committing at the clock were found stalled")
