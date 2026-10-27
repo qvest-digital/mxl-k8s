@@ -55,7 +55,7 @@ type progress struct {
 	start  time.Time
 	head   []uint64
 	moved  []time.Time // zero while the head has not moved since start
-	steady []time.Time // since when a stalled member moves steadily; zero while it does not
+	steady []time.Time // since when a stalled member moves steadily; read only while it is stalled
 	known  []bool      // moved, StartGrace passed, or reported stalled: stall is decided
 	stall  []bool
 }
@@ -93,8 +93,9 @@ func (p *progress) observe(heads []uint64, now time.Time) (changed bool) {
 	for i, h := range heads {
 		if h != p.head[i] {
 			// A stalled member's moves count as steady from the first
-			// one that follows a pause.
-			if p.stall[i] && (p.steady[i].IsZero() || now.Sub(p.moved[i]) >= pause) {
+			// one that follows a pause. Its first move after it stalled
+			// does: it stood still for a window then, or never moved.
+			if p.stall[i] && now.Sub(p.moved[i]) >= pause {
 				p.steady[i] = now
 			}
 			p.head[i], p.moved[i] = h, now
@@ -111,9 +112,6 @@ func (p *progress) observe(heads []uint64, now time.Time) (changed bool) {
 			stall = true
 		default:
 			known = false
-		}
-		if !stall {
-			p.steady[i] = time.Time{}
 		}
 		if known != p.known[i] || stall != p.stall[i] {
 			p.known[i], p.stall[i], changed = known, stall, true
