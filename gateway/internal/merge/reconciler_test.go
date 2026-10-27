@@ -544,11 +544,22 @@ func TestReconcilerRebuildsOverAMemberRestartedWithAnotherRingDepth(t *testing.T
 	require.Equal(t, [][]string{{memberA, memberB}, {memberA}}, *started)
 }
 
+// fakeClock replaces clock with one that moves only when told to.
+func fakeClock(t *testing.T) *time.Time {
+	t.Helper()
+	at := time.Now()
+	orig := clock
+	clock = func() time.Time { return at }
+	t.Cleanup(func() { clock = orig })
+	return &at
+}
+
 // A ring that cannot be opened keeps the engine while it is tried again,
 // but not for long: meanwhile the restarted member counts as one still
 // served, and the output would stay frozen on the others' rings when
 // they are gone too.
 func TestReconcilerStopsTryingARingItCannotOpen(t *testing.T) {
+	now := fakeClock(t)
 	started := startWithSpec(t)
 	dir := t.TempDir()
 	asked := fakeReplace(t, dir, fmt.Errorf("%w: %w", ErrNotOpened, unix.ENOENT), nil)
@@ -562,12 +573,13 @@ func TestReconcilerStopsTryingARingItCannotOpen(t *testing.T) {
 
 	require.NoError(t, os.RemoveAll(flowDir(dir, memberB)))
 	memberDir(t, dir, memberA, videoDef(memberA))
-	for range maxRetries {
+	for range retryFor / recheck {
 		require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter)
+		*now = now.Add(recheck)
 	}
 	require.Len(t, *started, 1, "the engine was not kept while the ring was tried again")
 	reconcileSet(t, r)
-	require.Len(t, *asked, maxRetries+1)
+	require.Len(t, *asked, int(retryFor/recheck)+1)
 	require.Equal(t, [][]string{{memberA, memberB}, {memberA}}, *started,
 		"the output stayed on a gone member's ring while the other could not be opened")
 }
@@ -789,6 +801,39 @@ func TestReconcilerReportsARestartedStalledMemberMovingWithinTenSeconds(t *testi
 		}
 	}
 	require.LessOrEqual(t, at.Sub(restarted), stalledRecheck+RecoverAfter+tick)
+}
+
+// A producer restarted out of a stall can leave a directory whose ring
+// cannot be opened yet. The set is looked at every second while it
+// reports the stall, and each look tries the ring again: counted in
+// tries, the engine gave up on it after three seconds and built the
+// output again under every reader, where it waits fifteen at the
+// five-second recheck. The budget is a time.
+func TestReconcilerKeepsTryingARingAsLongAtTheShortRecheck(t *testing.T) {
+	now := fakeClock(t)
+	engine := stalledStart(t, now.Add(-StartGrace))
+	dir := t.TempDir()
+	fakeReplace(t, dir, fmt.Errorf("%w: %w", ErrNotOpened, unix.ENOENT), nil)
+	memberDir(t, dir, memberA, videoDef(memberA))
+	memberDir(t, dir, memberB, videoDef(memberB))
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+	first := *engine
+	require.Len(t, stalledOf(t, r), 1)
+	f, err := os.Open(filepath.Join(flowDir(dir, memberA), "data"))
+	require.NoError(t, err)
+	t.Cleanup(func() { f.Close() })
+
+	memberDir(t, dir, memberA, videoDef(memberA))
+	restarted := *now
+	for now.Sub(restarted) < retryFor {
+		res := reconcileSet(t, r)
+		require.Same(t, first, *engine, "the output was built again %v after the restart", now.Sub(restarted))
+		require.Equal(t, stalledRecheck, res.RequeueAfter)
+		*now = now.Add(res.RequeueAfter)
+	}
+	reconcileSet(t, r)
+	require.NotSame(t, first, *engine, "a ring that could not be opened kept the engine past retryFor")
 }
 
 // The engine's report of a member moving again is dropped when its set's
