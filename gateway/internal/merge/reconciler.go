@@ -255,8 +255,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 	}
 	var prev []byte
 	var prevLayout string
+	// The members the new engine takes as stalled: what this node's
+	// engine reported, by its own judgement where it has one, which the
+	// cache may not have caught up with yet.
+	carried := r.reported(&set)
 	if cur != nil {
 		prev, prevLayout = cur.def, cur.layout
+		carried = reportOf(cur, carried)
 	}
 	r.stop(req.Name) // a changed spec or member builds a new output
 
@@ -270,7 +275,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 	}
 	spec := Spec{DomainDir: dir, OutputID: set.Spec.Output.FlowID, Skew: set.Spec.SkewBudget.Duration,
 		Ordered: set.Spec.Preference != mxlv1alpha1.RedundancyFirstArrival, Stalls: r.stallsOf(set.Name),
-		Stalled: r.reported(&set)}
+		Stalled: carried}
 	if spec.Skew <= 0 {
 		spec.Skew = 40 * time.Millisecond
 	}
