@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.31](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.30...v1.1.0-rc.31) (2026-10-27)
+
+
+### Bug Fixes
+
+* **gateway:** hold a stalled member until it advances steadily ([#374](https://github.com/qvest-digital/mxl-k8s/issues/374)) ([6a10c13](https://github.com/qvest-digital/mxl-k8s/commit/6a10c1326461df5ac884f5c1000b169077dab905))
+
 ## [1.1.0-rc.30](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.29...v1.1.0-rc.30) (2026-10-26)
 
 
