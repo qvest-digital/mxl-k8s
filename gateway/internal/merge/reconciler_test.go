@@ -803,6 +803,60 @@ func TestReconcilerReportsARestartedStalledMemberMovingWithinTenSeconds(t *testi
 	require.LessOrEqual(t, at.Sub(restarted), stalledRecheck+RecoverAfter+tick)
 }
 
+// retryFor bounds tries in a row. A member whose ring was taken in the
+// end, or that went away meanwhile, starts over: one that restarts again
+// later, and whose new ring cannot be opened at once, would otherwise
+// find its time spent and the output built again under every reader.
+func TestReconcilerStartsARingsRetryTimeOverOnceItIsSettled(t *testing.T) {
+	for name, settle := range map[string]func(t *testing.T, dir string, fail *bool){
+		"replaced": func(t *testing.T, _ string, fail *bool) { *fail = false },
+		"gone":     func(t *testing.T, dir string, _ *bool) { require.NoError(t, os.RemoveAll(flowDir(dir, memberA))) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			now := fakeClock(t)
+			started := startWithSpec(t)
+			dir := t.TempDir()
+			fail := true
+			orig := replace
+			replace = func(e *Engine, m int) (uint64, error) {
+				if fail {
+					return 0, fmt.Errorf("%w: %w", ErrNotOpened, unix.ENOENT)
+				}
+				return inodes(dir, []mxlv1alpha1.RedundancyFlowRef{{FlowID: e.spec.Members[m]}})[0], nil
+			}
+			t.Cleanup(func() { replace = orig })
+			memberDir(t, dir, memberA, videoDef(memberA))
+			memberDir(t, dir, memberB, videoDef(memberB))
+			r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+			reconcileSet(t, r)
+			engine := r.engines["programme"].engine
+			// Every ring stays open, so no inode is reused.
+			restart := func() {
+				f, err := os.Open(filepath.Join(flowDir(dir, memberA), "data"))
+				require.NoError(t, err)
+				t.Cleanup(func() { f.Close() })
+				memberDir(t, dir, memberA, videoDef(memberA))
+			}
+
+			restart()
+			reconcileSet(t, r)
+			settle(t, dir, &fail)
+			reconcileSet(t, r)
+			*now = now.Add(retryFor)
+
+			if name == "gone" {
+				memberDir(t, dir, memberA, videoDef(memberA))
+			} else {
+				restart()
+			}
+			fail = true
+			reconcileSet(t, r)
+			require.Len(t, *started, 1, "a ring tried in vain once more took the time of tries before it settled")
+			require.Same(t, engine, r.engines["programme"].engine)
+		})
+	}
+}
+
 // A producer restarted out of a stall can leave a directory whose ring
 // cannot be opened yet. The set is looked at every second while it
 // reports the stall, and each look tries the ring again: counted in
