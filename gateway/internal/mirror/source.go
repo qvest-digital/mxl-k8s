@@ -22,10 +22,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/go-logr/logr"
 
@@ -194,10 +196,15 @@ type SourceReconciler struct {
 	sources  map[types.NamespacedName]*sourceEntry
 	shared   map[sourceKey]*sharedSource
 	attempts attemptTable[sourceAddInputs]
-	// redials counts consecutive re-adds of a mirror whose target the
-	// initiator dropped, and sets the wait before the next one. Cleared
-	// once the target reads connected.
-	redials map[types.NamespacedName]uint32
+	// redials holds, per mirror, the consecutive re-adds of a target the
+	// initiator dropped and the earliest the next one may run. Cleared
+	// once the target reads connected or the mirror's TargetInfo changes.
+	redials map[types.NamespacedName]redial
+
+	// redialEvents brings a mirror whose target the initiator dropped
+	// back through the workqueue, so the re-add runs on the controller's
+	// worker for that key and never beside it. Nil sends nothing.
+	redialEvents chan event.GenericEvent
 	// rebuilds counts consecutive reader reopens per shared source. It
 	// outlives the sharedSource the watchdog tears down, which is the
 	// point: the budget has to survive the reopen it is bounding.
@@ -330,6 +337,13 @@ type sourceEntry struct {
 	// target connected. Only a connection-oriented provider has a
 	// connection to report; see deliversTransfers.
 	connected atomic.Bool
+
+	// dropped is set once the initiator no longer holds this mirror's
+	// target, which it does not connect to again. Reconcile replaces an
+	// entry that carries it. redialQueued is set once the event asking
+	// for that reconcile was accepted.
+	dropped      atomic.Bool
+	redialQueued atomic.Bool
 
 	// bytes counts payload handed to the fabric for this mirror, read
 	// by the throughput collector at scrape time. A counter rather than
@@ -633,10 +647,24 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// the flow inline, which is not this mirror's re-add.
 	sw.lap("originReopen")
 
+	if existing != nil && existing.infoStr == mirror.Status.TargetInfo && existing.dropped.Load() {
+		// The initiator dropped this target and will not connect to it
+		// again; only adding it again does. The same TargetInfo is
+		// added again with a backoff of its own, because it may name a
+		// target that is gone until the mirror publishes its successor.
+		wait, attempt := r.takeRedial(req.NamespacedName)
+		if wait > 0 {
+			return ctrl.Result{RequeueAfter: wait}, nil
+		}
+		l.Info("initiator dropped the target; adding it again", "attempt", attempt)
+		r.closeEntry(req.NamespacedName)
+		existing = nil
+	}
 	if existing != nil {
 		if existing.infoStr == mirror.Status.TargetInfo {
 			return ctrl.Result{}, nil
 		}
+		r.clearRedials(req.NamespacedName)
 		// TargetInfo rotated under us (typically: target gateway
 		// restarted and rebuilt the writer on a fresh ephemeral
 		// port). Take this mirror's target off the shared initiator
@@ -740,9 +768,16 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	r.mu.Lock()
 	if dup := r.sources[req.NamespacedName]; dup != nil {
+		// Another pass attached this mirror first. One that read an
+		// older TargetInfo leaves an entry the flusher publishes nothing
+		// for, so the mirror is looked at again rather than left on it.
+		stale := dup.infoStr != mirror.Status.TargetInfo
 		r.mu.Unlock()
 		r.opener.detach(shared, info)
 		r.releaseIfUnused(shared)
+		if stale {
+			return ctrl.Result{Requeue: true}, nil
+		}
 		return ctrl.Result{}, nil
 	}
 	r.sources[req.NamespacedName] = entry
@@ -2072,24 +2107,10 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 		// it again; only adding it again does. Waiting for the target
 		// side to notice costs its whole silence window, and longer when
 		// other mirrors keep the shared source sending.
-		if r.targetDropped(entry) {
-			attempt := r.bumpRedials(key)
-			wait := backoffFor(attempt)
-			ctrl.Log.WithName("source-flush").Info(
-				"initiator dropped the target; adding it again",
-				"mirror", key, "flowID", entry.flowID(), "attempt", attempt, "after", wait.String())
-			timer := time.NewTimer(wait)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
-			}
-			// Returning first for the same reason the reopen path does:
-			// closeEntry waits on flusherDone, which this goroutine
-			// closes.
-			go r.redial(entry)
-			return
+		// The re-add is Reconcile's, queued rather than run here, so it
+		// never races the worker reconciling the same mirror.
+		if r.targetDropped(entry) && !entry.redialQueued.Load() && r.enqueueRedial(key) {
+			entry.redialQueued.Store(true)
 		}
 		state := observedState(entry, r.readerStallAfter())
 
@@ -2188,6 +2209,7 @@ func (r *SourceReconciler) targetDropped(entry *sourceEntry) bool {
 	switch {
 	case errors.Is(err, mxl.ErrNotFound):
 		entry.connected.Store(false)
+		entry.dropped.Store(true)
 		return true
 	case err != nil:
 		ctrl.Log.WithName("source-flush").V(1).Info("target state",
@@ -2202,16 +2224,31 @@ func (r *SourceReconciler) targetDropped(entry *sourceEntry) bool {
 	return false
 }
 
-// bumpRedials records one more consecutive re-add of key's target and
-// returns the new count.
-func (r *SourceReconciler) bumpRedials(key types.NamespacedName) uint32 {
+// redial is one mirror's run of re-adds of a target its initiator
+// dropped.
+type redial struct {
+	count     uint32
+	notBefore time.Time
+}
+
+// takeRedial reports how long key's next re-add has to wait. When it
+// may run now, it is counted and the wait after it is armed, and the
+// returned attempt is its number.
+func (r *SourceReconciler) takeRedial(key types.NamespacedName) (time.Duration, uint32) {
+	now := r.now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.redials == nil {
-		r.redials = make(map[types.NamespacedName]uint32)
+	d := r.redials[key]
+	if wait := d.notBefore.Sub(now); wait > 0 {
+		return wait, d.count
 	}
-	r.redials[key]++
-	return r.redials[key]
+	if r.redials == nil {
+		r.redials = make(map[types.NamespacedName]redial)
+	}
+	d.count++
+	d.notBefore = now.Add(backoffFor(d.count))
+	r.redials[key] = d
+	return 0, d.count
 }
 
 func (r *SourceReconciler) clearRedials(key types.NamespacedName) {
@@ -2220,19 +2257,19 @@ func (r *SourceReconciler) clearRedials(key types.NamespacedName) {
 	delete(r.redials, key)
 }
 
-// redial takes entry's dropped target off the shared initiator and runs
-// one reconcile, which adds it again against the TargetInfo the mirror
-// carries now. Nothing is done for an entry that has been replaced or
-// closed meanwhile: whoever did that owns the mirror's next add.
-func (r *SourceReconciler) redial(entry *sourceEntry) {
-	r.mu.Lock()
-	current := r.sources[entry.key] == entry
-	r.mu.Unlock()
-	if !current {
-		return
+// enqueueRedial asks for a reconcile of key. An event the queue has no
+// room for is not waited for; the flusher asks again on its next tick.
+func (r *SourceReconciler) enqueueRedial(key types.NamespacedName) bool {
+	if r.redialEvents == nil {
+		return false
 	}
-	r.closeEntry(entry.key)
-	r.reopenEvicted(context.Background(), entry.key)
+	select {
+	case r.redialEvents <- event.GenericEvent{Object: &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name}}}:
+		return true
+	default:
+		return false
+	}
 }
 
 // attachedToReplacedTarget reports whether the mirror now publishes a
@@ -2546,6 +2583,9 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.rebuilds == nil {
 		r.rebuilds = make(map[sourceKey]uint32)
 	}
+	if r.redialEvents == nil {
+		r.redialEvents = make(chan event.GenericEvent, 64)
+	}
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
 	}
@@ -2592,6 +2632,7 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.leaseToMirrors),
 			builder.WithPredicates(leaseInMxlSystem()),
 		).
+		WatchesRawSource(source.Channel(r.redialEvents, &handler.EnqueueRequestForObject{})).
 		Named("mxlflowmirror-source").
 		Complete(r)
 }
