@@ -49,6 +49,31 @@ func TestFromFlags_DefaultsFireWhenArgsProvided(t *testing.T) {
 			"second-long delays during flow appear/vanish bursts; the "+
 			"default must stay well above that")
 	assert.Equal(t, 100, c.KubeAPIBurst)
+	assert.Equal(t, 16, c.IntentMirrorsPerPod)
+	assert.Equal(t, 64, c.IntentMirrorsPerNode)
+	assert.Equal(t, 8, c.IntentMirrorBurst,
+		"a glob over the domain opens every flow at once; without a burst "+
+			"limit each open becomes a mirror onto the node")
+	assert.Equal(t, 10*time.Second, c.IntentMirrorBurstWindow)
+}
+
+func TestFromFlags_IntentMirrorLimits(t *testing.T) {
+	t.Setenv("NODE_NAME", "")
+	base := []string{"--domain-path=/run/mxl/domain", "--node-name=n1"}
+	parse := func(extra ...string) (*Config, error) {
+		return FromFlags(flag.NewFlagSet("agent", flag.ContinueOnError), append(base, extra...))
+	}
+
+	c, err := parse("--intent-mirrors-per-pod=0", "--intent-mirrors-per-node=0",
+		"--intent-mirror-burst=0", "--intent-mirror-burst-window=0")
+	require.NoError(t, err, "0 turns every limit off")
+	assert.Zero(t, c.IntentMirrorBurst)
+
+	_, err = parse("--intent-mirrors-per-pod=-1")
+	require.Error(t, err)
+	_, err = parse("--intent-mirror-burst=4", "--intent-mirror-burst-window=0")
+	require.ErrorContains(t, err, "--intent-mirror-burst-window must be positive",
+		"a burst with no window would count nothing and refuse nothing")
 }
 
 func TestFromFlags_OverridesAreRespected(t *testing.T) {

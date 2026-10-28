@@ -219,6 +219,29 @@
               "required": [],
               "title": "healthProbeBindAddress"
             },
+            "intentMirrorBurst": {
+              "default": "8",
+              "description": "Most mirrors the agent creates on demand for one pod within intentMirrorBurstWindow, so a process opening every flow at once, as a glob over the domain does, gets only a few. Refused flows are mirrored when the process opens them again after the window. 0 is unlimited.",
+              "required": [],
+              "title": "intentMirrorBurst"
+            },
+            "intentMirrorBurstWindow": {
+              "default": "10s",
+              "title": "intentMirrorBurstWindow",
+              "type": "string"
+            },
+            "intentMirrorsPerNode": {
+              "default": "64",
+              "description": "Most live mirrors the agent creates on demand onto its node, for all pods together. 0 is unlimited.",
+              "required": [],
+              "title": "intentMirrorsPerNode"
+            },
+            "intentMirrorsPerPod": {
+              "default": "16",
+              "description": "Most live mirrors the agent creates on demand for one pod, the mirrors a process opening a flow absent here asks for. A request over a limit is refused with an event on the pod, and the open fails with ENOENT. Mirrors an MxlReceiver or a redundancy set declares are not counted. 0 is unlimited.",
+              "required": [],
+              "title": "intentMirrorsPerPod"
+            },
             "intentSocket": {
               "default": "/run/mxl/agent.sock",
               "description": " pattern: ^/.+ @schema",
@@ -291,6 +314,7 @@
           },
           "required": [
             "materializeTimeout",
+            "intentMirrorBurstWindow",
             "resyncPeriod"
           ],
           "title": "flags",

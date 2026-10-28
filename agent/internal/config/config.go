@@ -59,6 +59,15 @@ type Config struct {
 	// Ready.
 	MaterializeTimeout time.Duration
 
+	// IntentMirrorsPerPod, IntentMirrorsPerNode and IntentMirrorBurst
+	// within IntentMirrorBurstWindow bound the mirrors the intent
+	// dispatcher creates on demand; see intent.Limits. Zero leaves a
+	// limit off.
+	IntentMirrorsPerPod     int
+	IntentMirrorsPerNode    int
+	IntentMirrorBurst       int
+	IntentMirrorBurstWindow time.Duration
+
 	// Provider is an explicit per-cluster libmxl-fabrics provider
 	// override for on-demand mirrors. Empty (or "auto") lets the
 	// dispatcher resolve a concrete provider from the source and
@@ -114,6 +123,14 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 			"treated as a plain directory.")
 	fs.DurationVar(&c.MaterializeTimeout, "materialize-timeout", 5*time.Second,
 		"Per-request budget for the intent dispatcher waiting for a mirror Ready.")
+	fs.IntVar(&c.IntentMirrorsPerPod, "intent-mirrors-per-pod", 16,
+		"Most live mirrors created on demand for one pod. 0 is unlimited.")
+	fs.IntVar(&c.IntentMirrorsPerNode, "intent-mirrors-per-node", 64,
+		"Most live mirrors created on demand onto this node. 0 is unlimited.")
+	fs.IntVar(&c.IntentMirrorBurst, "intent-mirror-burst", 8,
+		"Most mirrors created on demand for one pod within --intent-mirror-burst-window. 0 is unlimited.")
+	fs.DurationVar(&c.IntentMirrorBurstWindow, "intent-mirror-burst-window", 10*time.Second,
+		"Window --intent-mirror-burst counts in.")
 	fs.StringVar(&c.Provider, "provider", "",
 		"Explicit libmxl-fabrics provider (tcp, verbs, efa, shm) stamped "+
 			"onto on-demand mirrors. Empty or 'auto' resolves per node from "+
@@ -159,6 +176,13 @@ func (c *Config) Validate() error {
 		mxlv1alpha1.ProviderSHM:
 	default:
 		return fmt.Errorf("--provider %q is not one of tcp, verbs, efa, shm, auto", c.Provider)
+	}
+	if c.IntentMirrorsPerPod < 0 || c.IntentMirrorsPerNode < 0 || c.IntentMirrorBurst < 0 {
+		return fmt.Errorf("--intent-mirrors-per-pod, --intent-mirrors-per-node and --intent-mirror-burst must not be negative")
+	}
+	if c.IntentMirrorBurst > 0 && c.IntentMirrorBurstWindow <= 0 {
+		return fmt.Errorf("--intent-mirror-burst-window must be positive while --intent-mirror-burst is set, got %v",
+			c.IntentMirrorBurstWindow)
 	}
 	if c.KubeAPIQPS <= 0 {
 		return fmt.Errorf("--kube-api-qps must be positive, got %v", c.KubeAPIQPS)
