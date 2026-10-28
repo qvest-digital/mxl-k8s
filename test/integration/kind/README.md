@@ -53,6 +53,8 @@ Tunables (all optional, environment variables):
 | `MONITORING_NAMESPACE` | `monitoring` | Namespace case 48 reads Prometheus and Grafana from |
 | `SCRAPE_TIMEOUT_SECS` | `90` | Case 48 wait for the first exporter samples to reach Prometheus |
 | `GRAFANA_AUTH` | `admin:admin` | Case 48 Grafana API credentials |
+| `IDLE_PAUSE_SETTLE_SECS` | `30` | Case 63 time a paused producer is left before each gateway restart |
+| `IDLE_RESUME_TIMEOUT_SECS` | `60` | Case 63 wait for a grain on the target after the producer resumes |
 | `KIND_DIAG_DIR` | `$PWD/kind-diagnostics` | Where failure diagnostics land |
 | `CASE_GLOB` | `cases/*.sh` | Case selection glob |
 
