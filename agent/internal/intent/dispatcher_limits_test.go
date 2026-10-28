@@ -347,3 +347,56 @@ func TestMaterialize_AFullBurstRefusesBeforeThePodLookup(t *testing.T) {
 	assert.NotErrorAs(t, err, &le, "a request the receiver's mirror serves was refused")
 	require.NoError(t, d.Materialize(context.Background(), 42, path(local)), "a flow already here was refused")
 }
+
+// Ahead of a full burst the full path answers a flow that originates on
+// this node with success, the shim retrying the open, and one no MxlFlow
+// names with a refusal that is final. Refused by the burst in their
+// place, the first would get ENOENT and the second be asked again for
+// as long as its process runs.
+func TestMaterialize_AFullBurstLeavesFinalAnswersToTheFullPath(t *testing.T) {
+	flow := func(i int, node string) *mxlv1alpha1.MxlFlow {
+		return &mxlv1alpha1.MxlFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: globFlow(i).ID},
+			Spec:       mxlv1alpha1.MxlFlowSpec{ID: globFlow(i).ID},
+			Status: mxlv1alpha1.MxlFlowStatus{Locations: []mxlv1alpha1.MxlFlowLocation{
+				{NodeName: node, Phase: mxlv1alpha1.MxlFlowLocationOrigin}}},
+		}
+	}
+	d, _, _ := limitedDispatcher(t, Limits{Burst: 1, BurstWindow: time.Minute},
+		flow(0, "n-src"), flow(1, "n-target"))
+	d.Resolver = &uidReader{pod: consumer("reader", "uid-r")}
+	d.FlowChecker = func(string) bool { return false }
+	d.MaterializeTimeout = 20 * time.Millisecond
+	path := func(i int) string { return "/run/mxl/domain/" + globFlow(i).ID + ".mxl-flow/data" }
+
+	require.Error(t, d.Materialize(context.Background(), 42, path(0)), "no gateway fills the first mirror")
+
+	require.NoError(t, d.Materialize(context.Background(), 42, path(1)),
+		"a flow originating on this node was refused")
+	err := d.Materialize(context.Background(), 42, path(2))
+	var le *LimitError
+	require.NotErrorAs(t, err, &le, "a flow no MxlFlow names was refused by the burst, to be asked again")
+	assert.EqualError(t, err, "MxlFlow not yet known cluster-wide")
+}
+
+// A refused flow whose process has gone never asks again. Its place is
+// given up a window after it was due, or every later refusal of the pod
+// waits a window longer for it.
+func TestEnsureMirror_AFlowThatNeverAsksAgainGivesUpItsPlace(t *testing.T) {
+	d, _, now := limitedDispatcher(t, Limits{Burst: 1, BurstWindow: 10 * time.Second})
+	pod := consumer("reader", "uid-r")
+	start := *now
+
+	_, err := d.ensureMirror(context.Background(), globFlow(0), "n-src", pod)
+	require.NoError(t, err)
+	_, err = d.ensureMirror(context.Background(), globFlow(1), "n-src", pod)
+	var le *LimitError
+	require.ErrorAs(t, err, &le, "due when the first creation leaves the window")
+
+	*now = start.Add(20 * time.Second)
+	_, err = d.ensureMirror(context.Background(), globFlow(2), "n-src", pod)
+	require.NoError(t, err)
+	_, err = d.ensureMirror(context.Background(), globFlow(3), "n-src", pod)
+	require.ErrorAs(t, err, &le)
+	assert.Equal(t, 10*time.Second, le.RetryAfter(), "a flow that never came back still held a place")
+}
