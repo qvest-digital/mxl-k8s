@@ -1075,6 +1075,36 @@ func TestRunFlusher_NeverHandshook_StaleSource_DoesNotTrigger(t *testing.T) {
 		"pre-open source activity must not accumulate recovery attempts")
 }
 
+// A source whose initiator cannot reach the target transfers nothing,
+// so lastSentAt stays where the previous fabric side left it, and the
+// source says so with TransfersNotLanding. sourceIsDelivering counts
+// that as a source trying to deliver; the watchdog has to act on it
+// at the re-check it makes after taking the recovery gate as well as
+// at the first look, or the spawn the first look asks for is dropped
+// on every tick and the mirror waits forever.
+func TestRunFlusher_NeverHandshook_TransfersNotLanding_TriggersRecovery(t *testing.T) {
+	f := newTargetWatchdogFixture(t, 4)
+	var current mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, f.c.Get(context.Background(), f.key, &current))
+	current.Status.LastSentAt = &metav1.Time{Time: time.Now().Add(-2 * time.Hour)}
+	current.Status.Conditions = []metav1.Condition{{
+		Type:               mxlv1alpha1.ConditionTypeSourceProgress,
+		Status:             metav1.ConditionFalse,
+		Reason:             mxlv1alpha1.ReasonTransfersNotLanding,
+		LastTransitionTime: metav1.Now(),
+	}}
+	require.NoError(t, f.c.Status().Update(context.Background(), &current))
+	f.startFlusher(t)
+	defer f.stopFlusher(t)
+
+	select {
+	case <-f.spawnCh:
+	case <-time.After(time.Second):
+		t.Fatal("a source reporting TransfersNotLanding into a fabric side " +
+			"that never committed did not get the target set up again")
+	}
+}
+
 func TestRunFlusher_CommitDisarmsWatchdog(t *testing.T) {
 	// One commit recorded after the fabric opened: the flusher must
 	// NOT spawn recovery. The discriminator is "no progress since
@@ -1700,4 +1730,53 @@ func TestTarget_RecoveryDropsEntryWhenTargetInfoPublishFails(t *testing.T) {
 		return got.Status.Phase == mxlv1alpha1.MxlFlowMirrorFailed
 	}, 5*time.Second, 50*time.Millisecond,
 		"the dropped entry must publish Failed so the stale prior state does not stand")
+}
+
+// A connection-based initiator whose connection fails just after it is
+// set up goes to its done state and never dials again, and its source
+// keeps transferring to the other targets of the shared initiator, so
+// lastSentAt keeps moving for this mirror too. The target is the only
+// side that sees nothing arrive, and it has to set up again well before
+// the stuck-handshake window: that window is sized for a handshake
+// that is still being retried, not for one that has been abandoned.
+//
+// The short window counts from the first tick that saw the source
+// sending, not from the fabric open, so a target that waited a long
+// time for its first initiator is not rebuilt the moment one arrives.
+func TestRunFlusher_SendingIntoSilence_SetsTheTargetUpAgain(t *testing.T) {
+	f := newTargetWatchdogFixture(t, 4)
+	f.r.StuckHandshakeAfter = 2 * time.Hour
+	f.r.SendingIntoSilenceAfter = 300 * time.Millisecond
+	f.stampSourceActivity(t, time.Now())
+	f.startFlusher(t)
+	defer f.stopFlusher(t)
+
+	select {
+	case <-f.spawnCh:
+		t.Fatal("the target was set up again before the source had been " +
+			"seen sending for the sending-into-silence window")
+	case <-time.After(150 * time.Millisecond):
+	}
+	select {
+	case <-f.spawnCh:
+	case <-time.After(time.Second):
+		t.Fatal("a source sending into a fabric side that never committed " +
+			"did not get the target set up again inside the stuck-handshake window")
+	}
+}
+
+// The short window is for a source that sends. One with nothing to
+// send leaves the target alone however long it waits.
+func TestRunFlusher_SendingIntoSilence_IdleSource_DoesNotTrigger(t *testing.T) {
+	f := newTargetWatchdogFixture(t, 4)
+	f.r.StuckHandshakeAfter = 2 * time.Hour
+	f.r.SendingIntoSilenceAfter = time.Millisecond
+	f.startFlusher(t)
+	defer f.stopFlusher(t)
+
+	select {
+	case <-f.spawnCh:
+		t.Fatal("the target was set up again for a source that sent nothing")
+	case <-time.After(200 * time.Millisecond):
+	}
 }

@@ -22,7 +22,9 @@ import (
 func stalledEntry(head uint64, headAt *time.Time, transfers uint64, sentAt time.Time) *sourceEntry {
 	// Attached to a handle-less shared source: the flusher reads the
 	// reader rebuild budget and the writer-liveness seam through it.
-	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}}
+	// Added against the TargetInfo the test mirrors publish, so the
+	// flusher treats it as attached to the current fabric side.
+	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1"}
 	e.lastHead.Store(head)
 	if headAt != nil {
 		t := *headAt
