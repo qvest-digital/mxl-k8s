@@ -81,7 +81,8 @@ type Manager struct {
 	mu   sync.Mutex
 	held map[string]*entry // by MxlFlow name
 	// swept is set once Start's first pass has run; opened are the
-	// domains opened before it, whose markers that pass judges.
+	// domains opened since the last pass, whose markers the next pass
+	// judges.
 	swept  bool
 	opened []string
 }
@@ -242,31 +243,30 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 // and a marker nothing holds any more would make the agent and the
 // exporter take that directory for a placeholder for good: a copy or a
 // local writer's flow under that id would never become a location. So
-// the markers this gateway does not hold go, but only once Start has
-// reconciled every MxlFlow and held again what is still absent here.
-// Clearing them on open instead leaves a placeholder directory without
-// its marker until its flow is reconciled, which the agent reads as a
-// local copy: it mirrors nothing into it, and a consumer opening the
-// flow then maps a ring nothing fills. While the MxlFlows cannot be
-// listed for that pass, the stale markers stay.
+// the markers this gateway does not hold go, but only once a pass has
+// reconciled every MxlFlow with the domain open and held again what is
+// still absent here. Clearing them on open instead leaves a placeholder
+// directory without its marker until its flow is reconciled, which the
+// agent reads as a local copy: it mirrors nothing into it, and a
+// consumer opening the flow then maps a ring nothing fills.
+//
+// That holds for a domain opened after the first pass too. The pass may
+// have failed to open it for a flow in it, which then holds nothing
+// until its retry; a domain opened later by a mirror or once it is ready
+// here is therefore judged by the next pass, not on the spot. While the
+// MxlFlows cannot be listed for that pass, the stale markers stay.
+//
+// DomainOpened runs under the instance set's lock and only queues the
+// domain: the pass opens domains through the same set.
 func (m *Manager) DomainOpened(domain string) {
 	m.mu.Lock()
-	if !m.swept {
-		m.opened = append(m.opened, domain)
-		m.mu.Unlock()
-		return
-	}
+	m.opened = append(m.opened, domain)
 	m.mu.Unlock()
-	// Opened after the first pass, so no placeholder of this gateway is
-	// in it yet: a Reconcile that would hold one waits for the open.
-	if err := m.clearStaleMarkers(domain); err != nil {
-		log.Log.WithName("placeholder").Error(err, "clear stale placeholder markers", "domain", domain)
-	}
 }
 
 // sweep reconciles every MxlFlow, then clears the markers of every
-// domain opened so far that no held placeholder accounts for. It
-// reports whether the MxlFlows could be listed.
+// domain opened since the last pass that no held placeholder accounts
+// for. It reports whether the MxlFlows could be listed.
 func (m *Manager) sweep(ctx context.Context, l logr.Logger) bool {
 	var flows mxlv1alpha1.MxlFlowList
 	if err := m.Client.List(ctx, &flows); err != nil {
@@ -493,7 +493,8 @@ func (m *Manager) period() time.Duration {
 
 // Start reconciles every MxlFlow and clears the markers left by a
 // previous gateway (see DomainOpened), then runs the local-writer check
-// every Period until ctx ends, then gives every placeholder up. Each
+// every Period until ctx ends, with another such pass whenever a domain
+// was opened since the last, then gives every placeholder up. Each
 // pass also reconciles every held placeholder again: one a mirror
 // released is retired then if its flow lost its Origin or changed
 // geometry while the mirror held it.
@@ -501,15 +502,15 @@ func (m *Manager) Start(ctx context.Context) error {
 	l := log.FromContext(ctx).WithName("placeholder")
 	t := time.NewTicker(m.period())
 	defer t.Stop()
-	swept := m.sweep(ctx, l)
+	m.sweep(ctx, l)
 	for {
 		select {
 		case <-ctx.Done():
 			m.leaveAll(l)
 			return nil
 		case <-t.C:
-			if !swept {
-				swept = m.sweep(ctx, l)
+			if m.unjudged() {
+				m.sweep(ctx, l)
 			}
 			m.CheckLocalWriters(l)
 			for _, name := range m.Held() {
@@ -519,6 +520,14 @@ func (m *Manager) Start(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// unjudged reports whether a pass is due: the first one has not
+// succeeded, or a domain was opened since the last.
+func (m *Manager) unjudged() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return !m.swept || len(m.opened) > 0
 }
 
 // Held reports the MxlFlow names this manager holds placeholders for.

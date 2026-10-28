@@ -12,9 +12,11 @@ import (
 // Set holds one Handles per MXL domain the gateway mirrors in or
 // sweeps. The primary domain is opened at start; every other one is
 // opened on first use, by a mirror or by the Opener, and stays open
-// until Close, because libmxl reads a
-// domain's options at instance open and a mirror in that domain may be
-// set up at any time.
+// until Close, because libmxl reads a domain's options at instance open
+// and a mirror in that domain may be set up at any time. Handles are
+// kept by directory, so an MxlDomain deleted and created again under the
+// same directory keeps the Handles, and the libmxl options, it was first
+// opened with.
 type Set struct {
 	// Primary is the domain --domain-path names, which a mirror with no
 	// spec.domain uses.
