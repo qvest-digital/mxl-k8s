@@ -276,6 +276,19 @@ spec:
                 format: date-time
                 nullable: true
                 type: string
+              targetAddedAt:
+                description: |-
+                  TargetAddedAt is when the source-side gateway last added this
+                  mirror's target to an initiator, which on a connection-based
+                  provider opens a new connection to it. A target that has
+                  accepted a connection listens on a port of its own choosing
+                  once that connection goes, so a target that sees TargetAddedAt
+                  move past its last grain sets up again and publishes a
+                  TargetInfo the new connection can reach. Unset while no
+                  initiator holds the target.
+                format: date-time
+                nullable: true
+                type: string
               targetAttemptCount:
                 description: |-
                   TargetAttemptCount is the number of consecutive failed attempts
