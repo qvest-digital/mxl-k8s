@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0-rc.24](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.23...api/v1.1.0-rc.24) (2026-10-28)
+
+
+### Features
+
+* **api:** add MxlFlowMirror status.targetAddedAt ([9806ee9](https://github.com/qvest-digital/mxl-k8s/commit/9806ee9f420c0e2b98a9b0b38ee0321284b19929))
+* **operator:** report a redundancy set's output down with its gateway ([#382](https://github.com/qvest-digital/mxl-k8s/issues/382)) ([1bad348](https://github.com/qvest-digital/mxl-k8s/commit/1bad348680048d58548ae98e933e6617b41c750e))
+
+
+### Bug Fixes
+
+* **gateway:** log the times a source re-add was judged on ([#386](https://github.com/qvest-digital/mxl-k8s/issues/386)) ([1156128](https://github.com/qvest-digital/mxl-k8s/commit/11561280ea901ebabefc75a89c62d3921d579d4e))
+* **gateway:** set an RC target up again when its source reconnects ([9806ee9](https://github.com/qvest-digital/mxl-k8s/commit/9806ee9f420c0e2b98a9b0b38ee0321284b19929))
+
 ## [1.1.0-rc.23](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.22...api/v1.1.0-rc.23) (2026-10-26)
 
 
