@@ -122,6 +122,11 @@ type Dispatcher struct {
 // mirror an MxlReceiver or a redundancy set declared is neither counted
 // nor refused, and a request that an existing mirror already serves
 // creates nothing. Zero leaves a limit off.
+//
+// Burst is what stops a glob. PerPod and PerNode count every live mirror
+// created on demand, and such a mirror lives as long as the pod it was
+// created for, whether or not the pod still reads it, so they bound what
+// a long-lived pod accumulates over its lifetime.
 type Limits struct {
 	// PerPod is how many live mirrors one pod may have had created.
 	PerPod int
@@ -129,10 +134,29 @@ type Limits struct {
 	// node, for all pods together.
 	PerNode int
 	// Burst is how many mirrors one pod may have created within
-	// BurstWindow.
+	// BurstWindow. The history is the agent's memory, so a restarted
+	// agent starts each pod's window afresh.
 	Burst       int
 	BurstWindow time.Duration
 }
+
+// LimitError is a request Limits refused. RetryAfter is how long until
+// it could pass: when the oldest creation in the pod's burst window
+// leaves it, or, for a count of live mirrors, one burst window, the
+// earliest a mirror is likely to have gone.
+type LimitError struct {
+	msg        string
+	retryAfter time.Duration
+}
+
+func (e *LimitError) Error() string { return e.msg }
+
+// RetryAfter is how long until the request could pass.
+func (e *LimitError) RetryAfter() time.Duration { return e.retryAfter }
+
+// defaultLimitRetry is RetryAfter for a count of live mirrors when no
+// burst window is set.
+const defaultLimitRetry = 10 * time.Second
 
 // ReasonMirrorLimitReached is the reason of the event a pod gets when a
 // mirror it asked for is refused by a limit.
@@ -510,9 +534,16 @@ func (d *Dispatcher) admit(ctx context.Context, pod metav1.Object) error {
 		}
 	}
 	if b := d.Limits.Burst; b > 0 && len(d.created[pod.GetUID()]) >= b {
-		return fmt.Errorf("pod %s/%s had %d mirrors created on demand in the last %s, its limit; "+
-			"it is asked again once that window has passed", pod.GetNamespace(), pod.GetName(),
-			len(d.created[pod.GetUID()]), d.Limits.BurstWindow)
+		at := d.created[pod.GetUID()]
+		return &LimitError{
+			msg: fmt.Sprintf("pod %s/%s had %d mirrors created on demand in the last %s, its limit",
+				pod.GetNamespace(), pod.GetName(), len(at), d.Limits.BurstWindow),
+			retryAfter: at[0].Add(d.Limits.BurstWindow).Sub(now),
+		}
+	}
+	retry := d.Limits.BurstWindow
+	if retry <= 0 {
+		retry = defaultLimitRetry
 	}
 	if d.Limits.PerPod <= 0 && d.Limits.PerNode <= 0 {
 		return nil
@@ -533,11 +564,12 @@ func (d *Dispatcher) admit(ctx context.Context, pod metav1.Object) error {
 		}
 	}
 	if d.Limits.PerPod > 0 && own >= d.Limits.PerPod {
-		return fmt.Errorf("pod %s/%s already has %d mirrors created on demand, its limit",
-			pod.GetNamespace(), pod.GetName(), own)
+		return &LimitError{msg: fmt.Sprintf("pod %s/%s already has %d mirrors created on demand, its limit",
+			pod.GetNamespace(), pod.GetName(), own), retryAfter: retry}
 	}
 	if d.Limits.PerNode > 0 && node >= d.Limits.PerNode {
-		return fmt.Errorf("node %s already has %d mirrors created on demand, its limit", d.NodeName, node)
+		return &LimitError{msg: fmt.Sprintf("node %s already has %d mirrors created on demand, its limit",
+			d.NodeName, node), retryAfter: retry}
 	}
 	return nil
 }
@@ -558,7 +590,8 @@ func (d *Dispatcher) refuse(ctx context.Context, ref mxlv1alpha1.FlowRef, pod me
 		InvolvedObject: corev1.ObjectReference{APIVersion: "v1", Kind: "Pod",
 			Namespace: pod.GetNamespace(), Name: pod.GetName(), UID: pod.GetUID()},
 		Reason: ReasonMirrorLimitReached,
-		Message: fmt.Sprintf("no mirror of flow %s created onto %s: %v; the open fails with ENOENT",
+		Message: fmt.Sprintf("no mirror of flow %s created onto %s: %v; a process waiting on the open "+
+			"gets ENOENT, and one that opened the flow's placeholder is asked for again while it runs",
 			ref.Name(), d.NodeName, why),
 		Type:           corev1.EventTypeWarning,
 		Source:         corev1.EventSource{Component: "mxl-domain-agent", Host: d.NodeName},

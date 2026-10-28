@@ -64,9 +64,82 @@ type Trigger struct {
 	// flow is found by its name below Domain, not by the path's prefix.
 	Domain string
 
+	// ProcessStart identifies a process's lifetime: its start time, read
+	// as the kernel reports it, or false once it is gone. Nil reads
+	// /proc, which the agent sees with the host's pids.
+	ProcessStart func(pid int32) (string, bool)
+
 	mu       sync.Mutex
 	seen     map[string]time.Time
 	requests sync.WaitGroup // the mirror requests Handle started
+}
+
+// minRetry is the shortest wait before a refused request is made again;
+// tests shorten it.
+var minRetry = time.Second
+
+// retryable is a refusal that could pass later, as the intent
+// dispatcher's limits report.
+type retryable interface{ RetryAfter() time.Duration }
+
+// processStart reads the start time of pid, field 22 of /proc/<pid>/stat,
+// which tells a process apart from a later one under the same pid.
+func processStart(pid int32) (string, bool) {
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return "", false
+	}
+	// The command name in field 2 may hold spaces; the fields after it
+	// start past its closing parenthesis.
+	i := strings.LastIndexByte(string(raw), ')')
+	if i < 0 {
+		return "", false
+	}
+	f := strings.Fields(string(raw[i+1:]))
+	if len(f) < 20 {
+		return "", false
+	}
+	return f[19], true
+}
+
+// request asks for a mirror of the placeholder a process opened. The
+// open has already succeeded, so a request a limit refused reaches no
+// one: the process maps a ring nothing fills and does not open it again.
+// Such a request is made again when the limit says it could pass, for as
+// long as the process lives and the flow is still a placeholder here.
+func (t *Trigger) request(ctx context.Context, pid int32, domain, id string) {
+	start := t.ProcessStart
+	if start == nil {
+		start = processStart
+	}
+	born, _ := start(pid)
+	path := filepath.Join(domain, id+".mxl-flow", "data")
+	for retries := 0; ; retries++ {
+		err := t.Dispatcher.Materialize(ctx, pid, path)
+		if err == nil {
+			if retries > 0 {
+				t.Log.Info("placeholder opened, mirror requested again and granted", "flowID", id, "pid", pid)
+			}
+			return
+		}
+		var r retryable
+		if !errors.As(err, &r) {
+			t.Log.Info("placeholder opened, no mirror", "flowID", id, "pid", pid, "reason", err.Error())
+			return
+		}
+		if retries == 0 {
+			t.Log.Info("placeholder opened, no mirror yet; asking again while the process runs",
+				"flowID", id, "pid", pid, "reason", err.Error(), "after", r.RetryAfter())
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(max(r.RetryAfter(), minRetry)):
+		}
+		if now, ok := start(pid); !ok || now != born || !mxlv1alpha1.IsPlaceholder(domain, id) {
+			return
+		}
+	}
 }
 
 // Handle starts a mirror for an open of a placeholder's ring, once per
@@ -105,13 +178,10 @@ func (t *Trigger) Handle(ctx context.Context, o fanotify.Open) bool {
 	if t.Ours != nil && t.Ours(ctx, o.PID) {
 		return false
 	}
-	flowDir := filepath.Join(domain, id+".mxl-flow")
 	t.requests.Add(1)
 	go func() {
 		defer t.requests.Done()
-		if err := t.Dispatcher.Materialize(ctx, o.PID, filepath.Join(flowDir, "data")); err != nil {
-			t.Log.Info("placeholder opened, no mirror", "flowID", id, "pid", o.PID, "reason", err.Error())
-		}
+		t.request(ctx, o.PID, domain, id)
 	}()
 	return true
 }

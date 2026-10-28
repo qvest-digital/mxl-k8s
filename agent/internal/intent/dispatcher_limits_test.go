@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -79,6 +80,9 @@ func TestEnsureMirror_AGlobIsHeldToTheBurst(t *testing.T) {
 	for i := range 26 {
 		if _, err := d.ensureMirror(context.Background(), globFlow(i), "n-src", pod); err != nil {
 			assert.Contains(t, err.Error(), "in the last 10s")
+			var le *LimitError
+			require.ErrorAs(t, err, &le, "a refusal by a limit says when it could pass")
+			assert.Equal(t, 10*time.Second, le.RetryAfter(), "when the oldest creation leaves the window")
 			refused++
 		}
 	}
@@ -99,9 +103,19 @@ func TestEnsureMirror_AGlobIsHeldToTheBurst(t *testing.T) {
 }
 
 // Requests arrive concurrently, one goroutine per open. Counting and
-// creating has to be one step, or all of them pass the count first.
+// creating has to be one step, or all of them pass the count first. A
+// slow create holds every request that counted inside that window, so a
+// count taken outside the step lets all twenty through.
 func TestEnsureMirror_ConcurrentRequestsShareTheLimit(t *testing.T) {
 	d, c, _ := limitedDispatcher(t, Limits{PerPod: 4})
+	d.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*mxlv1alpha1.MxlFlowMirror); ok {
+				time.Sleep(20 * time.Millisecond)
+			}
+			return cl.Create(ctx, obj, opts...)
+		},
+	})
 	pod := consumer("globber", "uid-glob")
 
 	var wg sync.WaitGroup
@@ -129,6 +143,9 @@ func TestEnsureMirror_PerPodLimitCountsLiveMirrors(t *testing.T) {
 	}
 	_, err := d.ensureMirror(context.Background(), globFlow(3), "n-src", a)
 	require.ErrorContains(t, err, "already has 3 mirrors created on demand")
+	var le *LimitError
+	require.ErrorAs(t, err, &le)
+	assert.Equal(t, defaultLimitRetry, le.RetryAfter(), "a live count is asked again after the default retry")
 
 	_, err = d.ensureMirror(context.Background(), globFlow(4), "n-src", b)
 	require.NoError(t, err, "another pod's mirrors count against its own limit")
