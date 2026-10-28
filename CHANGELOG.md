@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.1.0-rc.34](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.33...v1.1.0-rc.34) (2026-10-28)
+
+
+### Features
+
+* **exporter:** report flows in every domain on the node ([#388](https://github.com/qvest-digital/mxl-k8s/issues/388)) ([89ca77f](https://github.com/qvest-digital/mxl-k8s/commit/89ca77f74ce169ce5fa9e7d1cd233eeb318aa5a7))
+
+
+### Bug Fixes
+
+* **agent:** spread burst-refused mirror retries over freed places ([#392](https://github.com/qvest-digital/mxl-k8s/issues/392)) ([a4ddc73](https://github.com/qvest-digital/mxl-k8s/commit/a4ddc7329f07b05ad3401cc8aad5461dfca8a5a6))
+* **gateway:** judge a late-opened domain's markers after a pass ([#390](https://github.com/qvest-digital/mxl-k8s/issues/390)) ([779dc89](https://github.com/qvest-digital/mxl-k8s/commit/779dc896c251653097874543bfb6f5b13ba3bcd6))
+* **gateway:** judge only domains open before a pass reconciles ([#393](https://github.com/qvest-digital/mxl-k8s/issues/393)) ([f88c798](https://github.com/qvest-digital/mxl-k8s/commit/f88c79813a123eca63b85735d85d88bc46b801d0))
+* **gateway:** sweep every domain ready on the node ([#387](https://github.com/qvest-digital/mxl-k8s/issues/387)) ([78a06ba](https://github.com/qvest-digital/mxl-k8s/commit/78a06ba9ea81dbd70b47d8352e104e464db90de0))
+
 ## [1.1.0-rc.33](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.32...v1.1.0-rc.33) (2026-10-28)
 
 
