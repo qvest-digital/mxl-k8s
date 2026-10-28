@@ -104,7 +104,62 @@ type Dispatcher struct {
 	// NotifyProducerAttached a no-op, which is what a dispatcher
 	// wired without a publisher wants.
 	Origin OriginClaimer
+
+	// Limits bounds the mirrors the dispatcher creates. The zero value
+	// creates without bound.
+	Limits Limits
+
+	// limitMu makes counting the mirrors and creating one a single step,
+	// so a burst of requests cannot all pass the count before any
+	// mirror exists. created holds, per requesting pod, when the
+	// dispatcher created a mirror for it inside the burst window.
+	limitMu sync.Mutex
+	created map[types.UID][]time.Time
 }
+
+// Limits bounds the mirrors one node's agent creates on demand. A
+// process that opens every flow of a domain, as a glob over it does,
+// otherwise gets a mirror onto the node for each, and enough of them at
+// once wedge the node. Only mirrors this dispatcher created count: a
+// mirror an MxlReceiver or a redundancy set declared is neither counted
+// nor refused, and a request that an existing mirror already serves
+// creates nothing. Zero leaves a limit off.
+//
+// Burst is what stops a glob. PerPod and PerNode count every live mirror
+// created on demand, and such a mirror lives as long as the pod it was
+// created for, whether or not the pod still reads it, so they bound what
+// a long-lived pod accumulates over its lifetime.
+type Limits struct {
+	// PerPod is how many live mirrors one pod may have had created.
+	PerPod int
+	// PerNode is how many live mirrors may have been created onto this
+	// node, for all pods together.
+	PerNode int
+	// Burst is how many mirrors one pod may have created within
+	// BurstWindow. The history is the agent's memory, so a restarted
+	// agent starts each pod's window afresh.
+	Burst       int
+	BurstWindow time.Duration
+}
+
+// LimitError is a request Limits refused. RetryAfter is how long until
+// it could pass, and is zero for a count of live mirrors: an on-demand
+// mirror lives as long as its pod, so a pod at its count stays there.
+type LimitError struct {
+	msg        string
+	retryAfter time.Duration
+}
+
+func (e *LimitError) Error() string { return e.msg }
+
+// RetryAfter is how long until the request could pass, when the oldest
+// creation in the pod's burst window leaves it; zero when waiting does
+// not make it pass.
+func (e *LimitError) RetryAfter() time.Duration { return e.retryAfter }
+
+// ReasonMirrorLimitReached is the reason of the event a pod gets when a
+// mirror it asked for is refused by a limit.
+const ReasonMirrorLimitReached = "MirrorLimitReached"
 
 // PodResolver finds the pod of a host PID; *podlookup.Resolver is the
 // one the agent runs with.
@@ -447,6 +502,13 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, ref mxlv1alpha1.FlowRef, 
 		return nil, err
 	}
 
+	d.limitMu.Lock()
+	defer d.limitMu.Unlock()
+	if err := d.admit(ctx, pod); err != nil {
+		d.refuse(ctx, ref, pod, err)
+		return nil, err
+	}
+
 	desired := &mxlv1alpha1.MxlFlowMirror{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: pod.GetNamespace(),
@@ -478,7 +540,103 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, ref mxlv1alpha1.FlowRef, 
 		}
 		return &existing, nil
 	}
+	d.created[pod.GetUID()] = append(d.created[pod.GetUID()], d.now())
 	return desired, nil
+}
+
+func (d *Dispatcher) now() time.Time {
+	if d.nowFn != nil {
+		return d.nowFn()
+	}
+	return time.Now()
+}
+
+// admit reports why pod may not have another mirror created, or nil.
+// The caller holds limitMu.
+func (d *Dispatcher) admit(ctx context.Context, pod metav1.Object) error {
+	now := d.now()
+	if d.created == nil {
+		d.created = map[types.UID][]time.Time{}
+	}
+	for uid, at := range d.created {
+		kept := at[:0]
+		for _, t := range at {
+			if now.Sub(t) < d.Limits.BurstWindow {
+				kept = append(kept, t)
+			}
+		}
+		if len(kept) == 0 {
+			delete(d.created, uid)
+		} else {
+			d.created[uid] = kept
+		}
+	}
+	if b := d.Limits.Burst; b > 0 && len(d.created[pod.GetUID()]) >= b {
+		at := d.created[pod.GetUID()]
+		return &LimitError{
+			msg: fmt.Sprintf("pod %s/%s had %d mirrors created on demand in the last %s, its limit",
+				pod.GetNamespace(), pod.GetName(), len(at), d.Limits.BurstWindow),
+			retryAfter: at[0].Add(d.Limits.BurstWindow).Sub(now),
+		}
+	}
+	if d.Limits.PerPod <= 0 && d.Limits.PerNode <= 0 {
+		return nil
+	}
+	var mirrors mxlv1alpha1.MxlFlowMirrorList
+	if err := d.Client.List(ctx, &mirrors,
+		client.MatchingLabels{mxlv1alpha1.LabelCreatedByIntent: d.NodeName}); err != nil {
+		return fmt.Errorf("count on-demand mirrors: %w", err)
+	}
+	node, own := 0, 0
+	for _, m := range mirrors.Items {
+		if !m.DeletionTimestamp.IsZero() || m.Spec.TargetNode != d.NodeName {
+			continue
+		}
+		node++
+		if m.Labels[mxlv1alpha1.LabelRequestorPodUID] == string(pod.GetUID()) {
+			own++
+		}
+	}
+	if d.Limits.PerPod > 0 && own >= d.Limits.PerPod {
+		return &LimitError{msg: fmt.Sprintf("pod %s/%s already has %d mirrors created on demand, its limit",
+			pod.GetNamespace(), pod.GetName(), own)}
+	}
+	if d.Limits.PerNode > 0 && node >= d.Limits.PerNode {
+		return &LimitError{msg: fmt.Sprintf("node %s already has %d mirrors created on demand, its limit",
+			d.NodeName, node)}
+	}
+	return nil
+}
+
+// refuse logs a request a limit refused and records it as an event on
+// the pod, once per pod per refusal window: the pod sees only ENOENT,
+// and a glob is refused for every flow it reaches.
+func (d *Dispatcher) refuse(ctx context.Context, ref mxlv1alpha1.FlowRef, pod metav1.Object, why error) {
+	if !d.shouldLogRefusal("limit/" + string(pod.GetUID())) {
+		return
+	}
+	l := log.FromContext(ctx).WithName("intent")
+	l.Info("intent request refused", "flowID", ref.ID, "pod", pod.GetNamespace()+"/"+pod.GetName(),
+		"reason", why.Error())
+	now := metav1.NewTime(d.now())
+	ev := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: pod.GetName() + ".", Namespace: pod.GetNamespace()},
+		InvolvedObject: corev1.ObjectReference{APIVersion: "v1", Kind: "Pod",
+			Namespace: pod.GetNamespace(), Name: pod.GetName(), UID: pod.GetUID()},
+		Reason: ReasonMirrorLimitReached,
+		Message: fmt.Sprintf("no mirror of flow %s created onto %s: %v; a process waiting on the open "+
+			"gets ENOENT; for one that opened the flow's placeholder, a refusal by the burst limit is "+
+			"asked for again while it runs, and one by a count of live mirrors is final",
+			ref.Name(), d.NodeName, why),
+		Type:           corev1.EventTypeWarning,
+		Source:         corev1.EventSource{Component: "mxl-domain-agent", Host: d.NodeName},
+		FirstTimestamp: now,
+		LastTimestamp:  now,
+		Count:          1,
+	}
+	if err := d.Client.Create(ctx, ev); err != nil {
+		l.Error(err, "record event", "reason", ReasonMirrorLimitReached)
+	}
 }
 
 // resolveProvider decides which libmxl-fabrics provider an on-demand

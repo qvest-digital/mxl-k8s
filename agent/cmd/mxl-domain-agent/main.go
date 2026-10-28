@@ -138,9 +138,15 @@ func run(args []string) error {
 			NodeName:           cfg.NodeName,
 			Provider:           mxlv1alpha1.MxlFabricsProvider(cfg.Provider),
 			MaterializeTimeout: cfg.MaterializeTimeout,
-			Lease:              leaseMgr,
-			Origin:             originClaims{primary: flowPub, trackers: trackers},
-			Own:                own,
+			Limits: intent.Limits{
+				PerPod:      cfg.IntentMirrorsPerPod,
+				PerNode:     cfg.IntentMirrorsPerNode,
+				Burst:       cfg.IntentMirrorBurst,
+				BurstWindow: cfg.IntentMirrorBurstWindow,
+			},
+			Lease:  leaseMgr,
+			Origin: originClaims{primary: flowPub, trackers: trackers},
+			Own:    own,
 			Domains: func() intent.Domains {
 				domainsMu.Lock()
 				defer domainsMu.Unlock()
