@@ -10,6 +10,7 @@ import (
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -54,4 +55,47 @@ func TestSourceReconcile_TargetAddedReportsStageDurations(t *testing.T) {
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, open, 60*time.Millisecond,
 		"the open stage must carry the time the open took")
+}
+
+// After a target gateway restart the target publishes a new TargetInfo
+// while the source still holds the entry it added against the old one,
+// queued behind other re-adds. The shared source goes on transferring
+// to its other targets and stamps lastSentAt on this entry too, and
+// libmxl-fabrics accepts those transfers for a target it is not
+// connected to. Publishing that lastSentAt would tell the target a
+// source is sending into its new fabric side before any source has
+// been added to it, and the target would set itself up again before the
+// re-add lands.
+func TestRunFlusher_EntryOnAReplacedTargetInfo_PublishesNothing(t *testing.T) {
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithFinalizer(key.Name, key.Namespace, "node-a", "flow-1", "info-new")
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+	r := &SourceReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		NodeName: "node-a",
+		sources:  map[types.NamespacedName]*sourceEntry{},
+		attempts: attemptTable[sourceAddInputs]{},
+	}
+	entry := &sourceEntry{key: key, shared: testShared("flow-1", fabrics.ProviderTCP), infoStr: "info-old"}
+	entry.progress.Store(1)
+	sent := time.Now()
+	entry.lastSentAt.Store(&sent)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go r.runFlusher(ctx, done, entry, 2*time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &got))
+	require.Nil(t, got.Status.LastSentAt,
+		"an entry added against a replaced TargetInfo published lastSentAt")
 }

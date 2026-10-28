@@ -1211,7 +1211,7 @@ func TestSource_FlusherSuppressesIdenticalTicksAfterFirstTransfer(t *testing.T) 
 		attempts:      attemptTable[sourceAddInputs]{},
 	}
 
-	entry := &sourceEntry{key: key, shared: testShared("flow-1", fabrics.ProviderTCP)}
+	entry := &sourceEntry{key: key, shared: testShared("flow-1", fabrics.ProviderTCP), infoStr: "info-1"}
 	entry.progress.Store(1)
 	transferAt := time.Now()
 	entry.lastSentAt.Store(&transferAt)

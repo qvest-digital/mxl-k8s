@@ -619,7 +619,6 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		existing = nil
 	}
-
 	if existing != nil {
 		if existing.infoStr == mirror.Status.TargetInfo {
 			return ctrl.Result{}, nil
@@ -2013,6 +2012,17 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 			return
 		case <-t.C:
 		}
+		// An entry added against a TargetInfo the target has since
+		// replaced is waiting for its reconcile to re-add it, and
+		// publishes nothing meanwhile. Its transfers reach no connection
+		// to the current fabric side -- libmxl-fabrics accepts a transfer
+		// for a target it is not connected to -- and a shared source
+		// stamps lastSentAt on every entry attached to it, so a publish
+		// here would tell the target that a source is sending into its
+		// new fabric side before any source has been added to it.
+		if r.attachedToReplacedTarget(ctx, entry) {
+			continue
+		}
 		state := observedState(entry, r.readerStallAfter())
 
 		// A reader that has stopped feeding the fabric is the one wedge
@@ -2095,6 +2105,16 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 		last = state
 		first = false
 	}
+}
+
+// attachedToReplacedTarget reports whether the mirror now publishes a
+// TargetInfo other than the one entry was added against.
+func (r *SourceReconciler) attachedToReplacedTarget(ctx context.Context, entry *sourceEntry) bool {
+	var mirror mxlv1alpha1.MxlFlowMirror
+	if err := r.Get(ctx, entry.key, &mirror); err != nil {
+		return false
+	}
+	return mirror.Status.TargetInfo != entry.infoStr
 }
 
 // bumpReaderRebuilds records one more consecutive reopen of the shared
