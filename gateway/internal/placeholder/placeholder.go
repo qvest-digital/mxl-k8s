@@ -253,8 +253,9 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 // That holds for a domain opened after the first pass too. The pass may
 // have failed to open it for a flow in it, which then holds nothing
 // until its retry; a domain opened later by a mirror or once it is ready
-// here is therefore judged by the next pass, not on the spot. While the
-// MxlFlows cannot be listed for that pass, the stale markers stay.
+// here is therefore judged by the next pass, not on the spot, and keeps
+// its stale markers for up to one Period. While the MxlFlows cannot be
+// listed for that pass, the stale markers stay.
 //
 // DomainOpened runs under the instance set's lock and only queues the
 // domain: the pass opens domains through the same set.
@@ -273,6 +274,12 @@ func (m *Manager) sweep(ctx context.Context, l logr.Logger) bool {
 		l.Error(err, "list MxlFlows for the first placeholder pass")
 		return false
 	}
+	// Only the domains already open when the reconciles start are judged:
+	// one opened while they run may have a flow reconciled before its open,
+	// whose placeholder is not held yet. It waits for the next pass.
+	m.mu.Lock()
+	judged := len(m.opened)
+	m.mu.Unlock()
 	for _, f := range flows.Items {
 		if _, err := m.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: f.Name}}); err != nil {
 			l.Error(err, "reconcile placeholder", "flow", f.Name)
@@ -282,8 +289,8 @@ func (m *Manager) sweep(ctx context.Context, l logr.Logger) bool {
 	m.rmu.Lock()
 	defer m.rmu.Unlock()
 	m.mu.Lock()
-	domains := m.opened
-	m.opened, m.swept = nil, true
+	domains := m.opened[:judged:judged]
+	m.opened, m.swept = m.opened[judged:], true
 	m.mu.Unlock()
 	for _, d := range domains {
 		if err := m.clearStaleMarkers(d); err != nil {
