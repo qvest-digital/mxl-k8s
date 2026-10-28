@@ -79,8 +79,8 @@ type Dispatcher struct {
 	// default.
 	PollInterval time.Duration
 
-	// FlowChecker overrides the filesystem-based local-flow check.
-	// Nil falls back to the default stat under DomainPath.
+	// FlowChecker replaces the whole local-flow check, the listing of
+	// the domain included. Nil uses the default under DomainPath.
 	FlowChecker FlowChecker
 
 	// Lease, when set, gates resolveSourceNode's Origin picks on a
@@ -315,10 +315,16 @@ func (d *Dispatcher) flowExistsLocally(ref mxlv1alpha1.FlowRef) bool {
 	if !listed(dir, ref.ID+".mxl-flow") {
 		return false
 	}
-	_, err := os.Stat(filepath.Join(dir, ref.ID+".mxl-flow", "flow_def.json"))
+	// The directory is listed, so its dentry is positive and the walk into
+	// it does not wait; flow_def.json is no flow name and never waits.
+	_, err := statFlowDef(filepath.Join(dir, ref.ID+".mxl-flow", "flow_def.json"))
 	// A placeholder lists the flow without holding it.
 	return err == nil && !mxlv1alpha1.IsPlaceholder(dir, ref.ID)
 }
+
+// statFlowDef looks a flow's flow_def.json up by name. A seam for tests,
+// which have no mxlfs to show that a lookup of a missing flow waits.
+var statFlowDef = os.Stat
 
 // listed reports whether dir has an entry called name, reading the
 // directory instead of looking the name up.

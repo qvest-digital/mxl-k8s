@@ -803,3 +803,29 @@ func TestRefusalLogIsDeduplicated(t *testing.T) {
 	now = now.Add(refusalLogWindow + time.Second)
 	assert.True(t, d.shouldLogRefusal("/run/mxl/other/a.mxl-flow/data"), "after the window")
 }
+
+// On mxlfs a lookup by name of a flow directory that is not there waits for
+// it, so the local check looks a flow up by name only once the domain
+// listing has returned it.
+func TestFlowExistsLocally_LooksUpOnlyListedFlows(t *testing.T) {
+	domain := t.TempDir()
+	const listedID = "22222222-2222-4222-8222-222222222222"
+	flowDir := filepath.Join(domain, listedID+".mxl-flow")
+	require.NoError(t, os.Mkdir(flowDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(flowDir, "flow_def.json"), []byte(`{}`), 0o644))
+
+	var looked []string
+	stat := statFlowDef
+	statFlowDef = func(name string) (os.FileInfo, error) {
+		looked = append(looked, name)
+		return stat(name)
+	}
+	t.Cleanup(func() { statFlowDef = stat })
+
+	d := &Dispatcher{DomainPath: domain}
+	require.False(t, d.flowExistsLocally(mxlv1alpha1.FlowRef{ID: flowID}))
+	assert.Empty(t, looked, "a flow the listing did not return was looked up by name")
+
+	require.True(t, d.flowExistsLocally(mxlv1alpha1.FlowRef{ID: listedID}))
+	assert.Equal(t, []string{filepath.Join(flowDir, "flow_def.json")}, looked)
+}
