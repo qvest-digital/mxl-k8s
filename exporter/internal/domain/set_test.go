@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -82,13 +83,65 @@ func TestSetFollowsDomainsAppearingAndLeaving(t *testing.T) {
 	require.Equal(t, []string{primary}, paths(s.Domains()))
 
 	studio := filepath.Join(others, "5d0c4a9e-0000-4000-8000-000000000002")
-	require.NoError(t, os.MkdirAll(studio, 0o755))
+	writeFlow(t, studio)
 	require.NoError(t, s.Scan())
 	require.Equal(t, []string{primary, studio}, paths(s.Domains()))
+	gone := s.Domains()[1]
+	require.Len(t, gone.Observe(), 1)
 
 	require.NoError(t, os.RemoveAll(studio))
 	require.NoError(t, s.Scan())
 	require.Equal(t, []string{primary}, paths(s.Domains()))
+	// Only Close empties a Domain's flows: one left open keeps its libmxl
+	// instance and its readers' mappings of rings that were removed.
+	require.Empty(t, gone.flows, "a domain that went was not closed")
+}
+
+// A listing of domains/ that fails says nothing about which domains left,
+// so those already open keep being reported.
+func TestSetKeepsOpenDomainsWhenTheListingFails(t *testing.T) {
+	primary, others := runtimeRoot(t)
+	studio := filepath.Join(others, "5d0c4a9e-0000-4000-8000-000000000004")
+	writeFlow(t, studio)
+	s, err := OpenSet(primary, time.Minute)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	require.NoError(t, s.Scan())
+	require.Equal(t, []string{primary, studio}, paths(s.Domains()))
+
+	// A regular file where domains/ was: ReadDir fails with ENOTDIR.
+	notADir := filepath.Join(t.TempDir(), "domains")
+	require.NoError(t, os.WriteFile(notADir, nil, 0o644))
+	s.root = notADir
+	require.Error(t, s.Scan())
+	require.Equal(t, []string{primary, studio}, paths(s.Domains()))
+	require.Len(t, s.Domains()[1].Observe(), 1)
+}
+
+// A directory below domains/ that will not open is reported once, not on
+// every scan for as long as it stays.
+func TestSetReportsADomainThatWillNotOpenOnce(t *testing.T) {
+	primary, others := runtimeRoot(t)
+	bad := filepath.Join(others, "5d0c4a9e-0000-4000-8000-000000000005")
+	require.NoError(t, os.MkdirAll(bad, 0o755))
+	s, err := OpenSet(primary, time.Minute)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	s.open = func(path string, lifetime time.Duration) (*Domain, error) {
+		if path == bad {
+			return nil, errors.New("will not open")
+		}
+		return Open(path, lifetime)
+	}
+
+	require.Error(t, s.Scan())
+	require.NoError(t, s.Scan(), "the same open failure was reported again")
+
+	// Once it has gone, a new failure under that path is news again.
+	require.NoError(t, os.RemoveAll(bad))
+	require.NoError(t, s.Scan())
+	require.NoError(t, os.MkdirAll(bad, 0o755))
+	require.Error(t, s.Scan())
 }
 
 // A placeholder in another domain is skipped the same way as in the

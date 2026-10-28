@@ -30,6 +30,9 @@ type Set struct {
 
 	mu     sync.Mutex
 	others map[string]*Domain // by path
+	// failed are the paths that would not open, so each is reported once
+	// rather than on every scan until it opens or goes.
+	failed map[string]bool
 }
 
 // OpenSet opens the primary domain at primaryPath. The others are found
@@ -44,6 +47,7 @@ func OpenSet(primaryPath string, lifetime time.Duration) (*Set, error) {
 		root:     filepath.Join(filepath.Dir(filepath.Clean(primaryPath)), mxlv1alpha1.DomainsDir),
 		lifetime: lifetime,
 		others:   map[string]*Domain{},
+		failed:   map[string]bool{},
 	}, nil
 }
 
@@ -51,8 +55,9 @@ func OpenSet(primaryPath string, lifetime time.Duration) (*Set, error) {
 // domains/, closes every one that left, and scans the rest. Only
 // domains/ itself is listed to find them: a path walk into a missing
 // flow name on an mxlfs waits for it and asks for it to be mirrored. A
-// domain that fails to open or scan is retried on the next Scan, and its
-// error is returned with the others'.
+// domain that fails to open or scan is retried on the next Scan. A scan
+// error is returned with the others' on every Scan, an open error on the
+// first that fails to open that path.
 func (s *Set) Scan() error {
 	errs := []error{s.primary.Scan()}
 
@@ -87,15 +92,24 @@ func (s *Set) Scan() error {
 			delete(s.others, path)
 		}
 	}
+	for path := range s.failed {
+		if !found[path] {
+			delete(s.failed, path)
+		}
+	}
 	var scan []*Domain
 	for path := range found {
 		d, ok := s.others[path]
 		if !ok {
 			var openErr error
 			if d, openErr = open(path, s.lifetime); openErr != nil {
-				errs = append(errs, openErr)
+				if !s.failed[path] {
+					errs = append(errs, openErr)
+				}
+				s.failed[path] = true
 				continue
 			}
+			delete(s.failed, path)
 			s.others[path] = d
 		}
 		scan = append(scan, d)
