@@ -619,6 +619,10 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		existing = nil
 	}
+	// Its own stage: an origin rotation reconciles every other mirror of
+	// the flow inline, which is not this mirror's re-add.
+	sw.lap("originReopen")
+
 	if existing != nil {
 		if existing.infoStr == mirror.Status.TargetInfo {
 			return ctrl.Result{}, nil
@@ -683,12 +687,12 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// live, and opens one when this is the flow's first mirror or the
 	// origin rotation above tore the previous one down.
 	sw.lap("liveCheck")
-	shared, err = r.openShared(skey, originAt)
+	shared, opened, err := r.openShared(skey, originAt)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("open initiator: %w", err)
 	}
 	sw.lap("open")
-	if shared.openedAt.After(started) {
+	if opened {
 		sw.stages = append(sw.stages,
 			"openReader", shared.openSteps.reader.String(),
 			"openSetup", shared.openSteps.setup.String())
@@ -778,20 +782,20 @@ func (w *stopwatch) skip() { w.last = time.Now() }
 // is the first mirror to want it. The libmxl work happens outside the
 // reconciler's mutex, so a concurrent opener can win the race; the
 // loser closes what it built and takes the winner's source.
-func (r *SourceReconciler) openShared(skey sourceKey, originAt *time.Time) (*sharedSource, error) {
+func (r *SourceReconciler) openShared(skey sourceKey, originAt *time.Time) (s *sharedSource, opened bool, err error) {
 	r.mu.Lock()
 	if r.shared == nil {
 		r.shared = make(map[sourceKey]*sharedSource)
 	}
-	s := r.shared[skey]
+	s = r.shared[skey]
 	r.mu.Unlock()
 	if s != nil {
-		return s, nil
+		return s, false, nil
 	}
 
-	s, err := r.opener.open(skey)
+	s, err = r.opener.open(skey)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	s.key = skey
 	s.openedAt = time.Now()
@@ -804,11 +808,11 @@ func (r *SourceReconciler) openShared(skey sourceKey, originAt *time.Time) (*sha
 	if dup := r.shared[skey]; dup != nil {
 		r.mu.Unlock()
 		closeShared(s)
-		return dup, nil
+		return dup, false, nil
 	}
 	r.shared[skey] = s
 	r.mu.Unlock()
-	return s, nil
+	return s, true, nil
 }
 
 // releaseIfUnused closes a shared source no mirror is attached to.

@@ -48,7 +48,7 @@ func TestSourceReconcile_TargetAddedReportsStageDurations(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.NotNil(t, added, "no target added line")
-	for _, stage := range []string{"took", "lookup", "close", "liveCheck", "open", "attach", "openReader", "openSetup"} {
+	for _, stage := range []string{"took", "lookup", "originReopen", "close", "liveCheck", "open", "attach", "openReader", "openSetup"} {
 		require.Contains(t, added, stage)
 	}
 	open, err := time.ParseDuration(added["open"].(string))
