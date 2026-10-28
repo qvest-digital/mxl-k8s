@@ -169,39 +169,34 @@ func TestMaterialize_InvalidPath_ErrorsWithoutSideEffects(t *testing.T) {
 			"a buggy shim can spam unrelated mirrors into the cluster")
 }
 
-func TestMaterialize_MissingFlow_Errors(t *testing.T) {
-	scheme := newScheme(t)
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
-		WithObjects(&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: "ns",
-				Name:      "consumer",
-				UID:       "uid-1",
-			},
-			Spec: corev1.PodSpec{NodeName: "n1"},
-		}).
-		Build()
+type goneProcess struct{ asked bool }
 
+func (g *goneProcess) PodForPID(context.Context, int32) (*corev1.Pod, error) {
+	g.asked = true
+	return nil, os.ErrNotExist
+}
+
+// A reader refused a flow nobody publishes exits before its pid is
+// resolved. The refusal must still name the missing MxlFlow: a pod
+// lookup error in its place hides that the flow id matches nothing in
+// the cluster, which is the only reason no mirror can come.
+func TestMaterialize_MissingFlow_ReportedBeforePodLookup(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	pids := &goneProcess{}
 	d := &Dispatcher{
 		Client:      c,
-		Resolver:    &podlookup.Resolver{Client: c, NodeName: "n1"},
+		Resolver:    pids,
 		DomainPath:  "/run/mxl/domain",
 		NodeName:    "n1",
 		FlowChecker: func(string) bool { return false },
 	}
 
-	// Materialize cannot call PodForPID without /proc; bypass via a
-	// shortcut: when FlowChecker says true on second call, the
-	// dispatcher early-returns. Instead test the
-	// resolveSourceNode-missing-flow case by exercising it directly.
-	res, err := d.resolveSourceNode(context.Background(), mxlv1alpha1.FlowRef{ID: "missing-flow"})
-	require.NoError(t, err)
-	assert.False(t, res.Found)
-	assert.False(t, res.AllStale,
+	err := d.Materialize(context.Background(), 42, "/run/mxl/domain/"+flowID+".mxl-flow/data")
+	require.Error(t, err)
+	assert.Equal(t, "MxlFlow not yet known cluster-wide", err.Error(),
 		"a flow with no MxlFlow at all is not the same as one whose "+
 			"Origins are all stale; the shim is told which")
+	assert.False(t, pids.asked, "no mirror can follow, so the reader's pod is not needed")
 }
 
 func TestMaterialize_SourceIsLocalNode_NoOps(t *testing.T) {

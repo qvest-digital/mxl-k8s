@@ -152,6 +152,20 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 	wctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Before the pod lookup: a reader refused a flow nobody publishes
+	// usually exits before its pid can be resolved, and the reason
+	// logged must then still be the missing flow, not the gone pid.
+	res, err := d.resolveSourceNode(wctx, ref)
+	if err != nil {
+		return fmt.Errorf("resolve source node: %w", err)
+	}
+	if !res.Found {
+		if res.AllStale {
+			return errors.New("all Origin locations have an expired Lease")
+		}
+		return errors.New("MxlFlow not yet known cluster-wide")
+	}
+
 	pod, err := d.Resolver.PodForPID(wctx, pid)
 	if err != nil {
 		return fmt.Errorf("pod lookup: %w", err)
@@ -170,16 +184,6 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 	)
 	l.Info("intent request received")
 
-	res, err := d.resolveSourceNode(wctx, ref)
-	if err != nil {
-		return fmt.Errorf("resolve source node: %w", err)
-	}
-	if !res.Found {
-		if res.AllStale {
-			return errors.New("all Origin locations have an expired Lease")
-		}
-		return errors.New("MxlFlow not yet known cluster-wide")
-	}
 	sourceNode := res.Node
 	if sourceNode == d.NodeName {
 		// The flow's origin is this node; the producer should have
