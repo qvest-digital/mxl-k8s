@@ -140,7 +140,7 @@ func TestEnsureMirror_ConcurrentRequestsShareTheLimit(t *testing.T) {
 // The per-pod limit counts the live mirrors created for that pod,
 // across windows; another pod has its own.
 func TestEnsureMirror_PerPodLimitCountsLiveMirrors(t *testing.T) {
-	d, c, now := limitedDispatcher(t, Limits{PerPod: 3})
+	d, c, now := limitedDispatcher(t, Limits{PerPod: 3, BurstWindow: 10 * time.Second})
 	a, b := consumer("a", "uid-a"), consumer("b", "uid-b")
 
 	for i := range 3 {
@@ -152,8 +152,8 @@ func TestEnsureMirror_PerPodLimitCountsLiveMirrors(t *testing.T) {
 	require.ErrorContains(t, err, "already has 3 mirrors created on demand")
 	var le *LimitError
 	require.ErrorAs(t, err, &le)
-	assert.Zero(t, le.RetryAfter(), "a pod at its count of live mirrors stays there while it lives; "+
-		"asking again would only poll the API")
+	assert.Zero(t, le.RetryAfter(), "a pod at its count of live mirrors stays there while it lives, "+
+		"whatever the burst window; asking again would only poll the API")
 
 	_, err = d.ensureMirror(context.Background(), globFlow(4), "n-src", b)
 	require.NoError(t, err, "another pod's mirrors count against its own limit")
@@ -169,7 +169,7 @@ func TestEnsureMirror_PerPodLimitCountsLiveMirrors(t *testing.T) {
 
 // The node limit counts every pod's mirrors onto the node.
 func TestEnsureMirror_PerNodeLimitCountsEveryPod(t *testing.T) {
-	d, _, _ := limitedDispatcher(t, Limits{PerNode: 2})
+	d, _, _ := limitedDispatcher(t, Limits{PerNode: 2, BurstWindow: 10 * time.Second})
 
 	_, err := d.ensureMirror(context.Background(), globFlow(0), "n-src", consumer("a", "uid-a"))
 	require.NoError(t, err)
@@ -177,6 +177,9 @@ func TestEnsureMirror_PerNodeLimitCountsEveryPod(t *testing.T) {
 	require.NoError(t, err)
 	_, err = d.ensureMirror(context.Background(), globFlow(2), "n-src", consumer("c", "uid-c"))
 	require.ErrorContains(t, err, "node n-target already has 2 mirrors created on demand")
+	var le *LimitError
+	require.ErrorAs(t, err, &le)
+	assert.Zero(t, le.RetryAfter(), "a node at its count stays there while its pods live, whatever the burst window")
 }
 
 // Only mirrors this agent created on demand count. A receiver's mirror
