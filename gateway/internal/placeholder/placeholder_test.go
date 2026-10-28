@@ -3,6 +3,7 @@ package placeholder
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -442,17 +443,50 @@ func TestFirstPassClearsTheMarkersNothingHolds(t *testing.T) {
 	require.Empty(t, m.Held())
 }
 
+// The first pass can fail to open a domain for a flow in it, which then
+// holds nothing until its retry. Opened afterwards -- by a mirror, or
+// because it is ready here -- the domain still keeps the marker the
+// previous gateway left until a pass has held that placeholder again:
+// cleared on open, the directory read as a local copy in between, which
+// is the window the first pass exists to close.
+func TestADomainOpenedAfterAFailedFirstPassKeepsItsMarkers(t *testing.T) {
+	h := newDomain(t)
+	leaveBehind(t, h)
+	m := newManager(t, h, flow(origin))
+	domain := m.Domain
+	m.Domain = func(context.Context, string) (Handles, error) { return nil, errors.New("not mounted yet") }
+	require.True(t, m.sweep(context.Background(), logr.Discard()))
+	require.Empty(t, m.Held())
+
+	m.Domain = domain
+	m.DomainOpened(h.dir)
+	require.True(t, IsPlaceholder(h.dir, flowID), "the marker went on open, before any pass held the placeholder again")
+
+	require.True(t, m.unjudged(), "no pass is due for the domain opened late")
+	require.True(t, m.sweep(context.Background(), logr.Discard()))
+	require.Equal(t, []string{flowID}, m.Held())
+	require.True(t, IsPlaceholder(h.dir, flowID))
+	require.False(t, m.unjudged())
+}
+
 // A domain first opened after the first pass holds no placeholder of
-// this gateway yet, so every marker in it is left over.
-func TestADomainOpenedAfterTheFirstPassIsClearedAtOnce(t *testing.T) {
+// this gateway yet, so every marker in it that the next pass does not
+// hold again is left over, and Start runs that pass.
+func TestADomainOpenedAfterTheFirstPassIsJudgedByTheNext(t *testing.T) {
 	h := newDomain(t)
 	m := newManager(t, h)
-	require.True(t, m.sweep(context.Background(), logr.Discard()))
-	writeMarker(t, h, flowID)
+	m.Period = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = m.Start(ctx) }()
+	defer func() { cancel(); <-done }()
+	require.Eventually(t, func() bool { return !m.unjudged() }, 5*time.Second, 10*time.Millisecond)
 
+	writeMarker(t, h, flowID)
 	m.DomainOpened(h.dir)
 
-	require.False(t, IsPlaceholder(h.dir, flowID))
+	require.Eventually(t, func() bool { return !IsPlaceholder(h.dir, flowID) },
+		5*time.Second, 10*time.Millisecond, "a marker nothing holds outlived the pass after its domain opened")
 }
 
 func TestSameGeometry(t *testing.T) {
