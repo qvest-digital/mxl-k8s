@@ -2196,28 +2196,7 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// flusher tests construct bare targetEntry values and drive
 		// the flusher directly): the watchdog must not fire on an
 		// entry whose fabric side was never actually opened.
-		openedAt := entry.fabricOpenedAt.Load()
-		neverHandshook := false
-		if openedAt != nil &&
-			entry.commits.Load() == entry.commitsAtFabricOpen.Load() &&
-			time.Since(*openedAt) > r.stuckHandshakeAfter() {
-			if mirror, err := r.fetchMirror(ctx, key); err == nil &&
-				sourceIsDelivering(mirror, *openedAt) {
-				neverHandshook = true
-			}
-		}
-		postHandshakeWedge := false
-		if openedAt != nil && entry.commits.Load() > entry.commitsAtFabricOpen.Load() {
-			lastCommit := entry.lastCommitAt.Load()
-			if lastCommit != nil {
-				if mirror, err := r.fetchMirror(ctx, key); err == nil &&
-					mirror.Status.LastSentAt != nil &&
-					mirror.Status.LastSentAt.Time.Sub(*lastCommit) > r.stuckHandshakeAfter() {
-					postHandshakeWedge = true
-				}
-			}
-		}
-		if neverHandshook || postHandshakeWedge {
+		if r.wedged(ctx, key, entry) {
 			if entry.recoveryAttempts.Load() >= maxStuckRebuilds {
 				// Cap reached: rebuilds keep failing to attract a
 				// commit. Publish a terminal Phase=Failed so operators
@@ -2289,29 +2268,7 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 				// the mirror covers the post-handshake variant: a
 				// LastSentAt change that lands in the same window
 				// must be observed before the spawn commits.
-				openedAt2 := entry.fabricOpenedAt.Load()
-				neverHandshook2 := false
-				if openedAt2 != nil &&
-					entry.commits.Load() == entry.commitsAtFabricOpen.Load() &&
-					time.Since(*openedAt2) > r.stuckHandshakeAfter() {
-					if mirror, err := r.fetchMirror(ctx, key); err == nil &&
-						mirror.Status.LastSentAt != nil &&
-						mirror.Status.LastSentAt.Time.After(*openedAt2) {
-						neverHandshook2 = true
-					}
-				}
-				postHandshakeWedge2 := false
-				if openedAt2 != nil && entry.commits.Load() > entry.commitsAtFabricOpen.Load() {
-					lastCommit2 := entry.lastCommitAt.Load()
-					if lastCommit2 != nil {
-						if mirror, err := r.fetchMirror(ctx, key); err == nil &&
-							mirror.Status.LastSentAt != nil &&
-							mirror.Status.LastSentAt.Time.Sub(*lastCommit2) > r.stuckHandshakeAfter() {
-							postHandshakeWedge2 = true
-						}
-					}
-				}
-				if !neverHandshook2 && !postHandshakeWedge2 {
+				if !r.wedged(ctx, key, entry) {
 					entry.recovering.Store(false)
 					continue
 				}
@@ -2347,6 +2304,34 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 				"mirror", key, "reason", state.reason)
 		}
 	}
+}
+
+// wedged reports whether the entry's fabric side shows either wedge
+// shape the flusher's watchdog recovers from; see runFlusher. The
+// watchdog asks it twice, before and after taking the recovery gate,
+// and both answers have to come from the same predicate: a re-check
+// that is stricter than the first look discards every spawn the
+// first look asks for.
+func (r *TargetReconciler) wedged(ctx context.Context, key types.NamespacedName, entry *targetEntry) bool {
+	openedAt := entry.fabricOpenedAt.Load()
+	if openedAt == nil {
+		return false
+	}
+	commits, atOpen := entry.commits.Load(), entry.commitsAtFabricOpen.Load()
+	if commits == atOpen {
+		if time.Since(*openedAt) <= r.stuckHandshakeAfter() {
+			return false
+		}
+		mirror, err := r.fetchMirror(ctx, key)
+		return err == nil && sourceIsDelivering(mirror, *openedAt)
+	}
+	lastCommit := entry.lastCommitAt.Load()
+	if commits < atOpen || lastCommit == nil {
+		return false
+	}
+	mirror, err := r.fetchMirror(ctx, key)
+	return err == nil && mirror.Status.LastSentAt != nil &&
+		mirror.Status.LastSentAt.Time.Sub(*lastCommit) > r.stuckHandshakeAfter()
 }
 
 // observedTargetState derives the TargetProgress state the flusher

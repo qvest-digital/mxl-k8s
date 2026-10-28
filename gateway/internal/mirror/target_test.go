@@ -1075,6 +1075,36 @@ func TestRunFlusher_NeverHandshook_StaleSource_DoesNotTrigger(t *testing.T) {
 		"pre-open source activity must not accumulate recovery attempts")
 }
 
+// A source whose initiator cannot reach the target transfers nothing,
+// so lastSentAt stays where the previous fabric side left it, and the
+// source says so with TransfersNotLanding. sourceIsDelivering counts
+// that as a source trying to deliver; the watchdog has to act on it
+// at the re-check it makes after taking the recovery gate as well as
+// at the first look, or the spawn the first look asks for is dropped
+// on every tick and the mirror waits forever.
+func TestRunFlusher_NeverHandshook_TransfersNotLanding_TriggersRecovery(t *testing.T) {
+	f := newTargetWatchdogFixture(t, 4)
+	var current mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, f.c.Get(context.Background(), f.key, &current))
+	current.Status.LastSentAt = &metav1.Time{Time: time.Now().Add(-2 * time.Hour)}
+	current.Status.Conditions = []metav1.Condition{{
+		Type:               mxlv1alpha1.ConditionTypeSourceProgress,
+		Status:             metav1.ConditionFalse,
+		Reason:             mxlv1alpha1.ReasonTransfersNotLanding,
+		LastTransitionTime: metav1.Now(),
+	}}
+	require.NoError(t, f.c.Status().Update(context.Background(), &current))
+	f.startFlusher(t)
+	defer f.stopFlusher(t)
+
+	select {
+	case <-f.spawnCh:
+	case <-time.After(time.Second):
+		t.Fatal("a source reporting TransfersNotLanding into a fabric side " +
+			"that never committed did not get the target set up again")
+	}
+}
+
 func TestRunFlusher_CommitDisarmsWatchdog(t *testing.T) {
 	// One commit recorded after the fabric opened: the flusher must
 	// NOT spawn recovery. The discriminator is "no progress since
