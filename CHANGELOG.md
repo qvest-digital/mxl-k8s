@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.36](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.35...v1.1.0-rc.36) (2026-10-28)
+
+
+### Bug Fixes
+
+* **gateway:** stop setting an RC target up again on a source re-add ([#396](https://github.com/qvest-digital/mxl-k8s/issues/396)) ([5bb09b3](https://github.com/qvest-digital/mxl-k8s/commit/5bb09b30e513957528e50c50baa5c687d2eed121))
+
 ## [1.1.0-rc.35](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.34...v1.1.0-rc.35) (2026-10-28)
 
 
