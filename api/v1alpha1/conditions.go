@@ -120,6 +120,14 @@ const (
 	// status.stalledMembers entry. Owned by the operator. A False
 	// condition names the members the output is served without.
 	ConditionTypeMembersReady = "MembersReady"
+
+	// ConditionTypeOutputReady reports whether every node in an
+	// MxlFlowRedundancySet's status.nodes has a gateway that can merge
+	// the output there: a gateway pod on the node, not terminating,
+	// Ready for at least a few seconds. Owned by the operator. A False
+	// condition names the nodes the output is not served on. Members
+	// that stop are reported by ConditionTypeMembersReady, not here.
+	ConditionTypeOutputReady = "OutputReady"
 )
 
 // Condition reason constants for MxlFlowMirror and MxlFlow status.

@@ -156,9 +156,10 @@ func reconcilers(mgr ctrl.Manager, gcGrace time.Duration, mxlfs bool, setMirrorN
 	}
 	if mxlfs {
 		rs = append(rs, reconciler{"MxlFlowRedundancySet", (&redundancyset.Reconciler{
-			Client:    mgr.GetClient(),
-			Namespace: ownNamespace(setMirrorNS),
-			Lease:     &leasecheck.Checker{Client: mgr.GetClient()},
+			Client:           mgr.GetClient(),
+			Namespace:        ownNamespace(setMirrorNS),
+			GatewayNamespace: ownNamespace(""),
+			Lease:            &leasecheck.Checker{Client: mgr.GetClient()},
 		}).SetupWithManager})
 	}
 	return rs

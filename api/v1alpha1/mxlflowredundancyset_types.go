@@ -119,8 +119,10 @@ type MxlFlowRedundancySetStatus struct {
 
 	// Conditions: Valid reports whether the members can be merged,
 	// MembersReady whether every member is produced in the output's
-	// geometry and advances on every node the output is served on. A
-	// member of a data format is not judged on whether it advances.
+	// geometry and advances on every node the output is served on, and
+	// OutputReady whether every node in nodes has a gateway up to merge
+	// the output. A member of a data format is not judged on whether it
+	// advances.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
