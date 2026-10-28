@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0-rc.38](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.37...v1.1.0-rc.38) (2026-10-28)
+
+
+### Bug Fixes
+
+* **gateway:** add a target again once its initiator has dropped it ([0bf5fde](https://github.com/qvest-digital/mxl-k8s/commit/0bf5fdeda56066ff8e9d49a53ea4ca808a690d01))
+
+
+### Dependencies
+
+* **go-mxl:** update go-mxl to v1.1.0-rc.9 ([0bf5fde](https://github.com/qvest-digital/mxl-k8s/commit/0bf5fdeda56066ff8e9d49a53ea4ca808a690d01))
+
 ## [1.1.0-rc.37](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.36...v1.1.0-rc.37) (2026-10-28)
 
 
