@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.1.0-rc.33](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.32...v1.1.0-rc.33) (2026-10-28)
+
+
+### Features
+
+* **agent:** limit the mirrors a pod gets created on demand ([#385](https://github.com/qvest-digital/mxl-k8s/issues/385)) ([ed677bb](https://github.com/qvest-digital/mxl-k8s/commit/ed677bb7d18fc755de8fecc315d712a44180507b))
+* **api:** add MxlFlowMirror status.targetAddedAt ([9806ee9](https://github.com/qvest-digital/mxl-k8s/commit/9806ee9f420c0e2b98a9b0b38ee0321284b19929))
+* **operator:** report a redundancy set's output down with its gateway ([#382](https://github.com/qvest-digital/mxl-k8s/issues/382)) ([1bad348](https://github.com/qvest-digital/mxl-k8s/commit/1bad348680048d58548ae98e933e6617b41c750e))
+
+
+### Bug Fixes
+
+* **agent:** resolve a reader's pod before any local flow check ([#379](https://github.com/qvest-digital/mxl-k8s/issues/379)) ([3d49346](https://github.com/qvest-digital/mxl-k8s/commit/3d49346b9060c09ab007b7714fceca4bc86d3ba3))
+* **gateway:** keep placeholder markers until they are held again ([#380](https://github.com/qvest-digital/mxl-k8s/issues/380)) ([057956f](https://github.com/qvest-digital/mxl-k8s/commit/057956f88f78718dce11976ad96278a2cb22cb17))
+* **gateway:** log the times a source re-add was judged on ([#386](https://github.com/qvest-digital/mxl-k8s/issues/386)) ([1156128](https://github.com/qvest-digital/mxl-k8s/commit/11561280ea901ebabefc75a89c62d3921d579d4e))
+* **gateway:** set an RC target up again when its source reconnects ([9806ee9](https://github.com/qvest-digital/mxl-k8s/commit/9806ee9f420c0e2b98a9b0b38ee0321284b19929))
+
 ## [1.1.0-rc.32](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.31...v1.1.0-rc.32) (2026-10-27)
 
 
