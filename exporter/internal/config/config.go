@@ -14,8 +14,9 @@ type Config struct {
 	// distinguishable samples rather than three indistinguishable ones.
 	NodeName string
 
-	// DomainPath is the absolute path of the MXL domain directory to
-	// report on. One mxl.Instance is opened against it at boot.
+	// DomainPath is the absolute path of the primary MXL domain
+	// directory. One mxl.Instance is opened against it at boot, and one
+	// against each directory below domains/ next to it as it appears.
 	DomainPath string
 
 	// MetricsAddr is the address the /metrics endpoint binds to.
@@ -58,7 +59,7 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.StringVar(&c.NodeName, "node-name", os.Getenv("NODE_NAME"),
 		"Kubernetes node name (defaults to $NODE_NAME).")
 	fs.StringVar(&c.DomainPath, "domain-path", os.Getenv("MXL_DOMAIN"),
-		"Absolute path to the MXL domain directory to export metrics for.")
+		"Absolute path to the primary MXL domain directory; every directory below domains/ next to it is exported too.")
 	fs.StringVar(&c.MetricsAddr, "metrics-bind-address", ":8080",
 		"Address the metrics endpoint binds to.")
 	fs.StringVar(&c.ProbeAddr, "health-probe-bind-address", ":8081",

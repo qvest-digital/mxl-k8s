@@ -84,14 +84,15 @@ type Source interface {
 	Path() string
 }
 
-// FlowCollector exports one series set per flow in the domain.
+// FlowCollector exports one series set per flow in each domain.
 type FlowCollector struct {
-	src Source
+	list func() []Source
 }
 
-// NewFlowCollector returns a collector over src.
-func NewFlowCollector(src Source) *FlowCollector {
-	return &FlowCollector{src: src}
+// NewFlowCollector returns a collector over the domains list returns
+// at each scrape.
+func NewFlowCollector(list func() []Source) *FlowCollector {
+	return &FlowCollector{list: list}
 }
 
 // Describe implements prometheus.Collector.
@@ -108,9 +109,11 @@ func (c *FlowCollector) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect implements prometheus.Collector.
 func (c *FlowCollector) Collect(ch chan<- prometheus.Metric) {
-	dom := c.src.Path()
-	for _, obs := range c.src.Observe() {
-		c.collectFlow(ch, dom, obs)
+	for _, src := range c.list() {
+		dom := src.Path()
+		for _, obs := range src.Observe() {
+			c.collectFlow(ch, dom, obs)
+		}
 	}
 }
 
