@@ -21,7 +21,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -2446,31 +2445,7 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			builder.WithPredicates(leaseInMxlSystem()),
 		).
 		Named("mxlflowmirror-source").
-		WithOptions(sourceControllerOptions()).
 		Complete(r)
-}
-
-// sourceConcurrentReconciles is how many mirrors the source side
-// reconciles at once.
-//
-// One worker held every mirror on the node behind whichever reconcile
-// was slowest. Re-adding a target after its TargetInfo rotated, or
-// opening a reader on a flow, can take seconds -- a bounded teardown
-// wait, a libmxl open -- and after a target gateway restart every mirror
-// into that node rotates at once, so a busy mirror waited out the slow
-// reconciles of the mirrors queued ahead of it before its own re-add.
-//
-// Reconcile holds r.mu only around the map updates and does its libmxl
-// work outside it, opens of one shared source race to a single winner
-// in openShared, and controller-runtime never reconciles one object key
-// on two workers at once. Reconcile is already driven from outside the
-// workqueue too, by the reader-rebuild and origin-rotation paths. The
-// bound is about how much libmxl work runs on the node at once, as it
-// is for targetConcurrentReconciles.
-const sourceConcurrentReconciles = 4
-
-func sourceControllerOptions() controller.Options {
-	return controller.Options{MaxConcurrentReconciles: sourceConcurrentReconciles}
 }
 
 // leaseInMxlSystem confines the Lease watch to the namespace the
