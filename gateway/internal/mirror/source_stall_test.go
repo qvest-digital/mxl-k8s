@@ -24,7 +24,9 @@ func stalledEntry(head uint64, headAt *time.Time, transfers uint64, sentAt time.
 	// reader rebuild budget and the writer-liveness seam through it.
 	// Added against the TargetInfo the test mirrors publish, so the
 	// flusher treats it as attached to the current fabric side.
+	// Connected, so its transfers stamp lastSentAt as delivered ones.
 	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1"}
+	e.connected.Store(true)
 	e.lastHead.Store(head)
 	if headAt != nil {
 		t := *headAt

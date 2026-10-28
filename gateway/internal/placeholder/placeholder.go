@@ -392,11 +392,7 @@ func (m *Manager) drop(l logr.Logger, name string) {
 // markers it does not hold (see DomainOpened).
 //
 // Deleting the directories instead is no use to a process that is
-// exiting, and it is slow: libmxl, releasing the last writer of a
-// discrete flow it just deleted, looks the flow's directory up again,
-// and on an mxlfs mounted with wait= that walk through the missing name
-// waits the whole wait out. Serially, a dozen placeholders outlasted
-// the pod's termination grace period.
+// exiting.
 func (m *Manager) leaveAll(l logr.Logger) {
 	m.mu.Lock()
 	held := m.held

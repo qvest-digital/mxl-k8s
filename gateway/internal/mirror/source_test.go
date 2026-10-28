@@ -525,6 +525,8 @@ func TestRunTransferLoop_TracksProgressAndLastSentAt(t *testing.T) {
 type fakeOpener struct {
 	openFn   func(flowID string, provider fabrics.Provider) (*sharedSource, error)
 	attachFn func(s *sharedSource, targetInfoStr string) (*fabrics.TargetInfo, error)
+	// stateFn answers targetState. Nil reports every target connected.
+	stateFn func(info *fabrics.TargetInfo) (fabrics.TargetState, error)
 
 	opens    atomic.Int32
 	attaches atomic.Int32
@@ -571,6 +573,23 @@ func (f *fakeOpener) detach(_ *sharedSource, info *fabrics.TargetInfo) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removed = append(f.removed, f.names[info])
+}
+
+func (f *fakeOpener) targetState(_ *sharedSource, info *fabrics.TargetInfo) (fabrics.TargetState, error) {
+	f.mu.Lock()
+	fn := f.stateFn
+	f.mu.Unlock()
+	if fn == nil {
+		return fabrics.TargetConnected, nil
+	}
+	return fn(info)
+}
+
+// setState replaces stateFn while flushers may be asking it.
+func (f *fakeOpener) setState(fn func(info *fabrics.TargetInfo) (fabrics.TargetState, error)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stateFn = fn
 }
 
 // addedTargets and removedTargets report the target infos AddTarget
