@@ -509,11 +509,15 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		})).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
 			return r.setsOn(ctx, obj.(*corev1.Pod).Spec.NodeName)
-		}), builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
-			return obj.GetNamespace() == r.gatewayNamespace() &&
-				obj.GetLabels()["app.kubernetes.io/component"] == gatewayComponent
-		}))).
+		}), builder.WithPredicates(predicate.NewPredicateFuncs(r.isGatewayPod))).
 		Complete(r)
+}
+
+// isGatewayPod reports whether obj is one of the gateway pods OutputReady
+// is judged by.
+func (r *Reconciler) isGatewayPod(obj client.Object) bool {
+	return obj.GetNamespace() == r.gatewayNamespace() &&
+		obj.GetLabels()["app.kubernetes.io/component"] == gatewayComponent
 }
 
 // setsOn maps a node to the sets that list it in status.nodes.
