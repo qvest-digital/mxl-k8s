@@ -9,9 +9,10 @@ import (
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
-// Set holds one Handles per MXL domain the gateway mirrors in. The
-// primary domain is opened at start; every other one is opened on
-// first use and stays open until Close, because libmxl reads a
+// Set holds one Handles per MXL domain the gateway mirrors in or
+// sweeps. The primary domain is opened at start; every other one is
+// opened on first use, by a mirror or by the Opener, and stays open
+// until Close, because libmxl reads a
 // domain's options at instance open and a mirror in that domain may be
 // set up at any time.
 type Set struct {
@@ -35,8 +36,8 @@ type Set struct {
 	closed   bool
 }
 
-// For returns the Handles of the named MxlDomain, opening them when
-// this is the first mirror in that domain.
+// For returns the Handles of the named MxlDomain, opening them on its
+// first use.
 func (s *Set) For(ctx context.Context, domain string) (*Handles, error) {
 	if domain == "" {
 		return s.Primary, nil

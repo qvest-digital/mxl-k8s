@@ -97,8 +97,9 @@ func run(args []string) error {
 		return fmt.Errorf("construct manager: %w", err)
 	}
 
-	// Every other MxlDomain is opened on its first mirror, below the
-	// runtime root the primary domain sits in.
+	// Every other MxlDomain is opened below the runtime root the primary
+	// domain sits in, on its first mirror or once it is ready here,
+	// whichever comes first.
 	domains := &instance.Set{
 		Primary: handles,
 		Directory: func(ctx context.Context, name string) (string, error) {
@@ -188,6 +189,12 @@ func run(args []string) error {
 	}
 	if err := sourceReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup source reconciler: %w", err)
+	}
+	// Every domain ready here is opened, used or not, so the sweeper
+	// below runs in each of them.
+	opener := &instance.Opener{Client: mgr.GetClient(), NodeName: cfg.NodeName, Set: domains}
+	if err := opener.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup domain opener: %w", err)
 	}
 
 	// Both reconcilers hold per-mirror byte counters the collector
