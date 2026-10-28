@@ -375,6 +375,76 @@ func TestRetireReleasesThePlaceholder(t *testing.T) {
 	require.NoDirExists(t, flowDir(h))
 }
 
+// leaveBehind leaves in h what a gateway that shuts down leaves of its
+// placeholder: the directory and its marker, with no writer.
+func leaveBehind(t *testing.T, h *handles) {
+	t.Helper()
+	old := newManager(t, h, flow(origin))
+	reconcileFlow(t, old)
+	shutDown(t, old)
+	require.True(t, IsPlaceholder(h.dir, flowID))
+}
+
+func writeMarker(t *testing.T, h *handles, id string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(h.dir, MarkerDir), 0o755))
+	require.NoError(t, os.WriteFile(MarkerPath(h.dir, id), nil, 0o644))
+}
+
+// Between a new gateway opening the domain and its first reconcile of
+// the flow, the directory the previous gateway left keeps its marker.
+// Without it the agent reads the directory as a local copy and mirrors
+// nothing into it, and a consumer opening the flow maps a ring nothing
+// fills.
+func TestOpeningADomainKeepsTheMarkersLeftBehind(t *testing.T) {
+	h := newDomain(t)
+	leaveBehind(t, h)
+	m := newManager(t, h, flow(origin))
+
+	m.DomainOpened(h.dir)
+	require.True(t, IsPlaceholder(h.dir, flowID), "the marker went before the placeholder was held again")
+
+	require.True(t, m.sweep(context.Background(), logr.Discard()))
+	require.Equal(t, []string{flowID}, m.Held())
+	require.True(t, IsPlaceholder(h.dir, flowID), "the first pass cleared the marker of a placeholder it holds")
+}
+
+// A marker the first pass does not hold again goes: left in place it
+// would keep a copy or a local writer's flow under that id from ever
+// becoming a location.
+func TestFirstPassClearsTheMarkersNothingHolds(t *testing.T) {
+	h := newDomain(t)
+	leaveBehind(t, h)
+	const gone = "0f5d3a52-58a3-4f0e-9a4b-2c1f0d6e7b81"
+	writeMarker(t, h, gone)
+	// The flow has a copy here now, so it gets no placeholder.
+	m := newManager(t, h, flow(origin, mxlv1alpha1.MxlFlowLocation{NodeName: "node-a", Phase: mxlv1alpha1.MxlFlowLocationReady}))
+	m.DomainOpened(h.dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = m.Start(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	require.Eventually(t, func() bool {
+		return !IsPlaceholder(h.dir, flowID) && !IsPlaceholder(h.dir, gone)
+	}, 5*time.Second, 10*time.Millisecond, "a marker nothing holds outlived the first pass")
+	require.Empty(t, m.Held())
+}
+
+// A domain first opened after the first pass holds no placeholder of
+// this gateway yet, so every marker in it is left over.
+func TestADomainOpenedAfterTheFirstPassIsClearedAtOnce(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h)
+	require.True(t, m.sweep(context.Background(), logr.Discard()))
+	writeMarker(t, h, flowID)
+
+	m.DomainOpened(h.dir)
+
+	require.False(t, IsPlaceholder(h.dir, flowID))
+}
+
 func TestSameGeometry(t *testing.T) {
 	relabelled := strings.Replace(flowDef, `"label":"placeholder test"`, `"label":"renamed"`, 1)
 	require.True(t, SameGeometry([]byte(flowDef), []byte(relabelled)), "a label is no part of the ring")
@@ -468,7 +538,7 @@ func (w *fakeWriter) Detach() error { w.detached = true; return w.detach }
 // to the next gateway and to libmxl's garbage collection until the
 // process is gone.
 func TestShutdownReleasesAWriterThatCannotDetach(t *testing.T) {
-	m := &Manager{}
+	m := newManager(t, nil)
 	unguarded := &fakeWriter{detach: mxl.ErrNoFlowGuard}
 	guarded := &fakeWriter{}
 	m.held = map[string]*entry{
