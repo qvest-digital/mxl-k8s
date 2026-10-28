@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.35](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.34...v1.1.0-rc.35) (2026-10-28)
+
+
+### Dependencies
+
+* **go-mxl:** update go-mxl to v1.1.0-rc.8 ([#394](https://github.com/qvest-digital/mxl-k8s/issues/394)) ([2c95d72](https://github.com/qvest-digital/mxl-k8s/commit/2c95d723d9135ccb18d4cdeccf9823c04ce8f08d))
+
 ## [1.1.0-rc.34](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.33...v1.1.0-rc.34) (2026-10-28)
 
 
