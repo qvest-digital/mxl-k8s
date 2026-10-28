@@ -247,7 +247,8 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 // Clearing them on open instead leaves a placeholder directory without
 // its marker until its flow is reconciled, which the agent reads as a
 // local copy: it mirrors nothing into it, and a consumer opening the
-// flow then maps a ring nothing fills.
+// flow then maps a ring nothing fills. While the MxlFlows cannot be
+// listed for that pass, the stale markers stay.
 func (m *Manager) DomainOpened(domain string) {
 	m.mu.Lock()
 	if !m.swept {

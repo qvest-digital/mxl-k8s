@@ -400,11 +400,21 @@ func TestOpeningADomainKeepsTheMarkersLeftBehind(t *testing.T) {
 	h := newDomain(t)
 	leaveBehind(t, h)
 	m := newManager(t, h, flow(origin))
+	// The window is the time before the placeholder is held again, so the
+	// marker is read when the first pass asks for the domain to hold it:
+	// read after the pass, it has been written again either way.
+	var atReconcile []bool
+	domain := m.Domain
+	m.Domain = func(ctx context.Context, name string) (Handles, error) {
+		atReconcile = append(atReconcile, IsPlaceholder(h.dir, flowID))
+		return domain(ctx, name)
+	}
 
 	m.DomainOpened(h.dir)
 	require.True(t, IsPlaceholder(h.dir, flowID), "the marker went before the placeholder was held again")
 
 	require.True(t, m.sweep(context.Background(), logr.Discard()))
+	require.Equal(t, []bool{true}, atReconcile, "the marker went before the first pass held the placeholder again")
 	require.Equal(t, []string{flowID}, m.Held())
 	require.True(t, IsPlaceholder(h.dir, flowID), "the first pass cleared the marker of a placeholder it holds")
 }
