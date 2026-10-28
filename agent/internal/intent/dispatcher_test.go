@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -169,39 +170,100 @@ func TestMaterialize_InvalidPath_ErrorsWithoutSideEffects(t *testing.T) {
 			"a buggy shim can spam unrelated mirrors into the cluster")
 }
 
-func TestMaterialize_MissingFlow_Errors(t *testing.T) {
-	scheme := newScheme(t)
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
-		WithObjects(&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: "ns",
-				Name:      "consumer",
-				UID:       "uid-1",
-			},
-			Spec: corev1.PodSpec{NodeName: "n1"},
-		}).
-		Build()
+// waitingReader is a reader blocked in its open until the request is
+// answered or its own wait runs out; once gone, its pid resolves to
+// nothing.
+type waitingReader struct {
+	pod  *corev1.Pod
+	gone atomic.Bool
+}
 
+func (r *waitingReader) PodForPID(context.Context, int32) (*corev1.Pod, error) {
+	if r.gone.Load() {
+		return nil, os.ErrNotExist
+	}
+	return r.pod, nil
+}
+
+// The refusal for a flow no MxlFlow names must name the missing flow
+// even when the reader is already gone: a pod lookup error in its place
+// hides that the flow id matches nothing in the cluster, which is the
+// only reason no mirror can come.
+func TestMaterialize_MissingFlow_ReportedOverPodLookup(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	reader := &waitingReader{}
+	reader.gone.Store(true)
 	d := &Dispatcher{
 		Client:      c,
-		Resolver:    &podlookup.Resolver{Client: c, NodeName: "n1"},
+		Resolver:    reader,
 		DomainPath:  "/run/mxl/domain",
 		NodeName:    "n1",
 		FlowChecker: func(string) bool { return false },
 	}
 
-	// Materialize cannot call PodForPID without /proc; bypass via a
-	// shortcut: when FlowChecker says true on second call, the
-	// dispatcher early-returns. Instead test the
-	// resolveSourceNode-missing-flow case by exercising it directly.
-	res, err := d.resolveSourceNode(context.Background(), mxlv1alpha1.FlowRef{ID: "missing-flow"})
-	require.NoError(t, err)
-	assert.False(t, res.Found)
-	assert.False(t, res.AllStale,
+	err := d.Materialize(context.Background(), 42, "/run/mxl/domain/"+flowID+".mxl-flow/data")
+	require.Error(t, err)
+	assert.Equal(t, "MxlFlow not yet known cluster-wide", err.Error(),
 		"a flow with no MxlFlow at all is not the same as one whose "+
 			"Origins are all stale; the shim is told which")
+}
+
+// On an mxlfs mounted with wait=, looking up a missing flow name waits
+// for the flow as long as the reader's own open does, so a local check
+// that waits returns only once the reader has given up and its pid
+// resolves to nothing. The pod is resolved before any such check, or a
+// reader that gives up is never mirrored to.
+func TestMaterialize_ResolvesPodBeforeLocalCheck(t *testing.T) {
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: metav1.ObjectMeta{Name: flowID},
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: flowID},
+		Status: mxlv1alpha1.MxlFlowStatus{Locations: []mxlv1alpha1.MxlFlowLocation{
+			{NodeName: "n-src", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+		}},
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}, &mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(flow).Build()
+	reader := &waitingReader{pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "media", Name: "viewer", UID: "uid-viewer"}}}
+	d := &Dispatcher{
+		Client:     c,
+		Resolver:   reader,
+		DomainPath: "/run/mxl/domain",
+		NodeName:   "n-target",
+		Provider:   mxlv1alpha1.ProviderTCP,
+		FlowChecker: func(string) bool {
+			reader.gone.Store(true)
+			return false
+		},
+		MaterializeTimeout: 50 * time.Millisecond,
+	}
+
+	err := d.Materialize(context.Background(), 42, "/run/mxl/domain/"+flowID+".mxl-flow/data")
+	require.Error(t, err, "no gateway fills the mirror here, so the wait times out")
+	assert.NotContains(t, err.Error(), "pod lookup")
+
+	var list mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, c.List(context.Background(), &list))
+	assert.Len(t, list.Items, 1, "the reader's mirror is made although it gave up meanwhile")
+}
+
+// The local check finds a flow by listing the domain, so a flow that is
+// there counts and one that is not does not, whichever directory holds
+// the domain.
+func TestFlowExistsLocally_ListsTheDomain(t *testing.T) {
+	domain := t.TempDir()
+	d := &Dispatcher{DomainPath: domain}
+	ref := mxlv1alpha1.FlowRef{ID: flowID}
+
+	require.False(t, d.flowExistsLocally(ref))
+
+	flowDir := filepath.Join(domain, flowID+".mxl-flow")
+	require.NoError(t, os.Mkdir(flowDir, 0o755))
+	require.False(t, d.flowExistsLocally(ref), "a directory without flow_def.json holds no flow yet")
+
+	require.NoError(t, os.WriteFile(filepath.Join(flowDir, "flow_def.json"), []byte(`{}`), 0o644))
+	require.True(t, d.flowExistsLocally(ref))
 }
 
 func TestMaterialize_SourceIsLocalNode_NoOps(t *testing.T) {
@@ -740,4 +802,30 @@ func TestRefusalLogIsDeduplicated(t *testing.T) {
 	assert.True(t, d.shouldLogRefusal("/run/mxl/other/b.mxl-flow/data"), "another flow")
 	now = now.Add(refusalLogWindow + time.Second)
 	assert.True(t, d.shouldLogRefusal("/run/mxl/other/a.mxl-flow/data"), "after the window")
+}
+
+// On mxlfs a lookup by name of a flow directory that is not there waits for
+// it, so the local check looks a flow up by name only once the domain
+// listing has returned it.
+func TestFlowExistsLocally_LooksUpOnlyListedFlows(t *testing.T) {
+	domain := t.TempDir()
+	const listedID = "22222222-2222-4222-8222-222222222222"
+	flowDir := filepath.Join(domain, listedID+".mxl-flow")
+	require.NoError(t, os.Mkdir(flowDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(flowDir, "flow_def.json"), []byte(`{}`), 0o644))
+
+	var looked []string
+	stat := statFlowDef
+	statFlowDef = func(name string) (os.FileInfo, error) {
+		looked = append(looked, name)
+		return stat(name)
+	}
+	t.Cleanup(func() { statFlowDef = stat })
+
+	d := &Dispatcher{DomainPath: domain}
+	require.False(t, d.flowExistsLocally(mxlv1alpha1.FlowRef{ID: flowID}))
+	assert.Empty(t, looked, "a flow the listing did not return was looked up by name")
+
+	require.True(t, d.flowExistsLocally(mxlv1alpha1.FlowRef{ID: listedID}))
+	assert.Equal(t, []string{filepath.Join(flowDir, "flow_def.json")}, looked)
 }
