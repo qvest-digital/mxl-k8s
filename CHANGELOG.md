@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0-rc.37](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.36...v1.1.0-rc.37) (2026-10-28)
+
+
+### Features
+
+* **gateway:** report how long each stage of a source re-add took ([2156ed2](https://github.com/qvest-digital/mxl-k8s/commit/2156ed2268a362db9efb5272e74de75ee8878d48))
+
+
+### Bug Fixes
+
+* **gateway:** find a flow directory to reclaim in the domain listing ([#399](https://github.com/qvest-digital/mxl-k8s/issues/399)) ([3798f6d](https://github.com/qvest-digital/mxl-k8s/commit/3798f6d73150d18ffc002f9505c24f768e737d0d))
+* **gateway:** recover a target when its source's transfers do not land ([2156ed2](https://github.com/qvest-digital/mxl-k8s/commit/2156ed2268a362db9efb5272e74de75ee8878d48))
+* **gateway:** set a target up sooner when its source sends into silence ([2156ed2](https://github.com/qvest-digital/mxl-k8s/commit/2156ed2268a362db9efb5272e74de75ee8878d48))
+
 ## [1.1.0-rc.36](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.35...v1.1.0-rc.36) (2026-10-28)
 
 
