@@ -239,6 +239,10 @@ func (k sourceKey) ref() mxlv1alpha1.FlowRef {
 type sharedSource struct {
 	key sourceKey
 
+	// openSteps is how long the libmxl calls that opened this source
+	// took, logged with the first target added to it.
+	openSteps openSteps
+
 	reader    *mxl.Reader
 	initiator *fabrics.Initiator
 
@@ -489,6 +493,8 @@ func (r *SourceReconciler) nodeReader() client.Reader {
 // lifecycle.
 func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("mxlflowmirror", req.NamespacedName)
+	sw := newStopwatch()
+	started := sw.last
 
 	var mirror mxlv1alpha1.MxlFlowMirror
 	if err := r.Get(ctx, req.NamespacedName, &mirror); err != nil {
@@ -572,6 +578,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	r.mu.Lock()
 	existing := r.sources[req.NamespacedName]
 	r.mu.Unlock()
+	sw.lap("lookup")
 
 	// spec.provider rotated under a running mirror. An initiator is set
 	// up against one provider's interface and cannot serve another, so
@@ -632,6 +639,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		l.Info("target info rotated, re-adding target")
 		r.closeEntry(req.NamespacedName)
 	}
+	sw.lap("close")
 
 	// Seed the in-memory AddTarget attempts counter from the persisted
 	// status.attemptCount so a gateway pod restart does not reset the
@@ -657,6 +665,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// again. The condition is written once and the requeue carries the
 	// retry, because a producer that re-attaches to a directory that
 	// was never collected rotates nothing and fires no watch.
+	sw.skip()
 	if r.writerGone(mirror.Ref()) {
 		if !sourceProgressReads(&mirror, mxlv1alpha1.ReasonSourceWriterGone) {
 			if err := r.publishSourceProgress(ctx, req.NamespacedName, sourceProgressState{
@@ -675,15 +684,23 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// Reuses the source the fast path looked up when it is still
 	// live, and opens one when this is the flow's first mirror or the
 	// origin rotation above tore the previous one down.
+	sw.lap("liveCheck")
 	shared, err = r.openShared(skey, originAt)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("open initiator: %w", err)
+	}
+	sw.lap("open")
+	if shared.openedAt.After(started) {
+		sw.stages = append(sw.stages,
+			"openReader", shared.openSteps.reader.String(),
+			"openSetup", shared.openSteps.setup.String())
 	}
 
 	// The only per-mirror libmxl-fabrics work there is. A source that
 	// already carries other mirrors of this flow takes just this call:
 	// no second reader, no second initiator, no second transfer loop.
 	info, err := r.opener.attach(shared, mirror.Status.TargetInfo)
+	sw.lap("attach")
 	if err != nil {
 		r.releaseIfUnused(shared)
 		if errors.Is(err, errAddTargetFailed) {
@@ -723,13 +740,41 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	r.startFlusher(entry)
 
-	l.Info("target added",
+	l.Info("target added", append([]any{
 		"flowID", mirror.Spec.FlowID,
 		"targetNode", mirror.Spec.TargetNode,
 		"provider", provider.String(),
-		"targets", len(shared.attached()))
+		"targets", len(shared.attached()),
+		"took", time.Since(started).String()}, sw.stages...)...)
 	return ctrl.Result{}, nil
 }
+
+// openSteps is how long opening a shared source took, step by step.
+type openSteps struct {
+	reader time.Duration
+	setup  time.Duration
+}
+
+// stopwatch records how long each stage of one Reconcile took, for the
+// line that reports the target added. A re-add that takes seconds holds
+// its worker for as long, and only the per-stage split says which libmxl
+// call it was spent in.
+type stopwatch struct {
+	last   time.Time
+	stages []any
+}
+
+func newStopwatch() *stopwatch { return &stopwatch{last: time.Now()} }
+
+// lap records the time since the previous lap under name.
+func (w *stopwatch) lap(name string) {
+	now := time.Now()
+	w.stages = append(w.stages, name, now.Sub(w.last).String())
+	w.last = now
+}
+
+// skip restarts the clock without recording, for work no stage owns.
+func (w *stopwatch) skip() { w.last = time.Now() }
 
 // openShared returns the shared source for skey, opening one if this
 // is the first mirror to want it. The libmxl work happens outside the
@@ -952,10 +997,12 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 		return nil, fmt.Errorf("fabrics instance closed")
 	}
 
+	start := time.Now()
 	reader, err := mxlInst.NewReader(flowID)
 	if err != nil {
 		return nil, fmt.Errorf("NewReader: %w", err)
 	}
+	readerDone := time.Now()
 	initiator, err := fabInst.NewInitiator()
 	if err != nil {
 		_ = reader.Close()
@@ -975,6 +1022,7 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 		_ = reader.Close()
 		return nil, fmt.Errorf("Initiator.Setup: %w", err)
 	}
+	steps := openSteps{reader: readerDone.Sub(start), setup: time.Since(readerDone)}
 
 	// A continuous (audio) flow moves samples, not grains; pick the
 	// transfer path from the flow's data format. maxBatch is the
@@ -1016,6 +1064,7 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 	done := make(chan struct{})
 	s := &sharedSource{
 		key:       key,
+		openSteps: steps,
 		reader:    reader,
 		initiator: initiator,
 		cancel:    cancel,
