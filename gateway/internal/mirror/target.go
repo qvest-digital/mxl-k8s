@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -349,6 +350,11 @@ type TargetReconciler struct {
 	// tests inject failures so the attempt accounting and the
 	// escalation out of Materializing can be observed without one.
 	openTargetFn func(key types.NamespacedName, flowDef string, provider fabrics.Provider) (*targetEntry, error)
+
+	// reclaimFS is what reclaimUnusableFlowDir reaches the domain
+	// through. Production leaves it nil for the real filesystem; tests
+	// record which paths a reclaim touches.
+	reclaimFS reclaimFS
 
 	// nowFn is the clock the open backoff is measured against.
 	// Production leaves it nil and the reconciler falls back to
@@ -1012,14 +1018,25 @@ func (r *TargetReconciler) reclaimUnusableFlowDir(ctx context.Context, ref mxlv1
 		return false
 	}
 
-	dir := filepath.Join(domainPath, ref.ID+flowDirSuffix)
-	if _, err := os.Stat(dir); err != nil {
-		if !os.IsNotExist(err) {
-			l.Error(err, "stat flow directory", "path", dir)
-		}
+	// Looked for in the domain's listing rather than resolved: on a
+	// domain that waits for a missing flow name to appear, resolving
+	// one blocks for the whole wait, and every check below resolves a
+	// path inside the directory.
+	fsys := r.reclaimFS
+	if fsys == nil {
+		fsys = osReclaimFS{}
+	}
+	name := ref.ID + flowDirSuffix
+	names, err := fsys.Names(domainPath)
+	if err != nil {
+		l.Error(err, "list domain directory", "path", domainPath)
 		return false
 	}
-	if n, err := flowlocks.ForeignWriters(filepath.Join(dir, "data")); err != nil || n > 0 {
+	if !slices.Contains(names, name) {
+		return false
+	}
+	dir := filepath.Join(domainPath, name)
+	if n, err := fsys.ForeignWriters(filepath.Join(dir, "data")); err != nil || n > 0 {
 		l.Info("leaving flow directory in place: a process on this node writes it", "writers", n, "error", err)
 		return false
 	}
@@ -1028,16 +1045,44 @@ func (r *TargetReconciler) reclaimUnusableFlowDir(ctx context.Context, ref mxlv1
 	// from one that failed to open for another reason, and it is not
 	// recoverable once the directory is gone.
 	grains := -1
-	if entries, err := os.ReadDir(filepath.Join(dir, grainDirName)); err == nil {
+	if entries, err := fsys.ReadDir(filepath.Join(dir, grainDirName)); err == nil {
 		grains = len(entries)
 	}
-	if err := os.RemoveAll(dir); err != nil {
+	if err := fsys.RemoveAll(dir); err != nil {
 		l.Error(err, "remove flow directory", "path", dir)
 		return false
 	}
 	l.Info("reclaimed unopenable flow directory", "path", dir, "grainFiles", grains)
 	return true
 }
+
+// reclaimFS is the filesystem a reclaim works on.
+type reclaimFS interface {
+	Names(dir string) ([]string, error)
+	ForeignWriters(dataPath string) (int, error)
+	ReadDir(dir string) ([]os.DirEntry, error)
+	RemoveAll(path string) error
+}
+
+type osReclaimFS struct{}
+
+// Names lists dir without resolving any of its entries.
+func (osReclaimFS) Names(dir string) ([]string, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return f.Readdirnames(-1)
+}
+
+func (osReclaimFS) ForeignWriters(dataPath string) (int, error) {
+	return flowlocks.ForeignWriters(dataPath)
+}
+
+func (osReclaimFS) ReadDir(dir string) ([]os.DirEntry, error) { return os.ReadDir(dir) }
+
+func (osReclaimFS) RemoveAll(path string) error { return os.RemoveAll(path) }
 
 // openFabricSide creates the fabrics.Target + TargetInfo on an
 // already-open mxl.Writer. Used both by initial openTarget and by

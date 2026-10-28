@@ -421,3 +421,72 @@ func TestTarget_LocalWriterClosesALiveTarget(t *testing.T) {
 	assert.NotContains(t, f.r.targets, f.key)
 	assert.Equal(t, ReasonLocalWriter, f.mirror(t).Status.Conditions[0].Reason)
 }
+
+// recordingReclaimFS is the real filesystem with every path a reclaim
+// touches recorded.
+type recordingReclaimFS struct {
+	osReclaimFS
+	touched []string
+}
+
+func (f *recordingReclaimFS) Names(dir string) ([]string, error) {
+	f.touched = append(f.touched, "names "+dir)
+	return f.osReclaimFS.Names(dir)
+}
+
+func (f *recordingReclaimFS) ForeignWriters(dataPath string) (int, error) {
+	f.touched = append(f.touched, "writers "+dataPath)
+	return f.osReclaimFS.ForeignWriters(dataPath)
+}
+
+func (f *recordingReclaimFS) ReadDir(dir string) ([]os.DirEntry, error) {
+	f.touched = append(f.touched, "readdir "+dir)
+	return f.osReclaimFS.ReadDir(dir)
+}
+
+func (f *recordingReclaimFS) RemoveAll(path string) error {
+	f.touched = append(f.touched, "remove "+path)
+	return f.osReclaimFS.RemoveAll(path)
+}
+
+// On a domain that waits for a missing flow name to appear, resolving
+// one blocks for the whole wait. A reclaim of a directory that is not
+// there has to find that out from the domain's listing and resolve
+// nothing below the domain.
+func TestReclaimUnusableFlowDir_MissingDirectoryResolvesNoPathInIt(t *testing.T) {
+	scheme := newSourceTestScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	domain := t.TempDir()
+	fsys := &recordingReclaimFS{}
+	r := &TargetReconciler{
+		Client:     c,
+		Scheme:     scheme,
+		NodeName:   "node-a",
+		DomainPath: domain,
+		reclaimFS:  fsys,
+	}
+	assert.False(t, r.reclaimUnusableFlowDir(context.Background(), mxlv1alpha1.FlowRef{ID: openFailureFlowID}))
+	assert.Equal(t, []string{"names " + domain}, fsys.touched,
+		"a reclaim of a missing flow directory resolved a path below the domain")
+}
+
+// A directory that is there is still checked for a local writer and
+// removed through the same filesystem.
+func TestReclaimUnusableFlowDir_PresentDirectoryIsRemoved(t *testing.T) {
+	scheme := newSourceTestScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	domain := t.TempDir()
+	dir := writeTornFlowDir(t, domain, openFailureFlowID, 59)
+	fsys := &recordingReclaimFS{}
+	r := &TargetReconciler{
+		Client:     c,
+		Scheme:     scheme,
+		NodeName:   "node-a",
+		DomainPath: domain,
+		reclaimFS:  fsys,
+	}
+	assert.True(t, r.reclaimUnusableFlowDir(context.Background(), mxlv1alpha1.FlowRef{ID: openFailureFlowID}))
+	assert.NoDirExists(t, dir)
+	assert.Contains(t, fsys.touched, "writers "+filepath.Join(dir, "data"))
+	assert.Contains(t, fsys.touched, "remove "+dir)
+}
