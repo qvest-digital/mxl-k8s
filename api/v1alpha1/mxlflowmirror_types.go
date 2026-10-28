@@ -121,8 +121,9 @@ type MxlFlowMirrorStatus struct {
 	// accepted a connection listens on a port of its own choosing
 	// once that connection goes, so a target that sees TargetAddedAt
 	// move past its last grain sets up again and publishes a
-	// TargetInfo the new connection can reach. Unset while no
-	// initiator holds the target.
+	// TargetInfo the new connection can reach. Unset until a source
+	// gateway first adds the target; it keeps its last value after
+	// that source stops, until the next one publishes.
 	// +optional
 	// +nullable
 	TargetAddedAt *metav1.Time `json:"targetAddedAt,omitempty"`
