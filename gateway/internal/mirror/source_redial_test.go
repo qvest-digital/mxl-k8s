@@ -293,3 +293,28 @@ func TestRunFlusher_TargetStateDrivesConnected(t *testing.T) {
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	assert.Same(t, e, f.entry(key.Name), "a held target was added again")
 }
+
+// A mirror whose source moves to another node leaves this node's
+// sources, and its run of re-adds has to go with it: kept, it would make
+// the mirror wait out a backoff earned here if its source came back.
+func TestSourceReconcile_SourceNodeMove_ClearsRedials(t *testing.T) {
+	f := newFanoutFixture(t,
+		fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderTCP),
+	)
+	f.reconcile(t, "m1")
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	_, attempt := f.r.takeRedial(key)
+	require.Equal(t, uint32(1), attempt)
+
+	var m mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, f.c.Get(context.Background(), key, &m))
+	m.Spec.SourceNode = "node-z"
+	require.NoError(t, f.c.Update(context.Background(), &m))
+	f.reconcile(t, "m1")
+
+	assert.Nil(t, f.entry("m1"))
+	f.r.mu.Lock()
+	_, kept := f.r.redials[key]
+	f.r.mu.Unlock()
+	assert.False(t, kept, "the re-add run outlived the source's move off this node")
+}

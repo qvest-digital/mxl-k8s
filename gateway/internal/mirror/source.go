@@ -527,8 +527,11 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// spec.sourceNode used to name this node and was mutated to
 		// another; the in-memory sources map keeps an initiator open
 		// against a producer-less .mxl-flow until the pod is bounced.
-		// closeEntry is a no-op when the key holds nothing.
+		// closeEntry is a no-op when the key holds nothing. A re-add run
+		// this node counted is no business of the node the source moved
+		// to, and would hold a later return here to its backoff.
 		r.closeEntry(req.NamespacedName)
+		r.clearRedials(req.NamespacedName)
 		return r.reapOrphanedFinalizer(ctx, &mirror)
 	}
 
