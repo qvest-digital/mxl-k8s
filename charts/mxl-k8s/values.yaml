@@ -336,21 +336,40 @@ agent:
     # pods cannot see it. Empty disables the drop.
     shimPath: /run/mxl/libmxl-intent.so
     materializeTimeout: 5s
+    # @schema
+    # type: integer
+    # minimum: 0
+    # @schema
     # -- Most live mirrors the agent creates on demand for one pod, the
-    # mirrors a process opening a flow absent here asks for. A request
-    # over a limit is refused with an event on the pod, and the open
-    # fails with ENOENT. Mirrors an MxlReceiver or a redundancy set
-    # declares are not counted. 0 is unlimited.
-    intentMirrorsPerPod: 16
+    # mirrors a process opening a flow absent here asks for. Such a
+    # mirror lives as long as the pod, read or not, so this is a cap on
+    # what the pod accumulates over its lifetime; intentMirrorBurst is
+    # what stops a glob. A refused request is logged and recorded as an
+    # event on the pod: a process waiting on the open gets ENOENT, and
+    # one that already opened the flow's placeholder on an mxlfs domain
+    # is asked for again while it runs. Mirrors an MxlReceiver or a
+    # redundancy set declares are not counted. 0 is unlimited.
+    intentMirrorsPerPod: 64
+    # @schema
+    # type: integer
+    # minimum: 0
+    # @schema
     # -- Most live mirrors the agent creates on demand onto its node,
-    # for all pods together. 0 is unlimited.
-    intentMirrorsPerNode: 64
+    # for all pods together, over their lifetimes. 0 is unlimited.
+    intentMirrorsPerNode: 128
+    # @schema
+    # type: integer
+    # minimum: 0
+    # @schema
     # -- Most mirrors the agent creates on demand for one pod within
     # intentMirrorBurstWindow, so a process opening every flow at once,
-    # as a glob over the domain does, gets only a few. Refused flows are
-    # mirrored when the process opens them again after the window. 0 is
-    # unlimited.
+    # as a glob over the domain does, gets only a few at a time. The
+    # history is the agent's memory and starts afresh when the agent
+    # restarts. 0 is unlimited.
     intentMirrorBurst: 8
+    # @schema
+    # pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+    # @schema
     intentMirrorBurstWindow: 10s
     resyncPeriod: 30s
     # -- Client-side request rate to the API server. A node holding

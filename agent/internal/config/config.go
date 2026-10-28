@@ -123,9 +123,9 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 			"treated as a plain directory.")
 	fs.DurationVar(&c.MaterializeTimeout, "materialize-timeout", 5*time.Second,
 		"Per-request budget for the intent dispatcher waiting for a mirror Ready.")
-	fs.IntVar(&c.IntentMirrorsPerPod, "intent-mirrors-per-pod", 16,
-		"Most live mirrors created on demand for one pod. 0 is unlimited.")
-	fs.IntVar(&c.IntentMirrorsPerNode, "intent-mirrors-per-node", 64,
+	fs.IntVar(&c.IntentMirrorsPerPod, "intent-mirrors-per-pod", 64,
+		"Most live mirrors created on demand for one pod over its lifetime. 0 is unlimited.")
+	fs.IntVar(&c.IntentMirrorsPerNode, "intent-mirrors-per-node", 128,
 		"Most live mirrors created on demand onto this node. 0 is unlimited.")
 	fs.IntVar(&c.IntentMirrorBurst, "intent-mirror-burst", 8,
 		"Most mirrors created on demand for one pod within --intent-mirror-burst-window. 0 is unlimited.")

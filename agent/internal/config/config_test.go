@@ -49,8 +49,10 @@ func TestFromFlags_DefaultsFireWhenArgsProvided(t *testing.T) {
 			"second-long delays during flow appear/vanish bursts; the "+
 			"default must stay well above that")
 	assert.Equal(t, 100, c.KubeAPIBurst)
-	assert.Equal(t, 16, c.IntentMirrorsPerPod)
-	assert.Equal(t, 64, c.IntentMirrorsPerNode)
+	assert.Equal(t, 64, c.IntentMirrorsPerPod,
+		"an on-demand mirror lives as long as its pod, so this caps what a "+
+			"long-lived reader that switches flows accumulates, not a glob")
+	assert.Equal(t, 128, c.IntentMirrorsPerNode)
 	assert.Equal(t, 8, c.IntentMirrorBurst,
 		"a glob over the domain opens every flow at once; without a burst "+
 			"limit each open becomes a mirror onto the node")
