@@ -48,6 +48,13 @@ type initiatorOpener interface {
 	// shared reader, initiator and transfer loop running for the
 	// targets that remain.
 	detach(s *sharedSource, info *fabrics.TargetInfo)
+
+	// targetState reports the state of one target on the shared
+	// initiator. An error matching mxl.ErrNotFound means the initiator
+	// no longer holds it: a connection-oriented initiator whose
+	// connection to the target closed or failed drops the target and
+	// does not connect to it again.
+	targetState(s *sharedSource, info *fabrics.TargetInfo) (fabrics.TargetState, error)
 }
 
 // RuntimeProbe asks the source-side flow reader for the current head

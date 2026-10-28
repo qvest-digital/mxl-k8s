@@ -276,6 +276,10 @@ func TestSource_AccountingLandsPerMirrorAcrossTheFanout(t *testing.T) {
 
 	s := f.sharedFor("flow-a", fabrics.ProviderVerbs)
 	require.NotNil(t, s)
+	// verbs stamps lastSentAt only on a target that reads connected,
+	// which the flusher this fixture never ticks would record.
+	f.entry("m1").connected.Store(true)
+	f.entry("m2").connected.Store(true)
 
 	sentAt := time.Now()
 	s.recordHead(41, sentAt)

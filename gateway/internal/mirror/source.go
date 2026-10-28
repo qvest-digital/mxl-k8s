@@ -194,6 +194,10 @@ type SourceReconciler struct {
 	sources  map[types.NamespacedName]*sourceEntry
 	shared   map[sourceKey]*sharedSource
 	attempts attemptTable[sourceAddInputs]
+	// redials counts consecutive re-adds of a mirror whose target the
+	// initiator dropped, and sets the wait before the next one. Cleared
+	// once the target reads connected.
+	redials map[types.NamespacedName]uint32
 	// rebuilds counts consecutive reader reopens per shared source. It
 	// outlives the sharedSource the watchdog tears down, which is the
 	// point: the budget has to survive the reopen it is bounding.
@@ -321,6 +325,11 @@ type sourceEntry struct {
 	// most recent successful transfer. Both feed the status flusher.
 	progress   atomic.Uint64
 	lastSentAt atomic.Pointer[time.Time]
+
+	// connected is whether the initiator last reported this mirror's
+	// target connected. Only a connection-oriented provider has a
+	// connection to report; see deliversTransfers.
+	connected atomic.Bool
 
 	// bytes counts payload handed to the fabric for this mirror, read
 	// by the throughput collector at scrape time. A counter rather than
@@ -514,6 +523,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			return ctrl.Result{}, nil
 		}
 		r.closeEntry(req.NamespacedName)
+		r.clearRedials(req.NamespacedName)
 		controllerutil.RemoveFinalizer(&mirror, SourceFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
 			if apierrors.IsConflict(err) {
@@ -1247,6 +1257,14 @@ func (o *libmxlOpener) detach(s *sharedSource, info *fabrics.TargetInfo) {
 	_ = info.Close()
 }
 
+// targetState asks the shared initiator for one target's state.
+func (o *libmxlOpener) targetState(s *sharedSource, info *fabrics.TargetInfo) (fabrics.TargetState, error) {
+	if s == nil || s.initiator == nil {
+		return 0, errors.New("no initiator")
+	}
+	return s.initiator.TargetState(info)
+}
+
 const (
 	// maxMirrorLag is how far lastSent may trail the live head before
 	// we give up trying to catch up grain-by-grain and resync to the
@@ -1282,10 +1300,32 @@ type progressTracker interface {
 	recordSkipped(samples uint64)
 }
 
+// recordTransfer counts a transfer for this mirror, and stamps
+// lastSentAt only when the transfer reached its target.
 func (e *sourceEntry) recordTransfer(idx uint64, at time.Time) {
 	e.progress.Add(1)
+	if !e.deliversTransfers() {
+		return
+	}
 	t := at
 	e.lastSentAt.Store(&t)
+}
+
+// deliversTransfers reports whether a transfer on the shared initiator
+// reaches this mirror's target. libmxl-fabrics accepts a transfer for a
+// target a connection-oriented initiator is not connected to, and a
+// transfer on a shared source counts for every attached mirror, so for
+// tcp and verbs only the target's own state says so. The flusher keeps
+// it in connected. The other providers have no connection to lose.
+func (e *sourceEntry) deliversTransfers() bool {
+	return !connectionOriented(e.provider()) || e.connected.Load()
+}
+
+// connectionOriented reports whether the provider's initiator holds a
+// connection per target, which it drops for good when the connection
+// closes or fails.
+func connectionOriented(p fabrics.Provider) bool {
+	return p == fabrics.ProviderTCP || p == fabrics.ProviderVerbs
 }
 
 func (e *sourceEntry) recordAgedOut(at time.Time) {
@@ -2027,6 +2067,30 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 		if r.attachedToReplacedTarget(ctx, entry) {
 			continue
 		}
+		// A connection-oriented initiator whose connection to this
+		// target closed or failed has dropped the target and never dials
+		// it again; only adding it again does. Waiting for the target
+		// side to notice costs its whole silence window, and longer when
+		// other mirrors keep the shared source sending.
+		if r.targetDropped(entry) {
+			attempt := r.bumpRedials(key)
+			wait := backoffFor(attempt)
+			ctrl.Log.WithName("source-flush").Info(
+				"initiator dropped the target; adding it again",
+				"mirror", key, "flowID", entry.flowID(), "attempt", attempt, "after", wait.String())
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			// Returning first for the same reason the reopen path does:
+			// closeEntry waits on flusherDone, which this goroutine
+			// closes.
+			go r.redial(entry)
+			return
+		}
 		state := observedState(entry, r.readerStallAfter())
 
 		// A reader that has stopped feeding the fabric is the one wedge
@@ -2109,6 +2173,66 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 		last = state
 		first = false
 	}
+}
+
+// targetDropped asks the initiator for the state of entry's target and
+// records whether it is connected. It reports true when the initiator
+// no longer holds the target. Called from the flusher, outside r.mu:
+// the call crosses into libmxl-fabrics and waits for the initiator's
+// own lock, which the transfer loop holds while it sends.
+func (r *SourceReconciler) targetDropped(entry *sourceEntry) bool {
+	if !connectionOriented(entry.provider()) || entry.info == nil || r.opener == nil {
+		return false
+	}
+	state, err := r.opener.targetState(entry.shared, entry.info)
+	switch {
+	case errors.Is(err, mxl.ErrNotFound):
+		entry.connected.Store(false)
+		return true
+	case err != nil:
+		ctrl.Log.WithName("source-flush").V(1).Info("target state",
+			"mirror", entry.key, "error", err.Error())
+	case state == fabrics.TargetConnected:
+		if !entry.connected.Swap(true) {
+			r.clearRedials(entry.key)
+		}
+	default:
+		entry.connected.Store(false)
+	}
+	return false
+}
+
+// bumpRedials records one more consecutive re-add of key's target and
+// returns the new count.
+func (r *SourceReconciler) bumpRedials(key types.NamespacedName) uint32 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.redials == nil {
+		r.redials = make(map[types.NamespacedName]uint32)
+	}
+	r.redials[key]++
+	return r.redials[key]
+}
+
+func (r *SourceReconciler) clearRedials(key types.NamespacedName) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.redials, key)
+}
+
+// redial takes entry's dropped target off the shared initiator and runs
+// one reconcile, which adds it again against the TargetInfo the mirror
+// carries now. Nothing is done for an entry that has been replaced or
+// closed meanwhile: whoever did that owns the mirror's next add.
+func (r *SourceReconciler) redial(entry *sourceEntry) {
+	r.mu.Lock()
+	current := r.sources[entry.key] == entry
+	r.mu.Unlock()
+	if !current {
+		return
+	}
+	r.closeEntry(entry.key)
+	r.reopenEvicted(context.Background(), entry.key)
 }
 
 // attachedToReplacedTarget reports whether the mirror now publishes a
