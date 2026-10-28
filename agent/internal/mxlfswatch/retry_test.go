@@ -183,3 +183,20 @@ func TestProcessStartReadsTheKernelsStartTime(t *testing.T) {
 	_, ok = processStart(1 << 30)
 	require.False(t, ok)
 }
+
+// Once a request has ended, the same process opening the flow again after
+// the dedup window starts a fresh one: the entry that blocks a second
+// concurrent request is released.
+func TestAReopenAfterARequestEndedStartsANewOne(t *testing.T) {
+	d := domainWithPlaceholder(t)
+	m := &scripted{}
+	tr := retryTrigger(t, d, m, alive)
+	tr.Window = time.Nanosecond
+	open := fanotify.Open{PID: 77, Path: filepath.Join(d, id+".mxl-flow", "grains", "data.0")}
+	require.True(t, tr.Handle(context.Background(), open))
+	tr.requests.Wait()
+	time.Sleep(time.Millisecond)
+	require.True(t, tr.Handle(context.Background(), open), "a finished request still blocked the next one")
+	tr.requests.Wait()
+	require.Equal(t, 2, m.count())
+}
