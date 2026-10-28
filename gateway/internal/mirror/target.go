@@ -94,6 +94,18 @@ const defaultTargetFlushInterval = 1 * time.Second
 // kind testcase-60 ceiling (STUCK_SECS=45 s).
 const defaultStuckHandshakeAfter = 20 * time.Second
 
+// defaultSendingIntoSilenceAfter is the shorter window the watchdog
+// gives a fabric side that a source is demonstrably sending into. A
+// connection-based initiator whose connection to the target fails just
+// after it is set up goes to its done state and never dials again, and
+// the source cannot tell: libmxl-fabrics reports no per-target state,
+// and a transfer on a shared source counts for every mirror attached
+// to it. The target is the only side that sees the silence. A healthy
+// handshake commits its first grain well inside a second of the
+// source's first transfer, so three seconds of transfers with nothing
+// committed is a dead connection, not a slow one.
+const defaultSendingIntoSilenceAfter = 3 * time.Second
+
 // maxStuckRebuilds bounds the number of consecutive recovery spawns
 // the watchdog will issue without seeing a grain commit land. On the
 // (maxStuckRebuilds+1)th observation of a stuck handshake the flusher
@@ -271,6 +283,13 @@ type TargetReconciler struct {
 	// instead of waiting on a fatal that will not come. Defaults to
 	// defaultStuckHandshakeAfter.
 	StuckHandshakeAfter time.Duration
+
+	// SendingIntoSilenceAfter is how long the source may report
+	// transfers into a fabric side on which nothing has committed
+	// before the flusher sets the target up again, counted from the
+	// first tick that saw the source sending. Defaults to
+	// defaultSendingIntoSilenceAfter.
+	SendingIntoSilenceAfter time.Duration
 
 	// SamplesCommitted is told every audio sample range a target commits:
 	// the domain directory, the flow id and the samples [start, end).
@@ -2151,6 +2170,7 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 	defer t.Stop()
 
 	var last targetProgressState
+	var watch handshakeWatch
 	first := true
 	for {
 		select {
@@ -2172,9 +2192,12 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// onFatal, so recoverFromFatalError never fires, and the
 		// flusher would otherwise just oscillate between Ready and
 		// Degraded as time goes by. Spawn recovery when no commit has
-		// landed since the fabric side opened, the stuck-handshake
-		// window has elapsed, *and* mirror.Status.LastSentAt postdates
-		// the open: zero commits alone cannot distinguish a wedged
+		// landed since the fabric side opened, the source is sending
+		// into it (mirror.Status.LastSentAt postdates the open, or the
+		// source reports TransfersNotLanding), *and* either the
+		// stuck-handshake window has passed since the open or the
+		// shorter sending-into-silence window has passed since the
+		// source was first seen sending: zero commits alone cannot distinguish a wedged
 		// handshake from a flow whose producer simply is not sending.
 		// Without the source-activity gate an idle flow loops
 		// spawn->cap->drop->reopen forever - each reopen resets
@@ -2196,7 +2219,7 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// flusher tests construct bare targetEntry values and drive
 		// the flusher directly): the watchdog must not fire on an
 		// entry whose fabric side was never actually opened.
-		if r.wedged(ctx, key, entry) {
+		if r.wedged(ctx, key, entry, &watch) {
 			if entry.recoveryAttempts.Load() >= maxStuckRebuilds {
 				// Cap reached: rebuilds keep failing to attract a
 				// commit. Publish a terminal Phase=Failed so operators
@@ -2268,7 +2291,7 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 				// the mirror covers the post-handshake variant: a
 				// LastSentAt change that lands in the same window
 				// must be observed before the spawn commits.
-				if !r.wedged(ctx, key, entry) {
+				if !r.wedged(ctx, key, entry, &watch) {
 					entry.recovering.Store(false)
 					continue
 				}
@@ -2312,18 +2335,21 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 // and both answers have to come from the same predicate: a re-check
 // that is stricter than the first look discards every spawn the
 // first look asks for.
-func (r *TargetReconciler) wedged(ctx context.Context, key types.NamespacedName, entry *targetEntry) bool {
+func (r *TargetReconciler) wedged(ctx context.Context, key types.NamespacedName, entry *targetEntry, w *handshakeWatch) bool {
 	openedAt := entry.fabricOpenedAt.Load()
 	if openedAt == nil {
 		return false
 	}
 	commits, atOpen := entry.commits.Load(), entry.commitsAtFabricOpen.Load()
 	if commits == atOpen {
-		if time.Since(*openedAt) <= r.stuckHandshakeAfter() {
+		mirror, err := r.fetchMirror(ctx, key)
+		if err != nil || !sourceIsDelivering(mirror, *openedAt) {
+			w.reset()
 			return false
 		}
-		mirror, err := r.fetchMirror(ctx, key)
-		return err == nil && sourceIsDelivering(mirror, *openedAt)
+		since := w.sendingSince(*openedAt, time.Now())
+		return time.Since(*openedAt) > r.stuckHandshakeAfter() ||
+			time.Since(since) > r.sendingIntoSilenceAfter()
 	}
 	lastCommit := entry.lastCommitAt.Load()
 	if commits < atOpen || lastCommit == nil {
@@ -2332,6 +2358,33 @@ func (r *TargetReconciler) wedged(ctx context.Context, key types.NamespacedName,
 	mirror, err := r.fetchMirror(ctx, key)
 	return err == nil && mirror.Status.LastSentAt != nil &&
 		mirror.Status.LastSentAt.Time.Sub(*lastCommit) > r.stuckHandshakeAfter()
+}
+
+// handshakeWatch remembers, for the fabric side opened at openedAt,
+// the first flusher tick that saw the source sending into it. Only the
+// flusher goroutine touches it.
+type handshakeWatch struct {
+	openedAt time.Time
+	since    time.Time
+}
+
+func (w *handshakeWatch) reset() { *w = handshakeWatch{} }
+
+// sendingSince returns when the source was first seen sending into the
+// fabric side opened at openedAt, starting the count at now when this
+// is the first such tick or the fabric side has been opened again.
+func (w *handshakeWatch) sendingSince(openedAt, now time.Time) time.Time {
+	if w.since.IsZero() || !w.openedAt.Equal(openedAt) {
+		w.openedAt, w.since = openedAt, now
+	}
+	return w.since
+}
+
+func (r *TargetReconciler) sendingIntoSilenceAfter() time.Duration {
+	if r.SendingIntoSilenceAfter > 0 {
+		return r.SendingIntoSilenceAfter
+	}
+	return defaultSendingIntoSilenceAfter
 }
 
 // observedTargetState derives the TargetProgress state the flusher
