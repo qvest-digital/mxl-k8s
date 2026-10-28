@@ -71,7 +71,8 @@ type Trigger struct {
 
 	mu       sync.Mutex
 	seen     map[string]time.Time
-	requests sync.WaitGroup // the mirror requests Handle started
+	asking   map[string]bool // the (pid, flow) requests still being made
+	requests sync.WaitGroup  // the mirror requests Handle started
 }
 
 // minRetry is the shortest wait before a refused request is made again;
@@ -79,7 +80,8 @@ type Trigger struct {
 var minRetry = time.Second
 
 // retryable is a refusal that could pass later, as the intent
-// dispatcher's limits report.
+// dispatcher's burst limit reports. A zero RetryAfter is a refusal that
+// waiting does not lift, and is final.
 type retryable interface{ RetryAfter() time.Duration }
 
 // processStart reads the start time of pid, field 22 of /proc/<pid>/stat,
@@ -105,8 +107,11 @@ func processStart(pid int32) (string, bool) {
 // request asks for a mirror of the placeholder a process opened. The
 // open has already succeeded, so a request a limit refused reaches no
 // one: the process maps a ring nothing fills and does not open it again.
-// Such a request is made again when the limit says it could pass, for as
-// long as the process lives and the flow is still a placeholder here.
+// A request the burst limit refused is made again when that limit says
+// it could pass, for as long as the process lives and the flow is still
+// a placeholder here; a refusal waiting cannot lift, as by a count of
+// live mirrors, is final. Each request costs API calls on the agent's one
+// client, so nothing is asked again that could not pass.
 func (t *Trigger) request(ctx context.Context, pid int32, domain, id string) {
 	start := t.ProcessStart
 	if start == nil {
@@ -123,7 +128,7 @@ func (t *Trigger) request(ctx context.Context, pid int32, domain, id string) {
 			return
 		}
 		var r retryable
-		if !errors.As(err, &r) {
+		if !errors.As(err, &r) || r.RetryAfter() <= 0 {
 			t.Log.Info("placeholder opened, no mirror", "flowID", id, "pid", pid, "reason", err.Error())
 			return
 		}
@@ -178,9 +183,26 @@ func (t *Trigger) Handle(ctx context.Context, o fanotify.Open) bool {
 	if t.Ours != nil && t.Ours(ctx, o.PID) {
 		return false
 	}
+	// One request per process and flow: an open again after the window,
+	// while an earlier request is still waiting to ask again, starts none.
+	t.mu.Lock()
+	if t.asking[key] {
+		t.mu.Unlock()
+		return false
+	}
+	if t.asking == nil {
+		t.asking = make(map[string]bool)
+	}
+	t.asking[key] = true
+	t.mu.Unlock()
 	t.requests.Add(1)
 	go func() {
 		defer t.requests.Done()
+		defer func() {
+			t.mu.Lock()
+			delete(t.asking, key)
+			t.mu.Unlock()
+		}()
 		t.request(ctx, o.PID, domain, id)
 	}()
 	return true

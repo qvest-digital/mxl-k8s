@@ -76,14 +76,21 @@ func TestEnsureMirror_AGlobIsHeldToTheBurst(t *testing.T) {
 	d, c, now := limitedDispatcher(t, Limits{Burst: 8, BurstWindow: 10 * time.Second})
 	pod := consumer("globber", "uid-glob")
 
+	// One creation a second, so the window's oldest creation is the first
+	// and every later refusal is pinned to when that one leaves it.
+	start := *now
 	var refused int
 	for i := range 26 {
 		if _, err := d.ensureMirror(context.Background(), globFlow(i), "n-src", pod); err != nil {
 			assert.Contains(t, err.Error(), "in the last 10s")
 			var le *LimitError
 			require.ErrorAs(t, err, &le, "a refusal by a limit says when it could pass")
-			assert.Equal(t, 10*time.Second, le.RetryAfter(), "when the oldest creation leaves the window")
+			assert.Equal(t, start.Add(10*time.Second).Sub(*now), le.RetryAfter(),
+				"when the oldest creation leaves the window")
 			refused++
+		}
+		if i < 7 {
+			*now = now.Add(time.Second)
 		}
 	}
 	assert.Equal(t, 8, intentMirrors(t, c), "a glob of 26 flows created more than the burst")
@@ -97,7 +104,7 @@ func TestEnsureMirror_AGlobIsHeldToTheBurst(t *testing.T) {
 	assert.Equal(t, corev1.EventTypeWarning, ev[0].Type)
 	assert.Contains(t, ev[0].Message, "ENOENT")
 
-	*now = now.Add(10 * time.Second)
+	*now = start.Add(10 * time.Second)
 	_, err := d.ensureMirror(context.Background(), globFlow(8), "n-src", pod)
 	require.NoError(t, err, "a flow opened again after the window is mirrored")
 }
@@ -145,7 +152,8 @@ func TestEnsureMirror_PerPodLimitCountsLiveMirrors(t *testing.T) {
 	require.ErrorContains(t, err, "already has 3 mirrors created on demand")
 	var le *LimitError
 	require.ErrorAs(t, err, &le)
-	assert.Equal(t, defaultLimitRetry, le.RetryAfter(), "a live count is asked again after the default retry")
+	assert.Zero(t, le.RetryAfter(), "a pod at its count of live mirrors stays there while it lives; "+
+		"asking again would only poll the API")
 
 	_, err = d.ensureMirror(context.Background(), globFlow(4), "n-src", b)
 	require.NoError(t, err, "another pod's mirrors count against its own limit")
@@ -220,4 +228,29 @@ func TestEnsureMirror_ZeroLimitsCreateWithoutBound(t *testing.T) {
 	}
 	assert.Equal(t, 30, intentMirrors(t, c))
 	assert.Empty(t, limitEvents(t, c))
+}
+
+// The open trigger finds a burst refusal by errors.As on what Materialize
+// returns; a wrap that drops the error chain would disable every retry.
+func TestMaterialize_ReturnsTheLimitErrorItWasRefusedWith(t *testing.T) {
+	var objs []client.Object
+	for i := range 2 {
+		objs = append(objs, &mxlv1alpha1.MxlFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: globFlow(i).ID},
+			Spec:       mxlv1alpha1.MxlFlowSpec{ID: globFlow(i).ID},
+			Status: mxlv1alpha1.MxlFlowStatus{Locations: []mxlv1alpha1.MxlFlowLocation{
+				{NodeName: "n-src", Phase: mxlv1alpha1.MxlFlowLocationOrigin}}},
+		})
+	}
+	d, _, _ := limitedDispatcher(t, Limits{Burst: 1, BurstWindow: time.Minute}, objs...)
+	d.Resolver = &waitingReader{pod: consumer("reader", "uid-r")}
+	d.FlowChecker = func(string) bool { return false }
+	d.MaterializeTimeout = 20 * time.Millisecond
+	path := func(i int) string { return "/run/mxl/domain/" + globFlow(i).ID + ".mxl-flow/data" }
+
+	require.Error(t, d.Materialize(context.Background(), 42, path(0)), "no gateway fills the first mirror")
+	err := d.Materialize(context.Background(), 42, path(1))
+	var le *LimitError
+	require.ErrorAs(t, err, &le, "Materialize lost the refusal's type: %v", err)
+	assert.Positive(t, le.RetryAfter())
 }

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -117,20 +119,67 @@ func TestARefusedRequestEndsOnceThePlaceholderIsFilled(t *testing.T) {
 	require.Equal(t, 2, m.count(), "requests went on for a flow no longer a placeholder")
 }
 
-// A refusal no limit made is not made again.
-func TestAnyOtherRefusalIsFinal(t *testing.T) {
-	d := domainWithPlaceholder(t)
-	m := &scripted{errs: []error{errors.New("MxlFlow not yet known cluster-wide")}}
-	openRing(t, retryTrigger(t, d, m, alive), d, 77)
-	require.Equal(t, 1, m.count())
+type capped struct{}
+
+func (capped) Error() string             { return "pod already has 64 mirrors created on demand, its limit" }
+func (capped) RetryAfter() time.Duration { return 0 }
+
+// A refusal waiting cannot lift, by a count of live mirrors or by
+// anything but a limit, is not made again: each request costs API calls
+// on the agent's one client, and a pod at its count stays there.
+func TestARefusalWaitingCannotLiftIsFinal(t *testing.T) {
+	for name, err := range map[string]error{
+		"count of live mirrors": capped{},
+		"no limit":              errors.New("MxlFlow not yet known cluster-wide"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := domainWithPlaceholder(t)
+			m := &scripted{errs: []error{err}}
+			openRing(t, retryTrigger(t, d, m, alive), d, 77)
+			require.Equal(t, 1, m.count())
+		})
+	}
 }
 
+// A process opening the flow again after the dedup window, while its
+// first request still waits to ask again, starts no second request.
+func TestAReopenWhileARequestWaitsStartsNoOther(t *testing.T) {
+	d := domainWithPlaceholder(t)
+	release := make(chan struct{})
+	m := &scripted{errs: []error{limited{}}}
+	tr := retryTrigger(t, d, m, alive)
+	tr.Window = time.Nanosecond
+	m.before = func() { <-release }
+	open := fanotify.Open{PID: 77, Path: filepath.Join(d, id+".mxl-flow", "grains", "data.0")}
+	require.True(t, tr.Handle(context.Background(), open))
+	require.Eventually(t, func() bool { return m.count() >= 1 }, 5*time.Second, time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
+	require.False(t, tr.Handle(context.Background(), open), "a second request for the same process and flow")
+	close(release)
+	tr.requests.Wait()
+	require.Equal(t, 2, m.count(), "one refused request and its one retry")
+}
+
+// The start time tells a process from a later one under the same pid,
+// so a child started after this test process has read a later one.
 func TestProcessStartReadsTheKernelsStartTime(t *testing.T) {
-	a, ok := processStart(int32(os.Getpid()))
+	mine, ok := processStart(int32(os.Getpid()))
 	require.True(t, ok)
-	require.NotEmpty(t, a)
-	b, _ := processStart(int32(os.Getpid()))
-	require.Equal(t, a, b)
+	again, _ := processStart(int32(os.Getpid()))
+	require.Equal(t, mine, again)
+
+	time.Sleep(50 * time.Millisecond) // past one clock tick
+	child := exec.Command("sleep", "5")
+	require.NoError(t, child.Start())
+	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
+	theirs, ok := processStart(int32(child.Process.Pid))
+	require.True(t, ok)
+	a, err := strconv.ParseUint(mine, 10, 64)
+	require.NoError(t, err)
+	b, err := strconv.ParseUint(theirs, 10, 64)
+	require.NoError(t, err)
+	require.Greater(t, b, a, "a later process read no later start time")
+
 	_, ok = processStart(1 << 30)
 	require.False(t, ok)
 }

@@ -143,9 +143,8 @@ type Limits struct {
 }
 
 // LimitError is a request Limits refused. RetryAfter is how long until
-// it could pass: when the oldest creation in the pod's burst window
-// leaves it, or, for a count of live mirrors, one burst window, the
-// earliest a mirror is likely to have gone.
+// it could pass, and is zero for a count of live mirrors: an on-demand
+// mirror lives as long as its pod, so a pod at its count stays there.
 type LimitError struct {
 	msg        string
 	retryAfter time.Duration
@@ -153,12 +152,10 @@ type LimitError struct {
 
 func (e *LimitError) Error() string { return e.msg }
 
-// RetryAfter is how long until the request could pass.
+// RetryAfter is how long until the request could pass, when the oldest
+// creation in the pod's burst window leaves it; zero when waiting does
+// not make it pass.
 func (e *LimitError) RetryAfter() time.Duration { return e.retryAfter }
-
-// defaultLimitRetry is RetryAfter for a count of live mirrors when no
-// burst window is set.
-const defaultLimitRetry = 10 * time.Second
 
 // ReasonMirrorLimitReached is the reason of the event a pod gets when a
 // mirror it asked for is refused by a limit.
@@ -582,10 +579,6 @@ func (d *Dispatcher) admit(ctx context.Context, pod metav1.Object) error {
 			retryAfter: at[0].Add(d.Limits.BurstWindow).Sub(now),
 		}
 	}
-	retry := d.Limits.BurstWindow
-	if retry <= 0 {
-		retry = defaultLimitRetry
-	}
 	if d.Limits.PerPod <= 0 && d.Limits.PerNode <= 0 {
 		return nil
 	}
@@ -606,11 +599,11 @@ func (d *Dispatcher) admit(ctx context.Context, pod metav1.Object) error {
 	}
 	if d.Limits.PerPod > 0 && own >= d.Limits.PerPod {
 		return &LimitError{msg: fmt.Sprintf("pod %s/%s already has %d mirrors created on demand, its limit",
-			pod.GetNamespace(), pod.GetName(), own), retryAfter: retry}
+			pod.GetNamespace(), pod.GetName(), own)}
 	}
 	if d.Limits.PerNode > 0 && node >= d.Limits.PerNode {
 		return &LimitError{msg: fmt.Sprintf("node %s already has %d mirrors created on demand, its limit",
-			d.NodeName, node), retryAfter: retry}
+			d.NodeName, node)}
 	}
 	return nil
 }
@@ -632,7 +625,8 @@ func (d *Dispatcher) refuse(ctx context.Context, ref mxlv1alpha1.FlowRef, pod me
 			Namespace: pod.GetNamespace(), Name: pod.GetName(), UID: pod.GetUID()},
 		Reason: ReasonMirrorLimitReached,
 		Message: fmt.Sprintf("no mirror of flow %s created onto %s: %v; a process waiting on the open "+
-			"gets ENOENT, and one that opened the flow's placeholder is asked for again while it runs",
+			"gets ENOENT; for one that opened the flow's placeholder, a refusal by the burst limit is "+
+			"asked for again while it runs, and one by a count of live mirrors is final",
 			ref.Name(), d.NodeName, why),
 		Type:           corev1.EventTypeWarning,
 		Source:         corev1.EventSource{Component: "mxl-domain-agent", Host: d.NodeName},
