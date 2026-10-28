@@ -1872,6 +1872,9 @@ type sourceProgressState struct {
 	// sending but target is wedged" from "source is idle". Unset
 	// before the first transfer.
 	lastSentAt *time.Time
+	// addedAt is when this mirror's target was added to the initiator
+	// it is on, published as status.targetAddedAt.
+	addedAt *time.Time
 }
 
 // publishSourceProgress writes a single SourceProgress condition
@@ -1919,6 +1922,9 @@ func (r *SourceReconciler) publishSourceProgress(ctx context.Context, key types.
 		// target-side stuck-handshake discriminator.
 		status["lastSentAt"] = state.lastSentAt.UTC().Format(time.RFC3339)
 	}
+	if state.addedAt != nil {
+		status["targetAddedAt"] = state.addedAt.UTC().Format(time.RFC3339)
+	}
 	if err := unstructured.SetNestedField(patch.Object, status, "status"); err != nil {
 		return fmt.Errorf("build SSA payload: %w", err)
 	}
@@ -1965,6 +1971,11 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 		case <-t.C:
 		}
 		state := observedState(entry, r.readerStallAfter())
+		// Carried on every publish, as lastSentAt is: SSA releases a
+		// field a later payload omits.
+		if !entry.openedAt.IsZero() {
+			state.addedAt = &entry.openedAt
+		}
 
 		// A reader that has stopped feeding the fabric is the one wedge
 		// neither side of the mirror resolves on its own. The target's

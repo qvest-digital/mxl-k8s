@@ -2191,6 +2191,11 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// idle flow ("source is not sending either"); idle flows must
 		// not trigger recovery.
 		//
+		// sourceReattached: the source added the target to a new
+		// initiator after the last grain landed; see sourceReattached.
+		// Waiting for postHandshakeWedge there costs the whole
+		// stuck-handshake window on every source gateway restart.
+		//
 		// A nil fabricOpenedAt guards entries that the flusher runs
 		// against without a real openTarget/recovery handoff (existing
 		// flusher tests construct bare targetEntry values and drive
@@ -2217,7 +2222,8 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 				}
 			}
 		}
-		if neverHandshook || postHandshakeWedge {
+		reattached, _, _ := r.sourceReattached(ctx, key, entry)
+		if neverHandshook || postHandshakeWedge || reattached {
 			if entry.recoveryAttempts.Load() >= maxStuckRebuilds {
 				// Cap reached: rebuilds keep failing to attract a
 				// commit. Publish a terminal Phase=Failed so operators
@@ -2311,7 +2317,8 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 						}
 					}
 				}
-				if !neverHandshook2 && !postHandshakeWedge2 {
+				reattached2, addedAt, lastCommit := r.sourceReattached(ctx, key, entry)
+				if !neverHandshook2 && !postHandshakeWedge2 && !reattached2 {
 					entry.recovering.Store(false)
 					continue
 				}
@@ -2319,8 +2326,14 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 				// the budget so the watchdog and a fatally-exited
 				// loop's onFatal spawn count against one shared cap
 				// instead of each other.
-				log.FromContext(ctx).Info("stuck handshake; triggering recovery",
-					"mirror", key, "attempt", entry.recoveryAttempts.Load()+1)
+				if reattached2 && !neverHandshook2 && !postHandshakeWedge2 {
+					log.FromContext(ctx).Info("source added the target again; setting the target up again",
+						"mirror", key, "attempt", entry.recoveryAttempts.Load()+1,
+						"targetAddedAt", addedAt, "lastCommitAt", lastCommit)
+				} else {
+					log.FromContext(ctx).Info("stuck handshake; triggering recovery",
+						"mirror", key, "attempt", entry.recoveryAttempts.Load()+1)
+				}
 				go r.dispatchRecovery(key)
 			}
 			// Skip the Degraded write this tick: publishing it would
@@ -2347,6 +2360,40 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 				"mirror", key, "reason", state.reason)
 		}
 	}
+}
+
+// sourceReattached reports whether the source added this target to a
+// new initiator after the last grain this fabric side committed, and
+// nothing has committed since.
+//
+// libmxl-fabrics' connection-based target accepts one connection and
+// closes its listener. Once that connection goes it listens again, on
+// a new port no TargetInfo names, so a new initiator dialling the
+// published one is refused until the target sets up again. That is
+// what a source gateway restart, or a source reader rebuild, does to
+// every mirror it carries. A connectionless target keeps its address
+// and takes the new initiator as it is.
+func (r *TargetReconciler) sourceReattached(ctx context.Context, key types.NamespacedName, entry *targetEntry) (reattached bool, addedAt, lastCommit time.Time) {
+	if entry.provider != fabrics.ProviderTCP && entry.provider != fabrics.ProviderVerbs {
+		return false, time.Time{}, time.Time{}
+	}
+	// No connection on this fabric side yet: the initiator that
+	// added the target is the one it waits for.
+	if entry.commits.Load() == entry.commitsAtFabricOpen.Load() {
+		return false, time.Time{}, time.Time{}
+	}
+	// Grains that keep landing say the connection is the live one,
+	// whatever the clocks on the two nodes say.
+	last := entry.lastCommitAt.Load()
+	if last == nil || time.Since(*last) <= r.flushInterval() {
+		return false, time.Time{}, time.Time{}
+	}
+	mirror, err := r.fetchMirror(ctx, key)
+	if err != nil || mirror.Status.TargetAddedAt == nil {
+		return false, time.Time{}, time.Time{}
+	}
+	addedAt = mirror.Status.TargetAddedAt.Time
+	return addedAt.After(*last), addedAt, *last
 }
 
 // observedTargetState derives the TargetProgress state the flusher

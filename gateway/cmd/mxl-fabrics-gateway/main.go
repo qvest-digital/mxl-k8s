@@ -349,15 +349,11 @@ func mxlfsComponents(on bool, c client.Client, node string, domains *instance.Se
 	target.SamplesCommitted = sets.SamplesCommitted
 
 	return []component{
-		// Before any placeholder controller runs: the gateway holds no
-		// placeholder in a domain it just opened, so every marker there
-		// is left over from a gateway that did not drop its own.
+		// Before any placeholder controller runs, so no domain is opened
+		// unseen: the markers a previous gateway left in it are judged
+		// once the placeholders still absent here are held again.
 		{"stale placeholder markers", func(ctrl.Manager) error {
-			domains.Watch(func(h *instance.Handles) {
-				if err := placeholder.ClearMarkers(h.DomainPath()); err != nil {
-					setupLog.Error(err, "clear stale placeholder markers", "domain", h.DomainPath())
-				}
-			})
+			domains.Watch(func(h *instance.Handles) { placeholders.DomainOpened(h.DomainPath()) })
 			return nil
 		}},
 		{"redundancy set reconciler", sets.SetupWithManager},

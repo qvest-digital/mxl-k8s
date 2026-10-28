@@ -115,6 +115,19 @@ type MxlFlowMirrorStatus struct {
 	// +nullable
 	LastSentAt *metav1.Time `json:"lastSentAt,omitempty"`
 
+	// TargetAddedAt is when the source-side gateway last added this
+	// mirror's target to an initiator, which on a connection-based
+	// provider opens a new connection to it. A target that has
+	// accepted a connection listens on a port of its own choosing
+	// once that connection goes, so a target that sees TargetAddedAt
+	// move past its last grain sets up again and publishes a
+	// TargetInfo the new connection can reach. Unset until a source
+	// gateway first adds the target; it keeps its last value after
+	// that source stops, until the next one publishes.
+	// +optional
+	// +nullable
+	TargetAddedAt *metav1.Time `json:"targetAddedAt,omitempty"`
+
 	// LastError is the most recent reconcile error message recorded
 	// by the source gateway when bounded backoff is engaged. Empty
 	// after a successful reconcile.

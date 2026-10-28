@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -38,8 +39,9 @@ const (
 )
 
 // FlowChecker reports whether the named flow's flow_def.json is
-// present locally. The default implementation stats the filesystem
-// under DomainPath; tests inject a closure that fakes the lookup.
+// present locally. The default implementation lists the domain
+// directory and reads the flow's own directory; tests inject a closure
+// that fakes the lookup.
 type FlowChecker func(flowID string) bool
 
 // LeaseChecker is the slice of the originlease.Manager surface the
@@ -77,8 +79,8 @@ type Dispatcher struct {
 	// default.
 	PollInterval time.Duration
 
-	// FlowChecker overrides the filesystem-based local-flow check.
-	// Nil falls back to the default stat under DomainPath.
+	// FlowChecker replaces the whole local-flow check, the listing of
+	// the domain included. Nil uses the default under DomainPath.
 	FlowChecker FlowChecker
 
 	// Lease, when set, gates resolveSourceNode's Origin picks on a
@@ -199,10 +201,6 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 		return err
 	}
 
-	if d.flowExistsLocally(ref) {
-		return nil
-	}
-
 	timeout := d.MaterializeTimeout
 	if timeout <= 0 {
 		timeout = defaultMaterializeTimeout
@@ -210,9 +208,30 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 	wctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	pod, err := d.Resolver.PodForPID(wctx, pid)
+	// The pid is resolved before anything else: the reader is certain
+	// to exist only while its open waits for this request, so any check
+	// ahead of the lookup that waits can outlast it. A missing flow is
+	// still the reason reported over a failed lookup, since no mirror
+	// could follow either way.
+	pod, podErr := d.Resolver.PodForPID(wctx, pid)
+
+	if d.flowExistsLocally(ref) {
+		return nil
+	}
+
+	res, err := d.resolveSourceNode(wctx, ref)
 	if err != nil {
-		return fmt.Errorf("pod lookup: %w", err)
+		return fmt.Errorf("resolve source node: %w", err)
+	}
+	if !res.Found {
+		if res.AllStale {
+			return errors.New("all Origin locations have an expired Lease")
+		}
+		return errors.New("MxlFlow not yet known cluster-wide")
+	}
+
+	if podErr != nil {
+		return fmt.Errorf("pod lookup: %w", podErr)
 	}
 	// The open trigger checks this too, but passes on a pid whose pod it
 	// could not resolve; a mirror for the gateway's or the exporter's
@@ -228,16 +247,6 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 	)
 	l.Info("intent request received")
 
-	res, err := d.resolveSourceNode(wctx, ref)
-	if err != nil {
-		return fmt.Errorf("resolve source node: %w", err)
-	}
-	if !res.Found {
-		if res.AllStale {
-			return errors.New("all Origin locations have an expired Lease")
-		}
-		return errors.New("MxlFlow not yet known cluster-wide")
-	}
 	sourceNode := res.Node
 	if sourceNode == d.NodeName {
 		// The flow's origin is this node; the producer should have
@@ -357,9 +366,41 @@ func (d *Dispatcher) flowExistsLocally(ref mxlv1alpha1.FlowRef) bool {
 	if dir == "" {
 		return false
 	}
-	_, err := os.Stat(filepath.Join(dir, ref.ID+".mxl-flow", "flow_def.json"))
+	// Listed rather than looked up by name: on an mxlfs mounted with
+	// wait=, a lookup of a missing flow directory waits for it to
+	// appear, which would hold this request until the reader that made
+	// it has given up.
+	if !listed(dir, ref.ID+".mxl-flow") {
+		return false
+	}
+	// The directory is listed, so its dentry is positive and the walk into
+	// it does not wait; flow_def.json is no flow name and never waits.
+	_, err := statFlowDef(filepath.Join(dir, ref.ID+".mxl-flow", "flow_def.json"))
 	// A placeholder lists the flow without holding it.
 	return err == nil && !mxlv1alpha1.IsPlaceholder(dir, ref.ID)
+}
+
+// statFlowDef looks a flow's flow_def.json up by name. A seam for tests,
+// which have no mxlfs to show that a lookup of a missing flow waits.
+var statFlowDef = os.Stat
+
+// listed reports whether dir has an entry called name, reading the
+// directory instead of looking the name up.
+func listed(dir, name string) bool {
+	f, err := os.Open(dir)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	for {
+		names, err := f.Readdirnames(256)
+		if slices.Contains(names, name) {
+			return true
+		}
+		if err != nil {
+			return false
+		}
+	}
 }
 
 func (d *Dispatcher) resolveSourceNode(ctx context.Context, ref mxlv1alpha1.FlowRef) (mxlv1alpha1.OriginResolution, error) {
