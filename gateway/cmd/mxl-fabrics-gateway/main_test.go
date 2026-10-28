@@ -72,11 +72,13 @@ func TestRequireKindNamesTheMissingCRD(t *testing.T) {
 	require.NoError(t, requireKind(m, "MxlFlowRedundancySet"))
 }
 
-// A gateway that exits uncleanly leaves its placeholder markers, and the
-// directories they mark are taken for placeholders for good. Every
-// domain the gateway opens is cleared before a placeholder is held in
-// it: the primary one at start, any other as it is first opened.
-func TestStalePlaceholderMarkersGoWhenADomainOpens(t *testing.T) {
+// A gateway that exits leaves its placeholders and their markers. The
+// next one opening a domain, the primary one at start or any other as
+// it is first opened, keeps those markers: until it holds a
+// placeholder again, its directory without a marker reads as a local
+// copy that no mirror fills. The placeholder manager's first pass
+// clears the ones it does not hold.
+func TestPlaceholderMarkersOutliveADomainOpen(t *testing.T) {
 	marker := func(domain string) string {
 		p := mxlv1alpha1.PlaceholderMarker(domain, "5fbec3b1-1b0f-417d-9059-8b94a47197ed")
 		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
@@ -86,7 +88,7 @@ func TestStalePlaceholderMarkersGoWhenADomainOpens(t *testing.T) {
 	root := t.TempDir()
 	primary := filepath.Join(root, "domain")
 	studio := filepath.Join(root, mxlv1alpha1.DomainsDir, "studio")
-	stale, later := marker(primary), marker(studio)
+	left, later := marker(primary), marker(studio)
 	h, err := instance.Open(primary, true)
 	require.NoError(t, err)
 	domains := &instance.Set{Primary: h, Directory: func(context.Context, string) (string, error) {
@@ -99,10 +101,9 @@ func TestStalePlaceholderMarkersGoWhenADomainOpens(t *testing.T) {
 			require.NoError(t, c.setup(nil))
 		}
 	}
-	assert.NoFileExists(t, stale, "the primary domain's marker")
-	assert.FileExists(t, later, "a domain not opened yet is not touched")
+	assert.FileExists(t, left, "the primary domain's marker")
 
 	_, err = domains.For(context.Background(), "studio")
 	require.NoError(t, err)
-	assert.NoFileExists(t, later, "a domain opened later")
+	assert.FileExists(t, later, "a domain opened later")
 }
