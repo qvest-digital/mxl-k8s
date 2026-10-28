@@ -3,6 +3,7 @@ package mxlfswatch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,8 +14,18 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/fanotify"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/intent"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -199,4 +210,137 @@ func TestAReopenAfterARequestEndedStartsANewOne(t *testing.T) {
 	require.True(t, tr.Handle(context.Background(), open), "a finished request still blocked the next one")
 	tr.requests.Wait()
 	require.Equal(t, 2, m.count())
+}
+
+// podsByPID is the agent's pod lookup: the UID from /proc, the pod from
+// a List of the node's pods, which it counts as the API call it is.
+type podsByPID struct {
+	pods  map[int32]*corev1.Pod
+	calls func()
+}
+
+func (p podsByPID) UIDForPID(pid int32) (string, error) { return string(p.pods[pid].UID), nil }
+
+func (p podsByPID) PodForPID(_ context.Context, pid int32) (*corev1.Pod, error) {
+	p.calls()
+	return p.pods[pid], nil
+}
+
+// A process opening many placeholders at once is held to its pod's
+// burst, and each refused request asks again while it runs. Each request
+// costs API calls on the agent's one client, which renewing its leases
+// shares. Had every refused request been told to ask when the oldest
+// creation leaves the window, all of them would ask together each window,
+// and all but the places that freed be refused again, each at a full
+// request's price.
+func TestRefusedRequestsAskAgainAsPlacesFree(t *testing.T) {
+	const n, burst = 50, 8
+	const window = 200 * time.Millisecond
+	saved := minRetry
+	minRetry = 20 * time.Millisecond
+	t.Cleanup(func() { minRetry = saved })
+
+	d := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(d, mxlv1alpha1.PlaceholderMarkerDir), 0o755))
+	var objs []client.Object
+	ids := make([]string, n+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("11111111-2222-3333-4444-%012d", i)
+		require.NoError(t, os.MkdirAll(filepath.Join(d, ids[i]+".mxl-flow", "grains"), 0o755))
+		require.NoError(t, os.WriteFile(mxlv1alpha1.PlaceholderMarker(d, ids[i]), nil, 0o644))
+		objs = append(objs, &mxlv1alpha1.MxlFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: ids[i]},
+			Spec:       mxlv1alpha1.MxlFlowSpec{ID: ids[i]},
+			Status: mxlv1alpha1.MxlFlowStatus{Locations: []mxlv1alpha1.MxlFlowLocation{
+				{NodeName: "n-src", Phase: mxlv1alpha1.MxlFlowLocationOrigin}}},
+		})
+	}
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(mxlv1alpha1.AddToScheme(scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+
+	var mu sync.Mutex
+	var calls []time.Time
+	call := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, time.Now())
+	}
+	counted := interceptor.NewClient(c, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, k client.ObjectKey, o client.Object, opts ...client.GetOption) error {
+			call()
+			return cl.Get(ctx, k, o, opts...)
+		},
+		List: func(ctx context.Context, cl client.WithWatch, l client.ObjectList, opts ...client.ListOption) error {
+			call()
+			return cl.List(ctx, l, opts...)
+		},
+		Create: func(ctx context.Context, cl client.WithWatch, o client.Object, opts ...client.CreateOption) error {
+			call()
+			return cl.Create(ctx, o, opts...)
+		},
+	})
+	pod := func(name string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: name, UID: types.UID("uid-" + name)}}
+	}
+	disp := &intent.Dispatcher{
+		Client:     counted,
+		Resolver:   podsByPID{pods: map[int32]*corev1.Pod{77: pod("globber"), 78: pod("other")}, calls: call},
+		DomainPath: d,
+		NodeName:   "n-target",
+		Provider:   mxlv1alpha1.ProviderTCP,
+		Limits:     intent.Limits{PerPod: 64, Burst: burst, BurstWindow: window},
+		// No gateway fills a mirror here; an admitted request ends at once.
+		MaterializeTimeout: time.Millisecond,
+	}
+	tr := &Trigger{Domain: d, Dispatcher: disp, Window: time.Minute, Log: logr.Discard(), ProcessStart: alive}
+	open := func(pid int32, id string) {
+		tr.Handle(context.Background(),
+			fanotify.Open{PID: pid, Path: filepath.Join(d, id+".mxl-flow", "grains", "data.0")})
+	}
+	wait := func() {
+		done := make(chan struct{})
+		go func() { tr.requests.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the requests did not end")
+		}
+	}
+
+	// What one admitted request costs, from another pod.
+	open(78, ids[n])
+	wait()
+	mu.Lock()
+	admitted := len(calls)
+	calls = nil
+	mu.Unlock()
+
+	start := time.Now()
+	for _, id := range ids[:n] {
+		open(77, id)
+	}
+	wait()
+
+	var l mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, c.List(context.Background(), &l, client.MatchingLabels{mxlv1alpha1.LabelRequestorPodUID: "uid-globber"}))
+	require.Len(t, l.Items, n, "every refused request passed in the end")
+
+	var perWindow []int
+	for _, at := range calls {
+		w := int(at.Sub(start) / window)
+		for len(perWindow) <= w {
+			perWindow = append(perWindow, 0)
+		}
+		perWindow[w]++
+	}
+	t.Logf("%d API calls for %d flows, per window %v; an admitted request %d", len(calls), n, perWindow, admitted)
+	// The first window carries the open of every flow. In each one after,
+	// a place that frees lets one request in, which may have asked once
+	// before it was free; a refusal costs less than an admission.
+	for w := 1; w < len(perWindow); w++ {
+		require.LessOrEqual(t, perWindow[w], 2*burst*admitted,
+			"window %d: %d API calls for %d places", w, perWindow[w], burst)
+	}
 }

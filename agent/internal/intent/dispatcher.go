@@ -111,10 +111,23 @@ type Dispatcher struct {
 
 	// limitMu makes counting the mirrors and creating one a single step,
 	// so a burst of requests cannot all pass the count before any
-	// mirror exists. created holds, per requesting pod, when the
-	// dispatcher created a mirror for it inside the burst window.
+	// mirror exists.
 	limitMu sync.Mutex
-	created map[types.UID][]time.Time
+	bursts  map[types.UID]*burst
+}
+
+// burst is one pod's mirrors created on demand inside the burst window,
+// and the flows its burst limit refused it, in the order first refused.
+type burst struct {
+	pod     metav1.ObjectMeta // to refuse it before its pod is looked up
+	created []time.Time
+	waiting []waiter
+}
+
+// waiter is a flow a burst refused, and when it was told to ask again.
+type waiter struct {
+	flow string
+	at   time.Time
 }
 
 // Limits bounds the mirrors one node's agent creates on demand. A
@@ -152,9 +165,11 @@ type LimitError struct {
 
 func (e *LimitError) Error() string { return e.msg }
 
-// RetryAfter is how long until the request could pass, when the oldest
-// creation in the pod's burst window leaves it; zero when waiting does
-// not make it pass.
+// RetryAfter is how long until the request could pass, when a place in
+// the pod's burst window frees for it; zero when waiting does not make it
+// pass. The pod's refused flows are given the places in the order they
+// were refused, the k-th the one the k-th oldest creation leaves, so as
+// many ask again together as places free.
 func (e *LimitError) RetryAfter() time.Duration { return e.retryAfter }
 
 // ReasonMirrorLimitReached is the reason of the event a pod gets when a
@@ -165,6 +180,12 @@ const ReasonMirrorLimitReached = "MirrorLimitReached"
 // one the agent runs with.
 type PodResolver interface {
 	PodForPID(ctx context.Context, pid int32) (*corev1.Pod, error)
+}
+
+// uidResolver is a PodResolver that names a PID's pod UID without the
+// API, as *podlookup.Resolver does from /proc.
+type uidResolver interface {
+	UIDForPID(pid int32) (string, error)
 }
 
 // OriginClaimer is the slice of the flowpublisher.Publisher surface
@@ -204,6 +225,10 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 	}
 	wctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	if err := d.refuseEarly(wctx, pid, ref); err != nil {
+		return err
+	}
 
 	// The pid is resolved before anything else: the reader is certain
 	// to exist only while its open waits for this request, so any check
@@ -504,7 +529,7 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, ref mxlv1alpha1.FlowRef, 
 
 	d.limitMu.Lock()
 	defer d.limitMu.Unlock()
-	if err := d.admit(ctx, pod); err != nil {
+	if err := d.admit(ctx, pod, ref); err != nil {
 		d.refuse(ctx, ref, pod, err)
 		return nil, err
 	}
@@ -540,7 +565,8 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, ref mxlv1alpha1.FlowRef, 
 		}
 		return &existing, nil
 	}
-	d.created[pod.GetUID()] = append(d.created[pod.GetUID()], d.now())
+	b := d.bursts[pod.GetUID()]
+	b.created = append(b.created, d.now())
 	return desired, nil
 }
 
@@ -551,33 +577,18 @@ func (d *Dispatcher) now() time.Time {
 	return time.Now()
 }
 
-// admit reports why pod may not have another mirror created, or nil.
-// The caller holds limitMu.
-func (d *Dispatcher) admit(ctx context.Context, pod metav1.Object) error {
+// admit reports why pod may not have another mirror of ref created, or
+// nil. The caller holds limitMu.
+func (d *Dispatcher) admit(ctx context.Context, pod metav1.Object, ref mxlv1alpha1.FlowRef) error {
 	now := d.now()
-	if d.created == nil {
-		d.created = map[types.UID][]time.Time{}
+	d.pruneBursts(now)
+	b := d.bursts[pod.GetUID()]
+	if b == nil {
+		b = &burst{pod: metav1.ObjectMeta{Namespace: pod.GetNamespace(), Name: pod.GetName(), UID: pod.GetUID()}}
+		d.bursts[pod.GetUID()] = b
 	}
-	for uid, at := range d.created {
-		kept := at[:0]
-		for _, t := range at {
-			if now.Sub(t) < d.Limits.BurstWindow {
-				kept = append(kept, t)
-			}
-		}
-		if len(kept) == 0 {
-			delete(d.created, uid)
-		} else {
-			d.created[uid] = kept
-		}
-	}
-	if b := d.Limits.Burst; b > 0 && len(d.created[pod.GetUID()]) >= b {
-		at := d.created[pod.GetUID()]
-		return &LimitError{
-			msg: fmt.Sprintf("pod %s/%s had %d mirrors created on demand in the last %s, its limit",
-				pod.GetNamespace(), pod.GetName(), len(at), d.Limits.BurstWindow),
-			retryAfter: at[0].Add(d.Limits.BurstWindow).Sub(now),
-		}
+	if err := d.burstRefusal(b, ref, now); err != nil {
+		return err
 	}
 	if d.Limits.PerPod <= 0 && d.Limits.PerNode <= 0 {
 		return nil
@@ -606,6 +617,107 @@ func (d *Dispatcher) admit(ctx context.Context, pod metav1.Object) error {
 			d.NodeName, node)}
 	}
 	return nil
+}
+
+// pruneBursts forgets creations that have left the burst window, and
+// refused flows that did not ask again within a window of when they were
+// told to. The caller holds limitMu.
+func (d *Dispatcher) pruneBursts(now time.Time) {
+	if d.bursts == nil {
+		d.bursts = map[types.UID]*burst{}
+	}
+	for uid, b := range d.bursts {
+		b.created = slices.DeleteFunc(b.created, func(t time.Time) bool {
+			return now.Sub(t) >= d.Limits.BurstWindow
+		})
+		b.waiting = slices.DeleteFunc(b.waiting, func(w waiter) bool {
+			return now.Sub(w.at) >= d.Limits.BurstWindow
+		})
+		if len(b.created) == 0 && len(b.waiting) == 0 {
+			delete(d.bursts, uid)
+		}
+	}
+}
+
+// burstRefusal refuses ref when b's window is full, telling it to ask
+// again when its place frees, and otherwise lets it pass and forgets it
+// was refused. The caller holds limitMu.
+func (d *Dispatcher) burstRefusal(b *burst, ref mxlv1alpha1.FlowRef, now time.Time) error {
+	i := slices.IndexFunc(b.waiting, func(w waiter) bool { return w.flow == ref.Name() })
+	n, window := d.Limits.Burst, d.Limits.BurstWindow
+	if n <= 0 || len(b.created) < n {
+		if i >= 0 {
+			b.waiting = slices.Delete(b.waiting, i, i+1)
+		}
+		return nil
+	}
+	if i < 0 {
+		b.waiting = append(b.waiting, waiter{flow: ref.Name()})
+		i = len(b.waiting) - 1
+	}
+	// The i-th flow refused gets the place the i-th oldest creation
+	// frees, and once those are given, the one the creation it lets in
+	// frees a window later.
+	at := b.created[len(b.created)-n+i%n].Add(time.Duration(i/n+1) * window)
+	b.waiting[i].at = at
+	return &LimitError{
+		msg: fmt.Sprintf("pod %s/%s had %d mirrors created on demand in the last %s, its limit",
+			b.pod.Namespace, b.pod.Name, len(b.created), window),
+		retryAfter: at.Sub(now),
+	}
+}
+
+// refuseEarly refuses a request by its pod's burst limit before the pod
+// is looked up, from the pod UID /proc names for pid. A refused flow asks
+// again until it passes, and the full path costs it a pod List and the
+// provider's lookups each time. What that path answers ahead of the limit
+// is checked first and left to it: a flow already here, one no other node
+// can source, one a mirror already serves.
+func (d *Dispatcher) refuseEarly(ctx context.Context, pid int32, ref mxlv1alpha1.FlowRef) error {
+	r, ok := d.Resolver.(uidResolver)
+	if !ok || d.Limits.Burst <= 0 {
+		return nil
+	}
+	uid, err := r.UIDForPID(pid)
+	if err != nil {
+		return nil
+	}
+	full := func() *burst {
+		d.pruneBursts(d.now())
+		if b := d.bursts[types.UID(uid)]; b != nil && len(b.created) >= d.Limits.Burst {
+			return b
+		}
+		return nil
+	}
+	d.limitMu.Lock()
+	b := full()
+	var ns string
+	if b != nil {
+		ns = b.pod.Namespace
+	}
+	d.limitMu.Unlock()
+	if b == nil || d.flowExistsLocally(ref) {
+		return nil
+	}
+	if res, err := d.resolveSourceNode(ctx, ref); err != nil || !res.Found || res.Node == d.NodeName {
+		return nil
+	}
+	var existing mxlv1alpha1.MxlFlowMirror
+	key := types.NamespacedName{Namespace: ns, Name: mxlv1alpha1.MirrorNameFor(ref, d.NodeName)}
+	if err := d.Client.Get(ctx, key, &existing); !apierrors.IsNotFound(err) {
+		return nil
+	}
+
+	d.limitMu.Lock()
+	defer d.limitMu.Unlock()
+	if b = full(); b == nil {
+		return nil
+	}
+	err = d.burstRefusal(b, ref, d.now())
+	if err != nil {
+		d.refuse(ctx, ref, &b.pod, err)
+	}
+	return err
 }
 
 // refuse logs a request a limit refused and records it as an event on
