@@ -127,3 +127,50 @@ func TestAGatewayPodChecksTheSetsOnItsNode(t *testing.T) {
 	assert.Empty(t, r.setsOn(context.Background(), "node-c"))
 	assert.Empty(t, r.setsOn(context.Background(), ""), "an unscheduled pod is on no node")
 }
+
+// A set that waits on a member requeues every ten seconds. A gateway that
+// is settling meanwhile is checked again when it has settled, not at the
+// member's ten seconds: OutputReady would come back that much later.
+func TestASettlingGatewayShortensTheMembersRequeue(t *testing.T) {
+	objs := []client.Object{flow(memberA, video1080, "node-a"), flow(memberB, video1080, ""),
+		newSet("reader"), gateway("reader", gatewaySettle-2*time.Second)}
+	r, c := harness(t, objs...)
+
+	res, _ := reconcile(t, r)
+
+	require.Equal(t, metav1.ConditionFalse, membersReadyOf(t, c).Status, "member b has no producer")
+	assert.Greater(t, res.RequeueAfter, time.Duration(0))
+	assert.LessOrEqual(t, res.RequeueAfter, 2*time.Second,
+		"requeued after %s, past the moment the gateway has settled", res.RequeueAfter)
+}
+
+// A node can hold two gateway pods Ready at once while one replaces the
+// other. The output is served by the one Ready longest, so a replacement
+// that has just come up does not make a settled node read as settling.
+func TestTheGatewayReadyLongestServesTheNode(t *testing.T) {
+	settled, fresh := gateway("reader", time.Minute), gateway("reader", time.Second)
+	fresh.Name = "gateway-reader-new"
+	r, c := harness(t, append(readyMembers(), newSet("reader"), fresh, settled)...)
+
+	res, _ := reconcile(t, r)
+
+	assert.Equal(t, metav1.ConditionTrue, outputReadyOf(t, c).Status)
+	assert.Zero(t, res.RequeueAfter, "nothing is settling")
+}
+
+// Only a gateway pod in the gateways' namespace brings back the sets on
+// its node.
+func TestTheGatewayPodWatchTakesOnlyGatewayPods(t *testing.T) {
+	r := &Reconciler{Namespace: "mirrors", GatewayNamespace: ns}
+	pod := func(namespace, component string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "p",
+			Labels: map[string]string{"app.kubernetes.io/component": component}}}
+	}
+	assert.True(t, r.isGatewayPod(pod(ns, "gateway")))
+	assert.False(t, r.isGatewayPod(pod(ns, "agent")), "another component")
+	assert.False(t, r.isGatewayPod(pod("mirrors", "gateway")), "the mirrors' namespace, not the gateways'")
+	assert.False(t, r.isGatewayPod(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns}}), "no component label")
+
+	assert.True(t, (&Reconciler{Namespace: ns}).isGatewayPod(pod(ns, "gateway")),
+		"with no gateway namespace set, the gateways are in Namespace")
+}
