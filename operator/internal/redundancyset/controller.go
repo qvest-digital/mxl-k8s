@@ -36,6 +36,7 @@ import (
 const (
 	ConditionValid        = mxlv1alpha1.ConditionTypeValid
 	ConditionMembersReady = mxlv1alpha1.ConditionTypeMembersReady
+	ConditionOutputReady  = mxlv1alpha1.ConditionTypeOutputReady
 	ReasonMembersAligned  = "MembersAligned"
 	ReasonMembersReady    = "MembersReady"
 	ReasonMemberMissing   = "MemberMissing"
@@ -43,7 +44,23 @@ const (
 	ReasonOtherDomain     = "MemberInOtherDomain"
 	ReasonMisaligned      = "MembersMisaligned"
 	ReasonOutputTaken     = "OutputIsAFlow"
+	ReasonGatewaysReady   = "GatewaysReady"
+	ReasonGatewayNotReady = "GatewayNotReady"
+	ReasonNoNodes         = "NoNodes"
 )
+
+// gatewayComponent is the app.kubernetes.io/component label of the
+// gateway pods, one per node, in the operator's namespace.
+const gatewayComponent = "gateway"
+
+// gatewaySettle is how long a node's gateway has to have been Ready
+// before the output there counts as served again. A gateway reports
+// Ready before it has built the merge engines, and one that restarts
+// in a crash loop is Ready for moments at a time; OutputReady follows
+// neither. Going down is reported at once: the output stops with the
+// gateway, however briefly. It matches the time a stalled member has
+// to move steadily before MembersReady takes it back.
+const gatewaySettle = 5 * time.Second
 
 // LeaseChecker reports whether an Origin's Lease is fresh.
 type LeaseChecker interface {
@@ -55,7 +72,9 @@ type Reconciler struct {
 	client.Client
 	// Namespace holds the member mirrors a set creates.
 	Namespace string
-	Lease     LeaseChecker
+	// GatewayNamespace holds the gateway pods. Empty is Namespace.
+	GatewayNamespace string
+	Lease            LeaseChecker
 }
 
 // alignedKeys are the flow definition keys that must agree for two flows
@@ -85,18 +104,28 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	valid := r.validate(ctx, &set, ms)
 	ready := membersReady(ms, stalled)
+	served, settling, err := r.outputReady(ctx, nodes)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	res := ctrl.Result{}
 	if ready.Status != metav1.ConditionTrue {
 		res = ctrl.Result{RequeueAfter: 10 * time.Second} // a member or its producer is not up
+	}
+	// A gateway coming or going raises a pod event; one settling raises
+	// none when it is done.
+	if settling > 0 && (res.RequeueAfter == 0 || settling < res.RequeueAfter) {
+		res.RequeueAfter = settling
 	}
 	if valid.Status == metav1.ConditionTrue {
 		if err := r.ensureMirrors(ctx, &set, ms); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
-	valid.ObservedGeneration, ready.ObservedGeneration = set.Generation, set.Generation
+	valid.ObservedGeneration, ready.ObservedGeneration, served.ObservedGeneration = set.Generation, set.Generation, set.Generation
 	changed := meta.SetStatusCondition(&set.Status.Conditions, valid)
 	changed = meta.SetStatusCondition(&set.Status.Conditions, ready) || changed
+	changed = meta.SetStatusCondition(&set.Status.Conditions, served) || changed
 	if changed || set.Status.ObservedGeneration != set.Generation || pruned {
 		set.Status.ObservedGeneration = set.Generation
 		if err := r.Status().Update(ctx, &set); err != nil {
@@ -304,6 +333,69 @@ func membersReady(ms []member, stalled []mxlv1alpha1.NodeStalledMembers) metav1.
 		Message: "every member is produced in the output's geometry"}
 }
 
+// outputReady reports the nodes whose gateway cannot merge the output:
+// none there is Ready, or none has been for gatewaySettle. settling is
+// how long until the last of those that are Ready has been for that
+// long; zero when none is settling.
+func (r *Reconciler) outputReady(ctx context.Context, nodes []string) (cond metav1.Condition, settling time.Duration, err error) {
+	if len(nodes) == 0 {
+		return metav1.Condition{Type: ConditionOutputReady, Status: metav1.ConditionTrue, Reason: ReasonNoNodes,
+			Message: "no node wants the output"}, 0, nil
+	}
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(r.gatewayNamespace()),
+		client.MatchingLabels{"app.kubernetes.io/component": gatewayComponent}); err != nil {
+		return metav1.Condition{}, 0, err
+	}
+	now := time.Now()
+	var down []string
+	for _, n := range nodes {
+		since, ok := gatewayReadySince(pods.Items, n)
+		if !ok {
+			down = append(down, n)
+			continue
+		}
+		if left := gatewaySettle - now.Sub(since); left > 0 {
+			down = append(down, n)
+			settling = max(settling, left)
+		}
+	}
+	if down != nil {
+		return metav1.Condition{Type: ConditionOutputReady, Status: metav1.ConditionFalse, Reason: ReasonGatewayNotReady,
+			Message: fmt.Sprintf("the output is not served on %s: no gateway there has been Ready for %s",
+				strings.Join(down, ", "), gatewaySettle)}, settling, nil
+	}
+	return metav1.Condition{Type: ConditionOutputReady, Status: metav1.ConditionTrue, Reason: ReasonGatewaysReady,
+		Message: "a gateway is up to merge the output on every node that wants it"}, 0, nil
+}
+
+// gatewayReadySince reports since when a gateway pod on node has been
+// Ready, the longest of those that are. A pod being deleted does not
+// count: its gateway stops merging on SIGTERM.
+func gatewayReadySince(pods []corev1.Pod, node string) (time.Time, bool) {
+	var since time.Time
+	found := false
+	for _, p := range pods {
+		if p.Spec.NodeName != node || !p.DeletionTimestamp.IsZero() {
+			continue
+		}
+		for _, c := range p.Status.Conditions {
+			if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue &&
+				(!found || c.LastTransitionTime.Time.Before(since)) {
+				since, found = c.LastTransitionTime.Time, true
+			}
+		}
+	}
+	return since, found
+}
+
+func (r *Reconciler) gatewayNamespace() string {
+	if r.GatewayNamespace != "" {
+		return r.GatewayNamespace
+	}
+	return r.Namespace
+}
+
 // ensureMirrors mirrors every member that has an Origin to each node
 // the output is wanted on. A member whose producer is gone has its
 // mirrors collected by the mirror controller once they have no source;
@@ -396,35 +488,47 @@ func (r *Reconciler) provider(ctx context.Context, source, target string) (mxlv1
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowredundancysets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
 // SetupWithManager registers the controller. A set waiting for a member
 // or its producer requeues itself; a change to a member's or the output's
 // MxlFlow checks the set again, since members a producer restarted in
 // another geometry agree again only once both definitions have followed.
+// A gateway pod changing checks the sets wanted on its node.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&mxlv1alpha1.MxlFlowRedundancySet{}).
 		Owns(&mxlv1alpha1.MxlFlowMirror{}).
 		Watches(&mxlv1alpha1.MxlFlow{}, handler.EnqueueRequestsFromMapFunc(r.setsOf)).
-		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.setsOn),
-			builder.WithPredicates(predicate.Funcs{
-				CreateFunc:  func(event.CreateEvent) bool { return false },
-				UpdateFunc:  func(event.UpdateEvent) bool { return false },
-				GenericFunc: func(event.GenericEvent) bool { return false },
-			})).
+		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+			return r.setsOn(ctx, obj.GetName())
+		}), builder.WithPredicates(predicate.Funcs{
+			CreateFunc:  func(event.CreateEvent) bool { return false },
+			UpdateFunc:  func(event.UpdateEvent) bool { return false },
+			GenericFunc: func(event.GenericEvent) bool { return false },
+		})).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+			return r.setsOn(ctx, obj.(*corev1.Pod).Spec.NodeName)
+		}), builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+			return obj.GetNamespace() == r.gatewayNamespace() &&
+				obj.GetLabels()["app.kubernetes.io/component"] == gatewayComponent
+		}))).
 		Complete(r)
 }
 
-// setsOn maps a deleted Node to the sets that list it in status.nodes.
-func (r *Reconciler) setsOn(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+// setsOn maps a node to the sets that list it in status.nodes.
+func (r *Reconciler) setsOn(ctx context.Context, node string) []ctrlreconcile.Request {
+	if node == "" {
+		return nil
+	}
 	var sets mxlv1alpha1.MxlFlowRedundancySetList
 	if err := r.List(ctx, &sets); err != nil {
-		log.FromContext(ctx).Error(err, "list redundancy sets for a node", "node", obj.GetName())
+		log.FromContext(ctx).Error(err, "list redundancy sets for a node", "node", node)
 		return nil
 	}
 	var reqs []ctrlreconcile.Request
 	for _, s := range sets.Items {
-		if slices.Contains(s.Status.Nodes, obj.GetName()) {
+		if slices.Contains(s.Status.Nodes, node) {
 			reqs = append(reqs, ctrlreconcile.Request{NamespacedName: types.NamespacedName{Name: s.Name}})
 		}
 	}
