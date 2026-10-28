@@ -469,6 +469,30 @@ func TestADomainOpenedAfterAFailedFirstPassKeepsItsMarkers(t *testing.T) {
 	require.False(t, m.unjudged())
 }
 
+// A domain opened while a pass is reconciling may have had a flow
+// reconciled before the open, whose placeholder that pass therefore did
+// not hold. Its markers wait for the next pass rather than being judged at
+// the end of this one.
+func TestADomainOpenedDuringAPassWaitsForTheNext(t *testing.T) {
+	h := newDomain(t)
+	other := newDomain(t)
+	writeMarker(t, other, flowID)
+	m := newManager(t, h, flow(origin))
+	domain := m.Domain
+	m.Domain = func(ctx context.Context, name string) (Handles, error) {
+		m.DomainOpened(other.dir)
+		return domain(ctx, name)
+	}
+
+	require.True(t, m.sweep(context.Background(), logr.Discard()))
+	require.True(t, IsPlaceholder(other.dir, flowID), "a domain opened during the pass was judged by it")
+	require.True(t, m.unjudged())
+
+	m.Domain = domain
+	require.True(t, m.sweep(context.Background(), logr.Discard()))
+	require.False(t, IsPlaceholder(other.dir, flowID), "the next pass left a marker nothing holds")
+}
+
 // A domain first opened after the first pass holds no placeholder of
 // this gateway yet, so every marker in it that the next pass does not
 // hold again is left over, and Start runs that pass.
