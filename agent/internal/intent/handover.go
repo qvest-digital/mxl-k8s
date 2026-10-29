@@ -21,8 +21,10 @@ import (
 
 // HandOver names a pod still reading a mirrored flow as the requestor
 // of each mirror this dispatcher created onto the node whose requestor
-// no longer reads it. uses is, per pod UID, the flows the pod's
-// processes map, as observed.Scanner reports them.
+// no longer reads it. scan returns, per pod UID, the flows the pod's
+// processes map, as observed.Scanner reports them; it is called only
+// when the node has such a mirror, so a node with none costs one
+// metadata list and no walk of /proc.
 //
 // A requestor is recorded only when a pod's open of a missing flow
 // asks for the mirror. A pod that opens the flow while the mirror is
@@ -32,10 +34,29 @@ import (
 // operator waits RequestorHandover before collecting a mirror whose
 // requestor is gone; this is what names a reader inside that window.
 //
+// A reader in another namespace is named when none in the mirror's
+// own namespace reads it. The mirror then counts against that pod's
+// Limits.PerPod, as one it asked for would.
+//
 // Only mirrors whose requestor UID label says it does not map the flow
-// are read in full, so a sweep over a node whose readers are all
-// recorded costs one metadata list.
-func (d *Dispatcher) HandOver(ctx context.Context, uses map[string][]observed.Use) error {
+// are read in full.
+func (d *Dispatcher) HandOver(ctx context.Context, scan func() (map[string][]observed.Use, error)) error {
+	var mirrors metav1.PartialObjectMetadataList
+	mirrors.SetGroupVersionKind(mxlv1alpha1.GroupVersion.WithKind("MxlFlowMirrorList"))
+	if err := d.Client.List(ctx, &mirrors,
+		client.MatchingLabels{mxlv1alpha1.LabelCreatedByIntent: d.NodeName}); err != nil {
+		return fmt.Errorf("list on-demand mirrors: %w", err)
+	}
+	if !slices.ContainsFunc(mirrors.Items, func(m metav1.PartialObjectMetadata) bool {
+		return m.DeletionTimestamp.IsZero()
+	}) {
+		return nil
+	}
+
+	uses, err := scan()
+	if err != nil {
+		return fmt.Errorf("scan flow use: %w", err)
+	}
 	readers := map[string][]string{} // mirror name -> pod UIDs mapping its flow
 	for uid, us := range uses {
 		for _, u := range us {
@@ -45,16 +66,6 @@ func (d *Dispatcher) HandOver(ctx context.Context, uses map[string][]observed.Us
 			name := mxlv1alpha1.MirrorNameFor(mxlv1alpha1.FlowRef{Domain: u.Domain, ID: u.FlowID}, d.NodeName)
 			readers[name] = append(readers[name], uid)
 		}
-	}
-	if len(readers) == 0 {
-		return nil
-	}
-
-	var mirrors metav1.PartialObjectMetadataList
-	mirrors.SetGroupVersionKind(mxlv1alpha1.GroupVersion.WithKind("MxlFlowMirrorList"))
-	if err := d.Client.List(ctx, &mirrors,
-		client.MatchingLabels{mxlv1alpha1.LabelCreatedByIntent: d.NodeName}); err != nil {
-		return fmt.Errorf("list on-demand mirrors: %w", err)
 	}
 
 	var pods []corev1.Pod

@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/observed"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -63,12 +64,13 @@ func handoverDispatcher(t *testing.T, objs ...client.Object) (*Dispatcher, clien
 	}, c
 }
 
-func reads(uids ...string) map[string][]observed.Use {
+// reads is a scan in which each pod named maps the flow as a reader.
+func reads(uids ...string) func() (map[string][]observed.Use, error) {
 	out := map[string][]observed.Use{}
 	for _, uid := range uids {
 		out[uid] = []observed.Use{{FlowID: flowID, Direction: observed.Input}}
 	}
-	return out
+	return func() (map[string][]observed.Use, error) { return out, nil }
 }
 
 func requestorOf(t *testing.T, c client.Client, m *mxlv1alpha1.MxlFlowMirror) (mxlv1alpha1.PodRef, string) {
@@ -169,11 +171,60 @@ func TestHandOver_NoReader_IsLeftAlone(t *testing.T) {
 	d, c := handoverDispatcher(t, m, writer)
 	before := resourceVersion(t, c, m)
 
-	require.NoError(t, d.HandOver(context.Background(), map[string][]observed.Use{
-		"uid-writer": {{FlowID: flowID, Direction: observed.Output}},
+	require.NoError(t, d.HandOver(context.Background(), func() (map[string][]observed.Use, error) {
+		return map[string][]observed.Use{
+			"uid-writer": {{FlowID: flowID, Direction: observed.Output}},
+		}, nil
 	}))
 
 	assert.Equal(t, before, resourceVersion(t, c, m))
+}
+
+// The sweep runs every ten seconds on every node. Walking /proc there
+// buys nothing when the node has no mirror created on demand to hand
+// over, so a node without one is not scanned.
+func TestHandOver_NoOnDemandMirror_DoesNotScan(t *testing.T) {
+	receiverOwned := onDemandMirror(handoverPod("p", "engine", "uid-1", time.Hour))
+	receiverOwned.Labels = nil
+	receiverOwned.Spec.Requestor = nil
+	d, _ := handoverDispatcher(t, receiverOwned)
+
+	require.NoError(t, d.HandOver(context.Background(), func() (map[string][]observed.Use, error) {
+		t.Error("scanned /proc on a node with no mirror created on demand")
+		return nil, nil
+	}))
+}
+
+// The handover is decided on the mirror as it was read. Anything that
+// wrote it since -- the operator deleting it, another sweep handing it
+// over -- has a newer answer, and the patch must not land over it.
+func TestHandOver_MirrorWrittenSinceItWasRead_IsLeftAsWritten(t *testing.T) {
+	old := handoverPod("p", "engine-old", "uid-old", time.Hour)
+	repl := handoverPod("p", "engine-new", "uid-new", time.Minute)
+	m := onDemandMirror(old)
+	base := fake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithObjects(m, repl).
+		WithIndex(&corev1.Pod{}, "spec.nodeName", func(o client.Object) []string {
+			return []string{o.(*corev1.Pod).Spec.NodeName}
+		}).
+		Build()
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			var cur mxlv1alpha1.MxlFlowMirror
+			require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(obj), &cur))
+			cur.Annotations = map[string]string{"written": "since the sweep read it"}
+			require.NoError(t, cl.Update(ctx, &cur))
+			return cl.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	d := &Dispatcher{Client: c, NodeName: handoverNode}
+
+	require.NoError(t, d.HandOver(context.Background(), reads("uid-new")))
+
+	ref, label := requestorOf(t, base, m)
+	assert.Equal(t, "uid-old", ref.UID, "a handover read before the last write landed on top of it")
+	assert.Equal(t, "uid-old", label)
 }
 
 func resourceVersion(t *testing.T, c client.Client, m *mxlv1alpha1.MxlFlowMirror) string {

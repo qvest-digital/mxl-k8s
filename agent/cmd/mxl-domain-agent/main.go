@@ -304,10 +304,13 @@ func run(args []string) error {
 		domainsMu.Unlock()
 		return domainDevices(cfg.DomainPath, doms)
 	}}
-	if sets != nil {
-		inUse := func() (map[mxlv1alpha1.FlowRef]bool, error) {
-			return flowsInUse(ctx, kClient, cfg.NodeName, own, scanner.Scan)
-		}
+	// One loop for the two sweeps that read flow use, so a tick walks
+	// /proc once, and only when one of them needs it: each scans after
+	// it has found something on the node to decide about. The operator
+	// waits mirror.RequestorHandover for the handover before it collects
+	// a mirror whose requestor has gone, so the period has to stay well
+	// inside it.
+	if sets != nil || intentDispatcher != nil {
 		go func() {
 			t := time.NewTicker(10 * time.Second)
 			defer t.Stop()
@@ -317,32 +320,19 @@ func run(args []string) error {
 					return
 				case <-t.C:
 				}
-				if err := sets.Release(ctx, inUse, redundancy.ReleaseGrace); err != nil {
-					setupLog.Error(err, "release unused redundancy set outputs")
+				scan := sync.OnceValues(scanner.Scan)
+				if sets != nil {
+					inUse := func() (map[mxlv1alpha1.FlowRef]bool, error) {
+						return flowsInUse(ctx, kClient, cfg.NodeName, own, scan)
+					}
+					if err := sets.Release(ctx, inUse, redundancy.ReleaseGrace); err != nil {
+						setupLog.Error(err, "release unused redundancy set outputs")
+					}
 				}
-			}
-		}()
-	}
-
-	// The operator waits mirror.RequestorHandover for this before it
-	// collects a mirror whose requestor has gone, so the period has to
-	// stay well inside it.
-	if intentDispatcher != nil {
-		go func() {
-			t := time.NewTicker(10 * time.Second)
-			defer t.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-				}
-				uses, err := scanner.Scan()
-				if err == nil {
-					err = intentDispatcher.HandOver(ctx, uses)
-				}
-				if err != nil {
-					setupLog.Error(err, "hand mirrors to the pods still reading them")
+				if intentDispatcher != nil {
+					if err := intentDispatcher.HandOver(ctx, scan); err != nil {
+						setupLog.Error(err, "hand mirrors to the pods still reading them")
+					}
 				}
 			}
 		}()
