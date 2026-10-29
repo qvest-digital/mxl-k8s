@@ -213,7 +213,8 @@ operator:
     # between the old pod releasing it and the new one publishing
     # again, and collecting inside that window costs the stream a
     # re-materialization for no reason. It does not gate an unclaimed
-    # mirror, which goes at once.
+    # mirror, which goes at once, or after a 30s handover window when its
+    # requestor pod has gone.
     gcGracePeriod: 5m
     # @schema
     # enum: ["debug", "info", "warn", "error"]
@@ -349,7 +350,9 @@ agent:
     # one that already opened the flow's placeholder on an mxlfs domain
     # is asked for again while it runs if the burst limit refused it; a
     # refusal by this count is final. Mirrors an MxlReceiver or a
-    # redundancy set declares are not counted. 0 is unlimited.
+    # redundancy set declares are not counted; one the agent handed to
+    # the pod because it still reads it after its requestor went is. 0 is
+    # unlimited.
     intentMirrorsPerPod: 64
     # @schema
     # type: integer

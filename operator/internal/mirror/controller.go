@@ -69,15 +69,24 @@ const FieldOwner = "mxl-operator"
 // ones that hold a mirror back while the data plane tears down.
 const legacyIntentFinalizer = "mxl.qvest-digital.com/intent-gc"
 
-// DefaultGracePeriod is how long a mirror has to read Claimed=False or
-// Sourceable=False before it is deleted.
+// DefaultGracePeriod is how long a mirror has to read Sourceable=False
+// before it is deleted.
 //
-// It has to outlast a pod rolling over at either end. A consumer being
-// replaced leaves its mirror unclaimed between the old pod going and
-// the new one asking again; a producer being replaced leaves it
+// It has to outlast a producer being replaced, which leaves the mirror
 // unsourceable for as long as the flow has no Origin. Deleting inside
 // that window costs the stream a re-materialization for no reason.
 const DefaultGracePeriod = 5 * time.Minute
+
+// RequestorHandover is how long a mirror whose requestor pod has gone
+// waits before it is collected as unclaimed.
+//
+// A consumer replaced on the same node opens a flow whose directory is
+// already there, so it never asks for the mirror and is never recorded
+// as its requestor. The agent on the target node hands spec.requestor
+// to such a reader from the flows its processes map, on a sweep every
+// ten seconds; this has to outlast that sweep, or the old pod going
+// takes the mirror from a reader still using it.
+const RequestorHandover = 30 * time.Second
 
 // Reconciler drives one MxlFlowMirror through its lifecycle.
 type Reconciler struct {
@@ -97,15 +106,16 @@ type Reconciler struct {
 
 	// GracePeriod is how long a mirror whose source has terminally
 	// failed has to wait before it is deleted. Zero means
-	// DefaultGracePeriod. It does not apply to an unclaimed mirror:
-	// see collect.
+	// DefaultGracePeriod. It does not apply to an unclaimed mirror,
+	// which RequestorHandover covers: see collect.
 	GracePeriod time.Duration
 
 	// APIReader bypasses the controller-runtime cache for the reads
-	// that decide a mirror is unclaimed. That verdict deletes at once,
-	// so it must not rest on a cache that has not caught up with a pod
-	// or a receiver created a moment ago. Nil falls back to the cached
-	// Client; production wires mgr.GetAPIReader().
+	// that decide a mirror is unclaimed. That verdict deletes without
+	// the grace period, so it must not rest on a cache that has not
+	// caught up with a pod or a receiver created a moment ago. Nil
+	// falls back to the cached Client; production wires
+	// mgr.GetAPIReader().
 	APIReader client.Reader
 
 	// RedundancySets counts an owning MxlFlowRedundancySet as a claim.
@@ -704,16 +714,23 @@ func (r *Reconciler) collect(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, 
 		return requeueAt(src.deadline), nil
 	}
 
-	// An unclaimed mirror goes at once. A claim names its claimant --
-	// this receiver, this pod UID -- so the claimant being gone is not
-	// ambiguous the way a missing source is: a producer can come back
-	// to the node it left, a named pod cannot. Waiting would buy the
-	// case where a replacement consumer re-materializes onto the same
-	// mirror before the grace elapses, and pay for it by pulling a
-	// whole flow across the fabric for five minutes with nothing
-	// reading it. The verdict is confirmed against the apiserver
-	// before it is acted on; see claim.
+	// An unclaimed mirror goes without the grace period. A claim names
+	// its claimant -- this receiver, this pod UID -- and a named pod
+	// does not come back the way a producer can come back to the node
+	// it left. A requestor pod is the exception to going at once: a
+	// replacement reading the flow on the same node finds its directory
+	// in place and never asks, and only the agent there can tell it is
+	// reading. The handover window is what the agent gets to name it;
+	// a node that has left the cluster at either end is collected
+	// whoever reads, so there it buys nothing.
+	// The verdict is confirmed against the apiserver before it is acted
+	// on; see claim.
 	if !claimed.ok {
+		if m.Spec.Requestor != nil && src.disposition != sourceGone {
+			if wait := RequestorHandover - time.Since(unclaimedSince(m)); wait > 0 {
+				return ctrl.Result{RequeueAfter: wait}, nil
+			}
+		}
 		log.FromContext(ctx).Info("collected unclaimed MxlFlowMirror",
 			"flowID", m.Spec.FlowID,
 			"mxlflowmirror", client.ObjectKeyFromObject(m))
@@ -751,7 +768,16 @@ func (r *Reconciler) collect(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, 
 // an upgrade gives every mirror a full grace period rather than
 // collecting the collectable ones on sight.
 func unsourceableSince(m *mxlv1alpha1.MxlFlowMirror) time.Time {
-	c := meta.FindStatusCondition(m.Status.Conditions, mxlv1alpha1.ConditionTypeSourceable)
+	return transitionedAt(m, mxlv1alpha1.ConditionTypeSourceable)
+}
+
+// unclaimedSince is unsourceableSince for the Claimed condition.
+func unclaimedSince(m *mxlv1alpha1.MxlFlowMirror) time.Time {
+	return transitionedAt(m, mxlv1alpha1.ConditionTypeClaimed)
+}
+
+func transitionedAt(m *mxlv1alpha1.MxlFlowMirror, typ string) time.Time {
+	c := meta.FindStatusCondition(m.Status.Conditions, typ)
 	if c == nil || c.LastTransitionTime.IsZero() {
 		return time.Now()
 	}
