@@ -324,6 +324,30 @@ func run(args []string) error {
 		}()
 	}
 
+	// The operator waits mirror.RequestorHandover for this before it
+	// collects a mirror whose requestor has gone, so the period has to
+	// stay well inside it.
+	if intentDispatcher != nil {
+		go func() {
+			t := time.NewTicker(10 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+				}
+				uses, err := scanner.Scan()
+				if err == nil {
+					err = intentDispatcher.HandOver(ctx, uses)
+				}
+				if err != nil {
+					setupLog.Error(err, "hand mirrors to the pods still reading them")
+				}
+			}
+		}()
+	}
+
 	if cfg.ClaimStatusLabel != "" {
 		claims := &observed.ClaimWriter{
 			Client:   kClient,
