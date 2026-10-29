@@ -58,7 +58,13 @@ The grace covers one case only: a source the flow may yet republish.
 
 A claim names its claimant -- this receiver, this pod UID -- so the
 claimant being gone is unambiguous, and an unclaimed mirror is deleted
-at once. That verdict is confirmed against the apiserver rather than
+without the grace period: at once for a receiver, after a 30s handover
+window for a requestor pod. A reader replaced on the same node opens
+the mirrored copy that is already there, so it never asks for the
+mirror and is never recorded as its requestor; the agent on the target
+node, sweeping every 10s, names a pod whose processes still map the
+flow as the new `spec.requestor` inside that window. That verdict is
+confirmed against the apiserver rather than
 the informer cache first, so it cannot race a pod created a moment
 ago. A node that has left the cluster is equally unambiguous at either
 end of a mirror: nothing will publish on it again and no gateway will
@@ -70,7 +76,7 @@ exactly like that until it republishes. Holding it
 there rather than in the operator's memory is what makes the grace
 survive an operator restart, which would otherwise reset the timer on
 every object at once on every rollout. `--gc-grace-period` (default
-5m) has to outlast a producer or consumer pod rolling over.
+5m) has to outlast a producer pod rolling over.
 
 - **`MxlFlowMirror`** is justified by a claim and by a source, and
   needs both. `Claimed` reads True while an owner reference names a
@@ -78,8 +84,9 @@ every object at once on every rollout. `--gc-grace-period` (default
   ways a mirror is asked for, both written onto the object by the
   side that asked. `Sourceable` reads True while the target node
   exists and the flow names an Origin whose Lease is being renewed.
-  Losing the claim collects at once, as does either node leaving the
-  cluster; only an origin that has not republished waits out
+  Losing the claim collects at once, or after the handover window
+  for a requestor pod, as does either node leaving the cluster; only
+  an origin that has not republished waits out
   `--gc-grace-period`. Neither the creator labels nor `status.phase`
   is consulted: a label
   can be edited off an object, and the phase says whether grains are
@@ -188,7 +195,10 @@ the operator). The two paths converge on a single CR per
 (flow, target node) because `MirrorName` is the same algorithm.
 The difference visible in the API is the `spec.requestor` field:
 intent-path mirrors carry the requesting Pod's `name`/`namespace`/
-`uid`, declarative-path mirrors leave it nil.
+`uid`, declarative-path mirrors leave it nil. When that pod stops
+mapping the flow and another pod on the node still maps it, the agent
+moves `spec.requestor` and the `requestor-pod-uid` label to that pod
+([`handover.go`](../../agent/internal/intent/handover.go)).
 
 `waitReady`
 ([`dispatcher.go:203`](../../agent/internal/intent/dispatcher.go))

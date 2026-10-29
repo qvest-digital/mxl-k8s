@@ -213,7 +213,8 @@ operator:
     # between the old pod releasing it and the new one publishing
     # again, and collecting inside that window costs the stream a
     # re-materialization for no reason. It does not gate an unclaimed
-    # mirror, which goes at once.
+    # mirror, which goes at once, or after a 30s handover window when its
+    # requestor pod has gone.
     gcGracePeriod: 5m
     # @schema
     # enum: ["debug", "info", "warn", "error"]

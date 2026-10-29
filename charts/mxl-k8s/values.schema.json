@@ -2623,7 +2623,7 @@
           "properties": {
             "gcGracePeriod": {
               "default": "5m",
-              "description": "How long an MxlFlow must have no live copy, and an MxlFlowMirror no source it could pull from, before it is deleted. Has to outlast a producer rolling over: the flow has no Origin between the old pod releasing it and the new one publishing again, and collecting inside that window costs the stream a re-materialization for no reason. It does not gate an unclaimed mirror, which goes at once.",
+              "description": "How long an MxlFlow must have no live copy, and an MxlFlowMirror no source it could pull from, before it is deleted. Has to outlast a producer rolling over: the flow has no Origin between the old pod releasing it and the new one publishing again, and collecting inside that window costs the stream a re-materialization for no reason. It does not gate an unclaimed mirror, which goes at once, or after a 30s handover window when its requestor pod has gone.",
               "pattern": "^[0-9]+(ns|us|ms|s|m|h)$",
               "required": [],
               "title": "gcGracePeriod"
