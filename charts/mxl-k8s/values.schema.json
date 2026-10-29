@@ -242,7 +242,7 @@
             },
             "intentMirrorsPerPod": {
               "default": 64,
-              "description": "Most live mirrors the agent creates on demand for one pod, the mirrors a process opening a flow absent here asks for. Such a mirror lives as long as the pod, read or not, so this is a cap on what the pod accumulates over its lifetime; intentMirrorBurst is what stops a glob. A refused request is logged and recorded as an event on the pod: a process waiting on the open gets ENOENT, and one that already opened the flow's placeholder on an mxlfs domain is asked for again while it runs if the burst limit refused it; a refusal by this count is final. Mirrors an MxlReceiver or a redundancy set declares are not counted. 0 is unlimited.",
+              "description": "Most live mirrors the agent creates on demand for one pod, the mirrors a process opening a flow absent here asks for. Such a mirror lives as long as the pod, read or not, so this is a cap on what the pod accumulates over its lifetime; intentMirrorBurst is what stops a glob. A refused request is logged and recorded as an event on the pod: a process waiting on the open gets ENOENT, and one that already opened the flow's placeholder on an mxlfs domain is asked for again while it runs if the burst limit refused it; a refusal by this count is final. Mirrors an MxlReceiver or a redundancy set declares are not counted; one the agent handed to the pod because it still reads it after its requestor went is. 0 is unlimited.",
               "minimum": 0,
               "title": "intentMirrorsPerPod",
               "type": "integer"

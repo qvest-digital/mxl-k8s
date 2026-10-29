@@ -63,7 +63,10 @@ window for a requestor pod. A reader replaced on the same node opens
 the mirrored copy that is already there, so it never asks for the
 mirror and is never recorded as its requestor; the agent on the target
 node, sweeping every 10s, names a pod whose processes still map the
-flow as the new `spec.requestor` inside that window. That verdict is
+flow as the new `spec.requestor` inside that window. The window rests
+on that agent: if it is down for more than about 20s while a reader is
+replaced, the mirror is collected under the new reader as before. That
+verdict is
 confirmed against the apiserver rather than
 the informer cache first, so it cannot race a pod created a moment
 ago. A node that has left the cluster is equally unambiguous at either
@@ -198,7 +201,10 @@ intent-path mirrors carry the requesting Pod's `name`/`namespace`/
 `uid`, declarative-path mirrors leave it nil. When that pod stops
 mapping the flow and another pod on the node still maps it, the agent
 moves `spec.requestor` and the `requestor-pod-uid` label to that pod
-([`handover.go`](../../agent/internal/intent/handover.go)).
+([`handover.go`](../../agent/internal/intent/handover.go)). A pod in
+the mirror's namespace is preferred; failing one, a reader in another
+namespace is named, and the mirror then counts against that pod's
+`intentMirrorsPerPod` as one it had asked for.
 
 `waitReady`
 ([`dispatcher.go:203`](../../agent/internal/intent/dispatcher.go))
