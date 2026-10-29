@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0-rc.39](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.38...v1.1.0-rc.39) (2026-10-29)
+
+
+### Bug Fixes
+
+* **gateway:** forget a mirror's re-adds when its source leaves the node ([#403](https://github.com/qvest-digital/mxl-k8s/issues/403)) ([8347e34](https://github.com/qvest-digital/mxl-k8s/commit/8347e3460fdbcda3dbe5e0a950858a82725fad8d))
+* **operator:** keep a mirror a same-node replacement reader still reads ([#405](https://github.com/qvest-digital/mxl-k8s/issues/405)) ([0bf423d](https://github.com/qvest-digital/mxl-k8s/commit/0bf423dcd9e4e99c9807577eae2f78b546cd2361))
+
 ## [1.1.0-rc.38](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.37...v1.1.0-rc.38) (2026-10-28)
 
 
