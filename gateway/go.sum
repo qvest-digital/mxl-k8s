@@ -108,6 +108,8 @@ github.com/qvest-digital/go-mxl v1.1.0-rc.9.0.20261031135323-d6f4b2c5d954 h1:zvv
 github.com/qvest-digital/go-mxl v1.1.0-rc.9.0.20261031135323-d6f4b2c5d954/go.mod h1:cYzyT+S/AONytsKr/DozzFQP2OrNrg/JsQOSjvwn+Rk=
 github.com/qvest-digital/go-mxl v1.1.0-rc.9.0.20261031150806-0bd2b743426f h1:XdekQZHbKN8fob4PO0hG6IhMGw0X5QcOgWiyBa5wod4=
 github.com/qvest-digital/go-mxl v1.1.0-rc.9.0.20261031150806-0bd2b743426f/go.mod h1:cYzyT+S/AONytsKr/DozzFQP2OrNrg/JsQOSjvwn+Rk=
+github.com/qvest-digital/go-mxl v1.1.0-rc.10 h1:0SuPV5pJQt89V/nE366fYrO3CaN2p14YSJXRrwwYuko=
+github.com/qvest-digital/go-mxl v1.1.0-rc.10/go.mod h1:cYzyT+S/AONytsKr/DozzFQP2OrNrg/JsQOSjvwn+Rk=
 github.com/spf13/pflag v1.0.10 h1:4EBh2KAYBwaONj6b2Ye1GiHfwjqyROoF4RwYO+vPwFk=
 github.com/spf13/pflag v1.0.10/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=

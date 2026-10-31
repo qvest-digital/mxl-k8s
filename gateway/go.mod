@@ -3,7 +3,7 @@ module github.com/qvest-digital/mxl-k8s/gateway
 go 1.26.0
 
 require (
-	github.com/qvest-digital/go-mxl v1.1.0-rc.9.0.20261031150806-0bd2b743426f
+	github.com/qvest-digital/go-mxl v1.1.0-rc.10
 	github.com/qvest-digital/mxl-k8s/api v1.1.0-rc.25 // x-release-please-version
 	github.com/stretchr/testify v1.12.1
 	go.uber.org/goleak v1.3.0
