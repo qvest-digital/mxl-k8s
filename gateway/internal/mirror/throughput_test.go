@@ -155,7 +155,7 @@ func TestIndexMirrorByFlowCarriesTheDomain(t *testing.T) {
 func TestThroughputCollectorReportsTransferCounts(t *testing.T) {
 	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
 	video := &sourceEntry{shared: testShared("flow-v", fabrics.ProviderVerbs), peerNode: "n02"}
-	video.stats.Store(&fabrics.TargetStats{Posted: 10, Completed: 7, Failed: 1, Skipped: 4, InFlight: 2, Torn: 1, LastCompletedIndex: 96})
+	video.stats.Store(&fabrics.TargetStats{Posted: 10, Completed: 7, Failed: 1, Skipped: 4, InFlight: 2, Torn: 1, AccountingErrors: 3, LastCompletedIndex: 96})
 	video.lastHead.Store(100)
 	audioShared := testShared("flow-a", fabrics.ProviderVerbs)
 	audioShared.continuous = true
@@ -190,6 +190,8 @@ func TestThroughputCollectorReportsTransferCounts(t *testing.T) {
 	_, postedAsOutcome := values["mxl_gateway_mirror_transfers_total/flow-v/posted"]
 	assert.False(t, postedAsOutcome, "posted would be counted twice in a sum over outcomes")
 	assert.Equal(t, 1.0, values["mxl_gateway_mirror_transfers_torn_total/flow-v"])
+	assert.Equal(t, 3.0, values["mxl_gateway_mirror_accounting_errors_total/flow-v"])
+	assert.Equal(t, 0.0, values["mxl_gateway_mirror_accounting_errors_total/flow-a"])
 	assert.Equal(t, 2.0, values["mxl_gateway_mirror_transfers_in_flight/flow-v"])
 	assert.Equal(t, 4.0, values["mxl_gateway_mirror_completion_lag_grains/flow-v"])
 	assert.Equal(t, 480.0, values["mxl_gateway_mirror_completion_lag_samples/flow-a"])

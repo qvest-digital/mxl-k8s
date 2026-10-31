@@ -27,7 +27,7 @@ type Throughput struct {
 // TransferCounts is what an initiator did with the transfers of one
 // target. A transfer is a grain, or a batch of samples.
 type TransferCounts struct {
-	Posted, Completed, Failed, Skipped, InFlight, Torn uint64
+	Posted, Completed, Failed, Skipped, InFlight, Torn, AccountingErrors uint64
 
 	// Lag is how far the last completed transfer trails the source
 	// head, or -1 before the first completion. Continuous says it is
@@ -66,6 +66,12 @@ var (
 		"mxl_gateway_mirror_transfers_torn_total",
 		"Completed grains whose source slot the producer had rewritten by the time the completion was read, so they may "+
 			"have gone out with newer content. An upper bound. Never counted for audio, which is copied at post time.",
+		transferLabels, nil)
+
+	descAccountingErrors = prometheus.NewDesc(
+		"mxl_gateway_mirror_accounting_errors_total",
+		"Completions the initiator could not match to anything it recorded in flight for a mirror target. "+
+			"Always 0 unless libmxl-fabrics has a bug; anything else makes the other transfer counters unreliable.",
 		transferLabels, nil)
 
 	descInFlight = prometheus.NewDesc(
@@ -115,6 +121,7 @@ func (c *ThroughputCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descPosted
 	ch <- descTransfers
 	ch <- descTorn
+	ch <- descAccountingErrors
 	ch <- descInFlight
 	ch <- descLagGrains
 	ch <- descLagSamples
@@ -170,6 +177,7 @@ func (c *ThroughputCollector) Collect(ch chan<- prometheus.Metric) {
 			sum.Skipped += t.Transfers.Skipped
 			sum.InFlight += t.Transfers.InFlight
 			sum.Torn += t.Transfers.Torn
+			sum.AccountingErrors += t.Transfers.AccountingErrors
 			sum.Continuous = t.Transfers.Continuous
 			if !seen || t.Transfers.Lag > sum.Lag {
 				sum.Lag = t.Transfers.Lag
@@ -180,6 +188,7 @@ func (c *ThroughputCollector) Collect(ch chan<- prometheus.Metric) {
 			labels := []string{k.domain, k.flowID, c.NodeName, k.peerNode, k.provider}
 			ch <- prometheus.MustNewConstMetric(descPosted, prometheus.CounterValue, float64(n.Posted), labels...)
 			ch <- prometheus.MustNewConstMetric(descTorn, prometheus.CounterValue, float64(n.Torn), labels...)
+			ch <- prometheus.MustNewConstMetric(descAccountingErrors, prometheus.CounterValue, float64(n.AccountingErrors), labels...)
 			for outcome, v := range map[string]uint64{
 				"completed": n.Completed, "failed": n.Failed, "skipped": n.Skipped,
 			} {
@@ -260,6 +269,6 @@ func (e *sourceEntry) transferCounts() *TransferCounts {
 	}
 	return &TransferCounts{
 		Posted: st.Posted, Completed: st.Completed, Failed: st.Failed, Skipped: st.Skipped, InFlight: st.InFlight,
-		Torn: st.Torn, Lag: lag, Continuous: e.shared != nil && e.shared.continuous,
+		Torn: st.Torn, AccountingErrors: st.AccountingErrors, Lag: lag, Continuous: e.shared != nil && e.shared.continuous,
 	}
 }
