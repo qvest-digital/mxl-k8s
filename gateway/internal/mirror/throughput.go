@@ -115,7 +115,7 @@ var (
 		"mxl_gateway_mirror_target_invalid_grains_total",
 		"Arrived grains the target half committed invalid: flagged invalid at the source (invalid_from_source), or "+
 			"whose slot header names another index than the one committed, a later write into the slot having landed "+
-			"(index_mismatch).",
+			"(index_mismatch). The commit rewrites that header, so the later grain is flagged invalid too, not served.",
 		append(append([]string{}, transferLabels...), "reason"), nil)
 )
 

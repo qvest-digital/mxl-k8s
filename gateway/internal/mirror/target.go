@@ -1424,13 +1424,18 @@ const (
 	// invalidIndexMismatch is a slot whose header names another index
 	// than the one committed: a later write into the slot, such as a
 	// transfer the source retransmitted after its producer reused the
-	// slot, landed after the arrival was reported.
+	// slot, landed after the arrival was reported. OpenGrain rewrites
+	// the header to the committed index, so the later grain is not
+	// served from this slot either: its own arrival finds this index
+	// there and is committed invalid, or the writer flags it as a gap
+	// once a grain past it commits.
 	invalidIndexMismatch invalidReason = "index_mismatch"
 )
 
 // The slot's header is read before OpenGrain, which clears its invalid
-// flag and, unless it reopens the grain, its valid slices. An arrival is committed invalid when the
-// header carries the invalid flag or another index. A data grain is
+// flag and, unless it reopens the grain, its valid slices. An arrival
+// is committed invalid when the header carries the invalid flag or
+// another index. A data grain is
 // committed with the valid slices the initiator's write carried, none
 // included: they are its length, and libmxl data writers never complete
 // a grain. Any other grain is committed whole, an invalid one included,
