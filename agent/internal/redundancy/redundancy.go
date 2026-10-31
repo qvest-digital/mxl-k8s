@@ -75,11 +75,12 @@ func (s *Sets) outputOf(ctx context.Context, domain, id string) (*mxlv1alpha1.Mx
 }
 
 // IsOutput reports whether flow id in domain is a set's output. A lookup
-// that fails answers false: publishing an output costs a wrong location
-// until the next pass, while hiding a real flow costs its consumers.
-func (s *Sets) IsOutput(ctx context.Context, domain, id string) bool {
+// that fails is an error, not "no": an MxlFlow published for an output
+// makes the operator refuse its set, which stops the merge on every node
+// until the object is collected.
+func (s *Sets) IsOutput(ctx context.Context, domain, id string) (bool, error) {
 	set, err := s.outputOf(ctx, domain, id)
-	return err == nil && set != nil
+	return set != nil, err
 }
 
 // Want records that a reader on this node waits for flow id in domain,

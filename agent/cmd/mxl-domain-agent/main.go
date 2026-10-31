@@ -506,7 +506,7 @@ type domainTracking struct {
 // primary domain.
 type trackerMxlfs struct {
 	IsMxlfs  func(dir string) bool
-	IsOutput func(ctx context.Context, domain, flowID string) bool
+	IsOutput func(ctx context.Context, domain, flowID string) (bool, error)
 	// Run starts runMxlfs for dir and returns what waits for it to end
 	// once ctx has, or fails with none of it running.
 	Run func(ctx context.Context, dir string, fp *flowpublisher.Publisher) (wait func(), err error)

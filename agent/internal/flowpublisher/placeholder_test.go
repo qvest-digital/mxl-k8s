@@ -2,6 +2,7 @@ package flowpublisher
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -55,11 +56,40 @@ func TestPublishAppeared_IgnoresARedundancySetOutput(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(flowDir, FlowDefName), []byte(`{"id":"`+validFlowID+`"}`), 0o644))
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).Build()
 	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1",
-		IsOutput: func(_ context.Context, _, id string) bool { return id == validFlowID }}
+		IsOutput: func(_ context.Context, _, id string) (bool, error) { return id == validFlowID, nil }}
 
 	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
 
 	var got mxlv1alpha1.MxlFlow
 	err := c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got)
 	require.True(t, apierrors.IsNotFound(err), "a redundancy set output was published: %v", err)
+}
+
+// A failed output lookup publishes nothing: the flow may be an output
+// merged here, and an MxlFlow for one makes the operator refuse its set
+// with OutputIsAFlow. The rescan asks again and publishes a flow that
+// turns out to be no output.
+func TestPublishAppeared_DefersAFlowWhoseOutputLookupFailed(t *testing.T) {
+	domain := t.TempDir()
+	flowDir := filepath.Join(domain, validFlowID+".mxl-flow")
+	require.NoError(t, os.Mkdir(flowDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(flowDir, FlowDefName), []byte(`{"id":"`+validFlowID+`"}`), 0o644))
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).Build()
+	lookup := errors.New("apiserver unreachable")
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1",
+		IsOutput: func(context.Context, string, string) (bool, error) { return false, lookup }}
+
+	require.ErrorIs(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"), lookup)
+	var got mxlv1alpha1.MxlFlow
+	err := c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got)
+	require.True(t, apierrors.IsNotFound(err), "a flow of unknown kind was published: %v", err)
+
+	p.IsOutput = func(context.Context, string, string) (bool, error) { return false, nil }
+	p.retryDeferred(context.Background())
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
+	require.Len(t, got.Status.Locations, 1)
+
+	p.IsOutput = func(context.Context, string, string) (bool, error) { return false, lookup }
+	p.retryDeferred(context.Background())
+	require.Empty(t, p.deferred, "a published flow stays deferred")
 }

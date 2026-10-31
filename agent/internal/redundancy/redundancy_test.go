@@ -2,6 +2,7 @@ package redundancy
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -62,8 +63,12 @@ func TestWantIgnoresFlowsThatAreNoOutput(t *testing.T) {
 
 func TestIsOutput(t *testing.T) {
 	s, _ := newSets(t, "node-a")
-	require.True(t, s.IsOutput(context.Background(), "", out))
-	require.False(t, s.IsOutput(context.Background(), "", "11111111-1111-4111-8111-111111111111"))
+	isOut, err := s.IsOutput(context.Background(), "", out)
+	require.NoError(t, err)
+	require.True(t, isOut)
+	isOut, err = s.IsOutput(context.Background(), "", "11111111-1111-4111-8111-111111111111")
+	require.NoError(t, err)
+	require.False(t, isOut)
 }
 
 // A node stays in status.nodes while a reader there maps the output, and
@@ -187,4 +192,20 @@ func TestReleaseGivesUpOnAStatusUpdateThatHangs(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Release still waits on the status update")
 	}
+}
+
+// A lookup that fails is no answer. Read as "not an output", the
+// publisher would create an MxlFlow for an output being merged here,
+// and the operator would then refuse the set with OutputIsAFlow and
+// stop the merge on every node until that object is collected.
+func TestIsOutputReportsAFailedLookup(t *testing.T) {
+	s, _ := newSets(t, "node-a")
+	s.Client = interceptor.NewClient(s.Client.(client.WithWatch), interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return errors.New("apiserver unreachable")
+		},
+	})
+
+	_, err := s.IsOutput(context.Background(), "", out)
+	require.Error(t, err)
 }
