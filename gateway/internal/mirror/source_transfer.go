@@ -80,10 +80,12 @@ const defaultGrainsInFlight = 8
 // initiatorOptions is the libmxl-fabrics setup options string of a
 // flow's initiator.
 //
-// The window is capped at a quarter of the source ring: the provider
-// reads a grain's payload while it transmits, so a grain still in
-// flight when the producer comes round to its slot again would go out
-// with the newer content. Pacing splits a video grain into chunks, and
+// The window is capped at a quarter of the source ring. That bounds
+// how many grains are in flight, not how long one takes: the provider
+// reads a grain's payload while it transmits, retransmissions included,
+// so a grain still retrying when the producer comes round to its slot
+// again goes out with the newer content. libmxl-fabrics counts such a
+// grain as torn, which the gateway publishes. Pacing splits a video grain into chunks, and
 // the initiator has to know that to signal and count the grain once;
 // a data grain is sent as one range whatever the pacer does.
 func initiatorOptions(grainsInFlight int, ringGrains uint64, p pacer, video bool) string {

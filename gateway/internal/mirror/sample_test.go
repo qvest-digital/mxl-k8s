@@ -70,7 +70,7 @@ func TestRunSampleTransferLoop_TransfersDeltaSinceLastTick(t *testing.T) {
 		"the loop must transfer the (lastSent, head] delta as one run ending at head")
 	transfers, agedOuts := tracker.snapshot()
 	assert.Equal(t, []uint64{1096}, transfers,
-		"recordTransfer must observe the ending index of each sent run")
+		"recordOffered must observe the ending index of each sent run")
 	assert.Zero(t, agedOuts, "a within-window catch-up is not an aged-out skip")
 	assert.GreaterOrEqual(t, progressCalls.Load(), int32(1),
 		"makeProgress must drive the fabric event queues every tick")

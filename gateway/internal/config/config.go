@@ -227,7 +227,8 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.IntVar(&c.GrainsInFlight, "grains-in-flight", 8,
 		"Grains one mirror target may have posted and not completed. A grain offered to a "+
 			"target with this many in flight is skipped for that target alone. Capped at a "+
-			"quarter of the source ring and at 16.")
+			"quarter of the source ring and at 16; the cap bounds how many grains are in flight, "+
+			"not how long one takes.")
 	fs.DurationVar(&c.DegradedAfter, "degraded-after", 10*time.Second,
 		"Grain-commit inactivity after which the target gateway demotes a mirror to Degraded.")
 	fs.DurationVar(&c.DomainGCInterval, "domain-gc-interval", domaingc.DefaultInterval,

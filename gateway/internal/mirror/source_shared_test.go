@@ -286,7 +286,7 @@ func TestSource_AccountingLandsPerMirrorAcrossTheFanout(t *testing.T) {
 
 	sentAt := time.Now()
 	s.recordHead(41, sentAt)
-	s.recordTransfer(42, sentAt)
+	s.recordOffered(42, sentAt)
 
 	for _, n := range []string{"m1", "m2"} {
 		e := f.entry(n)

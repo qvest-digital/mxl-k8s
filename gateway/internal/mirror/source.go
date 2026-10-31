@@ -296,6 +296,10 @@ type sharedSource struct {
 	openedAt             time.Time
 	lastObservedOriginAt atomic.Pointer[time.Time]
 
+	// continuous is set for an audio flow, whose indices count samples
+	// rather than grains.
+	continuous bool
+
 	// rebuilding is set by the reader-stall watchdog before it hands
 	// the source to the reopen goroutine, so a second flusher tick --
 	// this mirror's or any other attached mirror's -- cannot spawn a
@@ -1143,12 +1147,13 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 	loopCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	s := &sharedSource{
-		key:       key,
-		openSteps: steps,
-		reader:    reader,
-		initiator: initiator,
-		cancel:    cancel,
-		done:      done,
+		key:        key,
+		openSteps:  steps,
+		reader:     reader,
+		initiator:  initiator,
+		cancel:     cancel,
+		done:       done,
+		continuous: audio,
 	}
 
 	progressInterval := o.ProgressInterval
@@ -1300,7 +1305,7 @@ const defaultReaderStallAfter = 20 * time.Second
 // mirror really did move it and really is at that index, and the
 // per-mirror status conditions and byte counters stay exact.
 type progressTracker interface {
-	recordTransfer(idx uint64, at time.Time)
+	recordOffered(idx uint64, at time.Time)
 	recordAgedOut(at time.Time)
 	recordHead(head uint64, at time.Time)
 	recordSkipped(samples uint64)
@@ -1344,10 +1349,12 @@ func (e *sourceEntry) recordHead(head uint64, at time.Time) {
 	e.headAdvancedAt.Store(&t)
 }
 
-// recordTransfer is a post, which the mirrors do not count: their
-// delivery comes from the initiator's completion counters, read by
-// each mirror's flusher (observeDelivery).
-func (s *sharedSource) recordTransfer(uint64, time.Time) {}
+// recordOffered is told each index the loop handed to the initiator.
+// A shared source keeps nothing of it: a post says nothing about
+// delivery, which each mirror's flusher takes from the initiator's
+// completion counters (observeDelivery). The loop tests observe the
+// loop through it.
+func (s *sharedSource) recordOffered(uint64, time.Time) {}
 
 func (s *sharedSource) recordAgedOut(at time.Time) {
 	for _, e := range s.attached() {
@@ -1494,7 +1501,7 @@ func runTransferLoop(
 				break
 			}
 			if tracker != nil {
-				tracker.recordTransfer(uint64(idx), time.Now())
+				tracker.recordOffered(uint64(idx), time.Now())
 			}
 			lastSent = idx
 		}
@@ -1697,7 +1704,7 @@ func runSampleTransferLoop(
 				retries = 0
 				delivered += count
 				if tracker != nil {
-					tracker.recordTransfer(end, time.Now())
+					tracker.recordOffered(end, time.Now())
 				}
 				lastSent = end
 				// Settle the chunk before starting the next one.

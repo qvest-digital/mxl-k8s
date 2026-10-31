@@ -39,7 +39,7 @@ func TestRunFlusher_DeliveryIsCompletionsNotPosts(t *testing.T) {
 	require.Eventually(t, func() bool { return slow.connected.Load() && fast.connected.Load() }, time.Second, 5*time.Millisecond)
 
 	for i := uint64(0); i < 20; i++ {
-		s.recordTransfer(i, time.Now())
+		s.recordOffered(i, time.Now())
 	}
 	require.Eventually(t, func() bool { return fast.lastSentAt.Load() != nil }, time.Second, 5*time.Millisecond)
 
