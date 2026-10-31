@@ -382,6 +382,19 @@ type sourceEntry struct {
 	// whatever it already held. Zero is the only healthy value.
 	skipped atomic.Uint64
 
+	// invalidGrains counts grains the producer committed invalid of
+	// which the transfer loop sent nothing; invalidAt is when the loop
+	// last passed one, offeredAt when it last offered anything else.
+	// See idleOnInvalid.
+	invalidGrains atomic.Uint64
+	invalidAt     atomic.Pointer[time.Time]
+	offeredAt     atomic.Pointer[time.Time]
+
+	// resyncGrains and agedOutGrains count the grains the transfer loop
+	// passed over without offering, by unsentReason.
+	resyncGrains  atomic.Uint64
+	agedOutGrains atomic.Uint64
+
 	// agedOutAt records the wall-clock of the most recent
 	// reader-aged-out skip the transfer loop has had to perform.
 	// Used by the flusher to publish SourceProgress with reason
@@ -1204,16 +1217,7 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 		// an edit rate advance their heads on the same MXL clock
 		// instants, so without the offset every source on this node
 		// would hand its chunks over in lockstep.
-		l := ctrl.Log.WithName("transfer").WithValues("flowID", flowID)
-		// Its own throttle rather than the transfer loop's: this call
-		// site fires once per chunk instead of once per tick, so it
-		// needs its own failure history. Both only ever run on the
-		// transfer goroutine, so neither needs a lock.
-		var chunkProgress progressThrottle
-		betweenChunks := func() {
-			chunkProgress.runProgress(progressFn, func(err error) { logProgressFailure(l, err) })
-		}
-		transferFn := newGrainTransfer(loopCtx, reader, initiator, p, data, betweenChunks)
+		transferFn := newInitiatorGrainTransfer(loopCtx, reader, initiator, p, data, flowID)
 		go runTransferLoop(loopCtx, done, flowID, runtimeFn, transferFn, progressFn, progressInterval, s)
 	}
 
@@ -1309,7 +1313,22 @@ type progressTracker interface {
 	recordAgedOut(at time.Time)
 	recordHead(head uint64, at time.Time)
 	recordSkipped(samples uint64)
+	recordInvalid(at time.Time)
+	recordPassedOver(reason unsentReason, grains uint64)
 }
+
+// unsentReason says why the grain transfer loop did not offer a grain.
+type unsentReason string
+
+const (
+	// unsentInvalid is a grain its producer committed invalid.
+	unsentInvalid unsentReason = "invalid"
+	// unsentResync is a grain the loop jumped over when it trailed the
+	// head by more than maxMirrorLag.
+	unsentResync unsentReason = "resync"
+	// unsentAgedOut is a grain whose slot the producer had reused.
+	unsentAgedOut unsentReason = "aged_out"
+)
 
 // recordDelivered takes completed, the initiator's count of transfers
 // completed to this mirror's target, and stamps lastSentAt when it
@@ -1350,11 +1369,33 @@ func (e *sourceEntry) recordHead(head uint64, at time.Time) {
 }
 
 // recordOffered is told each index the loop handed to the initiator.
-// A shared source keeps nothing of it: a post says nothing about
-// delivery, which each mirror's flusher takes from the initiator's
-// completion counters (observeDelivery). The loop tests observe the
-// loop through it.
-func (s *sharedSource) recordOffered(uint64, time.Time) {}
+// Only when is kept: a post says nothing about delivery, which each
+// mirror's flusher takes from the initiator's completion counters
+// (observeDelivery), but it says the source had something to send.
+func (s *sharedSource) recordOffered(_ uint64, at time.Time) {
+	for _, e := range s.attached() {
+		e.recordOffered(at)
+	}
+}
+
+func (e *sourceEntry) recordOffered(at time.Time) {
+	t := at
+	e.offeredAt.Store(&t)
+}
+
+// idleOnInvalid reports whether the head has moved over nothing but
+// invalid grains for longer than after, as a merge output with every
+// member down does. Such a source offers the initiator nothing, so a
+// target that completes nothing is not stalled and its transfers are
+// not failing to land.
+func idleOnInvalid(now time.Time, e *sourceEntry, after time.Duration) bool {
+	inv := e.invalidAt.Load()
+	if inv == nil || now.Sub(*inv) > after {
+		return false
+	}
+	off := e.offeredAt.Load()
+	return off == nil || now.Sub(*off) > after
+}
 
 func (s *sharedSource) recordAgedOut(at time.Time) {
 	for _, e := range s.attached() {
@@ -1369,6 +1410,33 @@ func (e *sourceEntry) recordSkipped(samples uint64) {
 func (s *sharedSource) recordSkipped(samples uint64) {
 	for _, e := range s.attached() {
 		e.recordSkipped(samples)
+	}
+}
+
+func (e *sourceEntry) recordInvalid(at time.Time) {
+	e.invalidGrains.Add(1)
+	t := at
+	e.invalidAt.Store(&t)
+}
+
+func (s *sharedSource) recordInvalid(at time.Time) {
+	for _, e := range s.attached() {
+		e.recordInvalid(at)
+	}
+}
+
+func (e *sourceEntry) recordPassedOver(reason unsentReason, grains uint64) {
+	switch reason {
+	case unsentResync:
+		e.resyncGrains.Add(grains)
+	case unsentAgedOut:
+		e.agedOutGrains.Add(grains)
+	}
+}
+
+func (s *sharedSource) recordPassedOver(reason unsentReason, grains uint64) {
+	for _, e := range s.attached() {
+		e.recordPassedOver(reason, grains)
 	}
 }
 
@@ -1463,6 +1531,7 @@ func runTransferLoop(
 				// tails the live flow silently.
 				if tracker != nil {
 					tracker.recordAgedOut(time.Now())
+					tracker.recordPassedOver(unsentResync, uint64(h-mirrorResyncLag-1-lastSent))
 				}
 			}
 			lastSent = h - mirrorResyncLag - 1
@@ -1473,7 +1542,8 @@ func runTransferLoop(
 			// behind it. Any earlier index means a backlog, and a
 			// backlog has to be cleared at the fabric's own rate.
 			paced := idx == int64(head)
-			if _, err := transferGrain(uint64(idx), paced); err != nil {
+			invalid, err := transferGrain(uint64(idx), paced)
+			if err != nil {
 				// libmxl reports "out of range (too late)" when the
 				// writer has already overwritten the slot the reader
 				// is asking for. The grains between lastSent+1 and
@@ -1489,6 +1559,7 @@ func runTransferLoop(
 						"fromIndex", lastSent+1, "toIndex", int64(head))
 					if tracker != nil {
 						tracker.recordAgedOut(time.Now())
+						tracker.recordPassedOver(unsentAgedOut, uint64(int64(head)-lastSent))
 					}
 					lastSent = int64(head)
 					break
@@ -1501,7 +1572,11 @@ func runTransferLoop(
 				break
 			}
 			if tracker != nil {
-				tracker.recordOffered(uint64(idx), time.Now())
+				if invalid {
+					tracker.recordInvalid(time.Now())
+				} else {
+					tracker.recordOffered(uint64(idx), time.Now())
+				}
 			}
 			lastSent = idx
 		}
@@ -2463,7 +2538,7 @@ func observedState(entry *sourceEntry, stallAfter time.Duration) sourceProgressS
 	// reading, and the target gates its own rebuild on seeing this
 	// reason.
 	if !delivering && !entry.openedAt.IsZero() &&
-		time.Since(entry.openedAt) > stallAfter {
+		time.Since(entry.openedAt) > stallAfter && !idleOnInvalid(time.Now(), entry, stallAfter) {
 		return sourceProgressState{
 			status: metav1.ConditionFalse,
 			reason: mxlv1alpha1.ReasonTransfersNotLanding,
@@ -2790,14 +2865,14 @@ func progressBlocking(provider fabrics.Provider) bool {
 // the completions of a write that has already crossed a microsecond of
 // fabric are there, and a chunk that still finds the queue full takes
 // the retry path, which does block.
-func reapFuncFor(initiator *fabrics.Initiator) ProgressFunc {
+func reapFuncFor(initiator progressDriver) ProgressFunc {
 	return initiator.MakeProgressNonBlocking
 }
 
 // progressFuncFor selects the MakeProgress variant the transfer loop
 // drives, keyed on the fabric provider. See progressBlocking for the
 // rationale.
-func progressFuncFor(initiator *fabrics.Initiator, provider fabrics.Provider) ProgressFunc {
+func progressFuncFor(initiator progressDriver, provider fabrics.Provider) ProgressFunc {
 	if !progressBlocking(provider) {
 		return initiator.MakeProgressNonBlocking
 	}

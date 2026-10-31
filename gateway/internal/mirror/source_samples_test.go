@@ -226,6 +226,10 @@ func (r *recordingSampleTracker) recordOffered(uint64, time.Time) {
 
 func (r *recordingSampleTracker) recordSkipped(uint64) {}
 
+func (r *recordingSampleTracker) recordInvalid(time.Time) {}
+
+func (r *recordingSampleTracker) recordPassedOver(unsentReason, uint64) {}
+
 func (r *recordingSampleTracker) recordAgedOut(time.Time) {
 	r.mu.Lock()
 	r.aged++

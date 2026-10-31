@@ -120,3 +120,99 @@ func TestGrainTransfer_OffersEveryGrainOnce(t *testing.T) {
 	produced := int64(src.head() - first)
 	assert.InDelta(t, produced, dst.n.Load(), 2)
 }
+
+// flaggedSource holds fixed grains by index, as a producer's ring does.
+type flaggedSource map[uint64]mxl.Grain
+
+func (s flaggedSource) GetGrainNonBlocking(idx uint64) (mxl.Grain, error) {
+	g, ok := s[idx]
+	if !ok {
+		return mxl.Grain{}, errors.New("out of range (too early)")
+	}
+	return g, nil
+}
+
+func (s flaggedSource) GetGrainSliceNonBlocking(idx uint64, _ uint16) (mxl.Grain, error) {
+	return s.GetGrainNonBlocking(idx)
+}
+
+// recordingSender records every slice range handed to the initiator.
+type recordingSender struct{ calls [][3]uint64 }
+
+func (s *recordingSender) TransferGrain(idx uint64, start, end uint16) error {
+	s.calls = append(s.calls, [3]uint64{idx, uint64(start), uint64(end)})
+	return nil
+}
+
+// A grain its producer committed as invalid carries no picture: libmxl
+// flags the slot of an index the producer skipped and leaves the bytes
+// an earlier lap wrote there. The target commits every arrival as a
+// whole valid grain - OpenGrain clears the flag and the commit marks
+// every slice valid - so a forwarded invalid grain reached every reader
+// on every target as a valid one carrying that earlier lap's payload.
+//
+// None of a video grain is sent: the target writer flags the index
+// invalid when the next grain commits past it, and the source counts
+// it unsent. A data writer never completes a grain, so it flags no
+// index it skips; a data grain goes as its header alone, which the
+// target commits invalid. That header is offered like any grain, and
+// a target that stops completing it is stalled like any other.
+func TestGrainTransfer_InvalidGrainIsNotForwarded(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		data    bool
+		g       mxl.Grain
+		want    [][3]uint64
+		invalid bool
+	}{
+		{"video", false, mxl.Grain{Index: 1001, Flags: mxl.GrainFlagInvalid, TotalSlices: 1080, ValidSlices: 1080, GrainSize: 5529600},
+			nil, true},
+		{"data", true, mxl.Grain{Index: 1001, Flags: mxl.GrainFlagInvalid, TotalSlices: 4096, ValidSlices: 64, GrainSize: 4096},
+			[][3]uint64{{1001, 0, 0}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := &recordingSender{}
+			transfer := newGrainTransfer(context.Background(), flaggedSource{1001: tc.g}, dst, pacer{}, tc.data, func() {})
+
+			invalid, err := transfer(1001, false)
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.invalid, invalid, "whether the grain counts as unsent")
+			assert.Equal(t, tc.want, dst.calls, "what of an invalid grain was handed to the initiator")
+		})
+	}
+}
+
+// parkingInitiator is a verbs initiator with nothing to complete: a
+// blocking MakeProgress parks for its whole timeout, as libmxl's
+// blockOnCQ does on an empty completion queue.
+type parkingInitiator struct{ recordingSender }
+
+func (*parkingInitiator) MakeProgress(timeout time.Duration) error {
+	time.Sleep(timeout)
+	return nil
+}
+
+func (*parkingInitiator) MakeProgressNonBlocking() error { return nil }
+
+// A paced grain's chunks are unsignalled but the last, so nothing lands
+// on the completion queue between them. Driving the queues there with
+// the blocking call parked for its timeout after every chunk: a grain
+// paced over 10 ms took 150 ms in 16 chunks, and every mirror of the
+// flow fell behind its producer and resynced.
+func TestInitiatorGrainTransfer_PacedGrainKeepsItsWindow(t *testing.T) {
+	const chunks = 16
+	p := newPacer(mxl.Rational{Num: 50, Den: 1}, 0.5, chunks, "k")
+	require.True(t, p.enabled())
+	in := &parkingInitiator{}
+	src := flaggedSource{1001: {Index: 1001, TotalSlices: 1080, ValidSlices: 1080, GrainSize: 5529600}}
+	transfer := newInitiatorGrainTransfer(context.Background(), src, in, p, false, "f")
+
+	start := time.Now()
+	_, err := transfer(1001, true)
+	took := time.Since(start)
+
+	require.NoError(t, err)
+	require.Len(t, in.calls, chunks)
+	assert.Less(t, took, 3*p.window, "a grain paced over %v took %v", p.window, took)
+}

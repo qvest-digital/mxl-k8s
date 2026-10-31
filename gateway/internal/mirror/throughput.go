@@ -19,6 +19,15 @@ type Throughput struct {
 	// flow only, and is zero everywhere else.
 	SkippedSamples uint64
 
+	// InvalidGrains, ResyncGrains and AgedOutGrains are meaningful on
+	// the source half of a discrete flow only: the grains it did not
+	// offer, by unsentReason.
+	InvalidGrains, ResyncGrains, AgedOutGrains uint64
+
+	// InvalidFromSource and IndexMismatch are meaningful on the target
+	// half only: arrivals committed invalid, by invalidReason.
+	InvalidFromSource, IndexMismatch uint64
+
 	// Transfers is the initiator's account of the mirror's target, on
 	// the source half only. Nil before the first report.
 	Transfers *TransferCounts
@@ -94,6 +103,21 @@ var (
 		"Samples the source half advanced past without sending, having left the readable window. "+
 			"The target's head still moves over them, so each is published as stale ring content.",
 		[]string{"domain", "flow_id", "node", "peer_node", "provider"}, nil)
+
+	descSourceUnsent = prometheus.NewDesc(
+		"mxl_gateway_mirror_source_unsent_grains_total",
+		"Grains the source half did not offer to the initiator, by reason: invalid (the producer committed a video grain "+
+			"invalid), resync (the loop fell more than a few grains behind the head and resumed near it) or aged_out (the "+
+			"producer had reused the slot). Each one is a grain no target receives. An invalid data grain is not counted "+
+			"here: its header is offered, and the target commits it invalid.",
+		append(append([]string{}, transferLabels...), "reason"), nil)
+
+	descTargetInvalid = prometheus.NewDesc(
+		"mxl_gateway_mirror_target_invalid_grains_total",
+		"Arrived grains the target half committed invalid: flagged invalid at the source (invalid_from_source), or "+
+			"whose slot header names another index than the one committed, a later write into the slot having landed "+
+			"(index_mismatch). The commit rewrites that header, so the later grain is flagged invalid too, not served.",
+		append(append([]string{}, transferLabels...), "reason"), nil)
 )
 
 // ThroughputSource reports the live mirrors one reconciler owns.
@@ -118,6 +142,8 @@ func (c *ThroughputCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descTransmitted
 	ch <- descReceived
 	ch <- descSkipped
+	ch <- descSourceUnsent
+	ch <- descTargetInvalid
 	ch <- descPosted
 	ch <- descTransfers
 	ch <- descTorn
@@ -136,32 +162,31 @@ func (c *ThroughputCollector) Describe(ch chan<- *prometheus.Desc) {
 // so this cannot be left to the labels alone.
 func (c *ThroughputCollector) Collect(ch chan<- prometheus.Metric) {
 	type key struct{ domain, flowID, peerNode, provider string }
-	emit := func(desc *prometheus.Desc, src ThroughputSource) {
+	// emit sums value over the entries of src that share a label set;
+	// extra are label values after the shared ones.
+	emit := func(desc *prometheus.Desc, src ThroughputSource, value func(Throughput) uint64, extra ...string) {
 		if src == nil {
 			return
 		}
 		totals := map[key]uint64{}
 		for _, t := range src.Throughput() {
-			totals[key{t.Domain, t.FlowID, t.PeerNode, t.Provider}] += t.Bytes
+			totals[key{t.Domain, t.FlowID, t.PeerNode, t.Provider}] += value(t)
 		}
-		for k, bytes := range totals {
-			ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue,
-				float64(bytes), k.domain, k.flowID, c.NodeName, k.peerNode, k.provider)
+		for k, n := range totals {
+			labels := append([]string{k.domain, k.flowID, c.NodeName, k.peerNode, k.provider}, extra...)
+			ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue, float64(n), labels...)
 		}
 	}
-	emit(descTransmitted, c.Source)
-	emit(descReceived, c.Target)
+	emit(descTransmitted, c.Source, func(t Throughput) uint64 { return t.Bytes })
+	emit(descReceived, c.Target, func(t Throughput) uint64 { return t.Bytes })
+	emit(descSkipped, c.Source, func(t Throughput) uint64 { return t.SkippedSamples })
+	emit(descSourceUnsent, c.Source, func(t Throughput) uint64 { return t.InvalidGrains }, string(unsentInvalid))
+	emit(descSourceUnsent, c.Source, func(t Throughput) uint64 { return t.ResyncGrains }, string(unsentResync))
+	emit(descSourceUnsent, c.Source, func(t Throughput) uint64 { return t.AgedOutGrains }, string(unsentAgedOut))
+	emit(descTargetInvalid, c.Target, func(t Throughput) uint64 { return t.InvalidFromSource }, string(invalidFromSource))
+	emit(descTargetInvalid, c.Target, func(t Throughput) uint64 { return t.IndexMismatch }, string(invalidIndexMismatch))
 
 	if c.Source != nil {
-		skipped := map[key]uint64{}
-		for _, t := range c.Source.Throughput() {
-			skipped[key{t.Domain, t.FlowID, t.PeerNode, t.Provider}] += t.SkippedSamples
-		}
-		for k, n := range skipped {
-			ch <- prometheus.MustNewConstMetric(descSkipped, prometheus.CounterValue,
-				float64(n), k.domain, k.flowID, c.NodeName, k.peerNode, k.provider)
-		}
-
 		// Two mirrors of one flow to one peer are two targets; their
 		// counters add, and the larger lag stands for both.
 		counts := map[key]TransferCounts{}
@@ -228,6 +253,9 @@ func (r *SourceReconciler) Throughput() []Throughput {
 			Bytes:    e.bytes.Load(),
 
 			SkippedSamples: e.skipped.Load(),
+			InvalidGrains:  e.invalidGrains.Load(),
+			ResyncGrains:   e.resyncGrains.Load(),
+			AgedOutGrains:  e.agedOutGrains.Load(),
 			Transfers:      e.transferCounts(),
 		})
 	}
@@ -247,6 +275,9 @@ func (r *TargetReconciler) Throughput() []Throughput {
 			PeerNode: e.peerNode,
 			Provider: e.provider.String(),
 			Bytes:    e.bytes.Load(),
+
+			InvalidFromSource: e.invalidFromSource.Load(),
+			IndexMismatch:     e.indexMismatch.Load(),
 		})
 	}
 	return out

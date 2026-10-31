@@ -446,6 +446,11 @@ type targetEntry struct {
 	// split the flow's bytes between them.
 	bytes atomic.Uint64
 
+	// invalidFromSource and indexMismatch count the arrivals this
+	// mirror committed invalid, by invalidReason.
+	invalidFromSource atomic.Uint64
+	indexMismatch     atomic.Uint64
+
 	// phaseMu orders the phases a recovery publishes against the Failed a
 	// drop publishes. Two recoveries of one entry can run at once -- the
 	// watchdog's and the one a fatal progress loop spawns -- and without it
@@ -1210,8 +1215,9 @@ func (r *TargetReconciler) startProgressLoop(
 			return arrivalComplete(g, data), nil
 		}
 		commitFn := func(idx uint64) error {
-			n, err := flow.commitGrain(writer, idx, entry)
+			n, reason, err := flow.commitGrain(writer, idx, entry)
 			entry.bytes.Add(n)
+			entry.recordInvalid(reason)
 			return err
 		}
 		go runTargetProgressLoop(loopCtx, done, readFn, completeFn, commitFn, onFatal, entry)
@@ -1244,6 +1250,17 @@ func (e *targetEntry) recordCommit(_ uint64, at time.Time) {
 	// ones.
 	if n == e.commitsAtFabricOpen.Load()+1 {
 		e.recoveryAttempts.Store(0)
+	}
+}
+
+// recordInvalid counts an arrival committed invalid for reason; an
+// empty reason counts nothing.
+func (e *targetEntry) recordInvalid(reason invalidReason) {
+	switch reason {
+	case invalidFromSource:
+		e.invalidFromSource.Add(1)
+	case invalidIndexMismatch:
+		e.indexMismatch.Add(1)
 	}
 }
 
@@ -1397,32 +1414,66 @@ func arrivalComplete(g mxl.Grain, data bool) bool {
 // first already has.
 var errGrainAlreadyCommitted = errors.New("grain already committed")
 
-// A data grain is committed with the valid slices the initiator's write
-// carried, none included: they are its length, and libmxl data writers
-// never complete a grain. OpenGrain clears them, so they are read first.
-// Any other grain, and a data grain whose header is not this index's,
-// is committed whole.
-func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, error) {
-	valid, carried := uint16(0), false
-	if writer.Config().Common.Format == mxl.FormatData {
-		if g, err := writer.GrainInfo(idx); err == nil && g.Index == idx {
-			valid, carried = g.ValidSlices, true
-		}
+// invalidReason says why an arrived grain was committed invalid; empty
+// for one committed valid.
+type invalidReason string
+
+const (
+	// invalidFromSource is a grain whose producer committed it invalid.
+	invalidFromSource invalidReason = "invalid_from_source"
+	// invalidIndexMismatch is a slot whose header names another index
+	// than the one committed: a later write into the slot, such as a
+	// transfer the source retransmitted after its producer reused the
+	// slot, landed after the arrival was reported. OpenGrain rewrites
+	// the header to the committed index, so the later grain is not
+	// served from this slot either: its own arrival finds this index
+	// there and is committed invalid, or the writer flags it as a gap
+	// once a grain past it commits.
+	invalidIndexMismatch invalidReason = "index_mismatch"
+)
+
+// The slot's header is read before OpenGrain, which clears its invalid
+// flag and, unless it reopens the grain, its valid slices. An arrival
+// is committed invalid when the header carries the invalid flag or
+// another index. A data grain is
+// committed with the valid slices the initiator's write carried, none
+// included: they are its length, and libmxl data writers never complete
+// a grain. Any other grain is committed whole, an invalid one included,
+// so the writer completes it and the next arrival commits past it.
+func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, invalidReason, error) {
+	hdr, err := writer.GrainInfo(idx)
+	if err != nil {
+		return 0, "", fmt.Errorf("GrainInfo(%d): %w", idx, err)
 	}
+	var reason invalidReason
+	switch {
+	case hdr.Index != idx:
+		reason = invalidIndexMismatch
+	case hdr.Invalid():
+		reason = invalidFromSource
+	}
+	data := writer.Config().Common.Format == mxl.FormatData
 	ga, err := writer.OpenGrain(idx)
 	if err != nil {
 		if errors.Is(err, mxl.ErrInvalidArg) {
-			return 0, fmt.Errorf("OpenGrain(%d): %w: %w", idx, errGrainAlreadyCommitted, err)
+			return 0, "", fmt.Errorf("OpenGrain(%d): %w: %w", idx, errGrainAlreadyCommitted, err)
 		}
-		return 0, fmt.Errorf("OpenGrain(%d): %w", idx, err)
+		return 0, "", fmt.Errorf("OpenGrain(%d): %w", idx, err)
 	}
-	if !carried {
-		valid = ga.TotalSlices
+	valid, flags := ga.TotalSlices, uint32(0)
+	if data {
+		valid = 0
+		if reason != invalidIndexMismatch {
+			valid = hdr.ValidSlices
+		}
 	}
-	if err := ga.Commit(valid, 0); err != nil {
-		return 0, fmt.Errorf("Commit(%d): %w", idx, err)
+	if reason != "" {
+		flags = mxl.GrainFlagInvalid
 	}
-	return uint64(ga.GrainSize), nil
+	if err := ga.Commit(valid, flags); err != nil {
+		return 0, "", fmt.Errorf("Commit(%d): %w", idx, err)
+	}
+	return uint64(ga.GrainSize), reason, nil
 }
 
 // runTargetSampleProgressLoop drives a libmxl-fabrics Target for a

@@ -67,9 +67,9 @@ type initiatorOpener interface {
 type RuntimeProbe func() (head uint64, err error)
 
 // TransferFunc transfers one grain from the source flow to the
-// target. The bool return signals "grain was skipped" - production
-// returns it true when grain.TotalSlices == 0. Continuous (audio)
-// flows take the sample-transfer path and never reach this loop.
+// target. invalid reports a grain its producer committed invalid, of
+// which nothing is sent. Continuous (audio) flows take the
+// sample-transfer path and never reach this loop.
 //
 // paced asks for the grain to be spread across a fraction of the
 // flow's own grain interval rather than handed over whole. The loop
@@ -80,7 +80,7 @@ type RuntimeProbe func() (head uint64, err error)
 //
 // A non-nil error breaks the per-tick loop; the next tick re-reads
 // head and re-tries from lastSent+1.
-type TransferFunc func(idx uint64, paced bool) (skipped bool, err error)
+type TransferFunc func(idx uint64, paced bool) (invalid bool, err error)
 
 // TransferSlicesFunc transfers the half-open slice range [start, end)
 // of grain idx. It is the primitive the pacer schedules against;

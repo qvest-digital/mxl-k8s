@@ -1,11 +1,13 @@
 package mirror
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
+	"github.com/qvest-digital/go-mxl/mxl"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -94,6 +96,81 @@ func TestRunFlusher_ReaddsOnlyTheTargetThatStopsCompleting(t *testing.T) {
 		"a connected target that completed nothing while the head advanced was kept")
 	time.Sleep(4 * f.r.deliveryStall)
 	assert.False(t, healthy.dropped.Load(), "a target that keeps completing was re-added")
+}
+
+// A producer whose head moves over nothing but invalid grains, as a
+// merge output with every member down does, offers nothing to the
+// initiator and so leaves nothing to complete. The flusher read the
+// moving head as a producer still writing and dropped and re-added a
+// healthy target once per stall window, and the source reported
+// TransfersNotLanding, which has the target rebuild its fabric side.
+func TestRunFlusher_AllInvalidSourceIsIdle(t *testing.T) {
+	f := newFanoutFixture(t, fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderVerbs))
+	f.r.FlushInterval = 5 * time.Millisecond
+	f.r.deliveryStall = 80 * time.Millisecond
+	f.opener.setState(stateFor(f.opener, "none", fabrics.TargetConnected))
+	f.opener.setStats(func(*fabrics.TargetInfo) (fabrics.TargetStats, error) {
+		return fabrics.TargetStats{LastCompletedIndex: fabrics.NoIndex}, nil
+	})
+	f.reconcile(t, "m1")
+	s := f.sharedFor("flow-1", fabrics.ProviderVerbs)
+	require.NotNil(t, s)
+	e := f.entry("m1")
+	require.Eventually(t, e.connected.Load, time.Second, 5*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	start := time.Now()
+	head := func() (uint64, error) { return 1000 + uint64(time.Since(start)/(5*time.Millisecond)), nil }
+	allInvalid := func(uint64, bool) (bool, error) { return true, nil }
+	go runTransferLoop(ctx, done, "flow-1", head, allInvalid, func() error { return nil }, time.Millisecond, s)
+	defer func() { cancel(); <-done }()
+
+	time.Sleep(4 * f.r.deliveryStall)
+	assert.False(t, e.dropped.Load(), "a target with nothing to complete was re-added")
+	assert.NotEqual(t, mxlv1alpha1.ReasonTransfersNotLanding, observedState(e, f.r.deliveryStall).reason,
+		"a source with nothing to send reported its transfers as not landing")
+}
+
+// invalidDataSource is a data producer that commits every grain
+// invalid.
+type invalidDataSource struct{}
+
+func (invalidDataSource) GetGrainNonBlocking(idx uint64) (mxl.Grain, error) {
+	return mxl.Grain{Index: idx, Flags: mxl.GrainFlagInvalid, TotalSlices: 4096, GrainSize: 4096}, nil
+}
+
+func (s invalidDataSource) GetGrainSliceNonBlocking(idx uint64, _ uint16) (mxl.Grain, error) {
+	return s.GetGrainNonBlocking(idx)
+}
+
+// The header of an invalid data grain is posted like any grain, so a
+// target that stops completing those is stalled, not idle, and is
+// added again.
+func TestRunFlusher_ReaddsAStalledTargetOfAnInvalidDataFlow(t *testing.T) {
+	f := newFanoutFixture(t, fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderVerbs))
+	f.r.FlushInterval = 5 * time.Millisecond
+	f.r.deliveryStall = 80 * time.Millisecond
+	f.opener.setState(stateFor(f.opener, "none", fabrics.TargetConnected))
+	f.opener.setStats(func(*fabrics.TargetInfo) (fabrics.TargetStats, error) {
+		return fabrics.TargetStats{Posted: 8, InFlight: 8, LastCompletedIndex: fabrics.NoIndex}, nil
+	})
+	f.reconcile(t, "m1")
+	s := f.sharedFor("flow-1", fabrics.ProviderVerbs)
+	require.NotNil(t, s)
+	e := f.entry("m1")
+	require.Eventually(t, e.connected.Load, time.Second, 5*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	start := time.Now()
+	head := func() (uint64, error) { return 1000 + uint64(time.Since(start)/(5*time.Millisecond)), nil }
+	transfer := newGrainTransfer(ctx, invalidDataSource{}, &offeredCounter{}, pacer{}, true, func() {})
+	go runTransferLoop(ctx, done, "flow-1", head, transfer, func() error { return nil }, time.Millisecond, s)
+	defer func() { cancel(); <-done }()
+
+	require.Eventually(t, e.dropped.Load, 2*time.Second, 5*time.Millisecond,
+		"a target that completed none of the headers it was sent was kept")
 }
 
 // A producer that stopped writing leaves nothing to complete, so a

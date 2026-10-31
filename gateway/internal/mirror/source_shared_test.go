@@ -2,8 +2,10 @@ package mirror
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -460,4 +462,49 @@ func TestSource_FailedAddTargetLeavesAnInUseSourceAlone(t *testing.T) {
 		"one mirror's AddTarget failure must not close the reader another is using")
 	assert.True(t, loopRunning(s))
 	assert.Len(t, s.attached(), 1)
+}
+
+// A grain the transfer loop passes over without offering it is a hole on
+// every target, and is counted with why. Two paths jump: a head more
+// than maxMirrorLag ahead, as a producer catching up after a stall puts
+// it, resyncs to the tail; a grain the producer has already reused ages
+// out and the loop jumps to the head. Both stamped only a timestamp, so
+// the grains they dropped showed up in no counter.
+func TestTransferLoop_CountsTheGrainsItPassesOver(t *testing.T) {
+	f := newFanoutFixture(t, fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderVerbs))
+	f.reconcile(t, "m1")
+	s := f.sharedFor("flow-1", fabrics.ProviderVerbs)
+	require.NotNil(t, s)
+
+	// 1000 is where the loop tunes in. 1030 is a catch-up burst: the
+	// loop resyncs to 1027 and drops 1003..1027. At 1034, within
+	// maxMirrorLag, grain 1031 has aged out: the loop jumps to the head
+	// and drops 1031..1034.
+	heads := []uint64{1000, 1001, 1002, 1030, 1034}
+	var probes atomic.Int32
+	head := func() (uint64, error) {
+		n := int(probes.Add(1)) - 1
+		return heads[min(n, len(heads)-1)], nil
+	}
+	transfer := func(idx uint64, _ bool) (bool, error) {
+		if idx == 1031 {
+			return false, errors.New(readerAgedOutMarker)
+		}
+		return false, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go runTransferLoop(ctx, done, "flow-1", head, transfer, func() error { return nil }, time.Millisecond, s)
+	require.Eventually(t, func() bool { return probes.Load() > int32(len(heads)) }, time.Second, time.Millisecond)
+	cancel()
+	<-done
+
+	col := &ThroughputCollector{NodeName: "n01", Source: f.r}
+	require.NoError(t, testutil.CollectAndCompare(col, strings.NewReader(`
+# HELP mxl_gateway_mirror_source_unsent_grains_total Grains the source half did not offer to the initiator, by reason: invalid (the producer committed a video grain invalid), resync (the loop fell more than a few grains behind the head and resumed near it) or aged_out (the producer had reused the slot). Each one is a grain no target receives. An invalid data grain is not counted here: its header is offered, and the target commits it invalid.
+# TYPE mxl_gateway_mirror_source_unsent_grains_total counter
+mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-1",node="n01",peer_node="node-b",provider="verbs",reason="aged_out"} 4
+mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-1",node="n01",peer_node="node-b",provider="verbs",reason="invalid"} 0
+mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-1",node="n01",peer_node="node-b",provider="verbs",reason="resync"} 25
+`), "mxl_gateway_mirror_source_unsent_grains_total"))
 }

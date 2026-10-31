@@ -48,10 +48,10 @@ type transferFixture struct {
 	headErr   error
 	headCalls int
 
-	transferLog  []uint64
-	pacedLog     []bool
-	transferErr  error
-	transferSkip map[uint64]bool
+	transferLog     []uint64
+	pacedLog        []bool
+	transferErr     error
+	transferInvalid map[uint64]bool
 
 	progressErr   error
 	progressCalls int
@@ -80,7 +80,7 @@ func (f *transferFixture) transferGrain(idx uint64, paced bool) (bool, error) {
 	if f.transferErr != nil {
 		return false, f.transferErr
 	}
-	if f.transferSkip[idx] {
+	if f.transferInvalid[idx] {
 		return true, nil
 	}
 	return false, nil
@@ -133,6 +133,33 @@ func TestRunTransferLoop_TailsFromHead(t *testing.T) {
 			"transfers must arrive in head-tail order; got idx[%d]=%d, want %d",
 			i, idx, expected)
 	}
+}
+
+// An invalid grain is counted once and moves the loop on like any
+// other: the index is the target writer's to flag.
+func TestRunTransferLoop_CountsInvalidGrains(t *testing.T) {
+	fx := &transferFixture{
+		headSeq:         []uint64{10, 14},
+		transferInvalid: map[uint64]bool{12: true, 13: true},
+	}
+	rt := &recordingTracker{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go runTransferLoop(ctx, done, "flow-a", fx.probeRuntime, fx.transferGrain, fx.makeProgress, time.Millisecond, rt)
+	require.Eventually(t, func() bool {
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		return len(rt.transfers) >= 2
+	}, time.Second, time.Millisecond)
+	cancel()
+	<-done
+
+	assert.Equal(t, []uint64{11, 12, 13, 14}, fx.transferred())
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	assert.Equal(t, []uint64{11, 14}, rt.transfers, "an invalid grain is not counted as offered")
+	assert.Equal(t, 2, rt.invalid)
 }
 
 func TestRunTransferLoop_ResyncsToHeadWhenLapped(t *testing.T) {
@@ -305,6 +332,7 @@ type recordingTracker struct {
 	transfers []uint64
 	agedOuts  int
 	skipped   uint64
+	invalid   int
 	heads     []uint64
 }
 
@@ -328,6 +356,14 @@ func (rt *recordingTracker) recordAgedOut(_ time.Time) {
 func (rt *recordingTracker) recordSkipped(samples uint64) {
 	rt.mu.Lock()
 	rt.skipped += samples
+	rt.mu.Unlock()
+}
+
+func (rt *recordingTracker) recordPassedOver(unsentReason, uint64) {}
+
+func (rt *recordingTracker) recordInvalid(time.Time) {
+	rt.mu.Lock()
+	rt.invalid++
 	rt.mu.Unlock()
 }
 
