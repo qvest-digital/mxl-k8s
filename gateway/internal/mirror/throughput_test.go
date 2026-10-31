@@ -63,7 +63,7 @@ func TestThroughputCollectorReportsInvalidGrains(t *testing.T) {
 
 	c := &ThroughputCollector{NodeName: "n01", Source: src, Target: tgt}
 	expected := `
-# HELP mxl_gateway_mirror_source_unsent_grains_total Grains the source half did not offer to the initiator, by reason: invalid (the producer committed it invalid; a data grain still goes as its header, which the target commits invalid), resync (the loop fell more than a few grains behind the head and resumed near it) or aged_out (the producer had reused the slot). Each one is a grain no target receives.
+# HELP mxl_gateway_mirror_source_unsent_grains_total Grains the source half did not offer to the initiator, by reason: invalid (the producer committed a video grain invalid), resync (the loop fell more than a few grains behind the head and resumed near it) or aged_out (the producer had reused the slot). Each one is a grain no target receives. An invalid data grain is not counted here: its header is offered, and the target commits it invalid.
 # TYPE mxl_gateway_mirror_source_unsent_grains_total counter
 mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs",reason="aged_out"} 0
 mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs",reason="invalid"} 2

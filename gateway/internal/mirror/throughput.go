@@ -106,10 +106,10 @@ var (
 
 	descSourceUnsent = prometheus.NewDesc(
 		"mxl_gateway_mirror_source_unsent_grains_total",
-		"Grains the source half did not offer to the initiator, by reason: invalid (the producer committed it invalid; "+
-			"a data grain still goes as its header, which the target commits invalid), resync (the loop fell more than a "+
-			"few grains behind the head and resumed near it) or aged_out (the producer had reused the slot). Each one is "+
-			"a grain no target receives.",
+		"Grains the source half did not offer to the initiator, by reason: invalid (the producer committed a video grain "+
+			"invalid), resync (the loop fell more than a few grains behind the head and resumed near it) or aged_out (the "+
+			"producer had reused the slot). Each one is a grain no target receives. An invalid data grain is not counted "+
+			"here: its header is offered, and the target commits it invalid.",
 		append(append([]string{}, transferLabels...), "reason"), nil)
 
 	descTargetInvalid = prometheus.NewDesc(
