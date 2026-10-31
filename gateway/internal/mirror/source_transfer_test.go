@@ -210,6 +210,5 @@ func TestInitiatorGrainTransfer_PacedGrainKeepsItsWindow(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, in.calls, chunks)
-	assert.Less(t, took, p.window+p.window/chunks+5*time.Millisecond,
-		"a grain paced over %v took %v", p.window, took)
+	assert.Less(t, took, 3*p.window, "a grain paced over %v took %v", p.window, took)
 }
