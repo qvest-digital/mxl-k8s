@@ -300,7 +300,7 @@ func TestSource_AccountingLandsPerMirrorAcrossTheFanout(t *testing.T) {
 
 	col := &ThroughputCollector{NodeName: "n01", Source: f.r}
 	require.NoError(t, testutil.CollectAndCompare(col, strings.NewReader(`
-# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes the fabric reported as delivered for a mirror this node is the source of.
+# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes the fabric reported as delivered for a mirror this node is the source of, including chunks of a grain given up part way, which went over the wire all the same.
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
 mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
 mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n03",provider="verbs"} 1000
