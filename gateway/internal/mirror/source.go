@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -168,8 +169,14 @@ type SourceReconciler struct {
 	// defaultReaderStallAfter.
 	ReaderStallAfter time.Duration
 
-	// deliveryStall overrides deliveryStallAfter. Zero keeps it.
+	// deliveryStall overrides the stall window of every mirror. Zero
+	// keeps deliveryStallFor's own.
 	deliveryStall time.Duration
+
+	// ackTimeout is FI_VERBS_ACK_TIMEOUT as libfabric reads it in this
+	// process, which a verbs mirror's stall window is derived from.
+	// SetupWithManager reads it from the environment.
+	ackTimeout string
 
 	// opener is the seam onto the cgo-dependent libmxl-fabrics
 	// Initiator setup path. SetupWithManager binds it to a
@@ -2034,7 +2041,7 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 		dropped := r.targetDropped(entry)
 		if r.observeDelivery(entry, time.Now()) {
 			ctrl.Log.WithName("source-flush").Info("target stopped completing transfers; adding it again",
-				"mirror", key, "after", r.deliveryStallAfter())
+				"mirror", key, "after", r.deliveryStallFor(entry.provider()))
 			entry.dropped.Store(true)
 			dropped = true
 		}
@@ -2502,6 +2509,7 @@ func observedState(entry *sourceEntry, stallAfter time.Duration) sourceProgressS
 //
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch
 func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.ackTimeout = os.Getenv(ackTimeoutEnv)
 	if r.sources == nil {
 		r.sources = make(map[types.NamespacedName]*sourceEntry)
 	}

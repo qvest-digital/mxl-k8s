@@ -2,32 +2,55 @@ package mirror
 
 import (
 	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
 )
 
-// retryExhaustAfter is how long a reliable connection keeps
-// retransmitting to a peer that stopped acknowledging before it fails:
-// seven retries of the RDMA-CM RoCE default ACK timeout, 4.096us x
-// 2^17 = 537ms each. libfabric's verbs provider sets neither, so this
-// is what every verbs connection runs with.
-const retryExhaustAfter = 7 * 537 * time.Millisecond
+// defaultAckTimeout is the ACK timeout exponent a verbs connection
+// runs with when FI_VERBS_ACK_TIMEOUT does not set one: the RDMA-CM
+// RoCE default, 4.096us x 2^17 = 537ms per retransmission.
+const defaultAckTimeout = 17
 
-// deliveryStallAfter is how long a connected target may go without a
-// completed transfer, while its source head advances, before it is
-// re-added on its own.
-//
-// Twice retryExhaustAfter, so a connection still retrying a lost
-// packet is not torn down from under the retry. It is 7.5s with the
-// default ACK timeout and follows retryExhaustAfter if that changes.
-const deliveryStallAfter = 2 * retryExhaustAfter
+// ackRetries is how often a reliable connection retransmits to a peer
+// that stopped acknowledging before it fails; libfabric's verbs
+// provider asks for 7 (the 3-bit maximum).
+const ackRetries = 7
+
+// ackTimeoutEnv is the variable libfabric's verbs provider reads the
+// ACK timeout exponent from, in the builds that carry the option. -1,
+// unset or out of range leaves the kernel default.
+const ackTimeoutEnv = "FI_VERBS_ACK_TIMEOUT"
+
+// tcpDeliveryStallAfter is the stall window of a tcp mirror, which
+// has no ACK timeout of its own to derive one from. It is the verbs
+// window at the default ACK timeout.
+var tcpDeliveryStallAfter = deliveryStallAfter(fmt.Sprint(defaultAckTimeout))
+
+// deliveryStallAfter is how long a connected verbs target may go
+// without a completed transfer, while its source head advances, before
+// it is re-added on its own: twice the time the connection retries an
+// unacknowledged packet before it fails, so a connection still
+// retrying is not torn down from under the retry. ackTimeout is the
+// value of FI_VERBS_ACK_TIMEOUT: 7.5s at the default exponent 17,
+// 0.94s at 14.
+func deliveryStallAfter(ackTimeout string) time.Duration {
+	exp := defaultAckTimeout
+	if v, err := strconv.Atoi(strings.TrimSpace(ackTimeout)); err == nil && v >= 1 && v <= 31 {
+		exp = v
+	}
+	perRetry := time.Duration(4096<<exp) * time.Nanosecond
+	return 2 * ackRetries * perRetry
+}
 
 // observeDelivery reads the initiator's counters for entry's target,
 // takes delivery and bytes from them, and reports whether the target
-// has stopped completing transfers: connected for longer than
-// deliveryStallAfter, the source head advancing, and nothing completed
-// in that time.
+// has stopped completing transfers: connected for longer than its
+// stall window (deliveryStallFor), the source head advancing, and
+// nothing completed in that time.
 //
 // Only that target is re-added. Its peers on the same initiator keep
 // their connections and their windows; one target that stops
@@ -45,16 +68,20 @@ func (r *SourceReconciler) observeDelivery(entry *sourceEntry, now time.Time) bo
 	if entry.recordDelivered(st.Completed, now) {
 		return false
 	}
-	return deliveryStalled(now, entry, r.deliveryStallAfter())
+	return deliveryStalled(now, entry, r.deliveryStallFor(entry.provider()))
 }
 
-// deliveryStallAfter returns the stall window, deliveryStallAfter
-// unless a test shortened it.
-func (r *SourceReconciler) deliveryStallAfter() time.Duration {
+// deliveryStallFor returns the stall window of a mirror on provider:
+// derived from the configured ACK timeout for verbs, the default for
+// tcp, and deliveryStall when a test set one.
+func (r *SourceReconciler) deliveryStallFor(provider fabrics.Provider) time.Duration {
 	if r.deliveryStall > 0 {
 		return r.deliveryStall
 	}
-	return deliveryStallAfter
+	if provider == fabrics.ProviderVerbs {
+		return deliveryStallAfter(r.ackTimeout)
+	}
+	return tcpDeliveryStallAfter
 }
 
 // deliveryStalled is the stall rule of observeDelivery on the entry's

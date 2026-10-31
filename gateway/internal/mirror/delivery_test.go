@@ -119,3 +119,22 @@ func TestDeliveryStalled(t *testing.T) {
 	delivered.recordDelivered(3, now.Add(-500*time.Millisecond))
 	assert.False(t, deliveryStalled(now, delivered, time.Second), "a completion inside the window")
 }
+
+// The stall window of a verbs mirror follows the ACK timeout libfabric
+// is configured with, so a shorter timeout re-adds a dead target as
+// soon as its connection would have failed, and never before.
+func TestDeliveryStallAfter(t *testing.T) {
+	assert.Equal(t, 2*7*4096*(time.Duration(1)<<17)*time.Nanosecond, deliveryStallAfter(""),
+		"unset keeps the RDMA-CM default exponent 17")
+	assert.InDelta(t, 7.5, deliveryStallAfter("").Seconds(), 0.05)
+	assert.InDelta(t, 0.94, deliveryStallAfter("14").Seconds(), 0.01, "the chart default")
+	for _, kept := range []string{"-1", "0", "32", "fast"} {
+		assert.Equal(t, deliveryStallAfter(""), deliveryStallAfter(kept),
+			"%q leaves the kernel default, as libfabric does", kept)
+	}
+
+	r := &SourceReconciler{ackTimeout: "14"}
+	assert.Equal(t, deliveryStallAfter("14"), r.deliveryStallFor(fabrics.ProviderVerbs))
+	assert.Equal(t, deliveryStallAfter(""), r.deliveryStallFor(fabrics.ProviderTCP),
+		"tcp has no ACK timeout to derive a window from")
+}

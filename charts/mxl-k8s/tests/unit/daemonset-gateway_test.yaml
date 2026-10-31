@@ -139,6 +139,47 @@ tests:
             name: FI_VERBS_IFACE
             value: net1
 
+  - it: a verbs gateway gets FI_VERBS_ACK_TIMEOUT 14 by default
+    set:
+      gateway.rdma.enabled: true
+      gateway.flags.providers: [tcp, verbs]
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FI_VERBS_ACK_TIMEOUT
+            value: "14"
+
+  - it: rdma.verbsAckTimeout -1 leaves FI_VERBS_ACK_TIMEOUT unset
+    set:
+      gateway.rdma.enabled: true
+      gateway.rdma.verbsAckTimeout: -1
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FI_VERBS_ACK_TIMEOUT
+          any: true
+
+  - it: a gateway without verbs gets no FI_VERBS_ACK_TIMEOUT
+    set:
+      gateway.rdma.enabled: true
+      gateway.flags.providers: [tcp, efa]
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FI_VERBS_ACK_TIMEOUT
+          any: true
+
+  - it: a gateway without rdma gets no FI_VERBS_ACK_TIMEOUT
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FI_VERBS_ACK_TIMEOUT
+          any: true
+
   - it: default rdma.resourceName emits no extended resource
     asserts:
       - isNull:
@@ -208,3 +249,29 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "at '/gateway': missing property 'updateStrategy'"
+
+  - it: a site-defined verbs variant inherits rdma.verbsAckTimeout
+    set:
+      gateway.extraEnv:
+        - name: FI_VERBS_TX_IOV_LIMIT
+          value: "32"
+      gateway.variants.irdma:
+        enabled: true
+        nodeSelector:
+          fabric: irdma
+        flags:
+          providers: [tcp, verbs]
+        rdma:
+          enabled: true
+          resourceName: rdma/irdma_shared_devices
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FI_VERBS_ACK_TIMEOUT
+            value: "14"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FI_VERBS_TX_IOV_LIMIT
+            value: "32"

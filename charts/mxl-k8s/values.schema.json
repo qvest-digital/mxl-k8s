@@ -2029,6 +2029,14 @@
               "description": "Extended-resource name advertised by a Kubernetes device plugin. `devic.es/rdma` from generic-device-plugin and `rdma/hca_shared_devices` from k8s-rdma-shared-dev-plugin cover on-prem verbs; `vpc.amazonaws.com/efa` from aws-efa-k8s-device-plugin covers EFA; a site may advertise something else entirely. When non-empty, the gateway container gets `\u003cresourceName\u003e: 1` on both requests and limits. Empty disables the request.  The request is what grants the container its cgroup device permissions, and it also makes the pod unschedulable on any node not advertising the resource -- which is why a cluster with mixed hardware needs `gateway.variants` rather than one DaemonSet.",
               "required": [],
               "title": "resourceName"
+            },
+            "verbsAckTimeout": {
+              "default": 14,
+              "description": "ACK timeout exponent for libfabric's verbs provider, set as FI_VERBS_ACK_TIMEOUT when rdma.enabled and the providers include verbs (or any). A connection retransmits an unacknowledged packet after 4.096us x 2^n and fails after 7 retries; 14 is 67ms per retry, 0.47s to fail, against 537ms and 3.8s at the RDMA-CM default 17. The gateway derives how long a verbs mirror target may complete nothing before it is re-added from the same value. Only libfabric builds carrying the option read it; others keep the kernel default whatever this says. -1 leaves it unset.",
+              "maximum": 31,
+              "minimum": -1,
+              "title": "verbsAckTimeout",
+              "type": "integer"
             }
           },
           "required": [
