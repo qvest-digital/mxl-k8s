@@ -1208,7 +1208,7 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 		// an edit rate advance their heads on the same MXL clock
 		// instants, so without the offset every source on this node
 		// would hand its chunks over in lockstep.
-		transferFn := newInitiatorGrainTransfer(loopCtx, reader, initiator, provider, p, data, flowID)
+		transferFn := newInitiatorGrainTransfer(loopCtx, reader, initiator, p, data, flowID)
 		go runTransferLoop(loopCtx, done, flowID, runtimeFn, transferFn, progressFn, progressInterval, s)
 	}
 

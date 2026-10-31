@@ -102,12 +102,16 @@ func newGrainTransfer(ctx context.Context, src grainSource, dst grainSender, p p
 }
 
 // newInitiatorGrainTransfer is newGrainTransfer over a flow's
-// initiator, driving its queues between the chunks of a paced grain.
-func newInitiatorGrainTransfer(ctx context.Context, src grainSource, in grainInitiator, provider fabrics.Provider,
-	p pacer, data bool, flowID string,
-) TransferFunc {
+// initiator, reaping its queues between the chunks of a paced grain.
+//
+// The reap does not block, whatever the provider. Only a grain's last
+// chunk reports a completion, so between its chunks the completion
+// queue is empty and a blocking call parks for its whole timeout: 10 ms
+// a chunk, a grain paced over 10 ms taking 150 ms in 16 chunks. The
+// transfer loop's own call after each tick still blocks.
+func newInitiatorGrainTransfer(ctx context.Context, src grainSource, in grainInitiator, p pacer, data bool, flowID string) TransferFunc {
 	l := ctrl.Log.WithName("transfer").WithValues("flowID", flowID)
-	progress := progressFuncFor(in, provider)
+	progress := reapFuncFor(in)
 	// Its own throttle rather than the transfer loop's: this call
 	// site fires once per chunk instead of once per tick, so it
 	// needs its own failure history. Both only ever run on the

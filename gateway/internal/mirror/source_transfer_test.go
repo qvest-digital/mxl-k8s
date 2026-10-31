@@ -202,7 +202,7 @@ func TestInitiatorGrainTransfer_PacedGrainKeepsItsWindow(t *testing.T) {
 	require.True(t, p.enabled())
 	in := &parkingInitiator{}
 	src := flaggedSource{1001: {Index: 1001, TotalSlices: 1080, ValidSlices: 1080, GrainSize: 5529600}}
-	transfer := newInitiatorGrainTransfer(context.Background(), src, in, fabrics.ProviderVerbs, p, false, "f")
+	transfer := newInitiatorGrainTransfer(context.Background(), src, in, p, false, "f")
 
 	start := time.Now()
 	_, err := transfer(1001, true)
