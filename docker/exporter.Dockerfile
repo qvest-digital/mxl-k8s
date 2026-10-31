@@ -6,7 +6,7 @@
 # Build context: repo root.
 
 # renovate: datasource=docker depName=ghcr.io/qvest-digital/go-mxl-builder
-ARG GO_MXL_TAG=libmxl-ea2ae37
+ARG GO_MXL_TAG=libmxl-4eb25c1
 
 FROM ghcr.io/qvest-digital/go-mxl-builder:${GO_MXL_TAG} AS builder
 WORKDIR /workspace
