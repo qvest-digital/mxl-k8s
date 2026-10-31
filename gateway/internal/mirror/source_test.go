@@ -48,10 +48,10 @@ type transferFixture struct {
 	headErr   error
 	headCalls int
 
-	transferLog  []uint64
-	pacedLog     []bool
-	transferErr  error
-	transferSkip map[uint64]bool
+	transferLog     []uint64
+	pacedLog        []bool
+	transferErr     error
+	transferInvalid map[uint64]bool
 
 	progressErr   error
 	progressCalls int
@@ -80,7 +80,7 @@ func (f *transferFixture) transferGrain(idx uint64, paced bool) (bool, error) {
 	if f.transferErr != nil {
 		return false, f.transferErr
 	}
-	if f.transferSkip[idx] {
+	if f.transferInvalid[idx] {
 		return true, nil
 	}
 	return false, nil
@@ -139,8 +139,8 @@ func TestRunTransferLoop_TailsFromHead(t *testing.T) {
 // other: the index is the target writer's to flag.
 func TestRunTransferLoop_CountsInvalidGrains(t *testing.T) {
 	fx := &transferFixture{
-		headSeq:      []uint64{10, 14},
-		transferSkip: map[uint64]bool{12: true, 13: true},
+		headSeq:         []uint64{10, 14},
+		transferInvalid: map[uint64]bool{12: true, 13: true},
 	}
 	rt := &recordingTracker{}
 	ctx, cancel := context.WithCancel(context.Background())
