@@ -19,10 +19,10 @@ type Throughput struct {
 	// flow only, and is zero everywhere else.
 	SkippedSamples uint64
 
-	// InvalidGrains is meaningful on the source half of a discrete flow
-	// only: grains the producer committed invalid, whose payload was
-	// not sent.
-	InvalidGrains uint64
+	// InvalidGrains, ResyncGrains and AgedOutGrains are meaningful on
+	// the source half of a discrete flow only: the grains it did not
+	// offer, by unsentReason.
+	InvalidGrains, ResyncGrains, AgedOutGrains uint64
 
 	// InvalidFromSource and IndexMismatch are meaningful on the target
 	// half only: arrivals committed invalid, by invalidReason.
@@ -104,12 +104,13 @@ var (
 			"The target's head still moves over them, so each is published as stale ring content.",
 		[]string{"domain", "flow_id", "node", "peer_node", "provider"}, nil)
 
-	descSourceInvalid = prometheus.NewDesc(
-		"mxl_gateway_mirror_source_invalid_grains_total",
-		"Grains the producer committed invalid, whose payload the source half did not send: none of a video grain, "+
-			"whose index the target writer flags invalid once the next grain commits past it, and the header of a data "+
-			"grain, which the target commits invalid.",
-		transferLabels, nil)
+	descSourceUnsent = prometheus.NewDesc(
+		"mxl_gateway_mirror_source_unsent_grains_total",
+		"Grains the source half did not offer to the initiator, by reason: invalid (the producer committed it invalid; "+
+			"a data grain still goes as its header, which the target commits invalid), resync (the loop fell more than a "+
+			"few grains behind the head and resumed near it) or aged_out (the producer had reused the slot). Each one is "+
+			"a grain no target receives.",
+		append(append([]string{}, transferLabels...), "reason"), nil)
 
 	descTargetInvalid = prometheus.NewDesc(
 		"mxl_gateway_mirror_target_invalid_grains_total",
@@ -141,7 +142,7 @@ func (c *ThroughputCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descTransmitted
 	ch <- descReceived
 	ch <- descSkipped
-	ch <- descSourceInvalid
+	ch <- descSourceUnsent
 	ch <- descTargetInvalid
 	ch <- descPosted
 	ch <- descTransfers
@@ -179,7 +180,9 @@ func (c *ThroughputCollector) Collect(ch chan<- prometheus.Metric) {
 	emit(descTransmitted, c.Source, func(t Throughput) uint64 { return t.Bytes })
 	emit(descReceived, c.Target, func(t Throughput) uint64 { return t.Bytes })
 	emit(descSkipped, c.Source, func(t Throughput) uint64 { return t.SkippedSamples })
-	emit(descSourceInvalid, c.Source, func(t Throughput) uint64 { return t.InvalidGrains })
+	emit(descSourceUnsent, c.Source, func(t Throughput) uint64 { return t.InvalidGrains }, string(unsentInvalid))
+	emit(descSourceUnsent, c.Source, func(t Throughput) uint64 { return t.ResyncGrains }, string(unsentResync))
+	emit(descSourceUnsent, c.Source, func(t Throughput) uint64 { return t.AgedOutGrains }, string(unsentAgedOut))
 	emit(descTargetInvalid, c.Target, func(t Throughput) uint64 { return t.InvalidFromSource }, string(invalidFromSource))
 	emit(descTargetInvalid, c.Target, func(t Throughput) uint64 { return t.IndexMismatch }, string(invalidIndexMismatch))
 
@@ -251,6 +254,8 @@ func (r *SourceReconciler) Throughput() []Throughput {
 
 			SkippedSamples: e.skipped.Load(),
 			InvalidGrains:  e.invalidGrains.Load(),
+			ResyncGrains:   e.resyncGrains.Load(),
+			AgedOutGrains:  e.agedOutGrains.Load(),
 			Transfers:      e.transferCounts(),
 		})
 	}

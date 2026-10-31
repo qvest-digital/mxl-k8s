@@ -63,16 +63,18 @@ func TestThroughputCollectorReportsInvalidGrains(t *testing.T) {
 
 	c := &ThroughputCollector{NodeName: "n01", Source: src, Target: tgt}
 	expected := `
-# HELP mxl_gateway_mirror_source_invalid_grains_total Grains the producer committed invalid, whose payload the source half did not send: none of a video grain, whose index the target writer flags invalid once the next grain commits past it, and the header of a data grain, which the target commits invalid.
-# TYPE mxl_gateway_mirror_source_invalid_grains_total counter
-mxl_gateway_mirror_source_invalid_grains_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 2
+# HELP mxl_gateway_mirror_source_unsent_grains_total Grains the source half did not offer to the initiator, by reason: invalid (the producer committed it invalid; a data grain still goes as its header, which the target commits invalid), resync (the loop fell more than a few grains behind the head and resumed near it) or aged_out (the producer had reused the slot). Each one is a grain no target receives.
+# TYPE mxl_gateway_mirror_source_unsent_grains_total counter
+mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs",reason="aged_out"} 0
+mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs",reason="invalid"} 2
+mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs",reason="resync"} 0
 # HELP mxl_gateway_mirror_target_invalid_grains_total Arrived grains the target half committed invalid: flagged invalid at the source (invalid_from_source), or whose slot header names another index than the one committed, a later write into the slot having landed (index_mismatch). The commit rewrites that header, so the later grain is flagged invalid too, not served.
 # TYPE mxl_gateway_mirror_target_invalid_grains_total counter
 mxl_gateway_mirror_target_invalid_grains_total{domain="",flow_id="flow-b",node="n01",peer_node="n03",provider="verbs",reason="index_mismatch"} 2
 mxl_gateway_mirror_target_invalid_grains_total{domain="",flow_id="flow-b",node="n01",peer_node="n03",provider="verbs",reason="invalid_from_source"} 1
 `
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(expected),
-		"mxl_gateway_mirror_source_invalid_grains_total", "mxl_gateway_mirror_target_invalid_grains_total"))
+		"mxl_gateway_mirror_source_unsent_grains_total", "mxl_gateway_mirror_target_invalid_grains_total"))
 }
 
 func TestThroughputCollectorForgetsClosedMirrors(t *testing.T) {

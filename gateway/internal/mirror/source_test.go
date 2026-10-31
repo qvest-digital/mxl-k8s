@@ -359,6 +359,8 @@ func (rt *recordingTracker) recordSkipped(samples uint64) {
 	rt.mu.Unlock()
 }
 
+func (rt *recordingTracker) recordPassedOver(unsentReason, uint64) {}
+
 func (rt *recordingTracker) recordInvalid(time.Time) {
 	rt.mu.Lock()
 	rt.invalid++

@@ -390,6 +390,11 @@ type sourceEntry struct {
 	invalidAt     atomic.Pointer[time.Time]
 	offeredAt     atomic.Pointer[time.Time]
 
+	// resyncGrains and agedOutGrains count the grains the transfer loop
+	// passed over without offering, by unsentReason.
+	resyncGrains  atomic.Uint64
+	agedOutGrains atomic.Uint64
+
 	// agedOutAt records the wall-clock of the most recent
 	// reader-aged-out skip the transfer loop has had to perform.
 	// Used by the flusher to publish SourceProgress with reason
@@ -1309,7 +1314,21 @@ type progressTracker interface {
 	recordHead(head uint64, at time.Time)
 	recordSkipped(samples uint64)
 	recordInvalid(at time.Time)
+	recordPassedOver(reason unsentReason, grains uint64)
 }
+
+// unsentReason says why the grain transfer loop did not offer a grain.
+type unsentReason string
+
+const (
+	// unsentInvalid is a grain its producer committed invalid.
+	unsentInvalid unsentReason = "invalid"
+	// unsentResync is a grain the loop jumped over when it trailed the
+	// head by more than maxMirrorLag.
+	unsentResync unsentReason = "resync"
+	// unsentAgedOut is a grain whose slot the producer had reused.
+	unsentAgedOut unsentReason = "aged_out"
+)
 
 // recordDelivered takes completed, the initiator's count of transfers
 // completed to this mirror's target, and stamps lastSentAt when it
@@ -1406,6 +1425,21 @@ func (s *sharedSource) recordInvalid(at time.Time) {
 	}
 }
 
+func (e *sourceEntry) recordPassedOver(reason unsentReason, grains uint64) {
+	switch reason {
+	case unsentResync:
+		e.resyncGrains.Add(grains)
+	case unsentAgedOut:
+		e.agedOutGrains.Add(grains)
+	}
+}
+
+func (s *sharedSource) recordPassedOver(reason unsentReason, grains uint64) {
+	for _, e := range s.attached() {
+		e.recordPassedOver(reason, grains)
+	}
+}
+
 func (s *sharedSource) recordHead(head uint64, at time.Time) {
 	for _, e := range s.attached() {
 		e.recordHead(head, at)
@@ -1497,6 +1531,7 @@ func runTransferLoop(
 				// tails the live flow silently.
 				if tracker != nil {
 					tracker.recordAgedOut(time.Now())
+					tracker.recordPassedOver(unsentResync, uint64(h-mirrorResyncLag-1-lastSent))
 				}
 			}
 			lastSent = h - mirrorResyncLag - 1
@@ -1524,6 +1559,7 @@ func runTransferLoop(
 						"fromIndex", lastSent+1, "toIndex", int64(head))
 					if tracker != nil {
 						tracker.recordAgedOut(time.Now())
+						tracker.recordPassedOver(unsentAgedOut, uint64(int64(head)-lastSent))
 					}
 					lastSent = int64(head)
 					break
