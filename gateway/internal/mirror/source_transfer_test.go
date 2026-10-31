@@ -152,19 +152,23 @@ func (s *recordingSender) TransferGrain(idx uint64, start, end uint16) error {
 // on every target as a valid one carrying that earlier lap's payload.
 //
 // None of a video grain is sent: the target writer flags the index
-// invalid when the next grain commits past it. A data writer never
-// completes a grain, so it flags no index it skips; a data grain goes
-// as its header alone, which the target commits invalid.
+// invalid when the next grain commits past it, and the source counts
+// it unsent. A data writer never completes a grain, so it flags no
+// index it skips; a data grain goes as its header alone, which the
+// target commits invalid. That header is offered like any grain, and
+// a target that stops completing it is stalled like any other.
 func TestGrainTransfer_InvalidGrainIsNotForwarded(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		data bool
-		g    mxl.Grain
-		want [][3]uint64
+		name    string
+		data    bool
+		g       mxl.Grain
+		want    [][3]uint64
+		invalid bool
 	}{
-		{"video", false, mxl.Grain{Index: 1001, Flags: mxl.GrainFlagInvalid, TotalSlices: 1080, ValidSlices: 1080, GrainSize: 5529600}, nil},
+		{"video", false, mxl.Grain{Index: 1001, Flags: mxl.GrainFlagInvalid, TotalSlices: 1080, ValidSlices: 1080, GrainSize: 5529600},
+			nil, true},
 		{"data", true, mxl.Grain{Index: 1001, Flags: mxl.GrainFlagInvalid, TotalSlices: 4096, ValidSlices: 64, GrainSize: 4096},
-			[][3]uint64{{1001, 0, 0}}},
+			[][3]uint64{{1001, 0, 0}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dst := &recordingSender{}
@@ -173,7 +177,7 @@ func TestGrainTransfer_InvalidGrainIsNotForwarded(t *testing.T) {
 			invalid, err := transfer(1001, false)
 
 			require.NoError(t, err)
-			assert.True(t, invalid, "an invalid grain must be reported as such")
+			assert.Equal(t, tc.invalid, invalid, "whether the grain counts as unsent")
 			assert.Equal(t, tc.want, dst.calls, "what of an invalid grain was handed to the initiator")
 		})
 	}
