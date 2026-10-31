@@ -24,7 +24,7 @@ func stalledEntry(head uint64, headAt *time.Time, transfers uint64, sentAt time.
 	// reader rebuild budget and the writer-liveness seam through it.
 	// Added against the TargetInfo the test mirrors publish, so the
 	// flusher treats it as attached to the current fabric side.
-	// Connected, so its transfers stamp lastSentAt as delivered ones.
+	// Connected, as an initiator reporting completions to it is.
 	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1"}
 	e.connected.Store(true)
 	e.lastHead.Store(head)
@@ -32,8 +32,12 @@ func stalledEntry(head uint64, headAt *time.Time, transfers uint64, sentAt time.
 		t := *headAt
 		e.headAdvancedAt.Store(&t)
 	}
-	for i := uint64(0); i < transfers; i++ {
-		e.recordTransfer(i, sentAt)
+	if transfers > 0 {
+		if sentAt.IsZero() {
+			e.progress.Store(transfers)
+		} else {
+			e.recordDelivered(transfers, sentAt)
+		}
 	}
 	return e
 }

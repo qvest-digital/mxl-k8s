@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
+	"github.com/qvest-digital/go-mxl/mxl"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -527,6 +528,9 @@ type fakeOpener struct {
 	attachFn func(s *sharedSource, targetInfoStr string) (*fabrics.TargetInfo, error)
 	// stateFn answers targetState. Nil reports every target connected.
 	stateFn func(info *fabrics.TargetInfo) (fabrics.TargetState, error)
+	// statsFn answers targetStats. Nil reports no counters, which
+	// leaves delivery as the test recorded it.
+	statsFn func(info *fabrics.TargetInfo) (fabrics.TargetStats, error)
 
 	opens    atomic.Int32
 	attaches atomic.Int32
@@ -583,6 +587,23 @@ func (f *fakeOpener) targetState(_ *sharedSource, info *fabrics.TargetInfo) (fab
 		return fabrics.TargetConnected, nil
 	}
 	return fn(info)
+}
+
+func (f *fakeOpener) targetStats(_ *sharedSource, info *fabrics.TargetInfo) (fabrics.TargetStats, error) {
+	f.mu.Lock()
+	fn := f.statsFn
+	f.mu.Unlock()
+	if fn == nil {
+		return fabrics.TargetStats{}, mxl.ErrNotFound
+	}
+	return fn(info)
+}
+
+// setStats replaces statsFn while flushers may be asking it.
+func (f *fakeOpener) setStats(fn func(info *fabrics.TargetInfo) (fabrics.TargetStats, error)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statsFn = fn
 }
 
 // setState replaces stateFn while flushers may be asking it.

@@ -240,6 +240,7 @@ func TestFromFlags_PacingDefaults(t *testing.T) {
 			"turned off, and not as zero: the reconciler reads zero as 'not "+
 			"configured' and would substitute its own default")
 	assert.Equal(t, 8, c.PacingChunks)
+	assert.Equal(t, 8, c.GrainsInFlight)
 	require.NoError(t, c.Validate())
 }
 
@@ -252,10 +253,12 @@ func TestFromFlags_PacingRoundTrips(t *testing.T) {
 	c, err := FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), []string{
 		"--pacing-fraction=0.75",
 		"--pacing-chunks=16",
+		"--grains-in-flight=4",
 	})
 	require.NoError(t, err)
 	assert.InDelta(t, 0.75, c.PacingFraction, 1e-9)
 	assert.Equal(t, 16, c.PacingChunks)
+	assert.Equal(t, 4, c.GrainsInFlight)
 	require.NoError(t, c.Validate())
 }
 

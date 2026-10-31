@@ -33,7 +33,7 @@ func TestThroughputCollectorReportsBothDirections(t *testing.T) {
 # HELP mxl_gateway_mirror_received_bytes_total Payload bytes committed to the local flow for a mirror this node is the target of.
 # TYPE mxl_gateway_mirror_received_bytes_total counter
 mxl_gateway_mirror_received_bytes_total{domain="",flow_id="flow-b",node="n01",peer_node="n03",provider="tcp"} 4096
-# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes handed to the fabric for a mirror this node is the source of.
+# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes the fabric reported as delivered for a mirror this node is the source of.
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
 mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 5529600
 `
@@ -77,7 +77,7 @@ func TestThroughputCollectorSurvivesOneFlowMirroredTwice(t *testing.T) {
 	}
 	c := &ThroughputCollector{NodeName: "n01", Source: src}
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(`
-# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes handed to the fabric for a mirror this node is the source of.
+# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes the fabric reported as delivered for a mirror this node is the source of.
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
 mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
 mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n03",provider="verbs"} 1000
@@ -127,7 +127,7 @@ func TestThroughputCollectorSeparatesDomains(t *testing.T) {
 	}
 	c := &ThroughputCollector{NodeName: "n01", Source: src}
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(`
-# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes handed to the fabric for a mirror this node is the source of.
+# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes the fabric reported as delivered for a mirror this node is the source of.
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
 mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
 mxl_gateway_mirror_transmitted_bytes_total{domain="studio",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000

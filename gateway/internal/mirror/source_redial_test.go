@@ -246,35 +246,6 @@ func TestRunFlusher_HeldTarget_IsLeftAlone(t *testing.T) {
 	}
 }
 
-// A transfer on a shared source counts for every attached mirror, and
-// libmxl-fabrics accepts one for a tcp or verbs target it is not
-// connected to. Stamping lastSentAt on such a mirror told its target a
-// source was delivering to it. Providers without a connection per
-// target stamp as before.
-func TestSource_LastSentAtOnlyOnATargetThatReadsConnected(t *testing.T) {
-	f := newFanoutFixture(t,
-		fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderTCP),
-		fanoutMirror("m2", "flow-1", "node-c", "info-c", mxlv1alpha1.ProviderEFA),
-	)
-	f.reconcile(t, "m1")
-	f.reconcile(t, "m2")
-
-	tcp := f.sharedFor("flow-1", fabrics.ProviderTCP)
-	efa := f.sharedFor("flow-1", fabrics.ProviderEFA)
-	require.NotNil(t, tcp)
-	require.NotNil(t, efa)
-
-	tcp.recordTransfer(1, time.Now())
-	efa.recordTransfer(1, time.Now())
-	assert.Nil(t, f.entry("m1").lastSentAt.Load(), "lastSentAt stamped on a target not known to be connected")
-	assert.Equal(t, uint64(1), f.entry("m1").progress.Load())
-	assert.NotNil(t, f.entry("m2").lastSentAt.Load())
-
-	f.entry("m1").connected.Store(true)
-	tcp.recordTransfer(2, time.Now())
-	assert.NotNil(t, f.entry("m1").lastSentAt.Load())
-}
-
 // The flusher's state poll is what moves connected, both ways.
 func TestRunFlusher_TargetStateDrivesConnected(t *testing.T) {
 	f := newFanoutFixture(t,

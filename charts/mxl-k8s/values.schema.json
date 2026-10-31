@@ -1638,6 +1638,12 @@
               "required": [],
               "title": "fabricMinLinkSpeed"
             },
+            "grainsInFlight": {
+              "default": "8",
+              "description": "How many grains one mirror target may have posted and not yet completed. A grain offered to a target with this many in flight is skipped for that target alone and counted in mxl_gateway_mirror_transfers_total{outcome=\"skipped\"}; the other targets of the flow still get it. Capped at a quarter of the source ring, so a grain completes before its slot is written again, and at 16.",
+              "required": [],
+              "title": "grainsInFlight"
+            },
             "healthProbeBindAddress": {
               "default": ":8081",
               "description": " pattern: ^:[0-9]+$|^[0-9.]+:[0-9]+$ @schema",

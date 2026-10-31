@@ -670,6 +670,14 @@ gateway:
     # fewer slices than this uses one range per slice. Under 2 disables
     # pacing.
     pacingChunks: 8
+    # -- How many grains one mirror target may have posted and not yet
+    # completed. A grain offered to a target with this many in flight
+    # is skipped for that target alone and counted in
+    # mxl_gateway_mirror_transfers_total{outcome="skipped"}; the other
+    # targets of the flow still get it. Capped at a quarter of the
+    # source ring, so a grain completes before its slot is written
+    # again, and at 16.
+    grainsInFlight: 8
     # -- How often libmxl reclaims flow directories no writer holds.
     # The criterion is libmxl's own: a writer keeps a shared lock for
     # as long as it is attached, so a live producer or mirror writer is

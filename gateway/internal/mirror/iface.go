@@ -55,6 +55,10 @@ type initiatorOpener interface {
 	// connection to the target closed or failed drops the target and
 	// does not connect to it again.
 	targetState(s *sharedSource, info *fabrics.TargetInfo) (fabrics.TargetState, error)
+
+	// targetStats reports what the shared initiator posted to one
+	// target, and what of it completed, failed or was skipped.
+	targetStats(s *sharedSource, info *fabrics.TargetInfo) (fabrics.TargetStats, error)
 }
 
 // RuntimeProbe asks the source-side flow reader for the current head
