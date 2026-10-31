@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -62,11 +61,9 @@ type Publisher struct {
 
 	// IsOutput reports whether a flow is a redundancy set's output, which
 	// is not published as a location. Nil publishes every flow. A flow
-	// it cannot answer for is not published; RunLocalRescan asks again.
+	// it cannot answer for is not published; the promote pass of
+	// RunLocalRescan asks again while a writer holds the flow.
 	IsOutput func(ctx context.Context, domain, flowID string) (bool, error)
-
-	deferredMu sync.Mutex
-	deferred   map[string]struct{} // flow directory names IsOutput failed for
 
 	// WriterAttached reports whether a writer still holds the flow's
 	// directory on this node. Nil takes the flock probe in
@@ -186,7 +183,8 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	if p.IsOutput != nil {
 		isOutput, err := p.IsOutput(ctx, p.Domain, flowID)
 		if err != nil {
-			p.deferPublish(dirName)
+			// No retry needed here: promoteStaleLocalOrigins calls this
+			// again on every rescan tick for a held flow with no MxlFlow.
 			return fmt.Errorf("look up redundancy set outputs for %s: %w", flowID, err)
 		}
 		if isOutput {
@@ -842,8 +840,7 @@ func (p *Publisher) localOrigins(ctx context.Context) (map[string]struct{}, erro
 
 // RunLocalRescan periodically re-runs the demote-stale-Origin pass
 // from InitialSync so a missed fanotify delete event does not leave
-// a permanent Origin location pointing at this node, and publishes the
-// flows a failed output lookup deferred.
+// a permanent Origin location pointing at this node.
 func (p *Publisher) RunLocalRescan(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 30 * time.Second
@@ -856,7 +853,6 @@ func (p *Publisher) RunLocalRescan(ctx context.Context, interval time.Duration) 
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			p.retryDeferred(ctx)
 			ids, err := p.localFlowIDs()
 			if err != nil {
 				l.Error(err, "list local flow dirs")
@@ -872,33 +868,6 @@ func (p *Publisher) RunLocalRescan(ctx context.Context, interval time.Duration) 
 			if err := p.refreshLocalObservations(ctx, held); err != nil {
 				l.Error(err, "observation refresh failed")
 			}
-		}
-	}
-}
-
-// deferPublish keeps a flow directory IsOutput could not answer for,
-// for retryDeferred.
-func (p *Publisher) deferPublish(dirName string) {
-	p.deferredMu.Lock()
-	defer p.deferredMu.Unlock()
-	if p.deferred == nil {
-		p.deferred = map[string]struct{}{}
-	}
-	p.deferred[dirName] = struct{}{}
-}
-
-// retryDeferred publishes the flows IsOutput could not answer for. Nothing
-// else would: fanotify reports a directory once, and the rescan passes
-// only touch flows that already have an MxlFlow. A lookup that fails
-// again defers the flow again.
-func (p *Publisher) retryDeferred(ctx context.Context) {
-	p.deferredMu.Lock()
-	dirs := p.deferred
-	p.deferred = nil
-	p.deferredMu.Unlock()
-	for dir := range dirs {
-		if err := p.PublishAppeared(ctx, dir); err != nil {
-			log.FromContext(ctx).WithName("flowpublisher.rescan").Error(err, "deferred publish failed", "name", dir)
 		}
 	}
 }
