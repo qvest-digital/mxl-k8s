@@ -178,3 +178,38 @@ func TestGrainTransfer_InvalidGrainIsNotForwarded(t *testing.T) {
 		})
 	}
 }
+
+// parkingInitiator is a verbs initiator with nothing to complete: a
+// blocking MakeProgress parks for its whole timeout, as libmxl's
+// blockOnCQ does on an empty completion queue.
+type parkingInitiator struct{ recordingSender }
+
+func (*parkingInitiator) MakeProgress(timeout time.Duration) error {
+	time.Sleep(timeout)
+	return nil
+}
+
+func (*parkingInitiator) MakeProgressNonBlocking() error { return nil }
+
+// A paced grain's chunks are unsignalled but the last, so nothing lands
+// on the completion queue between them. Driving the queues there with
+// the blocking call parked for its timeout after every chunk: a grain
+// paced over 10 ms took 150 ms in 16 chunks, and every mirror of the
+// flow fell behind its producer and resynced.
+func TestInitiatorGrainTransfer_PacedGrainKeepsItsWindow(t *testing.T) {
+	const chunks = 16
+	p := newPacer(mxl.Rational{Num: 50, Den: 1}, 0.5, chunks, "k")
+	require.True(t, p.enabled())
+	in := &parkingInitiator{}
+	src := flaggedSource{1001: {Index: 1001, TotalSlices: 1080, ValidSlices: 1080, GrainSize: 5529600}}
+	transfer := newInitiatorGrainTransfer(context.Background(), src, in, fabrics.ProviderVerbs, p, false, "f")
+
+	start := time.Now()
+	_, err := transfer(1001, true)
+	took := time.Since(start)
+
+	require.NoError(t, err)
+	require.Len(t, in.calls, chunks)
+	assert.Less(t, took, p.window+p.window/chunks+5*time.Millisecond,
+		"a grain paced over %v took %v", p.window, took)
+}
