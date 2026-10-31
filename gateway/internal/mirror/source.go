@@ -1208,16 +1208,7 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 		// an edit rate advance their heads on the same MXL clock
 		// instants, so without the offset every source on this node
 		// would hand its chunks over in lockstep.
-		l := ctrl.Log.WithName("transfer").WithValues("flowID", flowID)
-		// Its own throttle rather than the transfer loop's: this call
-		// site fires once per chunk instead of once per tick, so it
-		// needs its own failure history. Both only ever run on the
-		// transfer goroutine, so neither needs a lock.
-		var chunkProgress progressThrottle
-		betweenChunks := func() {
-			chunkProgress.runProgress(progressFn, func(err error) { logProgressFailure(l, err) })
-		}
-		transferFn := newGrainTransfer(loopCtx, reader, initiator, p, data, betweenChunks)
+		transferFn := newInitiatorGrainTransfer(loopCtx, reader, initiator, provider, p, data, flowID)
 		go runTransferLoop(loopCtx, done, flowID, runtimeFn, transferFn, progressFn, progressInterval, s)
 	}
 
@@ -2809,14 +2800,14 @@ func progressBlocking(provider fabrics.Provider) bool {
 // the completions of a write that has already crossed a microsecond of
 // fabric are there, and a chunk that still finds the queue full takes
 // the retry path, which does block.
-func reapFuncFor(initiator *fabrics.Initiator) ProgressFunc {
+func reapFuncFor(initiator progressDriver) ProgressFunc {
 	return initiator.MakeProgressNonBlocking
 }
 
 // progressFuncFor selects the MakeProgress variant the transfer loop
 // drives, keyed on the fabric provider. See progressBlocking for the
 // rationale.
-func progressFuncFor(initiator *fabrics.Initiator, provider fabrics.Provider) ProgressFunc {
+func progressFuncFor(initiator progressDriver, provider fabrics.Provider) ProgressFunc {
 	if !progressBlocking(provider) {
 		return initiator.MakeProgressNonBlocking
 	}

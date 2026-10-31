@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
+
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
 	"github.com/qvest-digital/go-mxl/mxl"
@@ -19,6 +22,20 @@ type grainSource interface {
 // writes to.
 type grainSender interface {
 	TransferGrain(grainIdx uint64, startSlice, endSlice uint16) error
+}
+
+// progressDriver is the part of fabrics.Initiator that drives its
+// event and completion queues.
+type progressDriver interface {
+	MakeProgress(timeout time.Duration) error
+	MakeProgressNonBlocking() error
+}
+
+// grainInitiator is the part of fabrics.Initiator a discrete flow's
+// transfer drives.
+type grainInitiator interface {
+	grainSender
+	progressDriver
 }
 
 // offered folds the answer of one TransferGrain call into whether the
@@ -82,6 +99,24 @@ func newGrainTransfer(ctx context.Context, src grainSource, dst grainSender, p p
 		}
 		return false, nil
 	}
+}
+
+// newInitiatorGrainTransfer is newGrainTransfer over a flow's
+// initiator, driving its queues between the chunks of a paced grain.
+func newInitiatorGrainTransfer(ctx context.Context, src grainSource, in grainInitiator, provider fabrics.Provider,
+	p pacer, data bool, flowID string,
+) TransferFunc {
+	l := ctrl.Log.WithName("transfer").WithValues("flowID", flowID)
+	progress := progressFuncFor(in, provider)
+	// Its own throttle rather than the transfer loop's: this call
+	// site fires once per chunk instead of once per tick, so it
+	// needs its own failure history. Both only ever run on the
+	// transfer goroutine, so neither needs a lock.
+	var chunkProgress progressThrottle
+	betweenChunks := func() {
+		chunkProgress.runProgress(progress, func(err error) { logProgressFailure(l, err) })
+	}
+	return newGrainTransfer(ctx, src, in, p, data, betweenChunks)
 }
 
 // defaultGrainsInFlight is how many grains one target may have posted
