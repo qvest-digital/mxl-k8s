@@ -72,11 +72,12 @@ func newGrainTransfer(ctx context.Context, src grainSource, dst grainSender, p p
 			// The producer committed it invalid, and libmxl left an
 			// earlier lap's bytes in the slot. A video target writer
 			// flags the index invalid once the next grain commits past
-			// it. A data writer never completes a grain, so it flags no
-			// index it skips: the header goes over, which the target
-			// commits invalid.
+			// it, so none of it is sent. A data writer never completes
+			// a grain, so it flags no index it skips: the header goes
+			// over, which the target commits invalid, and the grain is
+			// offered like any other.
 			if data {
-				return true, slices(idx, 0, 0)
+				return false, slices(idx, 0, 0)
 			}
 			return true, nil
 		}

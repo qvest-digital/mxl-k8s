@@ -67,8 +67,8 @@ type initiatorOpener interface {
 type RuntimeProbe func() (head uint64, err error)
 
 // TransferFunc transfers one grain from the source flow to the
-// target. invalid reports a grain its producer committed invalid,
-// whose payload is not sent. Continuous (audio) flows take the
+// target. invalid reports a grain its producer committed invalid, of
+// which nothing is sent. Continuous (audio) flows take the
 // sample-transfer path and never reach this loop.
 //
 // paced asks for the grain to be spread across a fraction of the

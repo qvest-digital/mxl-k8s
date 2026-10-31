@@ -382,10 +382,10 @@ type sourceEntry struct {
 	// whatever it already held. Zero is the only healthy value.
 	skipped atomic.Uint64
 
-	// invalidGrains counts grains the producer committed invalid, whose
-	// payload the transfer loop did not send; invalidAt is when the
-	// loop last passed one, offeredAt when it last offered anything
-	// else. See idleOnInvalid.
+	// invalidGrains counts grains the producer committed invalid of
+	// which the transfer loop sent nothing; invalidAt is when the loop
+	// last passed one, offeredAt when it last offered anything else.
+	// See idleOnInvalid.
 	invalidGrains atomic.Uint64
 	invalidAt     atomic.Pointer[time.Time]
 	offeredAt     atomic.Pointer[time.Time]
