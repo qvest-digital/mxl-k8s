@@ -3,6 +3,7 @@ package mirror
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -48,8 +49,8 @@ mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01"
 func TestThroughputCollectorReportsInvalidGrains(t *testing.T) {
 	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
 	sent := &sourceEntry{shared: testShared("flow-a", fabrics.ProviderVerbs), peerNode: "n02"}
-	sent.recordInvalid()
-	sent.recordInvalid()
+	sent.recordInvalid(time.Now())
+	sent.recordInvalid(time.Now())
 	src.sources[types.NamespacedName{Namespace: "p", Name: "a"}] = sent
 
 	tgt := &TargetReconciler{targets: map[types.NamespacedName]*targetEntry{}}

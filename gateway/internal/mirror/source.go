@@ -383,8 +383,12 @@ type sourceEntry struct {
 	skipped atomic.Uint64
 
 	// invalidGrains counts grains the producer committed invalid, whose
-	// payload the transfer loop did not send.
+	// payload the transfer loop did not send; invalidAt is when the
+	// loop last passed one, offeredAt when it last offered anything
+	// else. See idleOnInvalid.
 	invalidGrains atomic.Uint64
+	invalidAt     atomic.Pointer[time.Time]
+	offeredAt     atomic.Pointer[time.Time]
 
 	// agedOutAt records the wall-clock of the most recent
 	// reader-aged-out skip the transfer loop has had to perform.
@@ -1304,7 +1308,7 @@ type progressTracker interface {
 	recordAgedOut(at time.Time)
 	recordHead(head uint64, at time.Time)
 	recordSkipped(samples uint64)
-	recordInvalid()
+	recordInvalid(at time.Time)
 }
 
 // recordDelivered takes completed, the initiator's count of transfers
@@ -1346,11 +1350,33 @@ func (e *sourceEntry) recordHead(head uint64, at time.Time) {
 }
 
 // recordOffered is told each index the loop handed to the initiator.
-// A shared source keeps nothing of it: a post says nothing about
-// delivery, which each mirror's flusher takes from the initiator's
-// completion counters (observeDelivery). The loop tests observe the
-// loop through it.
-func (s *sharedSource) recordOffered(uint64, time.Time) {}
+// Only when is kept: a post says nothing about delivery, which each
+// mirror's flusher takes from the initiator's completion counters
+// (observeDelivery), but it says the source had something to send.
+func (s *sharedSource) recordOffered(_ uint64, at time.Time) {
+	for _, e := range s.attached() {
+		e.recordOffered(at)
+	}
+}
+
+func (e *sourceEntry) recordOffered(at time.Time) {
+	t := at
+	e.offeredAt.Store(&t)
+}
+
+// idleOnInvalid reports whether the head has moved over nothing but
+// invalid grains for longer than after, as a merge output with every
+// member down does. Such a source offers the initiator nothing, so a
+// target that completes nothing is not stalled and its transfers are
+// not failing to land.
+func idleOnInvalid(now time.Time, e *sourceEntry, after time.Duration) bool {
+	inv := e.invalidAt.Load()
+	if inv == nil || now.Sub(*inv) > after {
+		return false
+	}
+	off := e.offeredAt.Load()
+	return off == nil || now.Sub(*off) > after
+}
 
 func (s *sharedSource) recordAgedOut(at time.Time) {
 	for _, e := range s.attached() {
@@ -1368,13 +1394,15 @@ func (s *sharedSource) recordSkipped(samples uint64) {
 	}
 }
 
-func (e *sourceEntry) recordInvalid() {
+func (e *sourceEntry) recordInvalid(at time.Time) {
 	e.invalidGrains.Add(1)
+	t := at
+	e.invalidAt.Store(&t)
 }
 
-func (s *sharedSource) recordInvalid() {
+func (s *sharedSource) recordInvalid(at time.Time) {
 	for _, e := range s.attached() {
-		e.recordInvalid()
+		e.recordInvalid(at)
 	}
 }
 
@@ -1509,9 +1537,10 @@ func runTransferLoop(
 			}
 			if tracker != nil {
 				if invalid {
-					tracker.recordInvalid()
+					tracker.recordInvalid(time.Now())
+				} else {
+					tracker.recordOffered(uint64(idx), time.Now())
 				}
-				tracker.recordOffered(uint64(idx), time.Now())
 			}
 			lastSent = idx
 		}
@@ -2473,7 +2502,7 @@ func observedState(entry *sourceEntry, stallAfter time.Duration) sourceProgressS
 	// reading, and the target gates its own rebuild on seeing this
 	// reason.
 	if !delivering && !entry.openedAt.IsZero() &&
-		time.Since(entry.openedAt) > stallAfter {
+		time.Since(entry.openedAt) > stallAfter && !idleOnInvalid(time.Now(), entry, stallAfter) {
 		return sourceProgressState{
 			status: metav1.ConditionFalse,
 			reason: mxlv1alpha1.ReasonTransfersNotLanding,

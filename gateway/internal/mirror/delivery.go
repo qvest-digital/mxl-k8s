@@ -100,7 +100,11 @@ func deliveryStalled(now time.Time, entry *sourceEntry, after time.Duration) boo
 	if now.Sub(*since) <= after {
 		return false
 	}
-	// A producer that stopped writing leaves nothing to complete.
+	// A producer that stopped writing, or writes only invalid grains,
+	// leaves nothing to complete.
+	if idleOnInvalid(now, entry, after) {
+		return false
+	}
 	head := entry.headAdvancedAt.Load()
 	return head != nil && now.Sub(*head) <= after
 }

@@ -150,7 +150,7 @@ func TestRunTransferLoop_CountsInvalidGrains(t *testing.T) {
 	require.Eventually(t, func() bool {
 		rt.mu.Lock()
 		defer rt.mu.Unlock()
-		return len(rt.transfers) >= 4
+		return len(rt.transfers) >= 2
 	}, time.Second, time.Millisecond)
 	cancel()
 	<-done
@@ -158,6 +158,7 @@ func TestRunTransferLoop_CountsInvalidGrains(t *testing.T) {
 	assert.Equal(t, []uint64{11, 12, 13, 14}, fx.transferred())
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	assert.Equal(t, []uint64{11, 14}, rt.transfers, "an invalid grain is not counted as offered")
 	assert.Equal(t, 2, rt.invalid)
 }
 
@@ -358,7 +359,7 @@ func (rt *recordingTracker) recordSkipped(samples uint64) {
 	rt.mu.Unlock()
 }
 
-func (rt *recordingTracker) recordInvalid() {
+func (rt *recordingTracker) recordInvalid(time.Time) {
 	rt.mu.Lock()
 	rt.invalid++
 	rt.mu.Unlock()
