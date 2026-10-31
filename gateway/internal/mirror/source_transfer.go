@@ -51,6 +51,18 @@ func newGrainTransfer(ctx context.Context, src grainSource, dst grainSender, p p
 			// tries again on the next tick.
 			return false, err
 		}
+		if grain.Invalid() {
+			// The producer committed it invalid, and libmxl left an
+			// earlier lap's bytes in the slot. A video target writer
+			// flags the index invalid once the next grain commits past
+			// it. A data writer never completes a grain, so it flags no
+			// index it skips: the header goes over, which the target
+			// commits invalid.
+			if data {
+				return true, slices(idx, 0, 0)
+			}
+			return true, nil
+		}
 		if data {
 			// A data grain is never complete: its valid slices are its
 			// length. Only what is valid goes over, so the target
@@ -60,7 +72,7 @@ func newGrainTransfer(ctx context.Context, src grainSource, dst grainSender, p p
 		if grain.TotalSlices == 0 {
 			// A discrete grain with no slice subdivision; continuous
 			// (audio) flows take the sample path and never reach here.
-			return true, nil
+			return false, nil
 		}
 		if !paced || !p.enabled() {
 			return false, slices(idx, 0, grain.TotalSlices)

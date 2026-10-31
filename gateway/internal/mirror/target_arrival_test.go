@@ -22,17 +22,17 @@ func TestCommitArrivedGrain_InvalidArrivalIsCommittedInvalid(t *testing.T) {
 		def, id string
 		lap     bool // the slot carries the header of idx one ring lap later
 		flags   uint32
-		invalid bool
+		reason  invalidReason
 	}{
 		{name: "video", def: sharedFlowVideoDef, id: "5d1a7c2e-3f4b-4e8a-9c6d-2b7e1f0a9d34"},
 		{name: "video flagged invalid", def: sharedFlowVideoDef, id: "5d1a7c2e-3f4b-4e8a-9c6d-2b7e1f0a9d34",
-			flags: mxl.GrainFlagInvalid, invalid: true},
+			flags: mxl.GrainFlagInvalid, reason: invalidFromSource},
 		{name: "video other index", def: sharedFlowVideoDef, id: "5d1a7c2e-3f4b-4e8a-9c6d-2b7e1f0a9d34",
-			lap: true, invalid: true},
+			lap: true, reason: invalidIndexMismatch},
 		{name: "data flagged invalid", def: sharedFlowDataDef, id: "5d1a7c2e-3f4b-4e8a-9c6d-2b7e1f0a9d35",
-			flags: mxl.GrainFlagInvalid, invalid: true},
+			flags: mxl.GrainFlagInvalid, reason: invalidFromSource},
 		{name: "data other index", def: sharedFlowDataDef, id: "5d1a7c2e-3f4b-4e8a-9c6d-2b7e1f0a9d35",
-			lap: true, invalid: true},
+			lap: true, reason: invalidIndexMismatch},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inst, err := mxl.NewInstance(t.TempDir(), "")
@@ -55,15 +55,16 @@ func TestCommitArrivedGrain_InvalidArrivalIsCommittedInvalid(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, ga.Commit(64, tc.flags))
 
-			_, err = commitArrivedGrain(w, idx)
+			_, reason, err := commitArrivedGrain(w, idx)
 			require.NoError(t, err)
+			require.Equal(t, tc.reason, reason)
 
 			g, err := r.GetGrainSliceNonBlocking(idx, 0)
 			require.NoError(t, err)
 			require.Equal(t, uint64(idx), g.Index)
-			require.Equal(t, tc.invalid, g.Invalid(), "what a reader on the target is served")
+			require.Equal(t, tc.reason != "", g.Invalid(), "what a reader on the target is served")
 
-			_, err = commitArrivedGrain(w, idx+1)
+			_, _, err = commitArrivedGrain(w, idx+1)
 			require.NoError(t, err, "the next arrival commits past it")
 		})
 	}

@@ -382,6 +382,10 @@ type sourceEntry struct {
 	// whatever it already held. Zero is the only healthy value.
 	skipped atomic.Uint64
 
+	// invalidGrains counts grains the producer committed invalid, whose
+	// payload the transfer loop did not send.
+	invalidGrains atomic.Uint64
+
 	// agedOutAt records the wall-clock of the most recent
 	// reader-aged-out skip the transfer loop has had to perform.
 	// Used by the flusher to publish SourceProgress with reason
@@ -1309,6 +1313,7 @@ type progressTracker interface {
 	recordAgedOut(at time.Time)
 	recordHead(head uint64, at time.Time)
 	recordSkipped(samples uint64)
+	recordInvalid()
 }
 
 // recordDelivered takes completed, the initiator's count of transfers
@@ -1369,6 +1374,16 @@ func (e *sourceEntry) recordSkipped(samples uint64) {
 func (s *sharedSource) recordSkipped(samples uint64) {
 	for _, e := range s.attached() {
 		e.recordSkipped(samples)
+	}
+}
+
+func (e *sourceEntry) recordInvalid() {
+	e.invalidGrains.Add(1)
+}
+
+func (s *sharedSource) recordInvalid() {
+	for _, e := range s.attached() {
+		e.recordInvalid()
 	}
 }
 
@@ -1473,7 +1488,8 @@ func runTransferLoop(
 			// behind it. Any earlier index means a backlog, and a
 			// backlog has to be cleared at the fabric's own rate.
 			paced := idx == int64(head)
-			if _, err := transferGrain(uint64(idx), paced); err != nil {
+			invalid, err := transferGrain(uint64(idx), paced)
+			if err != nil {
 				// libmxl reports "out of range (too late)" when the
 				// writer has already overwritten the slot the reader
 				// is asking for. The grains between lastSent+1 and
@@ -1501,6 +1517,9 @@ func runTransferLoop(
 				break
 			}
 			if tracker != nil {
+				if invalid {
+					tracker.recordInvalid()
+				}
 				tracker.recordOffered(uint64(idx), time.Now())
 			}
 			lastSent = idx

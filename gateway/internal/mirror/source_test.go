@@ -135,6 +135,32 @@ func TestRunTransferLoop_TailsFromHead(t *testing.T) {
 	}
 }
 
+// An invalid grain is counted once and moves the loop on like any
+// other: the index is the target writer's to flag.
+func TestRunTransferLoop_CountsInvalidGrains(t *testing.T) {
+	fx := &transferFixture{
+		headSeq:      []uint64{10, 14},
+		transferSkip: map[uint64]bool{12: true, 13: true},
+	}
+	rt := &recordingTracker{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go runTransferLoop(ctx, done, "flow-a", fx.probeRuntime, fx.transferGrain, fx.makeProgress, time.Millisecond, rt)
+	require.Eventually(t, func() bool {
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		return len(rt.transfers) >= 4
+	}, time.Second, time.Millisecond)
+	cancel()
+	<-done
+
+	assert.Equal(t, []uint64{11, 12, 13, 14}, fx.transferred())
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	assert.Equal(t, 2, rt.invalid)
+}
+
 func TestRunTransferLoop_ResyncsToHeadWhenLapped(t *testing.T) {
 	// Attach race: the first Runtime probe reports head 0 (the reader
 	// has not observed a grain yet), then the real head appears far
@@ -305,6 +331,7 @@ type recordingTracker struct {
 	transfers []uint64
 	agedOuts  int
 	skipped   uint64
+	invalid   int
 	heads     []uint64
 }
 
@@ -328,6 +355,12 @@ func (rt *recordingTracker) recordAgedOut(_ time.Time) {
 func (rt *recordingTracker) recordSkipped(samples uint64) {
 	rt.mu.Lock()
 	rt.skipped += samples
+	rt.mu.Unlock()
+}
+
+func (rt *recordingTracker) recordInvalid() {
+	rt.mu.Lock()
+	rt.invalid++
 	rt.mu.Unlock()
 }
 

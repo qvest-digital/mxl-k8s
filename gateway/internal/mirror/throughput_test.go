@@ -43,6 +43,37 @@ mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01"
 		"mxl_gateway_mirror_received_bytes_total", "mxl_gateway_mirror_transmitted_bytes_total"))
 }
 
+// Invalid grains are counted on both halves: the source's what it did
+// not send, the target's what it committed invalid, by reason.
+func TestThroughputCollectorReportsInvalidGrains(t *testing.T) {
+	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
+	sent := &sourceEntry{shared: testShared("flow-a", fabrics.ProviderVerbs), peerNode: "n02"}
+	sent.recordInvalid()
+	sent.recordInvalid()
+	src.sources[types.NamespacedName{Namespace: "p", Name: "a"}] = sent
+
+	tgt := &TargetReconciler{targets: map[types.NamespacedName]*targetEntry{}}
+	got := &targetEntry{flowID: "flow-b", peerNode: "n03", provider: fabrics.ProviderVerbs}
+	got.recordInvalid(invalidFromSource)
+	got.recordInvalid(invalidIndexMismatch)
+	got.recordInvalid(invalidIndexMismatch)
+	got.recordInvalid("")
+	tgt.targets[types.NamespacedName{Namespace: "p", Name: "b"}] = got
+
+	c := &ThroughputCollector{NodeName: "n01", Source: src, Target: tgt}
+	expected := `
+# HELP mxl_gateway_mirror_source_invalid_grains_total Grains the producer committed invalid, whose payload the source half did not send: none of a video grain, whose index the target writer flags invalid once the next grain commits past it, and the header of a data grain, which the target commits invalid.
+# TYPE mxl_gateway_mirror_source_invalid_grains_total counter
+mxl_gateway_mirror_source_invalid_grains_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 2
+# HELP mxl_gateway_mirror_target_invalid_grains_total Arrived grains the target half committed invalid: flagged invalid at the source (invalid_from_source), or whose slot header names another index than the one committed, a later write into the slot having landed (index_mismatch).
+# TYPE mxl_gateway_mirror_target_invalid_grains_total counter
+mxl_gateway_mirror_target_invalid_grains_total{domain="",flow_id="flow-b",node="n01",peer_node="n03",provider="verbs",reason="index_mismatch"} 2
+mxl_gateway_mirror_target_invalid_grains_total{domain="",flow_id="flow-b",node="n01",peer_node="n03",provider="verbs",reason="invalid_from_source"} 1
+`
+	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(expected),
+		"mxl_gateway_mirror_source_invalid_grains_total", "mxl_gateway_mirror_target_invalid_grains_total"))
+}
+
 func TestThroughputCollectorForgetsClosedMirrors(t *testing.T) {
 	// Collecting from the live entry maps is what makes a torn-down
 	// mirror stop being reported. A counter registered per flow would
