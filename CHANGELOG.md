@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0-rc.40](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.39...v1.1.0-rc.40) (2026-10-31)
+
+
+### Features
+
+* **chart:** set the verbs ACK timeout to 14 by default ([#407](https://github.com/qvest-digital/mxl-k8s/issues/407)) ([41d0a1b](https://github.com/qvest-digital/mxl-k8s/commit/41d0a1b868ceeee7e4b8b4e5729b2ea85bf866da))
+* **gateway:** count mirror delivery by transfer completion ([#407](https://github.com/qvest-digital/mxl-k8s/issues/407)) ([41d0a1b](https://github.com/qvest-digital/mxl-k8s/commit/41d0a1b868ceeee7e4b8b4e5729b2ea85bf866da))
+
+
+### Bug Fixes
+
+* **agent:** do not publish a flow whose output lookup failed ([#406](https://github.com/qvest-digital/mxl-k8s/issues/406)) ([7c300f8](https://github.com/qvest-digital/mxl-k8s/commit/7c300f85da83fe900eafce18e18cc2e2039c319c))
+* **gateway:** offer each grain to the initiator once ([#407](https://github.com/qvest-digital/mxl-k8s/issues/407)) ([41d0a1b](https://github.com/qvest-digital/mxl-k8s/commit/41d0a1b868ceeee7e4b8b4e5729b2ea85bf866da))
+
 ## [1.1.0-rc.39](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.38...v1.1.0-rc.39) (2026-10-29)
 
 
