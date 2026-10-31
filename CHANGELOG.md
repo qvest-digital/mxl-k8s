@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.41](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.40...v1.1.0-rc.41) (2026-10-31)
+
+
+### Bug Fixes
+
+* **gateway:** keep invalid grains invalid, reap paced chunks unblocked ([#409](https://github.com/qvest-digital/mxl-k8s/issues/409)) ([367aedf](https://github.com/qvest-digital/mxl-k8s/commit/367aedf782ecde00e2227010628faebd43dada71))
+
 ## [1.1.0-rc.40](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.39...v1.1.0-rc.40) (2026-10-31)
 
 
