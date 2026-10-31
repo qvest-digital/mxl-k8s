@@ -2,6 +2,7 @@ package mirror
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/qvest-digital/go-mxl/fabrics"
 )
 
 // Throughput is what one mirror half moved since this gateway started.
@@ -17,18 +18,76 @@ type Throughput struct {
 	// SkippedSamples is meaningful on the source half of a continuous
 	// flow only, and is zero everywhere else.
 	SkippedSamples uint64
+
+	// Transfers is the initiator's account of the mirror's target, on
+	// the source half only. Nil before the first report.
+	Transfers *TransferCounts
+}
+
+// TransferCounts is what an initiator did with the transfers of one
+// target. A transfer is a grain, or a batch of samples.
+type TransferCounts struct {
+	Posted, Completed, Failed, Skipped, InFlight, Torn, AccountingErrors uint64
+
+	// Lag is how far the last completed transfer trails the source
+	// head, or -1 before the first completion. Continuous says it is
+	// in samples rather than grains.
+	Lag        float64
+	Continuous bool
 }
 
 var (
 	descTransmitted = prometheus.NewDesc(
 		"mxl_gateway_mirror_transmitted_bytes_total",
-		"Payload bytes handed to the fabric for a mirror this node is the source of.",
+		"Payload bytes the fabric reported as delivered for a mirror this node is the source of, including chunks of a grain given up part way, which went over the wire all the same.",
 		[]string{"domain", "flow_id", "node", "peer_node", "provider"}, nil)
 
 	descReceived = prometheus.NewDesc(
 		"mxl_gateway_mirror_received_bytes_total",
 		"Payload bytes committed to the local flow for a mirror this node is the target of.",
 		[]string{"domain", "flow_id", "node", "peer_node", "provider"}, nil)
+
+	transferLabels = []string{"domain", "flow_id", "node", "peer_node", "provider"}
+
+	descPosted = prometheus.NewDesc(
+		"mxl_gateway_mirror_transfers_posted_total",
+		"Transfers (grains, or batches of samples) the initiator posted to a mirror target. Equals completed + "+
+			"failed + in flight.",
+		transferLabels, nil)
+
+	descTransfers = prometheus.NewDesc(
+		"mxl_gateway_mirror_transfers_total",
+		"What became of the transfers (grains, or batches of samples) the initiator was offered for a mirror target: "+
+			"completed, failed (error completion or lost with the connection) or skipped (window or send queue full, "+
+			"or not connected; the other targets of the flow still got them). Posted transfers still in flight are in none.",
+		append(append([]string{}, transferLabels...), "outcome"), nil)
+
+	descTorn = prometheus.NewDesc(
+		"mxl_gateway_mirror_transfers_torn_total",
+		"Completed grains whose source slot the producer had rewritten by the time the completion was read, so they may "+
+			"have gone out with newer content. An upper bound. Never counted for audio, which is copied at post time.",
+		transferLabels, nil)
+
+	descAccountingErrors = prometheus.NewDesc(
+		"mxl_gateway_mirror_accounting_errors_total",
+		"Completions the initiator could not match to anything it recorded in flight for a mirror target. "+
+			"Always 0 unless libmxl-fabrics has a bug; anything else makes the other transfer counters unreliable.",
+		transferLabels, nil)
+
+	descInFlight = prometheus.NewDesc(
+		"mxl_gateway_mirror_transfers_in_flight",
+		"Transfers posted to a mirror target and not yet completed.",
+		transferLabels, nil)
+
+	descLagGrains = prometheus.NewDesc(
+		"mxl_gateway_mirror_completion_lag_grains",
+		"Source head index minus the index of the last grain completed to the mirror target.",
+		transferLabels, nil)
+
+	descLagSamples = prometheus.NewDesc(
+		"mxl_gateway_mirror_completion_lag_samples",
+		"Source head index minus the end index of the last batch of samples completed to the mirror target.",
+		transferLabels, nil)
 
 	descSkipped = prometheus.NewDesc(
 		"mxl_gateway_mirror_skipped_samples_total",
@@ -59,6 +118,13 @@ func (c *ThroughputCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descTransmitted
 	ch <- descReceived
 	ch <- descSkipped
+	ch <- descPosted
+	ch <- descTransfers
+	ch <- descTorn
+	ch <- descAccountingErrors
+	ch <- descInFlight
+	ch <- descLagGrains
+	ch <- descLagSamples
 }
 
 // Collect folds the live entries onto their label set before emitting.
@@ -95,6 +161,49 @@ func (c *ThroughputCollector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(descSkipped, prometheus.CounterValue,
 				float64(n), k.domain, k.flowID, c.NodeName, k.peerNode, k.provider)
 		}
+
+		// Two mirrors of one flow to one peer are two targets; their
+		// counters add, and the larger lag stands for both.
+		counts := map[key]TransferCounts{}
+		for _, t := range c.Source.Throughput() {
+			if t.Transfers == nil {
+				continue
+			}
+			k := key{t.Domain, t.FlowID, t.PeerNode, t.Provider}
+			sum, seen := counts[k]
+			sum.Posted += t.Transfers.Posted
+			sum.Completed += t.Transfers.Completed
+			sum.Failed += t.Transfers.Failed
+			sum.Skipped += t.Transfers.Skipped
+			sum.InFlight += t.Transfers.InFlight
+			sum.Torn += t.Transfers.Torn
+			sum.AccountingErrors += t.Transfers.AccountingErrors
+			sum.Continuous = t.Transfers.Continuous
+			if !seen || t.Transfers.Lag > sum.Lag {
+				sum.Lag = t.Transfers.Lag
+			}
+			counts[k] = sum
+		}
+		for k, n := range counts {
+			labels := []string{k.domain, k.flowID, c.NodeName, k.peerNode, k.provider}
+			ch <- prometheus.MustNewConstMetric(descPosted, prometheus.CounterValue, float64(n.Posted), labels...)
+			ch <- prometheus.MustNewConstMetric(descTorn, prometheus.CounterValue, float64(n.Torn), labels...)
+			ch <- prometheus.MustNewConstMetric(descAccountingErrors, prometheus.CounterValue, float64(n.AccountingErrors), labels...)
+			for outcome, v := range map[string]uint64{
+				"completed": n.Completed, "failed": n.Failed, "skipped": n.Skipped,
+			} {
+				ch <- prometheus.MustNewConstMetric(descTransfers, prometheus.CounterValue,
+					float64(v), append(append([]string{}, labels...), outcome)...)
+			}
+			ch <- prometheus.MustNewConstMetric(descInFlight, prometheus.GaugeValue, float64(n.InFlight), labels...)
+			if n.Lag >= 0 {
+				desc := descLagGrains
+				if n.Continuous {
+					desc = descLagSamples
+				}
+				ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, n.Lag, labels...)
+			}
+		}
 	}
 }
 
@@ -119,6 +228,7 @@ func (r *SourceReconciler) Throughput() []Throughput {
 			Bytes:    e.bytes.Load(),
 
 			SkippedSamples: e.skipped.Load(),
+			Transfers:      e.transferCounts(),
 		})
 	}
 	return out
@@ -140,4 +250,25 @@ func (r *TargetReconciler) Throughput() []Throughput {
 		})
 	}
 	return out
+}
+
+// transferCounts is the entry's last initiator report as metric values,
+// or nil before the first one.
+func (e *sourceEntry) transferCounts() *TransferCounts {
+	st := e.stats.Load()
+	if st == nil {
+		return nil
+	}
+	lag := -1.0
+	if st.LastCompletedIndex != fabrics.NoIndex {
+		if head := e.lastHead.Load(); head >= st.LastCompletedIndex {
+			lag = float64(head - st.LastCompletedIndex)
+		} else {
+			lag = 0
+		}
+	}
+	return &TransferCounts{
+		Posted: st.Posted, Completed: st.Completed, Failed: st.Failed, Skipped: st.Skipped, InFlight: st.InFlight,
+		Torn: st.Torn, AccountingErrors: st.AccountingErrors, Lag: lag, Continuous: e.shared != nil && e.shared.continuous,
+	}
 }

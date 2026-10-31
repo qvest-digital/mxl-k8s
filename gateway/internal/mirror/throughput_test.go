@@ -4,7 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -33,7 +35,7 @@ func TestThroughputCollectorReportsBothDirections(t *testing.T) {
 # HELP mxl_gateway_mirror_received_bytes_total Payload bytes committed to the local flow for a mirror this node is the target of.
 # TYPE mxl_gateway_mirror_received_bytes_total counter
 mxl_gateway_mirror_received_bytes_total{domain="",flow_id="flow-b",node="n01",peer_node="n03",provider="tcp"} 4096
-# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes handed to the fabric for a mirror this node is the source of.
+# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes the fabric reported as delivered for a mirror this node is the source of, including chunks of a grain given up part way, which went over the wire all the same.
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
 mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 5529600
 `
@@ -77,7 +79,7 @@ func TestThroughputCollectorSurvivesOneFlowMirroredTwice(t *testing.T) {
 	}
 	c := &ThroughputCollector{NodeName: "n01", Source: src}
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(`
-# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes handed to the fabric for a mirror this node is the source of.
+# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes the fabric reported as delivered for a mirror this node is the source of, including chunks of a grain given up part way, which went over the wire all the same.
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
 mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
 mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n03",provider="verbs"} 1000
@@ -127,7 +129,7 @@ func TestThroughputCollectorSeparatesDomains(t *testing.T) {
 	}
 	c := &ThroughputCollector{NodeName: "n01", Source: src}
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(`
-# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes handed to the fabric for a mirror this node is the source of.
+# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes the fabric reported as delivered for a mirror this node is the source of, including chunks of a grain given up part way, which went over the wire all the same.
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
 mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
 mxl_gateway_mirror_transmitted_bytes_total{domain="studio",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
@@ -143,4 +145,56 @@ func TestIndexMirrorByFlowCarriesTheDomain(t *testing.T) {
 	}
 	require.Equal(t, []string{"flow-a"}, indexMirrorByFlow(m("")))
 	require.Equal(t, []string{"studio.flow-a"}, indexMirrorByFlow(m("studio")))
+}
+
+// The initiator's per-target counters are published so each outcome is
+// counted once: posted in a series of its own, and completed, failed
+// and skipped under one outcome label that sums to what was offered
+// less what is in flight. Lag carries its unit in its name, because a
+// grain and a sample are not the same distance.
+func TestThroughputCollectorReportsTransferCounts(t *testing.T) {
+	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
+	video := &sourceEntry{shared: testShared("flow-v", fabrics.ProviderVerbs), peerNode: "n02"}
+	video.stats.Store(&fabrics.TargetStats{Posted: 10, Completed: 7, Failed: 1, Skipped: 4, InFlight: 2, Torn: 1, AccountingErrors: 3, LastCompletedIndex: 96})
+	video.lastHead.Store(100)
+	audioShared := testShared("flow-a", fabrics.ProviderVerbs)
+	audioShared.continuous = true
+	audio := &sourceEntry{shared: audioShared, peerNode: "n02"}
+	audio.stats.Store(&fabrics.TargetStats{Posted: 3, Completed: 3, LastCompletedIndex: 48000})
+	audio.lastHead.Store(48480)
+	src.sources[types.NamespacedName{Namespace: "p", Name: "v"}] = video
+	src.sources[types.NamespacedName{Namespace: "p", Name: "a"}] = audio
+
+	reg := prometheus.NewPedanticRegistry()
+	require.NoError(t, reg.Register(&ThroughputCollector{NodeName: "n01", Source: src}))
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	values := map[string]float64{}
+	for _, f := range families {
+		for _, m := range f.GetMetric() {
+			key := f.GetName()
+			for _, l := range m.GetLabel() {
+				switch l.GetName() {
+				case "flow_id", "outcome":
+					key += "/" + l.GetValue()
+				}
+			}
+			values[key] = m.GetCounter().GetValue() + m.GetGauge().GetValue()
+		}
+	}
+
+	assert.Equal(t, 10.0, values["mxl_gateway_mirror_transfers_posted_total/flow-v"])
+	assert.Equal(t, 7.0, values["mxl_gateway_mirror_transfers_total/flow-v/completed"])
+	assert.Equal(t, 1.0, values["mxl_gateway_mirror_transfers_total/flow-v/failed"])
+	assert.Equal(t, 4.0, values["mxl_gateway_mirror_transfers_total/flow-v/skipped"])
+	_, postedAsOutcome := values["mxl_gateway_mirror_transfers_total/flow-v/posted"]
+	assert.False(t, postedAsOutcome, "posted would be counted twice in a sum over outcomes")
+	assert.Equal(t, 1.0, values["mxl_gateway_mirror_transfers_torn_total/flow-v"])
+	assert.Equal(t, 3.0, values["mxl_gateway_mirror_accounting_errors_total/flow-v"])
+	assert.Equal(t, 0.0, values["mxl_gateway_mirror_accounting_errors_total/flow-a"])
+	assert.Equal(t, 2.0, values["mxl_gateway_mirror_transfers_in_flight/flow-v"])
+	assert.Equal(t, 4.0, values["mxl_gateway_mirror_completion_lag_grains/flow-v"])
+	assert.Equal(t, 480.0, values["mxl_gateway_mirror_completion_lag_samples/flow-a"])
+	_, audioAsGrains := values["mxl_gateway_mirror_completion_lag_grains/flow-a"]
+	assert.False(t, audioAsGrains, "an audio lag in samples published as grains")
 }

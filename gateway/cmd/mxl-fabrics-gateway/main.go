@@ -185,6 +185,7 @@ func run(args []string) error {
 		ReaderStallAfter: cfg.ReaderStallAfter,
 		PacingFraction:   cfg.PacingFraction,
 		PacingChunks:     cfg.PacingChunks,
+		GrainsInFlight:   cfg.GrainsInFlight,
 		Recorder:         mgr.GetEventRecorderFor("mxl-source-gateway"),
 	}
 	if err := sourceReconciler.SetupWithManager(mgr); err != nil {

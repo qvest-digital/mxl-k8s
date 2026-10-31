@@ -218,7 +218,7 @@ type recordingSampleTracker struct {
 	aged  int
 }
 
-func (r *recordingSampleTracker) recordTransfer(uint64, time.Time) {
+func (r *recordingSampleTracker) recordOffered(uint64, time.Time) {
 	r.mu.Lock()
 	r.xfers++
 	r.mu.Unlock()

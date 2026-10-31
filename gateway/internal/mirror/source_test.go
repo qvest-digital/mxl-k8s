@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
+	"github.com/qvest-digital/go-mxl/mxl"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -312,7 +313,7 @@ type recordingTracker struct {
 // reach, so nothing in them is ever old enough to abandon.
 const testReadableWindow = 1 << 20
 
-func (rt *recordingTracker) recordTransfer(idx uint64, _ time.Time) {
+func (rt *recordingTracker) recordOffered(idx uint64, _ time.Time) {
 	rt.mu.Lock()
 	rt.transfers = append(rt.transfers, idx)
 	rt.mu.Unlock()
@@ -496,7 +497,7 @@ func TestRunTransferLoop_TracksProgressAndLastSentAt(t *testing.T) {
 		got, _ := tracker.snapshot()
 		return len(got) >= 3
 	}, time.Second, time.Millisecond,
-		"tracker must observe one recordTransfer per successful grain")
+		"tracker must observe one recordOffered per successful grain")
 
 	cancel()
 	<-done
@@ -505,7 +506,7 @@ func TestRunTransferLoop_TracksProgressAndLastSentAt(t *testing.T) {
 	assert.GreaterOrEqual(t, len(transfers), 3)
 	for i := 0; i < 3; i++ {
 		assert.Equal(t, uint64(i+1), transfers[i],
-			"recordTransfer must observe the same monotonic index sequence "+
+			"recordOffered must observe the same monotonic index sequence "+
 				"the loop hands to transferGrain")
 	}
 }
@@ -527,6 +528,9 @@ type fakeOpener struct {
 	attachFn func(s *sharedSource, targetInfoStr string) (*fabrics.TargetInfo, error)
 	// stateFn answers targetState. Nil reports every target connected.
 	stateFn func(info *fabrics.TargetInfo) (fabrics.TargetState, error)
+	// statsFn answers targetStats. Nil reports no counters, which
+	// leaves delivery as the test recorded it.
+	statsFn func(info *fabrics.TargetInfo) (fabrics.TargetStats, error)
 
 	opens    atomic.Int32
 	attaches atomic.Int32
@@ -583,6 +587,23 @@ func (f *fakeOpener) targetState(_ *sharedSource, info *fabrics.TargetInfo) (fab
 		return fabrics.TargetConnected, nil
 	}
 	return fn(info)
+}
+
+func (f *fakeOpener) targetStats(_ *sharedSource, info *fabrics.TargetInfo) (fabrics.TargetStats, error) {
+	f.mu.Lock()
+	fn := f.statsFn
+	f.mu.Unlock()
+	if fn == nil {
+		return fabrics.TargetStats{}, mxl.ErrNotFound
+	}
+	return fn(info)
+}
+
+// setStats replaces statsFn while flushers may be asking it.
+func (f *fakeOpener) setStats(fn func(info *fabrics.TargetInfo) (fabrics.TargetStats, error)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statsFn = fn
 }
 
 // setState replaces stateFn while flushers may be asking it.
@@ -1144,7 +1165,7 @@ func TestPublishSourceProgress_IncludesLastSentAt(t *testing.T) {
 func TestSourceStateEqual_DereferencesLastSentAtPointers(t *testing.T) {
 	// observedState allocates a fresh *time.Time on every flusher tick
 	// (copying the atomic-loaded value through a local variable to
-	// detach it from the pointer that recordTransfer stored). The
+	// detach it from the pointer that recordOffered stored). The
 	// dedupe must therefore compare timestamps by value: a struct-level
 	// == would always disagree once lastSentAt is non-nil and the
 	// flusher would publish on every tick. Codifies the contract:

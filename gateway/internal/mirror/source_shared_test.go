@@ -276,19 +276,22 @@ func TestSource_AccountingLandsPerMirrorAcrossTheFanout(t *testing.T) {
 
 	s := f.sharedFor("flow-a", fabrics.ProviderVerbs)
 	require.NotNil(t, s)
-	// verbs stamps lastSentAt only on a target that reads connected,
-	// which the flusher this fixture never ticks would record.
 	f.entry("m1").connected.Store(true)
 	f.entry("m2").connected.Store(true)
+	// One completion each, of the same grain: the initiator reports
+	// every target on its own.
+	f.opener.setStats(func(*fabrics.TargetInfo) (fabrics.TargetStats, error) {
+		return fabrics.TargetStats{Posted: 1, Completed: 1, BytesCompleted: 1000, LastCompletedIndex: 42}, nil
+	})
 
 	sentAt := time.Now()
 	s.recordHead(41, sentAt)
-	s.recordTransfer(42, sentAt)
-	s.addBytes(1000)
+	s.recordOffered(42, sentAt)
 
 	for _, n := range []string{"m1", "m2"} {
 		e := f.entry(n)
 		require.NotNil(t, e, n)
+		f.r.observeDelivery(e, sentAt)
 		assert.Equal(t, uint64(1), e.progress.Load(), n)
 		assert.Equal(t, uint64(1000), e.bytes.Load(), n)
 		assert.Equal(t, uint64(41), e.lastHead.Load(), n)
@@ -297,7 +300,7 @@ func TestSource_AccountingLandsPerMirrorAcrossTheFanout(t *testing.T) {
 
 	col := &ThroughputCollector{NodeName: "n01", Source: f.r}
 	require.NoError(t, testutil.CollectAndCompare(col, strings.NewReader(`
-# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes handed to the fabric for a mirror this node is the source of.
+# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes the fabric reported as delivered for a mirror this node is the source of, including chunks of a grain given up part way, which went over the wire all the same.
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
 mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
 mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n03",provider="verbs"} 1000

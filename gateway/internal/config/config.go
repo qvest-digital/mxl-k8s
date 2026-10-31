@@ -103,6 +103,10 @@ type Config struct {
 	// into. Under 2 disables pacing.
 	PacingChunks int
 
+	// GrainsInFlight is how many grains one mirror target may have
+	// posted and not completed before further grains skip it.
+	GrainsInFlight int
+
 	// DegradedAfter is the inactivity window the target-side
 	// reconciler uses to demote a Ready mirror to Degraded and to
 	// invalidate its Reconcile fast-path. Matches the operator-side
@@ -220,6 +224,11 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"Number of slice ranges a paced grain is split into. Higher shortens the burst "+
 			"further at the cost of one cgo call and one RMA write per plane each. "+
 			"Under 2 disables pacing.")
+	fs.IntVar(&c.GrainsInFlight, "grains-in-flight", 8,
+		"Grains one mirror target may have posted and not completed. A grain offered to a "+
+			"target with this many in flight is skipped for that target alone. Capped at a "+
+			"quarter of the source ring and at 16; the cap bounds how many grains are in flight, "+
+			"not how long one takes.")
 	fs.DurationVar(&c.DegradedAfter, "degraded-after", 10*time.Second,
 		"Grain-commit inactivity after which the target gateway demotes a mirror to Degraded.")
 	fs.DurationVar(&c.DomainGCInterval, "domain-gc-interval", domaingc.DefaultInterval,

@@ -102,6 +102,14 @@ github.com/prometheus/procfs v0.21.1 h1:GljZCt+zSTS+NZq88cyQ1LjZ+RCHp3uVuabBWA5+
 github.com/prometheus/procfs v0.21.1/go.mod h1:aB55Cww9pdSJVHk0hUf0inxWyyjPogFIjmHKYgMKmtY=
 github.com/qvest-digital/go-mxl v1.1.0-rc.9 h1:QSR+Za/T/IVI2SE0Hf4C0BM5fXFto9o6sbpN+47rTcA=
 github.com/qvest-digital/go-mxl v1.1.0-rc.9/go.mod h1:cYzyT+S/AONytsKr/DozzFQP2OrNrg/JsQOSjvwn+Rk=
+github.com/qvest-digital/go-mxl v1.1.0-rc.9.0.20261031131946-3816408c57c0 h1:vudRCpxOGhKry51r8K+Z5lTeNNZib47LFFumHafCkTs=
+github.com/qvest-digital/go-mxl v1.1.0-rc.9.0.20261031131946-3816408c57c0/go.mod h1:cYzyT+S/AONytsKr/DozzFQP2OrNrg/JsQOSjvwn+Rk=
+github.com/qvest-digital/go-mxl v1.1.0-rc.9.0.20261031135323-d6f4b2c5d954 h1:zvvL02UBfWuVUi6Ys6IFO3qNjjdCpsi9g+pK6n7jxpg=
+github.com/qvest-digital/go-mxl v1.1.0-rc.9.0.20261031135323-d6f4b2c5d954/go.mod h1:cYzyT+S/AONytsKr/DozzFQP2OrNrg/JsQOSjvwn+Rk=
+github.com/qvest-digital/go-mxl v1.1.0-rc.9.0.20261031150806-0bd2b743426f h1:XdekQZHbKN8fob4PO0hG6IhMGw0X5QcOgWiyBa5wod4=
+github.com/qvest-digital/go-mxl v1.1.0-rc.9.0.20261031150806-0bd2b743426f/go.mod h1:cYzyT+S/AONytsKr/DozzFQP2OrNrg/JsQOSjvwn+Rk=
+github.com/qvest-digital/go-mxl v1.1.0-rc.10 h1:0SuPV5pJQt89V/nE366fYrO3CaN2p14YSJXRrwwYuko=
+github.com/qvest-digital/go-mxl v1.1.0-rc.10/go.mod h1:cYzyT+S/AONytsKr/DozzFQP2OrNrg/JsQOSjvwn+Rk=
 github.com/spf13/pflag v1.0.10 h1:4EBh2KAYBwaONj6b2Ye1GiHfwjqyROoF4RwYO+vPwFk=
 github.com/spf13/pflag v1.0.10/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=

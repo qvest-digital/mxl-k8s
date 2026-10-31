@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -147,6 +148,12 @@ type SourceReconciler struct {
 	// into. Zero takes defaultPacingChunks; under 2 disables pacing.
 	PacingChunks int
 
+	// GrainsInFlight is how many grains one target may have posted
+	// and not completed. Zero takes defaultGrainsInFlight; it is capped
+	// at a quarter of the source ring and at
+	// fabrics.MaxTransfersInFlight.
+	GrainsInFlight int
+
 	// FlushInterval is how often the per-mirror status flusher
 	// checks the sourceEntry trackers and publishes SourceProgress
 	// when the observed state has transitioned. Defaults to 1s.
@@ -161,6 +168,15 @@ type SourceReconciler struct {
 	// SourceProgress reports ReaderNotAdvancing. Defaults to
 	// defaultReaderStallAfter.
 	ReaderStallAfter time.Duration
+
+	// deliveryStall overrides the stall window of every mirror. Zero
+	// keeps deliveryStallFor's own.
+	deliveryStall time.Duration
+
+	// ackTimeout is FI_VERBS_ACK_TIMEOUT as libfabric reads it in this
+	// process, which a verbs mirror's stall window is derived from.
+	// SetupWithManager reads it from the environment.
+	ackTimeout string
 
 	// opener is the seam onto the cgo-dependent libmxl-fabrics
 	// Initiator setup path. SetupWithManager binds it to a
@@ -280,6 +296,10 @@ type sharedSource struct {
 	openedAt             time.Time
 	lastObservedOriginAt atomic.Pointer[time.Time]
 
+	// continuous is set for an audio flow, whose indices count samples
+	// rather than grains.
+	continuous bool
+
 	// rebuilding is set by the reader-stall watchdog before it hands
 	// the source to the reopen goroutine, so a second flusher tick --
 	// this mirror's or any other attached mirror's -- cannot spawn a
@@ -327,16 +347,22 @@ type sourceEntry struct {
 	// reads it without the entry's atomics.
 	peerNode string
 
-	// progress counts grains the transfer loop has successfully handed
-	// to TransferGrain. lastSentAt records the wall-clock time of the
-	// most recent successful transfer. Both feed the status flusher.
+	// progress counts the transfers the initiator reported as
+	// completed to this mirror's target. lastSentAt records when that
+	// count last grew. Both feed the status flusher.
 	progress   atomic.Uint64
 	lastSentAt atomic.Pointer[time.Time]
 
 	// connected is whether the initiator last reported this mirror's
-	// target connected. Only a connection-oriented provider has a
-	// connection to report; see deliversTransfers.
-	connected atomic.Bool
+	// target connected, and connectedAt when it last became so. Only a
+	// connection-oriented provider has a connection to report.
+	connected   atomic.Bool
+	connectedAt atomic.Pointer[time.Time]
+
+	// stats is the initiator's last report of this mirror's target:
+	// what was posted to it, completed, failed and skipped. Delivery,
+	// lastSentAt and bytes are taken from it, never from a post.
+	stats atomic.Pointer[fabrics.TargetStats]
 
 	// dropped is set once the initiator no longer holds this mirror's
 	// target, which it does not connect to again. Reconcile replaces an
@@ -345,10 +371,8 @@ type sourceEntry struct {
 	dropped      atomic.Bool
 	redialQueued atomic.Bool
 
-	// bytes counts payload handed to the fabric for this mirror, read
-	// by the throughput collector at scrape time. A counter rather than
-	// a rate: the scrape interval is the collector's business, not the
-	// transfer loop's.
+	// bytes counts payload the initiator reported as delivered to this
+	// mirror's target, read by the throughput collector at scrape time.
 	bytes atomic.Uint64
 
 	// skipped counts samples the transfer loop advanced past without
@@ -1030,6 +1054,7 @@ type libmxlOpener struct {
 	ProgressInterval time.Duration
 	PacingFraction   float64
 	PacingChunks     int
+	GrainsInFlight   int
 }
 
 func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
@@ -1064,22 +1089,8 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 		_ = reader.Close()
 		return nil, err
 	}
-	if err := initiator.Setup(fabrics.InitiatorConfig{
-		Interface: iface,
-		Reader:    reader,
-	}); err != nil {
-		_ = initiator.Close()
-		_ = reader.Close()
-		return nil, fmt.Errorf("Initiator.Setup: %w", err)
-	}
-	steps := openSteps{reader: readerDone.Sub(start), setup: time.Since(readerDone)}
-
-	// A continuous (audio) flow moves samples, not grains; pick the
-	// transfer path from the flow's data format. maxBatch is the
-	// reader's max readable sample run, which caps xferBatch so a
-	// single TransferSamples never exceeds the target's bounce-buffer
-	// entry; xferBatch is one natural commit batch (~10 ms of audio)
-	// and also sizes the transfer tick and the catch-up bound.
+	// The flow's format decides both the transfer path and the
+	// initiator options, so it is read before Setup.
 	cfg, err := reader.Config()
 	if err != nil {
 		_ = initiator.Close()
@@ -1087,6 +1098,29 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 		return nil, fmt.Errorf("Reader.Config: %w", err)
 	}
 	audio := cfg.Common.Format == mxl.FormatAudio
+	data := cfg.Common.Format == mxl.FormatData
+	pacingFraction := effectivePacingFraction(o.PacingFraction, provider)
+	pacingChunks := o.PacingChunks
+	if pacingChunks == 0 {
+		pacingChunks = defaultPacingChunks
+	}
+	p := newPacer(cfg.Common.GrainRate, pacingFraction, pacingChunks, flowID+"\x00"+provider.String())
+	if err := initiator.Setup(fabrics.InitiatorConfig{
+		Interface: iface,
+		Reader:    reader,
+		Options:   initiatorOptions(o.GrainsInFlight, uint64(cfg.Discrete.GrainCount), p, !audio && !data),
+	}); err != nil {
+		_ = initiator.Close()
+		_ = reader.Close()
+		return nil, fmt.Errorf("Initiator.Setup: %w", err)
+	}
+	steps := openSteps{reader: readerDone.Sub(start), setup: time.Since(readerDone)}
+
+	// A continuous (audio) flow moves samples, not grains. maxBatch is
+	// the reader's max readable sample run, which caps xferBatch so a
+	// single TransferSamples never exceeds the target's bounce-buffer
+	// entry; xferBatch is one natural commit batch (~10 ms of audio)
+	// and also sizes the transfer tick and the catch-up bound.
 	var maxBatch, xferBatch uint64
 	if audio {
 		maxBatch, err = reader.GetMaxReadLengthSamples()
@@ -1113,12 +1147,13 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 	loopCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	s := &sharedSource{
-		key:       key,
-		openSteps: steps,
-		reader:    reader,
-		initiator: initiator,
-		cancel:    cancel,
-		done:      done,
+		key:        key,
+		openSteps:  steps,
+		reader:     reader,
+		initiator:  initiator,
+		cancel:     cancel,
+		done:       done,
+		continuous: audio,
 	}
 
 	progressInterval := o.ProgressInterval
@@ -1141,11 +1176,6 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 			progressInterval = 2 * time.Millisecond
 		}
 	}
-	pacingFraction := effectivePacingFraction(o.PacingFraction, provider)
-	pacingChunks := o.PacingChunks
-	if pacingChunks == 0 {
-		pacingChunks = defaultPacingChunks
-	}
 	runtimeFn := func() (uint64, error) {
 		rt, err := reader.Runtime()
 		if err != nil {
@@ -1166,35 +1196,15 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 	progressFn := progressFuncFor(initiator, provider)
 
 	if audio {
-		// Resolved on the first transfer and reused: the width is fixed
-		// for the flow, and only the transfer goroutine reads or writes
-		// it, so it needs no synchronization.
-		var frameBytes uint64
-		transferSamplesFn := func(headIndex uint64, count int) error {
-			if err := initiator.TransferSamples(headIndex, count); err != nil {
-				return err
-			}
-			if frameBytes == 0 {
-				frameBytes = sampleFrameBytes(reader, headIndex)
-			}
-			s.addBytes(uint64(count) * frameBytes)
-			return nil
-		}
-		go runSampleTransferLoop(loopCtx, done, flowID, runtimeFn, transferSamplesFn, progressFn, reapFuncFor(initiator), xferBatch, maxBatch, progressInterval, s)
+		go runSampleTransferLoop(loopCtx, done, flowID, runtimeFn, initiator.TransferSamples, progressFn, reapFuncFor(initiator), xferBatch, maxBatch, progressInterval, s)
 	} else {
 		// The pacer is keyed on flow plus provider so two shared
 		// sources -- of the same flow on different providers, or of
 		// different flows -- get different phase offsets. Flows sharing
 		// an edit rate advance their heads on the same MXL clock
 		// instants, so without the offset every source on this node
-		// would hand its chunks over in lockstep. Keyed per flow rather
-		// than per target because there is now one transfer stream per
-		// flow, whatever its fan-out.
-		p := newPacer(cfg.Common.GrainRate, pacingFraction, pacingChunks, flowID+"\x00"+provider.String())
+		// would hand its chunks over in lockstep.
 		l := ctrl.Log.WithName("transfer").WithValues("flowID", flowID)
-		transferSlices := func(idx uint64, start, end uint16) error {
-			return initiator.TransferGrain(idx, start, end)
-		}
 		// Its own throttle rather than the transfer loop's: this call
 		// site fires once per chunk instead of once per tick, so it
 		// needs its own failure history. Both only ever run on the
@@ -1203,44 +1213,7 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 		betweenChunks := func() {
 			chunkProgress.runProgress(progressFn, func(err error) { logProgressFailure(l, err) })
 		}
-		// A data grain is never complete: its valid slices are its
-		// length. Only what is valid goes over, so the target commits
-		// the same length.
-		data := cfg.Common.Format == mxl.FormatData
-		transferFn := func(idx uint64, paced bool) (bool, error) {
-			grain, err := readForTransfer(reader, idx, data)
-			if err != nil {
-				// Not yet committed or already aged out; signal the loop
-				// to break and re-try on the next tick.
-				return false, err
-			}
-			if data {
-				if err := initiator.TransferGrain(idx, 0, grain.ValidSlices); err != nil {
-					return false, err
-				}
-				s.addBytes(uint64(grain.ValidSlices))
-				return false, nil
-			}
-			if grain.TotalSlices == 0 {
-				// A discrete grain with no slice subdivision; continuous
-				// (audio) flows take the sample path above and never
-				// reach here.
-				return true, nil
-			}
-			if !paced || !p.enabled() {
-				if err := initiator.TransferGrain(idx, 0, grain.TotalSlices); err != nil {
-					return false, err
-				}
-				s.addBytes(uint64(grain.GrainSize))
-				return false, nil
-			}
-			if err := transferPaced(loopCtx, realClock{}, p.plan(grain.TotalSlices), idx,
-				transferSlices, betweenChunks); err != nil {
-				return false, err
-			}
-			s.addBytes(uint64(grain.GrainSize))
-			return false, nil
-		}
+		transferFn := newGrainTransfer(loopCtx, reader, initiator, p, data, betweenChunks)
 		go runTransferLoop(loopCtx, done, flowID, runtimeFn, transferFn, progressFn, progressInterval, s)
 	}
 
@@ -1253,7 +1226,7 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 // slice would retry it until the loop resynced past it, dropping the
 // grains behind it as well. A range of no slices still carries the
 // grain's header, which is what the target commits from.
-func readForTransfer(r *mxl.Reader, idx uint64, data bool) (mxl.Grain, error) {
+func readForTransfer(r grainSource, idx uint64, data bool) (mxl.Grain, error) {
 	if data {
 		return r.GetGrainSliceNonBlocking(idx, 0)
 	}
@@ -1332,31 +1305,24 @@ const defaultReaderStallAfter = 20 * time.Second
 // mirror really did move it and really is at that index, and the
 // per-mirror status conditions and byte counters stay exact.
 type progressTracker interface {
-	recordTransfer(idx uint64, at time.Time)
+	recordOffered(idx uint64, at time.Time)
 	recordAgedOut(at time.Time)
 	recordHead(head uint64, at time.Time)
 	recordSkipped(samples uint64)
 }
 
-// recordTransfer counts a transfer for this mirror, and stamps
-// lastSentAt only when the transfer reached its target.
-func (e *sourceEntry) recordTransfer(idx uint64, at time.Time) {
-	e.progress.Add(1)
-	if !e.deliversTransfers() {
-		return
+// recordDelivered takes completed, the initiator's count of transfers
+// completed to this mirror's target, and stamps lastSentAt when it
+// grew. A post says nothing about delivery: the target may be
+// unreachable, its window full, or its connection gone.
+func (e *sourceEntry) recordDelivered(completed uint64, at time.Time) bool {
+	if completed <= e.progress.Load() {
+		return false
 	}
+	e.progress.Store(completed)
 	t := at
 	e.lastSentAt.Store(&t)
-}
-
-// deliversTransfers reports whether a transfer on the shared initiator
-// reaches this mirror's target. libmxl-fabrics accepts a transfer for a
-// target a connection-oriented initiator is not connected to, and a
-// transfer on a shared source counts for every attached mirror, so for
-// tcp and verbs only the target's own state says so. The flusher keeps
-// it in connected. The other providers have no connection to lose.
-func (e *sourceEntry) deliversTransfers() bool {
-	return !connectionOriented(e.provider()) || e.connected.Load()
+	return true
 }
 
 // connectionOriented reports whether the provider's initiator holds a
@@ -1383,11 +1349,12 @@ func (e *sourceEntry) recordHead(head uint64, at time.Time) {
 	e.headAdvancedAt.Store(&t)
 }
 
-func (s *sharedSource) recordTransfer(idx uint64, at time.Time) {
-	for _, e := range s.attached() {
-		e.recordTransfer(idx, at)
-	}
-}
+// recordOffered is told each index the loop handed to the initiator.
+// A shared source keeps nothing of it: a post says nothing about
+// delivery, which each mirror's flusher takes from the initiator's
+// completion counters (observeDelivery). The loop tests observe the
+// loop through it.
+func (s *sharedSource) recordOffered(uint64, time.Time) {}
 
 func (s *sharedSource) recordAgedOut(at time.Time) {
 	for _, e := range s.attached() {
@@ -1408,15 +1375,6 @@ func (s *sharedSource) recordSkipped(samples uint64) {
 func (s *sharedSource) recordHead(head uint64, at time.Time) {
 	for _, e := range s.attached() {
 		e.recordHead(head, at)
-	}
-}
-
-// addBytes credits one transfer's payload to every attached mirror.
-// Kept off progressTracker because it is added at the call site that
-// knows the payload size rather than by the loop.
-func (s *sharedSource) addBytes(n uint64) {
-	for _, e := range s.attached() {
-		e.bytes.Add(n)
 	}
 }
 
@@ -1543,7 +1501,7 @@ func runTransferLoop(
 				break
 			}
 			if tracker != nil {
-				tracker.recordTransfer(uint64(idx), time.Now())
+				tracker.recordOffered(uint64(idx), time.Now())
 			}
 			lastSent = idx
 		}
@@ -1572,31 +1530,6 @@ func runTransferLoop(
 // probeRuntime to mxl.Reader.Runtime().HeadIndex, transferSamples to
 // Initiator.TransferSamples, and makeProgress to the provider-specific
 // variant selected by progressFuncFor.
-// sampleFrameBytes is the payload one sample of a continuous flow
-// occupies across all its channels.
-//
-// libmxl publishes no per-sample width. The sample view's Stride is
-// the byte distance between two channels' ring buffers, which
-// PosixContinuousFlowWriter sets to sampleWordSize * bufferLength, so
-// dividing it by the bufferLength the flow config carries recovers the
-// word size exactly. Zero when the view cannot be opened, which leaves
-// the caller to ask again on its next transfer.
-func sampleFrameBytes(reader *mxl.Reader, index uint64) uint64 {
-	cfg, err := reader.Config()
-	if err != nil {
-		return 0
-	}
-	bufferLength := uint64(cfg.Continuous.BufferLength)
-	if bufferLength == 0 {
-		return 0
-	}
-	view, viewErr := reader.GetSamplesNonBlocking(index, 1)
-	if viewErr != nil {
-		return 0
-	}
-	return (view.Stride / bufferLength) * view.ChannelCount
-}
-
 func runSampleTransferLoop(
 	ctx context.Context,
 	done chan struct{},
@@ -1771,7 +1704,7 @@ func runSampleTransferLoop(
 				retries = 0
 				delivered += count
 				if tracker != nil {
-					tracker.recordTransfer(end, time.Now())
+					tracker.recordOffered(end, time.Now())
 				}
 				lastSent = end
 				// Settle the chunk before starting the next one.
@@ -2112,7 +2045,14 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 		// other mirrors keep the shared source sending.
 		// The re-add is Reconcile's, queued rather than run here, so it
 		// never races the worker reconciling the same mirror.
-		if r.targetDropped(entry) && !entry.redialQueued.Load() && r.enqueueRedial(key) {
+		dropped := r.targetDropped(entry)
+		if r.observeDelivery(entry, time.Now()) {
+			ctrl.Log.WithName("source-flush").Info("target stopped completing transfers; adding it again",
+				"mirror", key, "after", r.deliveryStallFor(entry.provider()))
+			entry.dropped.Store(true)
+			dropped = true
+		}
+		if dropped && !entry.redialQueued.Load() && r.enqueueRedial(key) {
 			entry.redialQueued.Store(true)
 		}
 		state := observedState(entry, r.readerStallAfter())
@@ -2219,6 +2159,8 @@ func (r *SourceReconciler) targetDropped(entry *sourceEntry) bool {
 			"mirror", entry.key, "error", err.Error())
 	case state == fabrics.TargetConnected:
 		if !entry.connected.Swap(true) {
+			now := time.Now()
+			entry.connectedAt.Store(&now)
 			r.clearRedials(entry.key)
 		}
 	default:
@@ -2574,6 +2516,7 @@ func observedState(entry *sourceEntry, stallAfter time.Duration) sourceProgressS
 //
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch
 func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.ackTimeout = os.Getenv(ackTimeoutEnv)
 	if r.sources == nil {
 		r.sources = make(map[types.NamespacedName]*sourceEntry)
 	}
@@ -2600,6 +2543,7 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			ProgressInterval: r.ProgressInterval,
 			PacingFraction:   r.PacingFraction,
 			PacingChunks:     r.PacingChunks,
+			GrainsInFlight:   r.GrainsInFlight,
 		}
 	}
 	if r.writerLiveFn == nil {
