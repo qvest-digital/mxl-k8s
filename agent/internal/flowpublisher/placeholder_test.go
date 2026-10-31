@@ -2,6 +2,7 @@ package flowpublisher
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -55,11 +56,40 @@ func TestPublishAppeared_IgnoresARedundancySetOutput(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(flowDir, FlowDefName), []byte(`{"id":"`+validFlowID+`"}`), 0o644))
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).Build()
 	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1",
-		IsOutput: func(_ context.Context, _, id string) bool { return id == validFlowID }}
+		IsOutput: func(_ context.Context, _, id string) (bool, error) { return id == validFlowID, nil }}
 
 	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
 
 	var got mxlv1alpha1.MxlFlow
 	err := c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got)
 	require.True(t, apierrors.IsNotFound(err), "a redundancy set output was published: %v", err)
+}
+
+// A failed output lookup publishes nothing: the flow may be an output
+// merged here, and an MxlFlow for one makes the operator refuse its set
+// with OutputIsAFlow. fanotify reports the directory once, so the
+// promote pass of the rescan is what asks again, and it publishes a
+// held flow that turns out to be no output.
+func TestPublishAppeared_DefersAFlowWhoseOutputLookupFailed(t *testing.T) {
+	domain := t.TempDir()
+	flowDir := filepath.Join(domain, validFlowID+".mxl-flow")
+	require.NoError(t, os.Mkdir(flowDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(flowDir, FlowDefName), []byte(`{"id":"`+validFlowID+`"}`), 0o644))
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).Build()
+	lookup := errors.New("apiserver unreachable")
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1",
+		IsOutput: func(context.Context, string, string) (bool, error) { return false, lookup }}
+	ctx := context.Background()
+
+	require.ErrorIs(t, p.PublishAppeared(ctx, validFlowID+".mxl-flow"), lookup)
+	var got mxlv1alpha1.MxlFlow
+	err := c.Get(ctx, types.NamespacedName{Name: validFlowID}, &got)
+	require.True(t, apierrors.IsNotFound(err), "a flow of unknown kind was published: %v", err)
+
+	p.IsOutput = func(context.Context, string, string) (bool, error) { return false, nil }
+	ids, err := p.localFlowIDs()
+	require.NoError(t, err)
+	require.NoError(t, p.promoteStaleLocalOrigins(ctx, p.heldFlowIDs(ctx, ids)))
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: validFlowID}, &got))
+	require.Len(t, got.Status.Locations, 1)
 }

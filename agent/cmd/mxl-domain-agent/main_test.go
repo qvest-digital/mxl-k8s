@@ -222,7 +222,7 @@ func TestTrackerRunsMxlfsForATrackedDomainOnMxlfs(t *testing.T) {
 		},
 		Mxlfs: &trackerMxlfs{
 			IsMxlfs:  func(dir string) bool { return dir == onMxlfs },
-			IsOutput: func(context.Context, string, string) bool { return true },
+			IsOutput: func(context.Context, string, string) (bool, error) { return true, nil },
 			Producer: func(context.Context, int32) bool { return true },
 			Run: func(ctx context.Context, dir string, fp *flowpublisher.Publisher) (func(), error) {
 				runs = append(runs, run{ctx, dir, fp})
@@ -284,7 +284,7 @@ func TestTrackerFailsWhenMxlfsCannotStart(t *testing.T) {
 		},
 		Mxlfs: &trackerMxlfs{
 			IsMxlfs:  func(string) bool { return true },
-			IsOutput: func(context.Context, string, string) bool { return false },
+			IsOutput: func(context.Context, string, string) (bool, error) { return false, nil },
 			Run: func(context.Context, string, *flowpublisher.Publisher) (func(), error) {
 				return nil, errors.New("no marker directory")
 			},

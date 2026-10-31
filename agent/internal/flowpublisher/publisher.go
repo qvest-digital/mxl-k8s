@@ -60,8 +60,10 @@ type Publisher struct {
 	Lease LeaseRenewer
 
 	// IsOutput reports whether a flow is a redundancy set's output, which
-	// is not published as a location. Nil publishes every flow.
-	IsOutput func(ctx context.Context, domain, flowID string) bool
+	// is not published as a location. Nil publishes every flow. A flow
+	// it cannot answer for is not published; the promote pass of
+	// RunLocalRescan asks again while a writer holds the flow.
+	IsOutput func(ctx context.Context, domain, flowID string) (bool, error)
 
 	// WriterAttached reports whether a writer still holds the flow's
 	// directory on this node. Nil takes the flock probe in
@@ -178,9 +180,17 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	}
 	// A redundancy set's output is merged on each node it is read on and
 	// is never a location other nodes mirror from.
-	if p.IsOutput != nil && p.IsOutput(ctx, p.Domain, flowID) {
-		l.V(1).Info("ignoring redundancy set output", "flowID", flowID)
-		return nil
+	if p.IsOutput != nil {
+		isOutput, err := p.IsOutput(ctx, p.Domain, flowID)
+		if err != nil {
+			// No retry needed here: promoteStaleLocalOrigins calls this
+			// again on every rescan tick for a held flow with no MxlFlow.
+			return fmt.Errorf("look up redundancy set outputs for %s: %w", flowID, err)
+		}
+		if isOutput {
+			l.V(1).Info("ignoring redundancy set output", "flowID", flowID)
+			return nil
+		}
 	}
 
 	defPath := filepath.Join(p.DomainPath, dirName, FlowDefName)
