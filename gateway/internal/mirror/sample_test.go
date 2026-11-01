@@ -312,6 +312,40 @@ func TestRunSampleTransferLoop_CatchUpStaysInsideTheTargetWindow(t *testing.T) {
 	assert.Zero(t, tracker.skippedSnapshot(), "and none of it is skipped")
 }
 
+func TestRunSampleTransferLoop_FailingTransfersAgeOutInsteadOfExiting(t *testing.T) {
+	// Every transfer fails while the writer keeps producing. The loop
+	// keeps running and keeps the head moving; once the backlog leaves
+	// the readable window it is aged out like any other, and an aged-out
+	// source that completes nothing is ReaderAgedOut, which the flusher
+	// rebuilds. A loop that exits on its own instead takes every target
+	// of the flow down with it.
+	const xferBatch = 480
+	const window = uint64(48000)
+	var probes atomic.Uint64
+	probe := func() (uint64, error) { return probes.Add(xferBatch), nil }
+	transfer := func(uint64, int) error { return errors.New("endpoint is gone") }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	tracker := &recordingTracker{}
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil },
+		xferBatch, window, time.Millisecond, tracker)
+
+	require.Eventually(t, func() bool { _, aged := tracker.snapshot(); return aged > 0 }, 2*time.Second, time.Millisecond,
+		"a backlog past the readable window must be aged out")
+	// Well past the 400 ticks after which the loop used to exit.
+	time.Sleep(time.Second)
+	select {
+	case <-done:
+		t.Fatal("the loop exited on failing transfers")
+	default:
+	}
+	cancel()
+	<-done
+	transfers, _ := tracker.snapshot()
+	assert.Empty(t, transfers, "a failed transfer must never be recorded as offered")
+}
+
 func TestRunSampleTransferLoop_RecordsSkippedSamplesWhenLapped(t *testing.T) {
 	// The counter behind mxl_gateway_mirror_skipped_samples_total. It
 	// is the only signal separating "the target received this" from
