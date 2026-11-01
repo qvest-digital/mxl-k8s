@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.42](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.41...v1.1.0-rc.42) (2026-11-01)
+
+
+### Bug Fixes
+
+* **gateway:** offer audio batches once and drop sample-loop stall caps ([15a9717](https://github.com/qvest-digital/mxl-k8s/commit/15a971769c43e61b803febccfbdb388a30b573b4))
+
 ## [1.1.0-rc.41](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.40...v1.1.0-rc.41) (2026-10-31)
 
 
