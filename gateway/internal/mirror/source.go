@@ -1665,21 +1665,6 @@ func runSampleTransferLoop(
 	defer t.Stop()
 	// Throttles MakeProgress while it keeps failing; see progress.go.
 	var progress progressThrottle
-	// starved counts consecutive ticks in which the writer produced
-	// new samples but only a fraction of them landed. A wedged fabric
-	// connection does not refuse every chunk: the send queue drains
-	// one slot at a time, a thin trickle of small chunks lands, and
-	// the trickle resets any "delivered recently" signal while the
-	// loop ages out and skips the bulk of the flow. The starvation
-	// ratio is the trickle-proof signal: produced counts the head
-	// advance, delivered the samples actually accepted, and a tick
-	// that lands under a quarter of what the producer wrote is
-	// starved regardless of any partial success. Exiting lets
-	// headAdvancedAt go stale, which the flusher reads as
-	// ReaderNotAdvancing and rebuilds the source end to end -- fresh
-	// initiator, fresh connection.
-	starved := 0
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -1701,15 +1686,6 @@ func runSampleTransferLoop(
 			tracker.recordHead(head, time.Now())
 		}
 		if head > lastSent {
-			// produced is the whole delta since the last tick, taken
-			// before anything below narrows it. The starvation bound
-			// asks whether the loop is keeping up with the writer, so
-			// it has to see what the writer wrote -- not the smaller
-			// figure the per-tick pacing bound chose to attempt, which
-			// a trickle would satisfy while falling further behind
-			// every tick.
-			produced := head - lastSent
-
 			// Abandon samples only once they have left the readable
 			// window. Everything nearer is still on the ring, and a
 			// skipped sample range is not a gap the target can see: the
@@ -1743,7 +1719,6 @@ func runSampleTransferLoop(
 			// could take it and counts the skip for the one that could
 			// not. Calling again would hand the same samples a second
 			// time to every target that already has them.
-			delivered := uint64(0)
 			for lastSent < limit {
 				count := limit - lastSent
 				if xferBatch > 0 && count > xferBatch {
@@ -1754,23 +1729,10 @@ func runSampleTransferLoop(
 					logSampleTransferFailure(l, err, end, count)
 					break
 				}
-				delivered += count
 				if tracker != nil {
 					tracker.recordOffered(end, time.Now())
 				}
 				lastSent = end
-			}
-			if produced > 0 && delivered*4 < produced {
-				starved++
-				if starved >= maxSampleStarvedTicks {
-					l.Error(nil, "sample transfers starving; exiting so the source is rebuilt",
-						"starvedTicks", starved,
-						"produced", produced, "delivered", delivered,
-						"lastSent", lastSent, "head", head)
-					return
-				}
-			} else {
-				starved = 0
 			}
 		}
 
@@ -2675,27 +2637,6 @@ func (r *SourceReconciler) flowToMirrors(ctx context.Context, obj client.Object)
 //
 // The classification is logged alongside the error so an operator can
 // tell the two apart without reading libmxl's headers.
-// maxSampleStarvedTicks bounds how many consecutive ticks the sample
-// loop may land under a quarter of the samples the writer produced.
-// A wedged fabric connection does not refuse every chunk: its send
-// queue drains slowly enough that a trickle of chunks keeps landing,
-// which reads as delivery to every freshness-based signal while the
-// loop ages out and skips the bulk of the flow. A quarter is far
-// below anything a healthy mirror produces even under backpressure
-// -- the queue refutes whole chunks, not sample ranges within them --
-// so only a sustained trickle trips it. One batch period is ~10 ms of
-// audio, so the window is a few seconds of starvation: long enough to
-// ride out a burst, or a peer restarting, short enough that the
-// rebuild the exit triggers outruns an operator noticing.
-const maxSampleStarvedBatches = 200
-
-// maxSampleStarvedTicks is that same window counted in ticks. The loop
-// wakes sampleProgressOversample times per batch period, so the tick
-// bound has to scale with it: left as a bare count, shortening the tick
-// shortens the window with it, and the loop tears itself down partway
-// through a peer restart it was meant to ride out.
-const maxSampleStarvedTicks = maxSampleStarvedBatches * sampleProgressOversample
-
 // sampleCatchUpBatches is how many batches one tick may transfer. One
 // batch is real time, so four lets a mirror that fell behind close the
 // gap at three times real time, and it stays below the transfers a
