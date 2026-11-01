@@ -211,6 +211,62 @@ func TestRunSampleTransferLoop_StillSkipsWhenGenuinelyLapped(t *testing.T) {
 	<-done
 }
 
+// fanoutSampleInitiator stands in for an initiator with two targets,
+// answering TransferSamples the way libmxl-fabrics does: the batch is
+// offered to every target, and a target that cannot take it skips it
+// and reports not-ready after the others have it. The healthy target
+// takes every batch; the other one refuses every batch.
+type fanoutSampleInitiator struct {
+	mu      sync.Mutex
+	healthy []sampleXfer
+}
+
+func (f *fanoutSampleInitiator) transferSamples(head uint64, count int) error {
+	f.mu.Lock()
+	f.healthy = append(f.healthy, sampleXfer{head, count})
+	f.mu.Unlock()
+	return fabrics.ErrNotReady
+}
+
+func (f *fanoutSampleInitiator) received() []sampleXfer {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]sampleXfer(nil), f.healthy...)
+}
+
+func TestRunSampleTransferLoop_OffersEachBatchToEveryTargetOnce(t *testing.T) {
+	// One target of an audio flow refuses every batch. A not-ready
+	// answer says that target skipped the batch, not that none got it:
+	// retrying the call hands the same batch again to the target that
+	// already took it. Its target then commits the same samples twice,
+	// as audio.
+	const xferBatch = 480
+	var probes atomic.Uint64
+	probe := func() (uint64, error) { return 1000 + probes.Add(xferBatch), nil }
+	in := &fanoutSampleInitiator{}
+	tr := &recordingSampleTracker{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go runSampleTransferLoop(ctx, done, "f", probe, in.transferSamples, func() error { return nil }, func() error { return nil },
+		xferBatch, testReadableWindow, time.Millisecond, tr)
+
+	require.Eventually(t, func() bool { return len(in.received()) >= 40 }, 3*time.Second, time.Millisecond,
+		"the healthy target received nothing")
+	cancel()
+	<-done
+
+	got := in.received()
+	for i := 1; i < len(got); i++ {
+		require.Equalf(t, got[i-1].head+uint64(got[i].count), got[i].head,
+			"batch %d: the healthy target received %v after %v; every batch must reach it once, in order",
+			i, got[i], got[i-1])
+	}
+	assert.Equal(t, len(got), tr.transfers(),
+		"a batch one target skipped still counts as offered")
+	assert.Zero(t, tr.agedOut(), "a skipping target is not a reader that fell behind")
+}
+
 // recordingSampleTracker counts what the sample loop reports.
 type recordingSampleTracker struct {
 	mu    sync.Mutex
