@@ -1664,10 +1664,7 @@ func runSampleTransferLoop(
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	// Throttles MakeProgress while it keeps failing; see progress.go.
-	// Two of them: one for the per-tick call, one for the call between
-	// chunks. They fire at different rates and a shared failure history
-	// would back the tick off for a chunk's sake.
-	var progress, chunkProgress progressThrottle
+	var progress progressThrottle
 	// starved counts consecutive ticks in which the writer produced
 	// new samples but only a fraction of them landed. A wedged fabric
 	// connection does not refuse every chunk: the send queue drains
@@ -1740,23 +1737,11 @@ func runSampleTransferLoop(
 			if catchUp > 0 && head-lastSent > catchUp {
 				limit = lastSent + catchUp
 			}
-			// A chunk that comes back not-ready is backpressure, not a
-			// failure: libmxl-fabrics reports the initiator's send
-			// queue being full as EAGAIN, which surfaces here as
-			// fabrics.ErrNotReady. The queue drains on MakeProgress, so
-			// the chunk is retried after driving it rather than
-			// abandoned until the next tick.
-			//
-			// Retries reap, they do not park. Nothing that blocks
-			// belongs inside a tick that owes real time: the tick is one
-			// batch of audio, so a blocking MakeProgress inside it makes
-			// the loop take two ticks to deliver one, and a loop running
-			// at half real time falls behind a live producer for good.
-			// A completion that has crossed a microsecond of fabric is
-			// already there for a non-blocking poll, and one that is not
-			// will be by the next tick, with the samples still owed
-			// because lastSent did not move.
-			retries := 0
+			// A not-ready batch counts as offered, as a grain does (see
+			// offered): libmxl-fabrics has given it to every target that
+			// could take it and counts the skip for the one that could
+			// not. Calling again would hand the same samples a second
+			// time to every target that already has them.
 			delivered := uint64(0)
 			deadline := time.Now().Add(interval)
 			for lastSent < limit {
@@ -1765,18 +1750,10 @@ func runSampleTransferLoop(
 					count = xferBatch
 				}
 				end := lastSent + count
-				err := transferSamples(end, int(count))
-				if err != nil {
-					if classifyFabricError(err) == fabricIdle && retries < maxSampleTransferRetries &&
-						time.Now().Before(deadline) {
-						retries++
-						chunkProgress.runProgress(reapProgress, func(perr error) { logProgressFailure(l, perr) })
-						continue
-					}
+				if err := offered(transferSamples(end, int(count))); err != nil {
 					logSampleTransferFailure(l, err, end, count)
 					break
 				}
-				retries = 0
 				delivered += count
 				if tracker != nil {
 					tracker.recordOffered(end, time.Now())
@@ -2746,14 +2723,6 @@ func (r *SourceReconciler) flowToMirrors(ctx context.Context, obj client.Object)
 //
 // The classification is logged alongside the error so an operator can
 // tell the two apart without reading libmxl's headers.
-// maxSampleTransferRetries bounds how many times one chunk is retried
-// against a full send queue within a single tick. Each retry drives
-// MakeProgress first, so the bound is what stops a genuinely wedged
-// fabric from spinning the tick instead of yielding to the next one,
-// where the head is re-read and the wedge becomes visible as a stalled
-// lastSent.
-const maxSampleTransferRetries = 8
-
 // maxSampleStarvedTicks bounds how many consecutive ticks the sample
 // loop may land under a quarter of the samples the writer produced.
 // A wedged fabric connection does not refuse every chunk: its send
@@ -2882,10 +2851,10 @@ func progressFuncFor(initiator progressDriver, provider fabrics.Provider) Progre
 }
 
 // logSampleTransferFailure renders a TransferSamples failure at a level
-// that matches what it means. A full send queue that outlived its
-// retries is congestion the next tick will pick up, and a disturbed
-// call is one the handles survive; neither is worth an error line per
-// occurrence on a flow that transfers hundreds of times a second.
+// that matches what it means. A disturbed call is one the handles
+// survive, which is not worth an error line per occurrence on a flow
+// that transfers hundreds of times a second. A not-ready answer never
+// gets here: the loop counts it as offered.
 func logSampleTransferFailure(l logr.Logger, err error, end, count uint64) {
 	kind := classifyFabricError(err)
 	switch kind {
