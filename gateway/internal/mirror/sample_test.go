@@ -284,6 +284,130 @@ func TestRunSampleTransferLoop_ReapsBetweenChunksWithoutBlocking(t *testing.T) {
 	assert.Zero(t, blocks, "the blocking MakeProgress must not be what paces the chunks")
 }
 
+func TestRunSampleTransferLoop_PostsTheCatchUpWhileTransfersAreOutstanding(t *testing.T) {
+	// A four-batch backlog goes out in the tick it is owed in, while
+	// the initiator still reports earlier transfers outstanding.
+	// libmxl-fabrics bounds what a target holds in flight itself (its
+	// window, at most half the receives the target keeps posted), so
+	// the loop has nothing to wait for between chunks; waiting for each
+	// chunk to settle first drained a backlog at one chunk per tick.
+	const xferBatch = 480
+	var probes atomic.Int32
+	probe := func() (uint64, error) {
+		if probes.Add(1) == 1 {
+			return 0, nil
+		}
+		return 4 * xferBatch, nil
+	}
+	var mu sync.Mutex
+	var seq []string
+	var probesAt []int32
+	note := func(what string) {
+		mu.Lock()
+		seq = append(seq, what)
+		if what == "xfer" {
+			probesAt = append(probesAt, probes.Load())
+		}
+		mu.Unlock()
+	}
+	transfer := func(uint64, int) error { note("xfer"); return nil }
+	outstanding := func() error { note("progress"); return fabrics.ErrNotReady }
+	snap := func() ([]string, []int32) {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), seq...), append([]int32(nil), probesAt...)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, outstanding, outstanding,
+		xferBatch, testReadableWindow, 5*time.Millisecond, &recordingTracker{})
+
+	require.Eventually(t, func() bool { _, at := snap(); return len(at) >= 4 }, 2*time.Second, time.Millisecond,
+		"the four-batch backlog must be transferred")
+	cancel()
+	<-done
+
+	got, at := snap()
+	assert.Equal(t, []int32{2, 2, 2, 2}, at[:4],
+		"all four batches must be posted in the first tick after attach")
+	assert.Equal(t, []string{"xfer", "xfer", "xfer", "xfer"}, got[:4],
+		"nothing may run between the chunks of a tick")
+}
+
+func TestRunSampleTransferLoop_CatchUpStaysInsideTheTargetWindow(t *testing.T) {
+	// libmxl-fabrics skips a batch for a target that already holds
+	// MaxTransfersInFlight batches, and a skipped batch is a hole the
+	// target fills with stale ring content. The per-tick catch-up bound
+	// is what keeps a backlog as deep as the readable window from being
+	// posted past that window in one tick. The fake completes what is
+	// in flight only when the loop drives progress, at the end of a
+	// tick, which is the most a tick can rely on.
+	const xferBatch = 480
+	const window = uint64(48000)
+	backlog := window - xferBatch - 1
+	require.LessOrEqual(t, sampleCatchUpBatches, fabrics.MaxTransfersInFlight)
+
+	var probes atomic.Int32
+	probe := func() (uint64, error) {
+		if probes.Add(1) == 1 {
+			return 0, nil
+		}
+		return backlog, nil
+	}
+	var mu sync.Mutex
+	var inFlight, maxInFlight, windowSkips int
+	var heads []uint64
+	transfer := func(head uint64, _ int) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if inFlight >= fabrics.MaxTransfersInFlight {
+			windowSkips++
+			return nil
+		}
+		inFlight++
+		maxInFlight = max(maxInFlight, inFlight)
+		heads = append(heads, head)
+		return nil
+	}
+	complete := func() error {
+		mu.Lock()
+		inFlight = 0
+		mu.Unlock()
+		return nil
+	}
+	sent := func() uint64 {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(heads) == 0 {
+			return 0
+		}
+		return heads[len(heads)-1]
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	tracker := &recordingTracker{}
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, complete, complete,
+		xferBatch, window, time.Millisecond, tracker)
+
+	require.Eventually(t, func() bool { return sent() == backlog }, 5*time.Second, time.Millisecond,
+		"the whole backlog must be transferred")
+	cancel()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Zero(t, windowSkips, "no batch may be posted past the target's window")
+	assert.LessOrEqual(t, maxInFlight, sampleCatchUpBatches)
+	for i := 1; i < len(heads); i++ {
+		require.LessOrEqualf(t, heads[i]-heads[i-1], uint64(xferBatch), "batch %d: a gap in the catch-up", i)
+	}
+	_, agedOuts := tracker.snapshot()
+	assert.Zero(t, agedOuts, "a backlog inside the readable window is not aged out")
+	assert.Zero(t, tracker.skippedSnapshot(), "and none of it is skipped")
+}
+
 func TestRunSampleTransferLoop_RecordsSkippedSamplesWhenLapped(t *testing.T) {
 	// The counter behind mxl_gateway_mirror_skipped_samples_total. It
 	// is the only signal separating "the target received this" from
