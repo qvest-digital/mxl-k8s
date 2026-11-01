@@ -143,8 +143,10 @@ func TestRunSampleTransferLoop_OffersEachBatchToEveryTargetOnce(t *testing.T) {
 	// One target of an audio flow refuses every batch. A not-ready
 	// answer says that target skipped the batch, not that none got it:
 	// retrying the call hands the same batch again to the target that
-	// already took it. Its target then commits the same samples twice,
-	// as audio.
+	// already took it. That target drops the repeat, but every repeat
+	// write takes a slot of its 16-transfer window and a posted
+	// receive, so it skips real batches and plays stale ring content
+	// in their place.
 	const xferBatch = 480
 	var probes atomic.Uint64
 	probe := func() (uint64, error) { return 1000 + probes.Add(xferBatch), nil }

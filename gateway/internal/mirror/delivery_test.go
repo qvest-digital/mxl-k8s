@@ -127,8 +127,9 @@ func TestRunFlusher_ReaddsOnlyTheSampleTargetThatStopsCompleting(t *testing.T) {
 	done := make(chan struct{})
 	var head atomic.Uint64
 	probe := func() (uint64, error) { return head.Add(240), nil }
-	// The stalled target's window is full, so libmxl-fabrics skips the
-	// batch for it and answers not-ready once the healthy one has it.
+	// The stalled target's send queue is full, so libmxl-fabrics skips
+	// the batch for it and answers not-ready once the healthy one has
+	// it. A full window alone skips without an error.
 	transfer := func(uint64, int) error { return fabrics.ErrNotReady }
 	go runSampleTransferLoop(ctx, done, "flow-1", probe, transfer, func() error { return nil }, func() error { return nil },
 		480, testReadableWindow, 5*time.Millisecond, s)
