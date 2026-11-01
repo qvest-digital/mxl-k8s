@@ -98,6 +98,54 @@ func TestRunFlusher_ReaddsOnlyTheTargetThatStopsCompleting(t *testing.T) {
 	assert.False(t, healthy.dropped.Load(), "a target that keeps completing was re-added")
 }
 
+// The sample path has the same rule: a sample target that stops
+// completing while its source keeps producing is re-added on its own,
+// and the sample loop keeps running for the other target.
+func TestRunFlusher_ReaddsOnlyTheSampleTargetThatStopsCompleting(t *testing.T) {
+	f := newFanoutFixture(t,
+		fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderVerbs),
+		fanoutMirror("m2", "flow-1", "node-c", "info-c", mxlv1alpha1.ProviderVerbs),
+	)
+	f.r.FlushInterval = 5 * time.Millisecond
+	f.r.deliveryStall = 80 * time.Millisecond
+	f.opener.setState(stateFor(f.opener, "none", fabrics.TargetConnected))
+	var completed atomic.Uint64
+	f.opener.setStats(func(info *fabrics.TargetInfo) (fabrics.TargetStats, error) {
+		if f.opener.nameOf(info) == "info-b" {
+			return fabrics.TargetStats{Posted: 16, InFlight: 16, LastCompletedIndex: fabrics.NoIndex}, nil
+		}
+		n := completed.Add(1)
+		return fabrics.TargetStats{Posted: n, Completed: n, LastCompletedIndex: n}, nil
+	})
+	f.reconcile(t, "m1")
+	f.reconcile(t, "m2")
+	s := f.sharedFor("flow-1", fabrics.ProviderVerbs)
+	require.NotNil(t, s)
+	stalled, healthy := f.entry("m1"), f.entry("m2")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var head atomic.Uint64
+	probe := func() (uint64, error) { return head.Add(240), nil }
+	// The stalled target's send queue is full, so libmxl-fabrics skips
+	// the batch for it and answers not-ready once the healthy one has
+	// it. A full window alone skips without an error.
+	transfer := func(uint64, int) error { return fabrics.ErrNotReady }
+	go runSampleTransferLoop(ctx, done, "flow-1", probe, transfer, func() error { return nil }, func() error { return nil },
+		480, testReadableWindow, 5*time.Millisecond, s)
+	defer func() { cancel(); <-done }()
+
+	require.Eventually(t, stalled.dropped.Load, 2*time.Second, 5*time.Millisecond,
+		"a connected sample target that completed nothing while the head advanced was kept")
+	time.Sleep(4 * f.r.deliveryStall)
+	assert.False(t, healthy.dropped.Load(), "a sample target that keeps completing was re-added")
+	select {
+	case <-done:
+		t.Fatal("the sample loop exited; the healthy target lost its transfers")
+	default:
+	}
+}
+
 // A producer whose head moves over nothing but invalid grains, as a
 // merge output with every member down does, offers nothing to the
 // initiator and so leaves nothing to complete. The flusher read the

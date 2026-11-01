@@ -15,70 +15,10 @@ import (
 	"github.com/qvest-digital/go-mxl/mxl"
 )
 
-// The sample loop's failure mode on a busy fabric was a livelock rather
-// than a stall: TransferSamples returned not-ready because the send
-// queue was full, the loop abandoned the chunk until the next tick, the
-// producer kept writing, and once the gap passed the readable window
-// the loop skipped samples and published ReaderAgedOut. Observed on a
-// live deployment as a mirror pinned at ReaderAgedOut + NoGrains while
-// its reader was healthy, which the reader-reopen watchdog could not
-// fix because the reader was never the broken part.
-
-func TestRunSampleTransferLoop_RetriesAFullSendQueueWithinTheTick(t *testing.T) {
-	// Discriminates on tick count, not wall clock: the loop probes the
-	// head exactly once per tick, plus once at attach. Retrying in place
-	// means the chunk lands during the first tick, so the probe count
-	// stands at 2 when it does. Abandoning the chunk until the next tick
-	// would need one tick per refusal and leave the count at 4.
-	var probes atomic.Int32
-	probe := func() (uint64, error) {
-		if probes.Add(1) == 1 {
-			return 1000, nil
-		}
-		return 1480, nil
-	}
-
-	var mu sync.Mutex
-	var attempts int
-	probesAtFirstSend := int32(-1)
-	transfer := func(_ uint64, _ int) error {
-		mu.Lock()
-		defer mu.Unlock()
-		attempts++
-		if attempts <= 2 {
-			return fabrics.ErrNotReady
-		}
-		if probesAtFirstSend < 0 {
-			probesAtFirstSend = probes.Load()
-		}
-		return nil
-	}
-	var progressCalls atomic.Int32
-	progress := func() error { progressCalls.Add(1); return nil }
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go runSampleTransferLoop(ctx, done, "f", probe, transfer, progress, func() error { return nil },
-		480, testReadableWindow, time.Millisecond, nil)
-
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return probesAtFirstSend >= 0
-	}, 2*time.Second, time.Millisecond, "the chunk never landed at all")
-
-	cancel()
-	<-done
-
-	mu.Lock()
-	got := probesAtFirstSend
-	mu.Unlock()
-	assert.Equalf(t, int32(2), got,
-		"a chunk refused for a full queue must be retried inside the same tick; "+
-			"probe count %d means it waited for a later tick", got)
-	assert.Positive(t, progressCalls.Load(),
-		"the retry must drive MakeProgress, which is what drains the queue")
-}
+// A not-ready TransferSamples means a target of the initiator skipped
+// the batch; the others have it. The loop counts the batch as offered
+// and moves on, so backpressure on one target neither holds the
+// samples back from the rest nor reads as a reader that fell behind.
 
 func TestRunSampleTransferLoop_BackpressureDoesNotReportReaderAgedOut(t *testing.T) {
 	// The producer writes one chunk per tick and the send queue refuses
@@ -117,44 +57,9 @@ func TestRunSampleTransferLoop_BackpressureDoesNotReportReaderAgedOut(t *testing
 			"out of its window; got %d aged-out reports", tr.agedOut())
 }
 
-func TestRunSampleTransferLoop_BoundsRetriesSoAWedgedFabricYieldsTheTick(t *testing.T) {
-	// A permanently full queue must not spin inside one tick. The loop
-	// has to give up on the chunk and come back on the next tick, where
-	// the head is re-read and the stall becomes visible.
-	var probes atomic.Uint64
-	probe := func() (uint64, error) {
-		if probes.Add(1) == 1 {
-			return 1000, nil
-		}
-		return 1480, nil
-	}
-	var attempts atomic.Int32
-	transfer := func(uint64, int) error {
-		attempts.Add(1)
-		return fabrics.ErrNotReady
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go runSampleTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil }, func() error { return nil },
-		480, testReadableWindow, 20*time.Millisecond, nil)
-
-	// Two ticks' worth of time. With the bound, attempts stay near
-	// 2 * (1 + maxSampleTransferRetries); without it the loop would
-	// spin on the first tick and the count would run away.
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-	<-done
-
-	n := attempts.Load()
-	assert.Positive(t, n)
-	assert.Lessf(t, n, int32(200),
-		"a permanently full queue must yield the tick, got %d attempts", n)
-}
-
 func TestRunSampleTransferLoop_NonIdleErrorBreaksImmediately(t *testing.T) {
-	// Only a full queue earns a retry. A real failure must not be
-	// retried eight times per tick against a fabric that cannot serve it.
+	// A real failure ends the tick's chunk loop at once; the next tick
+	// re-reads the head and tries again.
 	var probes atomic.Uint64
 	probe := func() (uint64, error) {
 		if probes.Add(1) == 1 {
@@ -209,6 +114,64 @@ func TestRunSampleTransferLoop_StillSkipsWhenGenuinelyLapped(t *testing.T) {
 		"a producer that lapped the readable window is still ReaderAgedOut")
 	cancel()
 	<-done
+}
+
+// fanoutSampleInitiator stands in for an initiator with two targets,
+// answering TransferSamples the way libmxl-fabrics does: the batch is
+// offered to every target, and a target that cannot take it skips it
+// and reports not-ready after the others have it. The healthy target
+// takes every batch; the other one refuses every batch.
+type fanoutSampleInitiator struct {
+	mu      sync.Mutex
+	healthy []sampleXfer
+}
+
+func (f *fanoutSampleInitiator) transferSamples(head uint64, count int) error {
+	f.mu.Lock()
+	f.healthy = append(f.healthy, sampleXfer{head, count})
+	f.mu.Unlock()
+	return fabrics.ErrNotReady
+}
+
+func (f *fanoutSampleInitiator) received() []sampleXfer {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]sampleXfer(nil), f.healthy...)
+}
+
+func TestRunSampleTransferLoop_OffersEachBatchToEveryTargetOnce(t *testing.T) {
+	// One target of an audio flow refuses every batch. A not-ready
+	// answer says that target skipped the batch, not that none got it:
+	// retrying the call hands the same batch again to the target that
+	// already took it. That target drops the repeat, but every repeat
+	// write takes a slot of its 16-transfer window and a posted
+	// receive, so it skips real batches and plays stale ring content
+	// in their place.
+	const xferBatch = 480
+	var probes atomic.Uint64
+	probe := func() (uint64, error) { return 1000 + probes.Add(xferBatch), nil }
+	in := &fanoutSampleInitiator{}
+	tr := &recordingSampleTracker{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go runSampleTransferLoop(ctx, done, "f", probe, in.transferSamples, func() error { return nil }, func() error { return nil },
+		xferBatch, testReadableWindow, time.Millisecond, tr)
+
+	require.Eventually(t, func() bool { return len(in.received()) >= 40 }, 3*time.Second, time.Millisecond,
+		"the healthy target received nothing")
+	cancel()
+	<-done
+
+	got := in.received()
+	for i := 1; i < len(got); i++ {
+		require.Equalf(t, got[i-1].head+uint64(got[i].count), got[i].head,
+			"batch %d: the healthy target received %v after %v; every batch must reach it once, in order",
+			i, got[i], got[i-1])
+	}
+	assert.Equal(t, len(got), tr.transfers(),
+		"a batch one target skipped still counts as offered")
+	assert.Zero(t, tr.agedOut(), "a skipping target is not a reader that fell behind")
 }
 
 // recordingSampleTracker counts what the sample loop reports.

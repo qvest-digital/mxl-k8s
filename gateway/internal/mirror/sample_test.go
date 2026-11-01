@@ -188,100 +188,162 @@ func TestRunSampleTransferLoop_CatchesUpInsideTheWindowRatherThanSkipping(t *tes
 	assert.Zero(t, tracker.skippedSnapshot(), "and nothing may be recorded as skipped")
 }
 
-// The pacing that keeps a multi-chunk tick from putting its writes on
-// the wire back to back. libmxl-fabrics gives an initiator an
-// eight-entry completion queue with no way to raise it, and the sample
-// ingress protocol keeps one posted receive, so a backlog drained
-// without reaping between chunks outruns both.
-//
-// The reap has to be the non-blocking call. The blocking one parks for
-// its whole timeout when nothing has landed, and that timeout is the
-// tick: pacing with it costs a tick per chunk, so the loop delivers one
-// batch per two ticks -- half real time -- and falls permanently behind
-// a live producer. That regression is what the timing assertion here
-// catches; the blocking stub sleeps like the real one.
-func TestRunSampleTransferLoop_ReapsBetweenChunksWithoutBlocking(t *testing.T) {
+func TestRunSampleTransferLoop_PostsTheCatchUpWhileTransfersAreOutstanding(t *testing.T) {
+	// A four-batch backlog goes out in the tick it is owed in, while
+	// the initiator still reports earlier transfers outstanding.
+	// libmxl-fabrics bounds what a target holds in flight itself (its
+	// window, at most half the receives the target keeps posted), so
+	// the loop has nothing to wait for between chunks; waiting for each
+	// chunk to settle first drained a backlog at one chunk per tick.
 	const xferBatch = 480
-	const tick = 5 * time.Millisecond
-	var probeCalls atomic.Int32
+	var probes atomic.Int32
 	probe := func() (uint64, error) {
-		if probeCalls.Add(1) == 1 {
+		if probes.Add(1) == 1 {
 			return 0, nil
 		}
-		return 1920, nil
+		return 4 * xferBatch, nil
 	}
-
 	var mu sync.Mutex
 	var seq []string
+	var probesAt []int32
 	note := func(what string) {
 		mu.Lock()
 		seq = append(seq, what)
+		if what == "xfer" {
+			probesAt = append(probesAt, probes.Load())
+		}
 		mu.Unlock()
 	}
 	transfer := func(uint64, int) error { note("xfer"); return nil }
-	// Blocking, exactly like progressFuncFor returns for verbs.
-	blocking := func() error { note("block"); time.Sleep(tick); return nil }
-	reap := func() error { note("reap"); return nil }
-	seqSnap := func() []string {
+	outstanding := func() error { note("progress"); return fabrics.ErrNotReady }
+	snap := func() ([]string, []int32) {
 		mu.Lock()
 		defer mu.Unlock()
-		return append([]string(nil), seq...)
-	}
-	countXfer := func() int {
-		n := 0
-		for _, s := range seqSnap() {
-			if s == "xfer" {
-				n++
-			}
-		}
-		return n
+		return append([]string(nil), seq...), append([]int32(nil), probesAt...)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	started := time.Now()
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, blocking, reap,
-		xferBatch, testReadableWindow, tick, &recordingTracker{})
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, outstanding, outstanding,
+		xferBatch, testReadableWindow, 5*time.Millisecond, &recordingTracker{})
 
-	require.Eventually(t, func() bool { return countXfer() >= 4 }, 2*time.Second, time.Millisecond,
+	require.Eventually(t, func() bool { _, at := snap(); return len(at) >= 4 }, 2*time.Second, time.Millisecond,
 		"the four-batch backlog must be transferred")
-	elapsed := time.Since(started)
 	cancel()
 	<-done
 
-	// Four chunks paced with the blocking call would cost at least four
-	// ticks of sleeping on top of the tick they start on.
-	assert.Less(t, elapsed, 4*tick,
-		"the backlog must clear inside a tick or two; pacing with the blocking call would take at least four")
+	got, at := snap()
+	assert.Equal(t, []int32{2, 2, 2, 2}, at[:4],
+		"all four batches must be posted in the first tick after attach")
+	assert.Equal(t, []string{"xfer", "xfer", "xfer", "xfer"}, got[:4],
+		"nothing may run between the chunks of a tick")
+}
 
-	// And no blocking call may appear between the first and the fourth
-	// chunk -- only reaps.
-	snap := seqSnap()
-	var first, fourth, seen int
-	for i, s := range snap {
-		if s == "xfer" {
-			seen++
-			if seen == 1 {
-				first = i
-			}
-			if seen == 4 {
-				fourth = i
-				break
-			}
+func TestRunSampleTransferLoop_CatchUpStaysInsideTheTargetWindow(t *testing.T) {
+	// libmxl-fabrics skips a batch for a target that already holds
+	// MaxTransfersInFlight batches, and a skipped batch is a hole the
+	// target fills with stale ring content. The per-tick catch-up bound
+	// is what keeps a backlog as deep as the readable window from being
+	// posted past that window in one tick. The fake completes what is
+	// in flight only when the loop drives progress, at the end of a
+	// tick, which is the most a tick can rely on.
+	const xferBatch = 480
+	const window = uint64(48000)
+	backlog := window - xferBatch - 1
+	require.LessOrEqual(t, sampleCatchUpBatches, fabrics.MaxTransfersInFlight)
+
+	var probes atomic.Int32
+	probe := func() (uint64, error) {
+		if probes.Add(1) == 1 {
+			return 0, nil
 		}
+		return backlog, nil
 	}
-	require.Equal(t, 4, seen)
-	var reaps, blocks int
-	for _, s := range snap[first:fourth] {
-		switch s {
-		case "reap":
-			reaps++
-		case "block":
-			blocks++
+	var mu sync.Mutex
+	var inFlight, maxInFlight, windowSkips int
+	var heads []uint64
+	transfer := func(head uint64, _ int) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if inFlight >= fabrics.MaxTransfersInFlight {
+			windowSkips++
+			return nil
 		}
+		inFlight++
+		maxInFlight = max(maxInFlight, inFlight)
+		heads = append(heads, head)
+		return nil
 	}
-	assert.GreaterOrEqual(t, reaps, 3, "every chunk but the last must be followed by a reap")
-	assert.Zero(t, blocks, "the blocking MakeProgress must not be what paces the chunks")
+	complete := func() error {
+		mu.Lock()
+		inFlight = 0
+		mu.Unlock()
+		return nil
+	}
+	sent := func() uint64 {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(heads) == 0 {
+			return 0
+		}
+		return heads[len(heads)-1]
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	tracker := &recordingTracker{}
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, complete, complete,
+		xferBatch, window, time.Millisecond, tracker)
+
+	require.Eventually(t, func() bool { return sent() == backlog }, 5*time.Second, time.Millisecond,
+		"the whole backlog must be transferred")
+	cancel()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Zero(t, windowSkips, "no batch may be posted past the target's window")
+	assert.LessOrEqual(t, maxInFlight, sampleCatchUpBatches)
+	for i := 1; i < len(heads); i++ {
+		require.LessOrEqualf(t, heads[i]-heads[i-1], uint64(xferBatch), "batch %d: a gap in the catch-up", i)
+	}
+	_, agedOuts := tracker.snapshot()
+	assert.Zero(t, agedOuts, "a backlog inside the readable window is not aged out")
+	assert.Zero(t, tracker.skippedSnapshot(), "and none of it is skipped")
+}
+
+func TestRunSampleTransferLoop_FailingTransfersAgeOutInsteadOfExiting(t *testing.T) {
+	// Every transfer fails while the writer keeps producing. The loop
+	// keeps running and keeps the head moving; once the backlog leaves
+	// the readable window it is aged out like any other, and an aged-out
+	// source that completes nothing is ReaderAgedOut, which the flusher
+	// rebuilds. A loop that exits on its own instead takes every target
+	// of the flow down with it.
+	const xferBatch = 480
+	const window = uint64(48000)
+	var probes atomic.Uint64
+	probe := func() (uint64, error) { return probes.Add(xferBatch), nil }
+	transfer := func(uint64, int) error { return errors.New("endpoint is gone") }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	tracker := &recordingTracker{}
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil },
+		xferBatch, window, time.Millisecond, tracker)
+
+	require.Eventually(t, func() bool { _, aged := tracker.snapshot(); return aged > 0 }, 2*time.Second, time.Millisecond,
+		"a backlog past the readable window must be aged out")
+	// Well past the 400 ticks after which the loop used to exit.
+	time.Sleep(time.Second)
+	select {
+	case <-done:
+		t.Fatal("the loop exited on failing transfers")
+	default:
+	}
+	cancel()
+	<-done
+	transfers, _ := tracker.snapshot()
+	assert.Empty(t, transfers, "a failed transfer must never be recorded as offered")
 }
 
 func TestRunSampleTransferLoop_RecordsSkippedSamplesWhenLapped(t *testing.T) {
@@ -377,140 +439,6 @@ func TestRunSampleTransferLoop_NeverBurstsBeyondCatchUpPerTick(t *testing.T) {
 	// afterwards nothing more transfers.
 	assert.LessOrEqualf(t, len(snap), 5,
 		"a frozen head must not produce further transfers, got %d", len(snap))
-}
-
-func TestRunSampleTransferLoop_ExitsAfterSustainedStarvation(t *testing.T) {
-	// A wedged fabric connection refuses most chunks while the writer
-	// keeps producing: a live loop keeps probing the head, so the
-	// flusher's stale-head watchdog never fires, and the occasional
-	// chunk that does land reads as delivery to every freshness-based
-	// signal. The loop must stop after maxSampleStarvedTicks
-	// consecutive ticks under a quarter of the produced samples
-	// rather than skip-retrying forever. Exiting stops the head
-	// probes, which the flusher reads as ReaderNotAdvancing and
-	// rebuilds the source end to end.
-	const xferBatch = 480
-	var probes atomic.Uint64
-	probe := func() (uint64, error) {
-		// The head advances one batch per tick so every tick finds
-		// new samples to starve.
-		return probes.Add(xferBatch), nil
-	}
-	transfer := func(uint64, int) error {
-		return fabrics.ErrNotReady
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil }, xferBatch, testReadableWindow, time.Millisecond, tracker)
-
-	select {
-	case <-done:
-		// The loop exited on its own: the starvation bound fired.
-	case <-time.After(5 * time.Second):
-		t.Fatal("loop did not exit under sustained starvation; the wedge would persist forever")
-	}
-
-	// Every tick refused, so nothing landed and the loop kept
-	// skipping: the exit must not have recorded a transfer.
-	transfers, _ := tracker.snapshot()
-	assert.Empty(t, transfers, "a refused queue must never be recorded as delivered")
-	// The head probes ran for at least the bound's worth of ticks
-	// before the exit, proving the loop tolerated the full window
-	// before giving up rather than exiting on the first refusal.
-	assert.GreaterOrEqual(t, probes.Load(), uint64(maxSampleStarvedTicks*xferBatch),
-		"the loop must tolerate the whole starvation window before exiting")
-}
-
-func TestRunSampleTransferLoop_StarvationResetsOnDelivery(t *testing.T) {
-	// A busy queue that intermittently refuses but delivers most of
-	// what the writer produces must run forever: the exit bound
-	// counts only consecutive starved ticks, and a tick that lands
-	// at least a quarter of the produced samples is not starved.
-	const xferBatch = 480
-	var probes atomic.Uint64
-	var calls atomic.Int32
-	probe := func() (uint64, error) {
-		return probes.Add(xferBatch), nil
-	}
-	transfer := func(uint64, int) error {
-		// Refuse heavily, but land every few attempts: each landed
-		// chunk empties the tick's delta, so the delivered fraction
-		// is far above the starvation threshold.
-		if calls.Add(1)%10 != 0 {
-			return fabrics.ErrNotReady
-		}
-		return nil
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil }, xferBatch, testReadableWindow, time.Millisecond, tracker)
-
-	// Far longer than the starvation window: if the counter were not
-	// reset by deliveries the loop would have exited inside it.
-	time.Sleep(2 * time.Second)
-	select {
-	case <-done:
-		t.Fatal("loop exited despite regular deliveries; the starvation counter is not reset on delivery")
-	default:
-	}
-	cancel()
-	<-done
-	transfers, _ := tracker.snapshot()
-	assert.NotEmpty(t, transfers, "an intermittently delivering queue must have landed chunks")
-}
-
-func TestRunSampleTransferLoop_TrickleDeliveryStillStarves(t *testing.T) {
-	// The wedge that defeats every freshness-based signal: the send
-	// queue drains one slot at a time, so a thin trickle of chunks
-	// lands while the bulk of each tick's production is aged out and
-	// skipped. A loop that exited only on total refusal -- or reset
-	// its bound on any delivery -- pins the wedge forever, because
-	// the trickle reads as delivery. The starvation ratio must count
-	// the samples the writer produced, before the skip folds the
-	// delta: one landing in eight is a starvation even though the
-	// folded delta is half delivered.
-	const xferBatch = 480
-	var probes atomic.Uint64
-	var calls atomic.Int32
-	probe := func() (uint64, error) {
-		// The head advances eight batches per tick, like a loop that
-		// spent the tick's budget retrying against a full queue.
-		return probes.Add(8 * xferBatch), nil
-	}
-	transfer := func(uint64, int) error {
-		// Land one call in ten -- the first chunk of a tick plus
-		// never a retry -- so every tick delivers one batch of the
-		// eight produced and every retry is refused, the shape of a
-		// send queue that frees a single slot per tick.
-		if calls.Add(1)%10 == 1 {
-			return nil
-		}
-		return fabrics.ErrNotReady
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil }, xferBatch, testReadableWindow, time.Millisecond, tracker)
-
-	select {
-	case <-done:
-		// The loop exited on its own: the trickle did not read as
-		// healthy against the true production.
-	case <-time.After(5 * time.Second):
-		t.Fatal("loop did not exit under trickle delivery; the wedge would persist forever")
-	}
-
-	transfers, _ := tracker.snapshot()
-	assert.NotEmpty(t, transfers, "the trickle landed chunks before the exit")
-	assert.LessOrEqual(t, len(transfers), maxSampleStarvedTicks,
-		"the loop must stop delivering the trickle once the bound fires")
 }
 
 func TestRunSampleTransferLoop_TransferErrorBreaksTickAndRetries(t *testing.T) {

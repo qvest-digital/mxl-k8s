@@ -2,9 +2,9 @@
 # Assert audio samples keep flowing across the fabric at delivery
 # rate after the target-side gateway pod bounces. Restarting the
 # gateway on the reader's node rebuilds the mirror's target fabric
-# side and rotates TargetInfo; the source initiator must reconnect
-# (or be rebuilt by the starvation watchdog) and resume delivering
-# continuous samples. A wedged initiator delivers a trickle: the
+# side and rotates TargetInfo; the source must reconnect its target
+# (or re-add it once it stops completing transfers) and resume
+# delivering continuous samples. A wedged initiator delivers a trickle: the
 # reader's batch index stalls or crawls while every freshness-based
 # signal on the mirror reports progress, which is the failure this
 # case exists to catch. Sits between 45-samples-flowing and the
@@ -25,8 +25,8 @@ GATEWAY_DS="${GATEWAY_DS:-mxl-k8s-gateway}"
 WINDOW_SECS="${AUDIO_RATE_WINDOW_SECS:-5}"
 MIN_WINDOW_SAMPLES="${AUDIO_RATE_MIN_WINDOW_SAMPLES:-100000}"
 # Ceiling for the whole post-bounce recovery before the rate check
-# gives up: mirrors reconverge in ~15s normally; the starvation exit
-# adds its own bounded window before the rebuild.
+# gives up: mirrors reconverge in ~15s normally; a target re-added for
+# completing nothing adds its delivery stall window first.
 RECOVERY_TIMEOUT_SECS="${AUDIO_RATE_RECOVERY_TIMEOUT_SECS:-120}"
 
 # Most recent sample-batch index from the reader, as in
@@ -80,7 +80,7 @@ echo "  replacement gateway ${replacement} running on ${reader_node}"
 
 # Poll until a full window delivers at rate. Sampling the index twice
 # per attempt bounds each check to WINDOW_SECS; the outer deadline
-# absorbs the mirror reconvergence and the starvation rebuild.
+# absorbs the mirror reconvergence and any target re-add.
 deadline=$(( $(date +%s) + RECOVERY_TIMEOUT_SECS ))
 attempt=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
