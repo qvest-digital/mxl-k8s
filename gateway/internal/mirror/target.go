@@ -96,23 +96,19 @@ const defaultTargetFlushInterval = 1 * time.Second
 const defaultStuckHandshakeAfter = 20 * time.Second
 
 // defaultSendingIntoSilenceAfter is the shorter window the watchdog
-// gives a fabric side that a source has been added to and is sending
-// into. A connection-based initiator whose connection to the target
-// fails just after it is set up goes to its done state and never dials
-// again, and the source cannot tell: libmxl-fabrics reports no
-// per-target state and accepts a transfer for a target it is not
-// connected to, and a transfer on a shared source counts for every
-// mirror attached to it. The target is the only side that sees the
-// silence.
+// gives a fabric side that a source is delivering into while nothing
+// commits. The source stamps lastSentAt when a transfer to this
+// mirror's target completes, so a lastSentAt past the fabric open says
+// the writes reached this side, and it reports TransfersNotLanding when
+// its head advances and none complete. Either way the source has
+// grains for this side, and a fabric side that has committed none of
+// them three seconds into that is rebuilt.
 //
-// A lastSentAt past the fabric open is evidence that a source entry
-// added against this fabric side's TargetInfo is transferring: the
+// A lastSentAt past the fabric open belongs to this fabric side: the
 // source publishes nothing for an entry added against a TargetInfo the
-// target has since replaced (see attachedToReplacedTarget), so the
-// re-add has landed by the time the window starts. A connection set up
-// after a re-add commits its first grain within tens of milliseconds
-// of the add, so three seconds of transfers with nothing committed is a
-// dead connection, not a slow one.
+// target has since replaced (see attachedToReplacedTarget). A connection
+// commits its first grain within tens of milliseconds of the add, so
+// three seconds of silence is not a slow start.
 const defaultSendingIntoSilenceAfter = 3 * time.Second
 
 // maxStuckRebuilds bounds the number of consecutive recovery spawns
