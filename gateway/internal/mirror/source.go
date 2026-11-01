@@ -1628,9 +1628,6 @@ func runSampleTransferLoop(
 	// what a tick does not reach stays owed and is sent by the next
 	// one.
 	catchUp := sampleCatchUpBatches * xferBatch
-	if catchUp == 0 {
-		catchUp = maxSampleCatchUpFallback
-	}
 	// agedOut is the only distance at which samples are abandoned: the
 	// point past which the reader can no longer read them at all.
 	// Anything nearer is still on the ring and is owed to the target.
@@ -2642,12 +2639,6 @@ func (r *SourceReconciler) flowToMirrors(ctx context.Context, obj client.Object)
 // gap at three times real time, and it stays below the transfers a
 // target may hold in flight (fabrics.MaxTransfersInFlight).
 const sampleCatchUpBatches = 4
-
-// maxSampleCatchUpFallback is the per-tick catch-up bound used when
-// xferBatch is zero, which cannot happen in production (the open path
-// defaults it to one sample at minimum) but keeps the loop's bound
-// non-zero on its own terms.
-const maxSampleCatchUpFallback = 2
 
 // defaultProgressTimeout caps how long a blocking MakeProgress call
 // parks on the completion queue before returning. The verbs provider
