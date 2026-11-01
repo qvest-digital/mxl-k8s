@@ -1727,12 +1727,13 @@ func runSampleTransferLoop(
 				}
 				lastSent = head - agedOut
 			}
-			// One tick transfers at most catchUp samples. A producer
-			// that commits in lumps -- an encoder emitting whole frames,
-			// say -- leaves a backlog on the ticks between its writes,
-			// and draining it in one pass puts that many writes on the
-			// wire back to back. Spreading it over ticks keeps the
-			// number in flight bounded whatever the producer does.
+			// One tick transfers at most catchUp samples. libmxl-fabrics
+			// does not queue a batch beyond a target's window
+			// (fabrics.MaxTransfersInFlight, fewer for a smaller bounce
+			// buffer): it skips it for that target, which then fills the
+			// hole with stale ring content. Completions are reaped at the
+			// end of a tick, so a tick must not post more than the window
+			// holds, however deep the backlog.
 			limit := head
 			if catchUp > 0 && head-lastSent > catchUp {
 				limit = lastSent + catchUp
@@ -1743,7 +1744,6 @@ func runSampleTransferLoop(
 			// not. Calling again would hand the same samples a second
 			// time to every target that already has them.
 			delivered := uint64(0)
-			deadline := time.Now().Add(interval)
 			for lastSent < limit {
 				count := limit - lastSent
 				if xferBatch > 0 && count > xferBatch {
@@ -1759,30 +1759,6 @@ func runSampleTransferLoop(
 					tracker.recordOffered(end, time.Now())
 				}
 				lastSent = end
-				// Settle the chunk before starting the next one.
-				//
-				// One write outstanding on the initiator is not the same
-				// as one the far side can absorb. The sample egress
-				// protocol writes RDMA_WRITE_WITH_IMM, which consumes a
-				// receive on the responder, and the ingress protocol
-				// keeps exactly one posted -- it re-posts from its own
-				// read loop, after it has processed the completion.
-				// There is no credit exchange between the two, so a
-				// second write issued before the far side has come round
-				// finds an empty receive queue and falls back on RNR
-				// retry, which libfabric configures as unbounded and
-				// which irdma leaves untimed on E810.
-				//
-				// Waiting for the transfer to report itself settled is
-				// the closest the API gets to that credit, and it is
-				// what the upstream reference loop does between batches.
-				// Bounded, because a wedge must surface as a stalled
-				// lastSent on the next tick rather than as a spin here.
-				if lastSent < limit {
-					if !drainChunk(reapProgress, chunkSettleBudget) || time.Now().After(deadline) {
-						break
-					}
-				}
 			}
 			if produced > 0 && delivered*4 < produced {
 				starved++
@@ -1806,30 +1782,6 @@ func runSampleTransferLoop(
 			progress.runProgress(reapProgress, func(err error) { logProgressFailure(l, err) })
 		} else {
 			progress.runProgress(makeProgress, func(err error) { logProgressFailure(l, err) })
-		}
-	}
-}
-
-// chunkSettleBudget bounds the wait for one chunk to settle before the
-// next is issued. It is a small fraction of a tick: long enough for a
-// completion that has crossed the fabric, short enough that several
-// chunks still fit in the tick they are owed in.
-const chunkSettleBudget = 500 * time.Microsecond
-
-// drainChunk polls until the initiator reports no work outstanding or
-// the budget runs out. Reports whether it settled.
-func drainChunk(reap ProgressFunc, budget time.Duration) bool {
-	deadline := time.Now().Add(budget)
-	for {
-		if err := reap(); err == nil {
-			return true
-		} else if classifyFabricError(err) != fabricIdle {
-			// A real failure, not "still working". Let the caller stop
-			// and the tick surface it.
-			return false
-		}
-		if !time.Now().Before(deadline) {
-			return false
 		}
 	}
 }
@@ -2746,8 +2698,8 @@ const maxSampleStarvedTicks = maxSampleStarvedBatches * sampleProgressOversample
 
 // sampleCatchUpBatches is how many batches one tick may transfer. One
 // batch is real time, so four lets a mirror that fell behind close the
-// gap at three times real time while keeping the number of writes a
-// single tick puts on the wire bounded and small.
+// gap at three times real time, and it stays below the transfers a
+// target may hold in flight (fabrics.MaxTransfersInFlight).
 const sampleCatchUpBatches = 4
 
 // maxSampleCatchUpFallback is the per-tick catch-up bound used when
@@ -2823,17 +2775,16 @@ func progressBlocking(provider fabrics.Provider) bool {
 	return provider != fabrics.ProviderEFA
 }
 
-// reapFuncFor selects the MakeProgress variant used between the chunks
-// of one tick. Always the non-blocking one, whatever the provider.
+// reapFuncFor selects the MakeProgress variant used while a loop still
+// owes work: between the chunks of a paced grain, and at the end of a
+// sample tick that left samples owed. Always the non-blocking one,
+// whatever the provider.
 //
 // The blocking variant parks on the completion queue for its whole
-// timeout when nothing has landed, and the timeout is the tick. Calling
-// it between chunks costs a tick per chunk, so a loop that paced with
-// it delivered one batch per two ticks -- half real time -- and fell
-// permanently behind a live producer. Reaping is all this call is for:
-// the completions of a write that has already crossed a microsecond of
-// fabric are there, and a chunk that still finds the queue full takes
-// the retry path, which does block.
+// timeout when nothing has landed, and the timeout is longer than a
+// tick. Called while work is owed, it costs that much time per call, and
+// a loop that runs behind real time falls permanently behind a live
+// producer.
 func reapFuncFor(initiator progressDriver) ProgressFunc {
 	return initiator.MakeProgressNonBlocking
 }
