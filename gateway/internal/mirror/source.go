@@ -2624,16 +2624,6 @@ func (r *SourceReconciler) flowToMirrors(ctx context.Context, obj client.Object)
 	return out
 }
 
-// logProgressFailure renders a MakeProgress failure at a level that
-// matches what it means. Every one of these used to be an error with a
-// stacktrace, including MXL_ERR_INTERRUPTED, which a signal-disturbed
-// poll returns as a matter of course under Go's async preemption: a
-// rolling restart produced hundreds of identical stacktraces that said
-// nothing, which is how a real endpoint failure came to look like
-// ordinary retry noise.
-//
-// The classification is logged alongside the error so an operator can
-// tell the two apart without reading libmxl's headers.
 // sampleCatchUpBatches is how many batches one tick may transfer. One
 // batch is real time, so four lets a mirror that fell behind close the
 // gap at three times real time, and it stays below the transfers a
@@ -2751,6 +2741,16 @@ func logSampleTransferFailure(l logr.Logger, err error, end, count uint64) {
 	}
 }
 
+// logProgressFailure renders a MakeProgress failure at a level that
+// matches what it means. Every one of these used to be an error with a
+// stacktrace, including MXL_ERR_INTERRUPTED, which a signal-disturbed
+// poll returns as a matter of course under Go's async preemption: a
+// rolling restart produced hundreds of identical stacktraces that said
+// nothing, which is how a real endpoint failure came to look like
+// ordinary retry noise.
+//
+// The classification is logged alongside the error so an operator can
+// tell the two apart without reading libmxl's headers.
 func logProgressFailure(l logr.Logger, err error) {
 	kind := classifyFabricError(err)
 	switch kind {
