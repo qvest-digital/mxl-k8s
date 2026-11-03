@@ -834,9 +834,12 @@ func (r *TargetReconciler) followRepoint(ctx context.Context, key types.Namespac
 		return ctrl.Result{}, false
 	}
 	oldSource, current := entry.peerNode, entry.provider
-	entry.peerNode = mirror.Spec.SourceNode
+	moved := oldSource != mirror.Spec.SourceNode
+	if moved {
+		entry.peerNode = mirror.Spec.SourceNode
+	}
 	r.mu.Unlock()
-	if oldSource != mirror.Spec.SourceNode {
+	if moved {
 		l.Info("mirror source moved; relabelling the target", "from", oldSource, "to", mirror.Spec.SourceNode)
 	}
 

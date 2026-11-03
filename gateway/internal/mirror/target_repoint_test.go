@@ -3,6 +3,7 @@ package mirror
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -192,4 +193,72 @@ func TestTarget_RecoveryRebuildsForTheProviderTheSpecNames(t *testing.T) {
 	default:
 		t.Fatal("the recovery never reached the fabric-side rebuild")
 	}
+}
+
+// Once the rebuild for a new provider has succeeded, the entry carries
+// that provider and the new targetInfo is published, so the next pass
+// finds nothing left to follow. An entry left on the old provider
+// would read as changed on every pass and rebuild the target, rotating
+// targetInfo under the source, every providerRecheckInterval for good.
+//
+// The zero-value fabric target the rebuild hands back makes the
+// progress loop it starts fail at once, and that loop's own recovery
+// publishes Materializing, which keeps a full Reconcile off the fast
+// path. The follow-up pass is therefore the repoint check itself. That
+// recovery's rebuild is held until the end of the test.
+func TestReconcile_RepointedProviderSettlesAfterTheRebuild(t *testing.T) {
+	f := newRepointFixture(t, "node-y", mxlv1alpha1.ProviderVerbs)
+	f.entry.writer = &mxl.Writer{}
+
+	release := make(chan struct{})
+	var (
+		callsMu sync.Mutex
+		calls   int
+	)
+	f.r.openFabricSideFn = func(_ *mxl.Writer, p fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+		f.rebuilds <- p
+		callsMu.Lock()
+		calls++
+		first := calls == 1
+		callsMu.Unlock()
+		if first {
+			return &fabrics.Target{}, nil, "info-2", nil
+		}
+		<-release
+		return nil, nil, "", errors.New("rebuild refused")
+	}
+	t.Cleanup(func() {
+		close(release)
+		require.Eventually(t, func() bool {
+			f.r.mu.Lock()
+			defer f.r.mu.Unlock()
+			return f.r.targets[f.req.NamespacedName] == nil && !f.entry.recovering.Load()
+		}, 5*time.Second, 10*time.Millisecond)
+	})
+
+	ctx := context.Background()
+	_, err := f.r.Reconcile(ctx, f.req)
+	require.NoError(t, err)
+	select {
+	case p := <-f.rebuilds:
+		require.Equal(t, fabrics.ProviderVerbs, p)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a provider change on a live Ready mirror never rebuilt the target")
+	}
+
+	var mirror mxlv1alpha1.MxlFlowMirror
+	require.Eventually(t, func() bool {
+		require.NoError(t, f.r.Get(ctx, f.req.NamespacedName, &mirror))
+		return mirror.Status.TargetInfo == "info-2"
+	}, 5*time.Second, 10*time.Millisecond, "the rebuilt fabric side's targetInfo was never published")
+
+	f.entry.lifecycle.Lock()
+	provider := f.entry.provider
+	f.entry.lifecycle.Unlock()
+	assert.Equal(t, fabrics.ProviderVerbs, provider,
+		"the entry still records the provider it was opened with")
+
+	res, again := f.r.followRepoint(ctx, f.req.NamespacedName, &mirror)
+	assert.False(t, again, "a target already rebuilt for the spec's provider was sent to rebuild again")
+	assert.Zero(t, res.RequeueAfter)
 }
