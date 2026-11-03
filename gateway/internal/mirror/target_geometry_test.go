@@ -107,7 +107,7 @@ func TestReconcile_ReplacesALiveTargetOfAnotherGeometry(t *testing.T) {
 			var opened []string
 			r := &TargetReconciler{
 				Client: c, Scheme: scheme, NodeName: "node-a", DegradedAfter: time.Hour,
-				targets:  map[types.NamespacedName]*targetEntry{key: {def: tc.live}},
+				targets:  map[types.NamespacedName]*targetEntry{key: {def: tc.live, provider: fabrics.ProviderTCP}},
 				attempts: attemptTable[targetOpenInputs]{},
 				Retire:   func(string, string) {},
 				openTargetFn: func(_ types.NamespacedName, def string, _ fabrics.Provider) (*targetEntry, error) {
