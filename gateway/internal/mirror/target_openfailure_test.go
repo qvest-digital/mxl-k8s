@@ -413,7 +413,7 @@ func TestTarget_LocalWriterClosesALiveTarget(t *testing.T) {
 	// go on writing over the producer's ring; it gives its writer up as
 	// StopFlow does for a placeholder taken over.
 	f := newOpenFailureFixture(t, errLocalWriter, mxlv1alpha1.MxlFlowLocationReady)
-	f.r.targets[f.key] = &targetEntry{flowID: openFailureFlowID}
+	f.r.targets[f.key] = &targetEntry{flowID: openFailureFlowID, provider: fabrics.ProviderTCP}
 
 	_, err := f.r.Reconcile(context.Background(), f.req)
 	require.NoError(t, err)

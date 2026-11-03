@@ -136,7 +136,11 @@ CR disappears, regardless of which side the gateway is acting on.
 The target-side lifecycle is worth its own diagram because the
 recovery path is non-obvious: a fatal `ReadGrain` error rebuilds the
 fabric side *without* closing the `mxl.Writer`, so consumer pods'
-`FlowReader` handles stay valid across the recovery.
+`FlowReader` handles stay valid across the recovery. A live target
+follows a repoint ahead of the `Ready` fast path: a new
+`spec.sourceNode` only relabels its counters, a new `spec.provider`
+takes the same rebuild for the new provider and republishes
+`TargetInfo`.
 
 ![Gateway: TargetReconciler state, including recovery](./diagrams/02-gateway-lifecycle.drawio.svg)
 

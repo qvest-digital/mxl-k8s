@@ -137,6 +137,13 @@ const maxTargetOpenAttempts uint32 = 3
 // look is on its own clock.
 const localWriterRecheckInterval = 5 * time.Second
 
+// providerRecheckInterval is how soon a mirror whose live target was
+// sent to be rebuilt for a new provider, or found mid-rebuild, is
+// looked at again. A rebuild already running may have read the old
+// provider, and one whose progress loop did not exit skips the
+// rebuild, so neither is proof the target follows the spec.
+const providerRecheckInterval = 5 * time.Second
+
 // ReasonLocalWriter marks a target-side mirror that stood down because
 // a process on this node writes the flow. The local writer wins: the
 // mirror opens no writer into the flow and leaves its directory alone
@@ -398,8 +405,11 @@ type targetEntry struct {
 	info    *fabrics.TargetInfo
 	infoStr string
 
-	// provider records the configuration the entry was opened with,
-	// so the recovery path can rebuild the fabric side identically.
+	// provider is the provider the live fabric side was opened with.
+	// A rebuild takes the one spec.provider names at the time and
+	// records it here once installed; followRepoint compares the spec
+	// against it. Written under both r.mu and lifecycle, so the
+	// collector reads it under r.mu and the recovery under lifecycle.
 	provider fabrics.Provider
 
 	// flow serialises commits into the local flow with every other
@@ -457,9 +467,12 @@ type targetEntry struct {
 	phaseMu sync.Mutex
 	dropped bool
 
-	// flowID and peerNode label that counter alongside provider. Set
-	// once when the entry is published and never changed, so the
-	// collector reads them without the entry's atomics.
+	// domain, flowID and peerNode label that counter alongside
+	// provider. domain and flowID are set once when the entry is
+	// published and never changed. peerNode is spec.sourceNode, which
+	// the operator rewrites when it moves the mirror to a new origin;
+	// followRepoint carries that onto the entry. All three are written
+	// under r.mu, which is what the collector reads them under.
 	domain   string
 	flowID   string
 	peerNode string
@@ -686,6 +699,9 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if r.Retire != nil {
 		r.replaceOtherGeometry(ctx, req.NamespacedName, mirror.Ref().Name())
 	}
+	if res, rebuilding := r.followRepoint(ctx, req.NamespacedName, &mirror); rebuilding {
+		return res, nil
+	}
 	r.mu.Lock()
 	live := r.targets[req.NamespacedName] != nil
 	r.mu.Unlock()
@@ -790,6 +806,54 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		"sourceNode", mirror.Spec.SourceNode,
 		"provider", provider.String())
 	return ctrl.Result{}, nil
+}
+
+// followRepoint carries spec.sourceNode and spec.provider onto the
+// live entry of key. The operator moves a mirror to its flow's new
+// origin by rewriting both, and an entry captures them when it opens.
+// It runs ahead of the Ready fast path, which a repointed mirror whose
+// grains keep flowing would otherwise always take.
+//
+// A new source node relabels the entry's counters and nothing else:
+// the target does not care which node dials it. A new provider is a
+// fabric side the new source cannot reach, so the entry goes through
+// the recovery rebuild, which keeps the writer, opens the fabric side
+// for the provider the spec names and publishes the new targetInfo.
+// The rebuild is spawned through the recovering gate the watchdog
+// uses, so it never runs twice for one entry from here. Reports true
+// when it spawned one or found one running; the caller stops there and
+// requeues to check the outcome. An unresolved provider is left to the
+// rest of Reconcile.
+func (r *TargetReconciler) followRepoint(ctx context.Context, key types.NamespacedName, mirror *mxlv1alpha1.MxlFlowMirror) (ctrl.Result, bool) {
+	l := log.FromContext(ctx)
+
+	r.mu.Lock()
+	entry := r.targets[key]
+	if entry == nil {
+		r.mu.Unlock()
+		return ctrl.Result{}, false
+	}
+	oldSource, current := entry.peerNode, entry.provider
+	moved := oldSource != mirror.Spec.SourceNode
+	if moved {
+		entry.peerNode = mirror.Spec.SourceNode
+	}
+	r.mu.Unlock()
+	if moved {
+		l.Info("mirror source moved; relabelling the target", "from", oldSource, "to", mirror.Spec.SourceNode)
+	}
+
+	provider, err := providerForSetup(mirror)
+	if err != nil || provider == current {
+		return ctrl.Result{}, false
+	}
+	if !entry.recovering.CompareAndSwap(false, true) {
+		return ctrl.Result{RequeueAfter: providerRecheckInterval}, true
+	}
+	l.Info("mirror provider changed; rebuilding the target's fabric side",
+		"from", current.String(), "to", provider.String())
+	go r.dispatchRecovery(key)
+	return ctrl.Result{RequeueAfter: providerRecheckInterval}, true
 }
 
 // now reports the current time through the reconciler's clock seam.
@@ -1848,9 +1912,17 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 		if !apierrors.IsNotFound(err) {
 			l.Error(err, "get mirror during recovery")
 		}
-	} else if mirror.Status.Phase != mxlv1alpha1.MxlFlowMirrorMaterializing {
-		if err := r.applyTargetStatus(ctx, mirror, mxlv1alpha1.MxlFlowMirrorMaterializing, nil, nil); err != nil && !apierrors.IsNotFound(err) {
-			l.Error(err, "mark Materializing during recovery")
+	} else {
+		// A repoint can have moved the mirror onto another fabric
+		// since the fabric side last opened; the source dials the one
+		// spec.provider names now.
+		if p, err := providerForSetup(mirror); err == nil {
+			provider = p
+		}
+		if mirror.Status.Phase != mxlv1alpha1.MxlFlowMirrorMaterializing {
+			if err := r.applyTargetStatus(ctx, mirror, mxlv1alpha1.MxlFlowMirrorMaterializing, nil, nil); err != nil && !apierrors.IsNotFound(err) {
+				l.Error(err, "mark Materializing during recovery")
+			}
 		}
 	}
 	entry.phaseMu.Unlock()
@@ -1882,6 +1954,11 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 		}
 		return
 	}
+	r.mu.Lock()
+	entry.lifecycle.Lock()
+	entry.provider = provider
+	entry.lifecycle.Unlock()
+	r.mu.Unlock()
 
 	mirror, err := r.fetchMirror(ctx, key)
 	if err != nil {
