@@ -467,7 +467,8 @@ func (p *Publisher) markStale(ctx context.Context, flowID string) error {
 //
 // Returns the phase this node's location carries once the update
 // lands, which is not always the one asked for -- see the Ready over
-// Origin guard below. An absent MxlFlow returns the empty phase.
+// Origin guard below. An absent MxlFlow, or a Stale for a node the
+// flow does not list, returns the empty phase and writes nothing.
 func (p *Publisher) upsertLocation(ctx context.Context, flowID string, phase mxlv1alpha1.MxlFlowLocationPhase, observed, appeared *metav1.Time) (mxlv1alpha1.MxlFlowLocationPhase, error) {
 	written := phase
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -517,6 +518,14 @@ func (p *Publisher) upsertLocation(ctx context.Context, flowID string, phase mxl
 			}
 		}
 		if !found {
+			// Stale demotes a copy the flow lists. A node it does not
+			// list has none to demote: on mxlfs, a placeholder the
+			// gateway creates on a node without a copy arrives here as
+			// a vanish (mxlfswatch.MarkerChanged).
+			if stale {
+				written = ""
+				return nil
+			}
 			loc := mxlv1alpha1.MxlFlowLocation{
 				NodeName:     p.NodeName,
 				Phase:        phase,
