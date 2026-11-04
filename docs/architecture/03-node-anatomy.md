@@ -164,21 +164,23 @@ Steps for one grain index *N*:
    fills the payload bytes directly into the mmap'd ring slot, and
    calls `Commit(slices, ...)`. The commit writes the grain header
    and advances the flow's `HeadIndex` in tmpfs.
-2. **Source gateway's transfer goroutine** ticks (default 2 ms),
-   reads the new `HeadIndex` from `Reader.Runtime()`, and for each
-   `idx > lastSent` calls `GetGrainNonBlocking(idx)` followed by
-   `Initiator.TransferGrain(idx, 0, slices)`. The grain is read
-   from the gateway's mapping of the *same tmpfs file* -- the
-   bytes never leave RAM on this node.
+2. **Source gateway's transfer goroutine** for the mirror polls
+   `Reader.Runtime()` (every 2 ms while nothing is new), and for the
+   next index calls `GetGrainNonBlocking(idx)` followed by
+   `Initiator.TransferGrain(idx, 0, slices)`, then
+   `Initiator.MakeProgress` until it stops returning not-ready. The
+   grain is read from the gateway's mapping of the *same tmpfs
+   file* -- the bytes never leave RAM on this node.
 3. **libfabric** performs an RDMA write into the target node's
    registered region. For the `tcp` provider this is a sequence of
    socket sends to the remote target; for `verbs`/EFA it is a real
    one-sided RDMA. In both cases the payload + grain header land
    *directly in the target's ring slot* -- no intermediate buffer
    on the target gateway.
-4. **Target gateway's progress goroutine** polls
-   `Target.ReadGrainNonBlocking`. On success it returns the index
-   that just completed; on `ErrNotReady` it sleeps 1 ms and loops.
+4. **Target gateway's progress goroutine** calls
+   `Target.ReadGrain`, which blocks for up to 20 ms. On success it
+   returns the index that just completed; on `ErrNotReady` it calls
+   again.
 5. **Target gateway** calls `commitArrivedGrain(writer, idx)`,
    which is `Writer.OpenGrain(idx)` followed immediately by
    `Commit(TotalSlices, 0)`. This does not copy data -- the payload
@@ -192,18 +194,12 @@ Steps for one grain index *N*:
 
 Three details from the diagram are worth pulling out:
 
-- **Why non-blocking `ReadGrain` on the target side**
-  ([`target.go:285-293`](../../gateway/internal/mirror/target.go)).
-  libfabric's `util_wait.c` returns `-EINTR` from `epoll_wait` as a
-  fatal "poll failed" in release builds (the `EINTR` filter is
-  gated on `#if ENABLE_DEBUG`). Go's async preemption sends SIGURG
-  to running goroutines ~50/sec since Go 1.14, and that's the
-  signal a blocking `ReadGrain` receives via the libfabric thread --
-  tearing the endpoint down every 10-60 seconds in steady state.
-  Polling from Go avoids blocking inside libfabric and sidesteps
-  the signal interaction. An upstream-libfabric workaround exists
-  in the libmxl fork, but the non-blocking path is the correct
-  shape regardless of whether the workaround is in place.
+- **Why a blocking `ReadGrain` survives signals.** libfabric's
+  `util_wait.c` returns `-EINTR` from `epoll_wait` as a fatal "poll
+  failed" in release builds, and Go's async preemption sends SIGURG
+  to running goroutines routinely. libmxl-fabrics catches that
+  interrupt and returns `MXL_ERR_INTERRUPTED` with the endpoint
+  intact, and the loop calls again.
 - **Why `Commit` is metadata-only on the target.** The payload +
   header bytes were RDMA'd into the ring slot by the remote
   initiator *before* `ReadGrain` reported the index as ready. What
@@ -221,24 +217,18 @@ Three details from the diagram are worth pulling out:
   point at it. The new `TargetInfo` is published into status; the
   source side detects the rotation through its existing watch and
   swaps that one target on its initiator.
-- **One initiator per flow on the source side.** libmxl-fabrics
-  enqueues each `TransferGrain` / `TransferSamples` call to every
-  target added to an initiator, so a flow mirrored from this node to
-  several others is one `FlowReader`, one `Initiator` and one
-  transfer goroutine, with one `AddTarget` per mirror. Per-mirror
-  state is the target handle and the status counters; the reader,
-  the initiator and the loop are keyed on (flow, provider), because
-  an initiator is set up against one interface and that interface is
-  chosen per provider.
+- **One initiator per mirror on the source side.** A flow mirrored
+  from this node to several others is one `FlowReader`, keyed on
+  (flow, provider), and per mirror one `Initiator` holding that
+  mirror's target and one transfer goroutine. A target that stops
+  completing transfers holds up no other mirror of the flow.
 
-There is no application-level backpressure on the source side: the
-transfer goroutine forwards every grain it sees in
-`Reader.Runtime().HeadIndex` order. If the network is the
-bottleneck, libfabric's send queue absorbs the delta; if a target
-is unreachable, `TransferGrain` errors are logged and the loop
-continues, falling further behind the writer until the producer
-wraps the ring and grains start being overwritten in tmpfs before
-they're sent. Consumer reads honour libmxl's normal grain-ring
+Each mirror has at most one transfer outstanding. A transfer that
+takes longer than one grain interval (one batch, for audio) is
+counted late, and the loop then resumes at the live head: grains the
+producer committed meanwhile are skipped, never queued. A transfer
+outstanding for 2 s, or a target the initiator dropped, ends the loop,
+and the mirror's target is added again. Consumer reads honour libmxl's normal grain-ring
 semantics -- if the consumer is too slow it will start receiving
 "grain aged out" errors from `GetGrain`. mxl-k8s does not
 interpose on this; the ring is libmxl's, not ours.

@@ -1342,10 +1342,9 @@ func (e *targetEntry) recordInvalid(reason invalidReason) {
 // loop retries and keeps its handles.
 //
 // For every grain ReadGrain reports as received, completeFn decides
-// whether the whole grain has landed - a paced source transfers one
-// grain as several slice ranges and each range signals separately -
-// and commitFn then does the OpenGrain + Commit dance on the local
-// FlowWriter so consumer FlowReaders see the arrived grain.
+// whether every slice of it is valid, and commitFn then does the
+// OpenGrain + Commit dance on the local FlowWriter so consumer
+// FlowReaders see the arrived grain.
 //
 // Errors from ReadGrain are classified: idle means nothing arrived,
 // transient means the call was disturbed and the handles are still
@@ -1381,12 +1380,8 @@ func runTargetProgressLoop(
 		idx, err := readGrain()
 		switch kind := classifyFabricError(err); {
 		case err == nil:
-			// A grain the source paced arrives as several slice ranges,
-			// each signalling separately with a growing valid-slice
-			// count. Committing on the first would publish a grain with
-			// most of its lines unwritten, and commitArrivedGrain marks
-			// every slice valid regardless. Only the arrival that
-			// completes the grain may commit it.
+			// commitArrivedGrain marks every slice valid regardless of
+			// what landed, so a grain short of slices is not committed.
 			if grainComplete != nil {
 				ok, cerr := grainComplete(idx)
 				if cerr != nil {
@@ -1438,8 +1433,8 @@ func runTargetProgressLoop(
 }
 
 // arrivalComplete reports whether an arrived grain may be committed. A
-// video grain the source paced arrives as several slice ranges and is
-// committed once all of them are in. A data grain is never complete,
+// video grain is committed once its header reports every slice valid.
+// A data grain is never complete,
 // its valid slices being its length, and the source sends it in one
 // write, so it is committed as it arrives. TotalSlices == 0 is a grain
 // the source never subdivides, so there is nothing to wait for;

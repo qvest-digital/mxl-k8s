@@ -3,6 +3,7 @@ package mirror
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -37,302 +38,86 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
-// transferFixture wraps the canned probes/transfers a test wants to
-// feed into runTransferLoop, plus the counters and call logs that
-// the assertions read.
-type transferFixture struct {
-	mu sync.Mutex
-
-	headSeq   []uint64
-	headIdx   int
-	headErr   error
-	headCalls int
-
-	transferLog     []uint64
-	pacedLog        []bool
-	transferErr     error
-	transferInvalid map[uint64]bool
-
-	progressErr   error
-	progressCalls int
+// headScript answers Runtime probes from a list, holding the last value.
+type headScript struct {
+	mu    sync.Mutex
+	heads []uint64
+	n     int
 }
 
-func (f *transferFixture) probeRuntime() (uint64, error) {
+func (h *headScript) probe() (uint64, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	v := h.heads[min(h.n, len(h.heads)-1)]
+	h.n++
+	return v, nil
+}
+
+// fakeLink stands in for one mirror's initiator: TransferGrain posts,
+// MakeProgress answers not-ready notReady times per transfer and then
+// completes it. It fails the test on a post while one is outstanding.
+type fakeLink struct {
+	t        *testing.T
+	notReady int
+	// hold, when set, is called by MakeProgress before it answers, so a
+	// test can keep a transfer outstanding while the head moves.
+	hold func(idx uint64)
+
+	mu          sync.Mutex
+	outstanding bool
+	current     uint64
+	pending     int
+	posted      []uint64
+	progress    int
+}
+
+func (f *fakeLink) transferGrain(idx uint64) (bool, uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.headCalls++
-	if f.headErr != nil {
-		return 0, f.headErr
+	if f.outstanding {
+		f.t.Errorf("grain %d posted while grain %d was outstanding", idx, f.current)
 	}
-	if f.headIdx >= len(f.headSeq) {
-		return f.headSeq[len(f.headSeq)-1], nil
-	}
-	h := f.headSeq[f.headIdx]
-	f.headIdx++
-	return h, nil
+	f.outstanding, f.current, f.pending = true, idx, f.notReady
+	f.posted = append(f.posted, idx)
+	return true, 100, nil
 }
 
-func (f *transferFixture) transferGrain(idx uint64, paced bool) (bool, error) {
+func (f *fakeLink) makeProgress() error {
+	f.mu.Lock()
+	hold, idx := f.hold, f.current
+	f.mu.Unlock()
+	if hold != nil {
+		hold(idx)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.transferLog = append(f.transferLog, idx)
-	f.pacedLog = append(f.pacedLog, paced)
-	if f.transferErr != nil {
-		return false, f.transferErr
-	}
-	if f.transferInvalid[idx] {
-		return true, nil
-	}
-	return false, nil
-}
-
-func (f *transferFixture) makeProgress() error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.progressCalls++
-	return f.progressErr
-}
-
-func (f *transferFixture) transferred() []uint64 {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]uint64, len(f.transferLog))
-	copy(out, f.transferLog)
-	return out
-}
-
-func TestRunTransferLoop_TailsFromHead(t *testing.T) {
-	// First Runtime probe reports head=10. Subsequent probes report
-	// 12 and 15. The loop must transfer (11, 12, 13, 14, 15) and
-	// never anything <= 10 - the initial head is "where we tune in",
-	// the producer's historical grains are not replayed.
-	fx := &transferFixture{
-		headSeq: []uint64{10, 12, 15, 15},
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-
-	go runTransferLoop(ctx, done, "flow-a", fx.probeRuntime, fx.transferGrain, fx.makeProgress, time.Millisecond, nil)
-
-	// Let the loop run a few ticks then cancel.
-	require.Eventually(t, func() bool {
-		fx.mu.Lock()
-		defer fx.mu.Unlock()
-		return len(fx.transferLog) >= 5
-	}, time.Second, time.Millisecond, "expected >=5 transfers")
-
-	cancel()
-	<-done
-
-	got := fx.transferred()
-	assert.GreaterOrEqual(t, len(got), 5)
-	for i, idx := range got[:5] {
-		expected := uint64(11 + i)
-		assert.Equalf(t, expected, idx,
-			"transfers must arrive in head-tail order; got idx[%d]=%d, want %d",
-			i, idx, expected)
-	}
-}
-
-// An invalid grain is counted once and moves the loop on like any
-// other: the index is the target writer's to flag.
-func TestRunTransferLoop_CountsInvalidGrains(t *testing.T) {
-	fx := &transferFixture{
-		headSeq:         []uint64{10, 14},
-		transferInvalid: map[uint64]bool{12: true, 13: true},
-	}
-	rt := &recordingTracker{}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-
-	go runTransferLoop(ctx, done, "flow-a", fx.probeRuntime, fx.transferGrain, fx.makeProgress, time.Millisecond, rt)
-	require.Eventually(t, func() bool {
-		rt.mu.Lock()
-		defer rt.mu.Unlock()
-		return len(rt.transfers) >= 2
-	}, time.Second, time.Millisecond)
-	cancel()
-	<-done
-
-	assert.Equal(t, []uint64{11, 12, 13, 14}, fx.transferred())
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	assert.Equal(t, []uint64{11, 14}, rt.transfers, "an invalid grain is not counted as offered")
-	assert.Equal(t, 2, rt.invalid)
-}
-
-func TestRunTransferLoop_ResyncsToHeadWhenLapped(t *testing.T) {
-	// Attach race: the first Runtime probe reports head 0 (the reader
-	// has not observed a grain yet), then the real head appears far
-	// ahead. The producer only still holds grains near the head in its
-	// ring, so replaying from index 1 fails "out of range (too late)".
-	// The loop must resync to the live head and transfer fresh grains
-	// rather than wedge forever on the aged-out index.
-	var calls atomic.Int32
-	probe := func() (uint64, error) {
-		if calls.Add(1) == 1 {
-			return 0, nil
-		}
-		return 1000, nil
-	}
-
-	var mu sync.Mutex
-	var transferred []uint64
-	transfer := func(idx uint64, _ bool) (bool, error) {
-		// Only grains within maxMirrorLag of the head are still in the
-		// producer ring; older indices have aged out.
-		if int64(idx) < 1000-maxMirrorLag {
-			return false, errors.New("mxl: out of range (too late)")
-		}
-		mu.Lock()
-		transferred = append(transferred, idx)
-		mu.Unlock()
-		return false, nil
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go runTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil }, time.Millisecond, nil)
-
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(transferred) > 0
-	}, time.Second, time.Millisecond,
-		"loop must resync to the live head and transfer fresh grains, "+
-			"not wedge on the aged-out index 1")
-
-	cancel()
-	<-done
-
-	mu.Lock()
-	defer mu.Unlock()
-	for _, idx := range transferred {
-		assert.GreaterOrEqualf(t, int64(idx), 1000-maxMirrorLag-1,
-			"after resync, transfers must be near the live head; got %d", idx)
-	}
-}
-
-func TestRunTransferLoop_TransferErrorBreaksInnerLoopButLoopSurvives(t *testing.T) {
-	// On a tick that fails the transfer, the loop must break the
-	// per-grain inner pass but keep going on the next tick. If it
-	// exited entirely, a single transient TransferGrain error would
-	// stall the flow forever.
-
-	// Custom probe that reports 0 once, then 3 forever.
-	var calls atomic.Int32
-	probe := func() (uint64, error) {
-		if calls.Add(1) == 1 {
-			return 0, nil
-		}
-		return 3, nil
-	}
-
-	var transferCalls atomic.Int32
-	transfer := func(idx uint64, _ bool) (bool, error) {
-		transferCalls.Add(1)
-		if idx == 2 {
-			return false, errors.New("transient")
-		}
-		return false, nil
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go runTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil }, time.Millisecond, nil)
-
-	// Give the loop time to attempt many ticks (so the error path is
-	// hit at least once, and the next-tick recovery is tried too).
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-	<-done
-
-	// Even though idx=2 always errors, the loop must keep being
-	// invoked - so transferCalls grows past a single tick's worth.
-	assert.Greater(t, int(transferCalls.Load()), 3,
-		"a transient transfer error must not stop the loop; future ticks "+
-			"must retry from lastSent+1 (idx=2 again here)")
-}
-
-func TestRunTransferLoop_InitialProbeErrorReturnsEarly(t *testing.T) {
-	// If the very first Runtime probe fails, the loop returns and
-	// closes done without ever spinning. Catches a regression where
-	// the loop would proceed with a zero head index and silently
-	// flood the initiator with stale grains.
-	probe := func() (uint64, error) { return 0, errors.New("dead reader") }
-	transfer := func(uint64, bool) (bool, error) {
-		t.Fatal("transferGrain must not be called when initial probe errors")
-		return false, nil
-	}
-	progress := func() error {
-		t.Fatal("makeProgress must not be called when initial probe errors")
-		return nil
-	}
-
-	done := make(chan struct{})
-	go runTransferLoop(context.Background(), done, "f", probe, transfer, progress, time.Millisecond, nil)
-
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("loop did not exit on initial probe error")
-	}
-}
-
-func TestRunTransferLoop_ProgressErrNotReadyIsSwallowed(t *testing.T) {
-	// fabrics.ErrNotReady is the normal "queue is empty" signal;
-	// the loop must keep ticking. Any other error from MakeProgress
-	// is logged but does not stop the loop either - the next tick
-	// recovers.
-	probe := func() (uint64, error) { return 0, nil }
-	transfer := func(uint64, bool) (bool, error) {
-		return false, nil
-	}
-	calls := atomic.Int32{}
-	progress := func() error {
-		calls.Add(1)
+	f.progress++
+	if f.pending > 0 {
+		f.pending--
 		return fabrics.ErrNotReady
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go runTransferLoop(ctx, done, "f", probe, transfer, progress, time.Millisecond, nil)
-
-	require.Eventually(t, func() bool { return calls.Load() >= 3 },
-		time.Second, time.Millisecond,
-		"expected MakeProgress to be called multiple times despite ErrNotReady")
-
-	cancel()
-	<-done
+	f.outstanding = false
+	return nil
 }
 
-func TestRunTransferLoop_CtxCancelExitsImmediately(t *testing.T) {
-	probe := func() (uint64, error) { return 0, nil }
-	transfer := func(uint64, bool) (bool, error) { return false, nil }
-	progress := func() error { return nil }
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go runTransferLoop(ctx, done, "f", probe, transfer, progress, time.Hour, nil)
-
-	// Cancel before the first tick fires.
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("loop did not honour ctx cancel before first tick")
-	}
+func (f *fakeLink) snapshot() (posted []uint64, progress int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.posted), f.progress
 }
 
-// recordingTracker captures every transfer/agedOut call the loop
-// makes so assertions can read them after cancel.
+// recordingTracker captures what a transfer loop reports.
 type recordingTracker struct {
 	mu        sync.Mutex
-	transfers []uint64
+	completed []uint64
+	bytes     uint64
+	late      int
+	offered   int
+	dropped   []bool
 	agedOuts  int
 	skipped   uint64
 	invalid   int
+	passed    map[unsentReason]uint64
 	heads     []uint64
 }
 
@@ -341,13 +126,29 @@ type recordingTracker struct {
 // reach, so nothing in them is ever old enough to abandon.
 const testReadableWindow = 1 << 20
 
-func (rt *recordingTracker) recordOffered(idx uint64, _ time.Time) {
+func (rt *recordingTracker) recordOffered(time.Time) {
 	rt.mu.Lock()
-	rt.transfers = append(rt.transfers, idx)
+	rt.offered++
 	rt.mu.Unlock()
 }
 
-func (rt *recordingTracker) recordAgedOut(_ time.Time) {
+func (rt *recordingTracker) recordCompleted(idx, bytes uint64, late bool, _ time.Time) {
+	rt.mu.Lock()
+	rt.completed = append(rt.completed, idx)
+	rt.bytes += bytes
+	if late {
+		rt.late++
+	}
+	rt.mu.Unlock()
+}
+
+func (rt *recordingTracker) recordDropped(outstanding bool) {
+	rt.mu.Lock()
+	rt.dropped = append(rt.dropped, outstanding)
+	rt.mu.Unlock()
+}
+
+func (rt *recordingTracker) recordAgedOut(time.Time) {
 	rt.mu.Lock()
 	rt.agedOuts++
 	rt.mu.Unlock()
@@ -359,7 +160,14 @@ func (rt *recordingTracker) recordSkipped(samples uint64) {
 	rt.mu.Unlock()
 }
 
-func (rt *recordingTracker) recordPassedOver(unsentReason, uint64) {}
+func (rt *recordingTracker) recordPassedOver(reason unsentReason, grains uint64) {
+	rt.mu.Lock()
+	if rt.passed == nil {
+		rt.passed = map[unsentReason]uint64{}
+	}
+	rt.passed[reason] += grains
+	rt.mu.Unlock()
+}
 
 func (rt *recordingTracker) recordInvalid(time.Time) {
 	rt.mu.Lock()
@@ -382,198 +190,336 @@ func (rt *recordingTracker) skippedSnapshot() uint64 {
 func (rt *recordingTracker) headSnapshot() []uint64 {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	out := make([]uint64, len(rt.heads))
-	copy(out, rt.heads)
-	return out
+	return slices.Clone(rt.heads)
 }
 
+// snapshot returns the completed indices and the aged-out count.
 func (rt *recordingTracker) snapshot() ([]uint64, int) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	out := make([]uint64, len(rt.transfers))
-	copy(out, rt.transfers)
-	return out, rt.agedOuts
+	return slices.Clone(rt.completed), rt.agedOuts
+}
+
+func (rt *recordingTracker) droppedSnapshot() []bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return slices.Clone(rt.dropped)
+}
+
+// runGrainLoop starts runTransferLoop with a 1 ms poll and returns a
+// stop function that cancels it and waits for it.
+func runGrainLoop(probe RuntimeProbe, transfer TransferFunc, progress ProgressFunc, interval time.Duration, tr progressTracker) (done chan struct{}, stop func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done = make(chan struct{})
+	go runTransferLoop(ctx, done, "flow-a", probe, transfer, progress, time.Millisecond, interval, tr)
+	return done, func() {
+		cancel()
+		<-done
+	}
+}
+
+func TestRunTransferLoop_TailsFromHead(t *testing.T) {
+	// The first probe is where the mirror tunes in; the producer's
+	// earlier grains are not replayed.
+	h := &headScript{heads: []uint64{10, 12, 15}}
+	link := &fakeLink{t: t}
+	tr := &recordingTracker{}
+	_, stop := runGrainLoop(h.probe, link.transferGrain, link.makeProgress, time.Second, tr)
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) >= 5 }, time.Second, time.Millisecond)
+	stop()
+
+	got, _ := tr.snapshot()
+	assert.Equal(t, []uint64{11, 12, 13, 14, 15}, got)
+}
+
+// libmxl-fabrics guarantees a transfer complete only once MakeProgress
+// stops returning not-ready. The loop drives each transfer that far
+// and posts nothing while it is outstanding.
+func TestRunTransferLoop_ProgressesEachTransferUntilItCompletes(t *testing.T) {
+	h := &headScript{heads: []uint64{10, 13}}
+	link := &fakeLink{t: t, notReady: 3}
+	tr := &recordingTracker{}
+	_, stop := runGrainLoop(h.probe, link.transferGrain, link.makeProgress, time.Second, tr)
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) == 3 }, time.Second, time.Millisecond)
+	stop()
+
+	posted, progress := link.snapshot()
+	assert.Equal(t, []uint64{11, 12, 13}, posted)
+	assert.Equal(t, 3*4, progress, "three not-ready answers and one completion per transfer")
+	got, _ := tr.snapshot()
+	assert.Equal(t, []uint64{11, 12, 13}, got)
+	assert.Zero(t, tr.late)
+}
+
+// A transfer that misses its deadline is still driven to completion,
+// with nothing posted meanwhile, and the loop then resumes at the live
+// head instead of queueing what the producer wrote in between.
+func TestRunTransferLoop_LateTransferResumesAtTheHead(t *testing.T) {
+	var head atomic.Uint64
+	head.Store(10)
+	probe := func() (uint64, error) { return head.Load(), nil }
+	link := &fakeLink{t: t}
+	link.hold = func(idx uint64) {
+		if idx == 11 && head.Load() == 11 {
+			// The producer moves on by three grains, inside
+			// maxMirrorLag, while grain 11 is still outstanding past its
+			// deadline.
+			time.Sleep(20 * time.Millisecond)
+			head.Store(14)
+		}
+	}
+	tr := &recordingTracker{}
+	_, stop := runGrainLoop(probe, link.transferGrain, link.makeProgress, 5*time.Millisecond, tr)
+	require.Eventually(t, func() bool { return len(tr.headSnapshot()) > 1 }, time.Second, time.Millisecond)
+	head.Store(11)
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) >= 2 }, time.Second, time.Millisecond)
+	stop()
+
+	posted, _ := link.snapshot()
+	assert.Equal(t, []uint64{11, 14}, posted[:2], "the grains written while 11 was outstanding are skipped")
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	assert.Equal(t, 1, tr.late)
+	assert.Equal(t, uint64(2), tr.passed[unsentResync], "grains 12 and 13 are counted as passed over")
+	assert.Zero(t, tr.agedOuts, "a late transfer is not the reader ageing out")
+}
+
+// On a connection-oriented initiator that dropped its only target every
+// MakeProgress answers interrupted. The loop gives the target up and
+// stops, so the reconciler adds it again.
+func TestRunTransferLoop_DroppedTargetStopsTheLoop(t *testing.T) {
+	h := &headScript{heads: []uint64{10, 11}}
+	link := &fakeLink{t: t}
+	progress := func() error { return mxl.ErrInterrupted }
+	tr := &recordingTracker{}
+	done, stop := runGrainLoop(h.probe, link.transferGrain, progress, time.Second, tr)
+	defer stop()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the loop kept running against a dropped target")
+	}
+	assert.Equal(t, []bool{true}, tr.droppedSnapshot(), "the outstanding transfer is counted lost")
+	got, _ := tr.snapshot()
+	assert.Empty(t, got)
+}
+
+// A post the target is not ready for posts nothing. The loop drives
+// progress, which moves a connecting target on, and offers the same
+// grain again.
+func TestRunTransferLoop_RetriesAPostTheTargetWasNotReadyFor(t *testing.T) {
+	h := &headScript{heads: []uint64{10, 11}}
+	var posts []uint64
+	var mu sync.Mutex
+	transfer := func(idx uint64) (bool, uint64, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		posts = append(posts, idx)
+		if len(posts) == 1 {
+			return false, 0, fmt.Errorf("%w: %w", errPost, fabrics.ErrNotReady)
+		}
+		return true, 1, nil
+	}
+	var progress atomic.Int32
+	tr := &recordingTracker{}
+	_, stop := runGrainLoop(h.probe, transfer, func() error { progress.Add(1); return nil }, time.Second, tr)
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) == 1 }, time.Second, time.Millisecond)
+	stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []uint64{11, 11}, posts)
+	assert.Empty(t, tr.droppedSnapshot())
+}
+
+func TestRunTransferLoop_FailedPostGivesTheTargetUp(t *testing.T) {
+	h := &headScript{heads: []uint64{10, 11}}
+	transfer := func(uint64) (bool, uint64, error) {
+		return false, 0, fmt.Errorf("%w: %w", errPost, errors.New("endpoint gone"))
+	}
+	tr := &recordingTracker{}
+	done, stop := runGrainLoop(h.probe, transfer, func() error { return nil }, time.Second, tr)
+	defer stop()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the loop kept running after a failed post")
+	}
+	assert.Equal(t, []bool{false}, tr.droppedSnapshot(), "nothing was outstanding")
+}
+
+// An invalid video grain posts nothing and moves the loop on: the index
+// is the target writer's to flag.
+func TestRunTransferLoop_CountsInvalidGrains(t *testing.T) {
+	h := &headScript{heads: []uint64{10, 14}}
+	link := &fakeLink{t: t}
+	transfer := func(idx uint64) (bool, uint64, error) {
+		if idx == 12 || idx == 13 {
+			return false, 0, nil
+		}
+		return link.transferGrain(idx)
+	}
+	tr := &recordingTracker{}
+	_, stop := runGrainLoop(h.probe, transfer, link.makeProgress, time.Second, tr)
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) >= 2 }, time.Second, time.Millisecond)
+	stop()
+
+	got, _ := tr.snapshot()
+	assert.Equal(t, []uint64{11, 14}, got)
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	assert.Equal(t, 2, tr.invalid)
+	assert.Equal(t, 2, tr.offered, "an invalid grain is not counted as offered")
+}
+
+func TestRunTransferLoop_ResyncsToHeadWhenLapped(t *testing.T) {
+	// Attach race: the first probe reports head 0, then the real head
+	// appears far ahead. Replaying from index 1 would wedge on grains
+	// the producer no longer holds.
+	h := &headScript{heads: []uint64{0, 1000}}
+	link := &fakeLink{t: t}
+	tr := &recordingTracker{}
+	_, stop := runGrainLoop(h.probe, link.transferGrain, link.makeProgress, time.Second, tr)
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) > 0 }, time.Second, time.Millisecond)
+	stop()
+
+	posted, _ := link.snapshot()
+	assert.Equal(t, uint64(1000), posted[0])
+	_, agedOuts := tr.snapshot()
+	assert.Zero(t, agedOuts, "the attach case never held the grains it skips")
+}
+
+func TestRunTransferLoop_ResyncRecordsAgedOutOnFallBehind(t *testing.T) {
+	h := &headScript{heads: []uint64{0, 2, 2, 100}}
+	link := &fakeLink{t: t}
+	tr := &recordingTracker{}
+	_, stop := runGrainLoop(h.probe, link.transferGrain, link.makeProgress, time.Second, tr)
+	require.Eventually(t, func() bool { _, n := tr.snapshot(); return n >= 1 }, time.Second, time.Millisecond)
+	stop()
+
+	posted, _ := link.snapshot()
+	assert.Equal(t, []uint64{1, 2, 100}, posted[:3])
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	assert.Equal(t, uint64(97), tr.passed[unsentResync])
 }
 
 func TestRunTransferLoop_AdvancesLastSentOnAgedOutError(t *testing.T) {
-	// A grain ages out while the lag stays within maxMirrorLag, so the
-	// proactive resync never fires and the aged-out grain surfaces only
-	// as a transferGrain error. Initial probe head=0 pins lastSent at
-	// 0. On the first tick the probe reports head=3 (lag 3, at or below
-	// maxMirrorLag), so the loop tries idx=1 first; transferGrain
-	// returns the libmxl "out of range (too late)" string. The loop
-	// must advance lastSent to head (3) and signal the tracker. On the
-	// next tick the probe reports head=6: transfers must resume from 4
-	// onward, never re-attempting the unrecoverable 2..3.
-	var probeCalls atomic.Int32
-	probe := func() (uint64, error) {
-		switch probeCalls.Add(1) {
-		case 1:
-			return 0, nil
-		case 2:
-			return 3, nil
-		default:
-			return 6, nil
-		}
-	}
-
+	// A grain ages out while the lag stays within maxMirrorLag, so it
+	// surfaces only as the reader's error. The loop jumps to the head
+	// and never retries the unrecoverable indices.
+	h := &headScript{heads: []uint64{0, 3, 3, 6}}
+	link := &fakeLink{t: t}
 	var mu sync.Mutex
 	var attempts []uint64
-	transfer := func(idx uint64, _ bool) (bool, error) {
+	transfer := func(idx uint64) (bool, uint64, error) {
 		mu.Lock()
 		attempts = append(attempts, idx)
 		mu.Unlock()
 		if idx == 1 {
-			return false, errors.New("MXL_ERR_OUT_OF_RANGE: requested index 1 is out of range (too late)")
+			return false, 0, errors.New("MXL_ERR_OUT_OF_RANGE: requested index 1 is out of range (too late)")
 		}
-		return false, nil
+		return link.transferGrain(idx)
 	}
-
-	tracker := &recordingTracker{}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go runTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil }, time.Millisecond, tracker)
-
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		for _, v := range attempts {
-			if v == 4 {
-				return true
-			}
-		}
-		return false
-	}, time.Second, time.Millisecond,
-		"loop must resume from head+1 after an aged-out skip; "+
-			"a retry from lastSent+1 would loop on idx=1 forever")
-
-	cancel()
-	<-done
+	tr := &recordingTracker{}
+	_, stop := runGrainLoop(h.probe, transfer, link.makeProgress, time.Second, tr)
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return slices.Contains(got, 4) }, time.Second, time.Millisecond)
+	stop()
 
 	mu.Lock()
-	gotAttempts := append([]uint64(nil), attempts...)
-	mu.Unlock()
-	transfers, agedOuts := tracker.snapshot()
-
-	assert.Equal(t, uint64(1), gotAttempts[0],
-		"first transfer attempt must be lastSent+1 = 1; "+
-			"head0=0 was the initial probe, so the loop starts from 1")
-	assert.GreaterOrEqual(t, agedOuts, 1,
-		"the aged-out skip must reach the tracker so the reconciler "+
-			"can surface SourceProgress=ReaderAgedOut")
-	for _, idx := range transfers {
-		assert.NotContains(t, []uint64{1, 2, 3}, idx,
-			"a recorded transfer for an aged-out index would mean the "+
-				"loop counted a fictional success against the tracker")
-	}
+	defer mu.Unlock()
+	assert.Equal(t, uint64(1), attempts[0])
+	assert.NotContains(t, attempts, uint64(2))
+	assert.NotContains(t, attempts, uint64(3))
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	assert.GreaterOrEqual(t, tr.agedOuts, 1)
+	assert.Equal(t, uint64(3), tr.passed[unsentAgedOut])
 }
 
-func TestRunTransferLoop_ResyncRecordsAgedOutOnFallBehind(t *testing.T) {
-	// The mirror transfers a few grains, then the producer laps it by
-	// more than maxMirrorLag before the next tick. The proactive resync
-	// abandons the stranded grains and lands near the live head; it
-	// must also signal the tracker so the reconciler can surface
-	// SourceProgress=ReaderAgedOut, matching the aged-out error path.
-	var probeCalls atomic.Int32
-	probe := func() (uint64, error) {
-		switch probeCalls.Add(1) {
-		case 1:
-			return 0, nil
-		case 2:
-			return 2, nil
-		default:
-			return 100, nil
-		}
-	}
-
-	transfer := func(uint64, bool) (bool, error) { return false, nil }
-
-	tracker := &recordingTracker{}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go runTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil }, time.Millisecond, tracker)
-
-	require.Eventually(t, func() bool {
-		_, agedOuts := tracker.snapshot()
-		return agedOuts >= 1
-	}, time.Second, time.Millisecond,
-		"a fall-behind resync must reach the tracker so the reconciler "+
-			"can surface SourceProgress=ReaderAgedOut")
-
-	cancel()
-	<-done
-
-	transfers, _ := tracker.snapshot()
-	for _, idx := range transfers {
-		assert.Truef(t, idx <= 2 || idx >= uint64(100-maxMirrorLag),
-			"transfers must be the pre-resync grains or land near the "+
-				"live head after resync; got %d", idx)
-	}
-}
-
-func TestRunTransferLoop_TracksProgressAndLastSentAt(t *testing.T) {
-	// Every successful transferGrain must be reflected on the tracker:
-	// the per-mirror flusher reads progress + lastSentAt to decide
-	// whether to publish a SourceProgress=Recovered condition.
+// A grain the reader cannot hand out yet is read again once the head
+// moves; the loop does not give the target up over it.
+func TestRunTransferLoop_UnreadableGrainIsReadAgain(t *testing.T) {
+	h := &headScript{heads: []uint64{0, 3}}
 	var calls atomic.Int32
-	probe := func() (uint64, error) {
-		if calls.Add(1) == 1 {
-			return 0, nil
-		}
-		return 3, nil
+	transfer := func(idx uint64) (bool, uint64, error) {
+		calls.Add(1)
+		return false, 0, errors.New("out of range (too early)")
 	}
-	transfer := func(uint64, bool) (bool, error) { return false, nil }
+	tr := &recordingTracker{}
+	_, stop := runGrainLoop(h.probe, transfer, func() error { return nil }, time.Second, tr)
+	require.Eventually(t, func() bool { return calls.Load() > 3 }, time.Second, time.Millisecond)
+	stop()
 
-	tracker := &recordingTracker{}
+	assert.Empty(t, tr.droppedSnapshot())
+}
+
+func TestRunTransferLoop_InitialProbeErrorReturnsEarly(t *testing.T) {
+	probe := func() (uint64, error) { return 0, errors.New("dead reader") }
+	transfer := func(uint64) (bool, uint64, error) {
+		t.Error("transferGrain must not be called when the initial probe errors")
+		return false, 0, nil
+	}
+	done, stop := runGrainLoop(probe, transfer, func() error { return nil }, time.Second, &recordingTracker{})
+	defer stop()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("loop did not exit on initial probe error")
+	}
+}
+
+func TestRunTransferLoop_CtxCancelExitsImmediately(t *testing.T) {
+	h := &headScript{heads: []uint64{0}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runTransferLoop(ctx, done, "f", probe, transfer, func() error { return nil }, time.Millisecond, tracker)
-
-	require.Eventually(t, func() bool {
-		got, _ := tracker.snapshot()
-		return len(got) >= 3
-	}, time.Second, time.Millisecond,
-		"tracker must observe one recordOffered per successful grain")
-
+	go runTransferLoop(ctx, done, "f", h.probe, func(uint64) (bool, uint64, error) { return true, 0, nil },
+		func() error { return nil }, time.Hour, time.Second, &recordingTracker{})
 	cancel()
-	<-done
-
-	transfers, _ := tracker.snapshot()
-	assert.GreaterOrEqual(t, len(transfers), 3)
-	for i := 0; i < 3; i++ {
-		assert.Equal(t, uint64(i+1), transfers[i],
-			"recordOffered must observe the same monotonic index sequence "+
-				"the loop hands to transferGrain")
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("loop did not honour ctx cancel")
 	}
+}
+
+// The entry is what the flusher and the collector read: completions,
+// bytes, the last completed index and when it completed.
+func TestRunTransferLoop_RecordsCompletionsOnTheEntry(t *testing.T) {
+	h := &headScript{heads: []uint64{0, 3}}
+	link := &fakeLink{t: t}
+	e := &sourceEntry{}
+	_, stop := runGrainLoop(h.probe, link.transferGrain, link.makeProgress, time.Second, e)
+	require.Eventually(t, func() bool { return e.progress.Load() == 3 }, time.Second, time.Millisecond)
+	stop()
+
+	assert.Equal(t, uint64(300), e.bytes.Load())
+	assert.Equal(t, uint64(3), e.lastCompleted.Load())
+	assert.NotNil(t, e.lastSentAt.Load())
+	assert.Zero(t, e.late.Load())
 }
 
 // fakeOpener is the inline initiatorOpener used by the Reconcile
 // tests. openFn and attachFn are whatever the scenario wants the calls
-// to return; the counters and the added / removed logs let a test
-// assert how much libmxl-fabrics work a reconcile did without
-// inspecting the entries. Mirrors the style of the operator's
-// fakeLeaseChecker - an inline test fake instead of a
-// mockery-generated mock.
+// to return; loopFn, when set, runs as each mirror's transfer loop. The
+// counters and the added / removed logs let a test assert how much
+// libmxl work a reconcile did.
 //
-// opens is the counter that answers "how many readers and initiators
-// does this node hold", which is the whole point of sharing them:
-// several mirrors of one flow must drive attaches without driving
-// opens.
+// opens counts readers: several mirrors of one flow must drive attaches
+// without driving opens.
 type fakeOpener struct {
 	openFn   func(flowID string, provider fabrics.Provider) (*sharedSource, error)
-	attachFn func(s *sharedSource, targetInfoStr string) (*fabrics.TargetInfo, error)
-	// stateFn answers targetState. Nil reports every target connected.
-	stateFn func(info *fabrics.TargetInfo) (fabrics.TargetState, error)
-	// statsFn answers targetStats. Nil reports no counters, which
-	// leaves delivery as the test recorded it.
-	statsFn func(info *fabrics.TargetInfo) (fabrics.TargetStats, error)
+	attachFn func(s *sharedSource, targetInfoStr string) error
+	loopFn   func(ctx context.Context, targetInfoStr string, e *sourceEntry)
 
 	opens    atomic.Int32
 	attaches atomic.Int32
 	detaches atomic.Int32
 
 	mu      sync.Mutex
-	names   map[*fabrics.TargetInfo]string
+	names   map[*sourceLink]string
 	added   []string
 	removed []string
 }
@@ -586,67 +532,38 @@ func (f *fakeOpener) open(key sourceKey) (*sharedSource, error) {
 	return &sharedSource{}, nil
 }
 
-func (f *fakeOpener) attach(s *sharedSource, targetInfoStr string) (*fabrics.TargetInfo, error) {
+func (f *fakeOpener) attach(s *sharedSource, targetInfoStr string, e *sourceEntry) (*sourceLink, error) {
 	f.attaches.Add(1)
-	info := &fabrics.TargetInfo{}
 	if f.attachFn != nil {
-		var err error
-		if info, err = f.attachFn(s, targetInfoStr); err != nil {
+		if err := f.attachFn(s, targetInfoStr); err != nil {
 			return nil, err
 		}
 	}
-	// The pointer is the identity a detach is asserted against. A
-	// zero-valued handle is never dereferenced: nothing in these tests
-	// calls into libmxl-fabrics through it.
+	link := &sourceLink{}
+	if f.loopFn != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		link.cancel, link.done = cancel, make(chan struct{})
+		go func() {
+			defer close(link.done)
+			f.loopFn(ctx, targetInfoStr, e)
+		}()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.names == nil {
-		f.names = make(map[*fabrics.TargetInfo]string)
+		f.names = make(map[*sourceLink]string)
 	}
-	f.names[info] = targetInfoStr
+	f.names[link] = targetInfoStr
 	f.added = append(f.added, targetInfoStr)
-	return info, nil
+	return link, nil
 }
 
-func (f *fakeOpener) detach(_ *sharedSource, info *fabrics.TargetInfo) {
+func (f *fakeOpener) detach(link *sourceLink) {
 	f.detaches.Add(1)
+	link.stop()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.removed = append(f.removed, f.names[info])
-}
-
-func (f *fakeOpener) targetState(_ *sharedSource, info *fabrics.TargetInfo) (fabrics.TargetState, error) {
-	f.mu.Lock()
-	fn := f.stateFn
-	f.mu.Unlock()
-	if fn == nil {
-		return fabrics.TargetConnected, nil
-	}
-	return fn(info)
-}
-
-func (f *fakeOpener) targetStats(_ *sharedSource, info *fabrics.TargetInfo) (fabrics.TargetStats, error) {
-	f.mu.Lock()
-	fn := f.statsFn
-	f.mu.Unlock()
-	if fn == nil {
-		return fabrics.TargetStats{}, mxl.ErrNotFound
-	}
-	return fn(info)
-}
-
-// setStats replaces statsFn while flushers may be asking it.
-func (f *fakeOpener) setStats(fn func(info *fabrics.TargetInfo) (fabrics.TargetStats, error)) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.statsFn = fn
-}
-
-// setState replaces stateFn while flushers may be asking it.
-func (f *fakeOpener) setState(fn func(info *fabrics.TargetInfo) (fabrics.TargetState, error)) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.stateFn = fn
+	f.removed = append(f.removed, f.names[link])
 }
 
 // addedTargets and removedTargets report the target infos AddTarget
@@ -726,8 +643,8 @@ func TestReconcile_AddTargetFailureSurfacesConditionAndCapsBackoffAt30s(t *testi
 		Scheme:   scheme,
 		NodeName: "node-a",
 		opener: &fakeOpener{
-			attachFn: func(*sharedSource, string) (*fabrics.TargetInfo, error) {
-				return nil, errors.Join(errAddTargetFailed, addErr)
+			attachFn: func(*sharedSource, string) error {
+				return errors.Join(errAddTargetFailed, addErr)
 			},
 		},
 		sources:  map[types.NamespacedName]*sourceEntry{},
@@ -934,8 +851,8 @@ func TestSource_SeedAttemptsFromStatus(t *testing.T) {
 		Scheme:   scheme,
 		NodeName: "node-a",
 		opener: &fakeOpener{
-			attachFn: func(*sharedSource, string) (*fabrics.TargetInfo, error) {
-				return nil, errors.Join(errAddTargetFailed, errors.New("offline"))
+			attachFn: func(*sharedSource, string) error {
+				return errors.Join(errAddTargetFailed, errors.New("offline"))
 			},
 		},
 		sources:  map[types.NamespacedName]*sourceEntry{},

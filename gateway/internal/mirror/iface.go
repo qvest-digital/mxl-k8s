@@ -1,64 +1,24 @@
 package mirror
 
-import "github.com/qvest-digital/go-mxl/fabrics"
+// The transfer loops on both sides take their cgo calls as injected
+// functions, so their state machines run in tests without libmxl.
 
-// The two per-mirror progress loops below sit at the heart of every
-// data-plane bug the gateway has shipped. They are also the only
-// pieces of this package whose state machine can be exercised
-// without libmxl-fabrics: the cgo-dependent work happens behind a
-// handful of function calls the loops make on every iteration.
-//
-// The refactor that introduced these types narrowed the loop
-// signatures to accept those calls as injected functions. Production
-// binds them to thin closures over *mxl.Reader / *mxl.Writer /
-// *fabrics.Initiator / *fabrics.Target; the tests bind them to
-// closures that record every call and return whatever the scenario
-// needs. No interface gymnastics, no mockery boilerplate; the loops
-// stay where they were, and only their parameter list changed.
-
-// initiatorOpener is the source reconciler's seam onto the
-// cgo-dependent libmxl-fabrics Initiator paths. Production binds it to
-// libmxlOpener, a thin struct wrapping the FlowReader + Initiator +
-// AddTarget calls. Tests bind it to an inline fake that returns canned
-// values without touching libmxl or libmxl-fabrics.
-//
-// The split between open and attach is the shape of the API it wraps:
-// an initiator fans a transfer out to every target added to it, so the
-// reader, the initiator and the transfer loop are per flow, and only
-// AddTarget is per mirror.
-//
-// The interface keeps the production binary free of a swappable
-// function pointer that a malicious or buggy caller could redirect
-// at runtime: the field on SourceReconciler is an interface value
-// the constructor sets once and never reassigns.
+// initiatorOpener is the source reconciler's seam onto libmxl and
+// libmxl-fabrics. Production binds it to libmxlOpener; tests bind it to
+// a fake. It is an interface value the constructor sets once.
 type initiatorOpener interface {
-	// open builds the per-flow half: a FlowReader on the flow, an
-	// Initiator set up against it on an interface the provider can
-	// carry, and the transfer goroutine feeding one into the other. It
-	// adds no target, so nothing is transferred until attach runs.
+	// open opens the reader every mirror of one flow transfers from.
 	open(key sourceKey) (*sharedSource, error)
 
-	// attach adds one target to an already-open shared initiator and
-	// returns the handle detach needs. An AddTarget failure is wrapped
-	// in errAddTargetFailed so the reconciler can back off without
-	// rebuilding the reader.
-	attach(s *sharedSource, targetInfoStr string) (*fabrics.TargetInfo, error)
+	// attach sets up an initiator for one mirror on s's reader, adds
+	// the mirror's target to it and starts the transfer loop reporting
+	// to e. An AddTarget failure is wrapped in errAddTargetFailed so
+	// the reconciler can back off without reopening the reader.
+	attach(s *sharedSource, targetInfoStr string, e *sourceEntry) (*sourceLink, error)
 
-	// detach removes one target and closes its handle, leaving the
-	// shared reader, initiator and transfer loop running for the
-	// targets that remain.
-	detach(s *sharedSource, info *fabrics.TargetInfo)
-
-	// targetState reports the state of one target on the shared
-	// initiator. An error matching mxl.ErrNotFound means the initiator
-	// no longer holds it: a connection-oriented initiator whose
-	// connection to the target closed or failed drops the target and
-	// does not connect to it again.
-	targetState(s *sharedSource, info *fabrics.TargetInfo) (fabrics.TargetState, error)
-
-	// targetStats reports what the shared initiator posted to one
-	// target, and what of it completed, failed or was skipped.
-	targetStats(s *sharedSource, info *fabrics.TargetInfo) (fabrics.TargetStats, error)
+	// detach stops the loop, removes the target and closes the
+	// initiator. The reader stays open for the other mirrors.
+	detach(link *sourceLink)
 }
 
 // RuntimeProbe asks the source-side flow reader for the current head
@@ -66,31 +26,14 @@ type initiatorOpener interface {
 // a value the scenario controls.
 type RuntimeProbe func() (head uint64, err error)
 
-// TransferFunc transfers one grain from the source flow to the
-// target. invalid reports a grain its producer committed invalid, of
-// which nothing is sent. Continuous (audio) flows take the
-// sample-transfer path and never reach this loop.
-//
-// paced asks for the grain to be spread across a fraction of the
-// flow's own grain interval rather than handed over whole. The loop
-// sets it only for a grain with nothing queued behind it: a mirror
-// that has fallen behind has to catch up at whatever rate the fabric
-// allows, and shaping a backlog would keep it behind for good.
-// Production ignores it when pacing is disabled.
-//
-// A non-nil error breaks the per-tick loop; the next tick re-reads
-// head and re-tries from lastSent+1.
-type TransferFunc func(idx uint64, paced bool) (invalid bool, err error)
+// TransferFunc posts grain idx of a discrete flow to a mirror's target.
+// sent is false when nothing was posted, for a video grain its producer
+// committed invalid. bytes is the payload posted. A failed post is
+// wrapped in errPost; any other error is a grain the reader cannot hand
+// out.
+type TransferFunc func(idx uint64) (sent bool, bytes uint64, err error)
 
-// TransferSlicesFunc transfers the half-open slice range [start, end)
-// of grain idx. It is the primitive the pacer schedules against;
-// production binds it to fabrics.Initiator.TransferGrain.
-type TransferSlicesFunc func(idx uint64, start, end uint16) error
-
-// ProgressFunc drives libmxl-fabrics's event/completion queues.
-// Production selects the blocking or non-blocking variant per
-// provider (see progressFuncFor); the loop tolerates
-// fabrics.ErrNotReady silently.
+// ProgressFunc is one MakeProgress call on a mirror's initiator.
 type ProgressFunc func() error
 
 // ReadGrainFunc waits for the target side to report an arrived grain.
@@ -99,10 +42,8 @@ type ProgressFunc func() error
 // recovery callback to fire.
 type ReadGrainFunc func() (idx uint64, err error)
 
-// GrainCompleteFunc reports whether every slice of an arrived grain has
-// landed. A paced source transfers a grain as several slice ranges and
-// each one signals the target separately, so the loop has to know which
-// arrival finishes the grain before committing it.
+// GrainCompleteFunc reports whether every slice of an arrived grain is
+// valid, which is when the target commits it.
 type GrainCompleteFunc func(idx uint64) (bool, error)
 
 // CommitFunc finishes one arrived grain on the local writer
@@ -110,12 +51,10 @@ type GrainCompleteFunc func(idx uint64) (bool, error)
 // passes a closure over the per-mirror *mxl.Writer.
 type CommitFunc func(idx uint64) error
 
-// SampleTransferFunc transfers a contiguous run of `count` samples
-// ending at headIndex from a continuous source flow to the target.
-// Production calls Initiator.TransferSamples; tests record the
-// (headIndex, count) pairs. A non-nil error breaks the per-tick loop;
-// the next tick re-reads head and re-tries from lastSent+1.
-type SampleTransferFunc func(headIndex uint64, count int) error
+// SampleTransferFunc posts the run of count samples ending at headIndex
+// of a continuous flow to a mirror's target and returns the payload
+// posted.
+type SampleTransferFunc func(headIndex uint64, count int) (bytes uint64, err error)
 
 // ReadSamplesFunc polls the target side for an arrived run of samples,
 // returning the ending head index and the sample count. Returns

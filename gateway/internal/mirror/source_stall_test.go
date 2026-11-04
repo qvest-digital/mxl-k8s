@@ -24,19 +24,17 @@ func stalledEntry(head uint64, headAt *time.Time, transfers uint64, sentAt time.
 	// reader rebuild budget and the writer-liveness seam through it.
 	// Added against the TargetInfo the test mirrors publish, so the
 	// flusher treats it as attached to the current fabric side.
-	// Connected, as an initiator reporting completions to it is.
 	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1"}
-	e.connected.Store(true)
 	e.lastHead.Store(head)
 	if headAt != nil {
 		t := *headAt
 		e.headAdvancedAt.Store(&t)
 	}
 	if transfers > 0 {
-		if sentAt.IsZero() {
-			e.progress.Store(transfers)
-		} else {
-			e.recordDelivered(transfers, sentAt)
+		e.progress.Store(transfers)
+		if !sentAt.IsZero() {
+			t := sentAt
+			e.lastSentAt.Store(&t)
 		}
 	}
 	return e
@@ -170,7 +168,7 @@ func TestObservedState_TransfersStoppedWithLiveHead(t *testing.T) {
 func TestRecordHead_StampsOnlyOnChange(t *testing.T) {
 	// headAdvancedAt has to measure how long the reader has stood
 	// still, not how long ago it was last polled: the loop probes
-	// every ProgressInterval regardless of whether the head moved.
+	// every PollInterval regardless of whether the head moved.
 	e := &sourceEntry{}
 	t0 := time.Now()
 
@@ -210,9 +208,9 @@ func TestRunTransferLoop_RecordsProbedHead(t *testing.T) {
 			cancel()
 			return 7, nil
 		},
-		func(uint64, bool) (bool, error) { return true, nil },
+		func(uint64) (bool, uint64, error) { return true, 0, nil },
 		func() error { return nil },
-		time.Millisecond, tracker)
+		time.Millisecond, time.Second, tracker)
 
 	<-done
 	heads := tracker.headSnapshot()
@@ -247,13 +245,12 @@ func TestRunSampleTransferLoop_RecordsProbedHead(t *testing.T) {
 			cancel()
 			return 4800, nil
 		},
-		func(uint64, int) error {
+		func(uint64, int) (uint64, error) {
 			t.Error("a head that never advances leaves nothing to transfer")
-			return nil
+			return 0, nil
 		},
 		func() error { return nil },
-		func() error { return nil },
-		480, testReadableWindow, time.Millisecond, tracker)
+		480, testReadableWindow, time.Millisecond, time.Second, tracker)
 
 	<-done
 	heads := tracker.headSnapshot()

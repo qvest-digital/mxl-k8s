@@ -23,486 +23,216 @@ type sampleXfer struct {
 	count int
 }
 
-func TestRunSampleTransferLoop_TransfersDeltaSinceLastTick(t *testing.T) {
-	// Initial probe head=1000 means lastSent starts at 1000; tailing
-	// the live flow rather than replaying history. The first tick sees
-	// head=1096, so the loop transfers the 96-sample run ending at 1096
-	// exactly once. Steady ticks at the same head transfer nothing.
-	var probeCalls atomic.Int32
-	probe := func() (uint64, error) {
-		if probeCalls.Add(1) == 1 {
-			return 1000, nil
-		}
-		return 1096, nil
-	}
+// fakeSampleLink is fakeLink for sample batches.
+type fakeSampleLink struct {
+	t        *testing.T
+	notReady int
+	hold     func(end uint64)
+	postErr  func(n int) error
 
-	var mu sync.Mutex
-	var xfers []sampleXfer
-	transfer := func(head uint64, count int) error {
-		mu.Lock()
-		xfers = append(xfers, sampleXfer{head, count})
-		mu.Unlock()
-		return nil
-	}
-	xfersSnap := func() []sampleXfer {
-		mu.Lock()
-		defer mu.Unlock()
-		out := make([]sampleXfer, len(xfers))
-		copy(out, xfers)
-		return out
-	}
-
-	var progressCalls atomic.Int32
-	makeProgress := func() error { progressCalls.Add(1); return nil }
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, makeProgress, func() error { return nil }, 480, testReadableWindow, time.Millisecond, tracker)
-
-	require.Eventually(t, func() bool { return len(xfersSnap()) == 1 },
-		time.Second, time.Millisecond, "expected exactly one sample-run transfer")
-
-	cancel()
-	<-done
-
-	assert.Equal(t, []sampleXfer{{head: 1096, count: 96}}, xfersSnap(),
-		"the loop must transfer the (lastSent, head] delta as one run ending at head")
-	transfers, agedOuts := tracker.snapshot()
-	assert.Equal(t, []uint64{1096}, transfers,
-		"recordOffered must observe the ending index of each sent run")
-	assert.Zero(t, agedOuts, "a within-window catch-up is not an aged-out skip")
-	assert.GreaterOrEqual(t, progressCalls.Load(), int32(1),
-		"makeProgress must drive the fabric event queues every tick")
+	mu          sync.Mutex
+	outstanding bool
+	current     uint64
+	pending     int
+	posted      []sampleXfer
+	progress    int
 }
 
-func TestRunSampleTransferLoop_ChunksLargeDeltaByXferBatch(t *testing.T) {
-	// A within-window delta larger than xferBatch must be transferred
-	// as several runs of at most xferBatch each, not one oversized
-	// TransferSamples (the fabric rejects an over-large count). The
-	// delta is exactly the catch-up bound, so this is a normal
-	// catch-up with no aged-out skip.
-	const xferBatch = 480
-	var probeCalls atomic.Int32
-	probe := func() (uint64, error) {
-		if probeCalls.Add(1) == 1 {
-			return 0, nil
+func (f *fakeSampleLink) transferSamples(end uint64, count int) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.postErr != nil {
+		if err := f.postErr(len(f.posted)); err != nil {
+			f.posted = append(f.posted, sampleXfer{end, count})
+			return 0, err
 		}
-		return 960, nil
 	}
-
-	var mu sync.Mutex
-	var xfers []sampleXfer
-	transfer := func(head uint64, count int) error {
-		mu.Lock()
-		xfers = append(xfers, sampleXfer{head, count})
-		mu.Unlock()
-		return nil
+	if f.outstanding {
+		f.t.Errorf("batch ending %d posted while batch ending %d was outstanding", end, f.current)
 	}
-	xfersSnap := func() []sampleXfer {
-		mu.Lock()
-		defer mu.Unlock()
-		out := make([]sampleXfer, len(xfers))
-		copy(out, xfers)
-		return out
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	tracker := &recordingTracker{}
-	// The delta is larger than xferBatch but inside the catch-up
-	// bound (2*xferBatch), so it must split into full-batch runs
-	// with no aged-out skip.
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil }, xferBatch, testReadableWindow, time.Millisecond, tracker)
-
-	require.Eventually(t, func() bool { return len(xfersSnap()) == 2 },
-		time.Second, time.Millisecond, "expected the 960-sample delta to split into 480+480")
-
-	cancel()
-	<-done
-
-	assert.Equal(t, []sampleXfer{{480, 480}, {960, 480}}, xfersSnap(),
-		"the loop must chunk the delta into runs of at most xferBatch, each ending at the chunk's last index")
-	_, agedOuts := tracker.snapshot()
-	assert.Zero(t, agedOuts, "a within-bound delta is a normal catch-up, not an aged-out skip")
+	f.outstanding, f.current, f.pending = true, end, f.notReady
+	f.posted = append(f.posted, sampleXfer{end, count})
+	return uint64(count) * 8, nil
 }
 
-func TestRunSampleTransferLoop_CatchesUpInsideTheWindowRatherThanSkipping(t *testing.T) {
-	// A backlog that is still on the ring is owed to the target and
-	// must be sent, not passed over.
-	//
-	// Skipping is not the cheap option it is on the grain path. The
-	// next transfer commits at its own index, so the target's head
-	// moves across the skipped range and republishes whatever its ring
-	// already held there. Every skipped sample is a hole filled with
-	// stale audio, which is why only the readable window may end a
-	// catch-up.
-	const xferBatch = 480
-	var probeCalls atomic.Int32
-	probe := func() (uint64, error) {
-		if probeCalls.Add(1) == 1 {
-			return 0, nil
-		}
-		return 2000, nil
+func (f *fakeSampleLink) makeProgress() error {
+	f.mu.Lock()
+	hold, end := f.hold, f.current
+	f.mu.Unlock()
+	if hold != nil {
+		hold(end)
 	}
-
-	var mu sync.Mutex
-	var xfers []sampleXfer
-	transfer := func(head uint64, count int) error {
-		mu.Lock()
-		xfers = append(xfers, sampleXfer{head, count})
-		mu.Unlock()
-		return nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.progress++
+	if f.pending > 0 {
+		f.pending--
+		return fabrics.ErrNotReady
 	}
-	xfersSnap := func() []sampleXfer {
-		mu.Lock()
-		defer mu.Unlock()
-		out := make([]sampleXfer, len(xfers))
-		copy(out, xfers)
-		return out
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil }, xferBatch, testReadableWindow, time.Millisecond, tracker)
-
-	require.Eventually(t, func() bool { return len(xfersSnap()) == 5 },
-		time.Second, time.Millisecond, "the whole 2000-sample backlog must be transferred")
-
-	cancel()
-	<-done
-
-	// Four batches in the first tick, the 80-sample remainder in the
-	// next: contiguous from zero, nothing passed over.
-	assert.Equal(t, []sampleXfer{
-		{head: 480, count: 480},
-		{head: 960, count: 480},
-		{head: 1440, count: 480},
-		{head: 1920, count: 480},
-		{head: 2000, count: 80},
-	}, xfersSnap())
-	transfers, agedOuts := tracker.snapshot()
-	assert.Equal(t, []uint64{480, 960, 1440, 1920, 2000}, transfers)
-	assert.Zero(t, agedOuts, "a backlog inside the readable window is not aged out")
-	assert.Zero(t, tracker.skippedSnapshot(), "and nothing may be recorded as skipped")
+	f.outstanding = false
+	return nil
 }
 
-func TestRunSampleTransferLoop_PostsTheCatchUpWhileTransfersAreOutstanding(t *testing.T) {
-	// A four-batch backlog goes out in the tick it is owed in, while
-	// the initiator still reports earlier transfers outstanding.
-	// libmxl-fabrics bounds what a target holds in flight itself (its
-	// window, at most half the receives the target keeps posted), so
-	// the loop has nothing to wait for between chunks; waiting for each
-	// chunk to settle first drained a backlog at one chunk per tick.
-	const xferBatch = 480
-	var probes atomic.Int32
-	probe := func() (uint64, error) {
-		if probes.Add(1) == 1 {
-			return 0, nil
-		}
-		return 4 * xferBatch, nil
-	}
-	var mu sync.Mutex
-	var seq []string
-	var probesAt []int32
-	note := func(what string) {
-		mu.Lock()
-		seq = append(seq, what)
-		if what == "xfer" {
-			probesAt = append(probesAt, probes.Load())
-		}
-		mu.Unlock()
-	}
-	transfer := func(uint64, int) error { note("xfer"); return nil }
-	outstanding := func() error { note("progress"); return fabrics.ErrNotReady }
-	snap := func() ([]string, []int32) {
-		mu.Lock()
-		defer mu.Unlock()
-		return append([]string(nil), seq...), append([]int32(nil), probesAt...)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, outstanding, outstanding,
-		xferBatch, testReadableWindow, 5*time.Millisecond, &recordingTracker{})
-
-	require.Eventually(t, func() bool { _, at := snap(); return len(at) >= 4 }, 2*time.Second, time.Millisecond,
-		"the four-batch backlog must be transferred")
-	cancel()
-	<-done
-
-	got, at := snap()
-	assert.Equal(t, []int32{2, 2, 2, 2}, at[:4],
-		"all four batches must be posted in the first tick after attach")
-	assert.Equal(t, []string{"xfer", "xfer", "xfer", "xfer"}, got[:4],
-		"nothing may run between the chunks of a tick")
+func (f *fakeSampleLink) snapshot() ([]sampleXfer, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]sampleXfer(nil), f.posted...), f.progress
 }
 
-func TestRunSampleTransferLoop_CatchUpStaysInsideTheTargetWindow(t *testing.T) {
-	// libmxl-fabrics skips a batch for a target that already holds
-	// MaxTransfersInFlight batches, and a skipped batch is a hole the
-	// target fills with stale ring content. The per-tick catch-up bound
-	// is what keeps a backlog as deep as the readable window from being
-	// posted past that window in one tick. The fake completes what is
-	// in flight only when the loop drives progress, at the end of a
-	// tick, which is the most a tick can rely on.
-	const xferBatch = 480
-	const window = uint64(48000)
-	backlog := window - xferBatch - 1
-	require.LessOrEqual(t, sampleCatchUpBatches, fabrics.MaxTransfersInFlight)
-
-	var probes atomic.Int32
-	probe := func() (uint64, error) {
-		if probes.Add(1) == 1 {
-			return 0, nil
-		}
-		return backlog, nil
-	}
-	var mu sync.Mutex
-	var inFlight, maxInFlight, windowSkips int
-	var heads []uint64
-	transfer := func(head uint64, _ int) error {
-		mu.Lock()
-		defer mu.Unlock()
-		if inFlight >= fabrics.MaxTransfersInFlight {
-			windowSkips++
-			return nil
-		}
-		inFlight++
-		maxInFlight = max(maxInFlight, inFlight)
-		heads = append(heads, head)
-		return nil
-	}
-	complete := func() error {
-		mu.Lock()
-		inFlight = 0
-		mu.Unlock()
-		return nil
-	}
-	sent := func() uint64 {
-		mu.Lock()
-		defer mu.Unlock()
-		if len(heads) == 0 {
-			return 0
-		}
-		return heads[len(heads)-1]
-	}
-
+// runSampleLoop starts runSampleTransferLoop with a 1 ms poll and
+// returns a stop function that cancels it and waits for it.
+func runSampleLoop(probe RuntimeProbe, transfer SampleTransferFunc, progress ProgressFunc, xferBatch, window uint64, interval time.Duration, tr progressTracker) (done chan struct{}, stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, complete, complete,
-		xferBatch, window, time.Millisecond, tracker)
-
-	require.Eventually(t, func() bool { return sent() == backlog }, 5*time.Second, time.Millisecond,
-		"the whole backlog must be transferred")
-	cancel()
-	<-done
-
-	mu.Lock()
-	defer mu.Unlock()
-	assert.Zero(t, windowSkips, "no batch may be posted past the target's window")
-	assert.LessOrEqual(t, maxInFlight, sampleCatchUpBatches)
-	for i := 1; i < len(heads); i++ {
-		require.LessOrEqualf(t, heads[i]-heads[i-1], uint64(xferBatch), "batch %d: a gap in the catch-up", i)
+	done = make(chan struct{})
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, progress, xferBatch, window, time.Millisecond, interval, tr)
+	return done, func() {
+		cancel()
+		<-done
 	}
-	_, agedOuts := tracker.snapshot()
-	assert.Zero(t, agedOuts, "a backlog inside the readable window is not aged out")
-	assert.Zero(t, tracker.skippedSnapshot(), "and none of it is skipped")
 }
 
-func TestRunSampleTransferLoop_FailingTransfersAgeOutInsteadOfExiting(t *testing.T) {
-	// Every transfer fails while the writer keeps producing. The loop
-	// keeps running and keeps the head moving; once the backlog leaves
-	// the readable window it is aged out like any other, and an aged-out
-	// source that completes nothing is ReaderAgedOut, which the flusher
-	// rebuilds. A loop that exits on its own instead takes every target
-	// of the flow down with it.
-	const xferBatch = 480
-	const window = uint64(48000)
-	var probes atomic.Uint64
-	probe := func() (uint64, error) { return probes.Add(xferBatch), nil }
-	transfer := func(uint64, int) error { return errors.New("endpoint is gone") }
+func TestRunSampleTransferLoop_TransfersDeltaSinceLastPoll(t *testing.T) {
+	// The first probe is where the mirror tunes in. The next head
+	// 96 samples on is one run ending at it, sent once.
+	h := &headScript{heads: []uint64{1000, 1096}}
+	link := &fakeSampleLink{t: t}
+	tr := &recordingTracker{}
+	_, stop := runSampleLoop(h.probe, link.transferSamples, link.makeProgress, 480, testReadableWindow, time.Second, tr)
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) == 1 }, time.Second, time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
+	stop()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil },
-		xferBatch, window, time.Millisecond, tracker)
+	posted, _ := link.snapshot()
+	assert.Equal(t, []sampleXfer{{head: 1096, count: 96}}, posted)
+	got, agedOuts := tr.snapshot()
+	assert.Equal(t, []uint64{1096}, got)
+	assert.Zero(t, agedOuts)
+	assert.Equal(t, uint64(96*8), tr.bytes)
+}
 
-	require.Eventually(t, func() bool { _, aged := tracker.snapshot(); return aged > 0 }, 2*time.Second, time.Millisecond,
-		"a backlog past the readable window must be aged out")
-	// Well past the 400 ticks after which the loop used to exit.
-	time.Sleep(time.Second)
-	select {
-	case <-done:
-		t.Fatal("the loop exited on failing transfers")
-	default:
+// A delta larger than one batch goes as one batch per transfer, each
+// driven to completion before the next is posted.
+func TestRunSampleTransferLoop_SendsOneBatchAtATime(t *testing.T) {
+	h := &headScript{heads: []uint64{0, 1440}}
+	link := &fakeSampleLink{t: t, notReady: 2}
+	tr := &recordingTracker{}
+	_, stop := runSampleLoop(h.probe, link.transferSamples, link.makeProgress, 480, testReadableWindow, time.Second, tr)
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) == 3 }, time.Second, time.Millisecond)
+	stop()
+
+	posted, progress := link.snapshot()
+	assert.Equal(t, []sampleXfer{{480, 480}, {960, 480}, {1440, 480}}, posted)
+	assert.Equal(t, 3*3, progress, "two not-ready answers and one completion per batch")
+	assert.Zero(t, tr.skippedSnapshot())
+}
+
+// A batch that misses its deadline is still driven to completion, and
+// the loop then resumes one batch short of the live head, counting what
+// it passed over.
+func TestRunSampleTransferLoop_LateBatchResumesAtTheHead(t *testing.T) {
+	var head atomic.Uint64
+	head.Store(0)
+	probe := func() (uint64, error) { return head.Load(), nil }
+	link := &fakeSampleLink{t: t}
+	link.hold = func(end uint64) {
+		if end == 480 && head.Load() == 480 {
+			time.Sleep(20 * time.Millisecond)
+			head.Store(4800)
+		}
 	}
-	cancel()
-	<-done
-	transfers, _ := tracker.snapshot()
-	assert.Empty(t, transfers, "a failed transfer must never be recorded as offered")
+	tr := &recordingTracker{}
+	_, stop := runSampleLoop(probe, link.transferSamples, link.makeProgress, 480, testReadableWindow, 5*time.Millisecond, tr)
+	require.Eventually(t, func() bool { return len(tr.headSnapshot()) > 1 }, time.Second, time.Millisecond)
+	head.Store(480)
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) >= 2 }, time.Second, time.Millisecond)
+	stop()
+
+	posted, _ := link.snapshot()
+	assert.Equal(t, []sampleXfer{{480, 480}, {4800, 480}}, posted[:2])
+	assert.Equal(t, uint64(4800-480-480), tr.skippedSnapshot())
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	assert.Equal(t, 1, tr.late)
+	assert.Zero(t, tr.agedOuts, "a late batch is not the reader ageing out")
 }
 
 func TestRunSampleTransferLoop_RecordsSkippedSamplesWhenLapped(t *testing.T) {
-	// The counter behind mxl_gateway_mirror_skipped_samples_total. It
-	// is the only signal separating "the target received this" from
-	// "the target's head moved over it", and those two are identical in
-	// every byte and freshness measure the gateway keeps.
+	// The counter behind mxl_gateway_mirror_skipped_samples_total: the
+	// only signal separating "the target received this" from "the
+	// target's head moved over it".
 	const xferBatch = 480
 	const window = uint64(48000)
-	var probeCalls atomic.Int32
-	probe := func() (uint64, error) {
-		if probeCalls.Add(1) == 1 {
-			return 0, nil
-		}
-		return 100000, nil
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe,
-		func(uint64, int) error { return nil }, func() error { return nil }, func() error { return nil },
-		xferBatch, window, time.Millisecond, tracker)
-
-	require.Eventually(t, func() bool { return tracker.skippedSnapshot() > 0 },
-		time.Second, time.Millisecond)
-	cancel()
-	<-done
+	h := &headScript{heads: []uint64{0, 100000}}
+	link := &fakeSampleLink{t: t}
+	tr := &recordingTracker{}
+	_, stop := runSampleLoop(h.probe, link.transferSamples, link.makeProgress, xferBatch, window, time.Second, tr)
+	require.Eventually(t, func() bool { return tr.skippedSnapshot() > 0 }, time.Second, time.Millisecond)
+	stop()
 
 	// The window less one batch of slack stays readable, so everything
 	// before head-(window-xferBatch) is abandoned.
-	assert.Equal(t, 100000-(window-xferBatch), tracker.skippedSnapshot())
-	_, agedOuts := tracker.snapshot()
+	assert.Equal(t, 100000-(window-xferBatch), tr.skippedSnapshot())
+	_, agedOuts := tr.snapshot()
 	assert.Positive(t, agedOuts)
 }
 
-func TestRunSampleTransferLoop_NeverBurstsBeyondCatchUpPerTick(t *testing.T) {
-	// A mirror that has fallen far behind must not attempt the whole
-	// backlog in one tick: at most sampleCatchUpBatches chunks are
-	// transferable per tick. This is what keeps a 48 kHz mirror from
-	// posting a burst of hundreds of writes -- one per readable-window
-	// batch -- against the fabric. The loop transfers the bounded
-	// catch-up and leaves the rest for the next tick; it does not spin.
-	const xferBatch = 480
-	var probes atomic.Uint64
-	probe := func() (uint64, error) {
-		if probes.Add(1) == 1 {
-			return 0, nil
-		}
-		return 2000, nil
+func TestRunSampleTransferLoop_DroppedTargetStopsTheLoop(t *testing.T) {
+	h := &headScript{heads: []uint64{0, 480}}
+	link := &fakeSampleLink{t: t}
+	tr := &recordingTracker{}
+	done, stop := runSampleLoop(h.probe, link.transferSamples, func() error { return mxl.ErrInterrupted },
+		480, testReadableWindow, time.Second, tr)
+	defer stop()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the loop kept running against a dropped target")
 	}
-
-	var mu sync.Mutex
-	var xfers []sampleXfer
-	transfer := func(head uint64, count int) error {
-		mu.Lock()
-		xfers = append(xfers, sampleXfer{head, count})
-		mu.Unlock()
-		return nil
-	}
-	xfersSnap := func() []sampleXfer {
-		mu.Lock()
-		defer mu.Unlock()
-		out := make([]sampleXfer, len(xfers))
-		copy(out, xfers)
-		return out
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	tracker := &recordingTracker{}
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil }, xferBatch, testReadableWindow, time.Millisecond, tracker)
-
-	require.Eventually(t, func() bool { return len(xfersSnap()) >= 1 },
-		time.Second, time.Millisecond, "the bounded catch-up must transfer")
-
-	// Give the loop more ticks than it would need to burst the whole
-	// backlog had the bound not held, then verify it never did: two
-	// chunks maximum per tick, each ending inside the bound.
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	<-done
-
-	snap := xfersSnap()
-	for i, x := range snap {
-		assert.LessOrEqualf(t, x.count, int(xferBatch), "chunk %d: a single write must never exceed xferBatch", i)
-		if i > 0 {
-			assert.LessOrEqualf(t, snap[i].head-snap[i-1].head, uint64(xferBatch),
-				"chunk %d: consecutive transfers must advance by at most one batch", i)
-		}
-	}
-	// 2000 samples of backlog is five chunks; with the head frozen
-	// afterwards nothing more transfers.
-	assert.LessOrEqualf(t, len(snap), 5,
-		"a frozen head must not produce further transfers, got %d", len(snap))
+	assert.Equal(t, []bool{true}, tr.droppedSnapshot())
 }
 
-func TestRunSampleTransferLoop_TransferErrorBreaksTickAndRetries(t *testing.T) {
-	// A transferSamples error (e.g. the fabric briefly not ready) must
-	// not exit the loop or advance lastSent past the failed run: the
-	// next tick re-reads head and re-attempts the same delta. The first
-	// call fails, the second succeeds against the unchanged head.
-	var probeCalls atomic.Int32
-	probe := func() (uint64, error) {
-		if probeCalls.Add(1) == 1 {
-			return 0, nil
+// A batch the target is not ready for is offered again; one the
+// initiator rejects for good gives the target up.
+func TestRunSampleTransferLoop_PostFailures(t *testing.T) {
+	h := &headScript{heads: []uint64{0, 480}}
+	link := &fakeSampleLink{t: t, postErr: func(n int) error {
+		if n == 0 {
+			return fabrics.ErrNotReady
 		}
-		return 240, nil
-	}
-
-	var calls atomic.Int32
-	var mu sync.Mutex
-	var xfers []sampleXfer
-	transfer := func(head uint64, count int) error {
-		if calls.Add(1) == 1 {
-			return errors.New("transient fabric error")
-		}
-		mu.Lock()
-		xfers = append(xfers, sampleXfer{head, count})
-		mu.Unlock()
 		return nil
+	}}
+	tr := &recordingTracker{}
+	_, stop := runSampleLoop(h.probe, link.transferSamples, link.makeProgress, 480, testReadableWindow, time.Second, tr)
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) == 1 }, time.Second, time.Millisecond)
+	stop()
+	posted, _ := link.snapshot()
+	assert.Equal(t, []sampleXfer{{480, 480}, {480, 480}}, posted, "the same batch is offered again")
+	assert.Empty(t, tr.droppedSnapshot())
+
+	link = &fakeSampleLink{t: t, postErr: func(int) error { return fmt.Errorf("count too large: %w", mxl.ErrInvalidArg) }}
+	tr = &recordingTracker{}
+	h = &headScript{heads: []uint64{0, 480}}
+	done, stop := runSampleLoop(h.probe, link.transferSamples, link.makeProgress, 480, testReadableWindow, time.Second, tr)
+	defer stop()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the loop kept running after a rejected post")
 	}
-	xfersLen := func() int {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(xfers)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, func() error { return nil }, func() error { return nil }, 480, testReadableWindow, time.Millisecond, &recordingTracker{})
-
-	require.Eventually(t, func() bool { return xfersLen() >= 1 },
-		time.Second, time.Millisecond, "a transfer error must not wedge the loop; the next tick must retry")
-
-	cancel()
-	<-done
-
-	mu.Lock()
-	defer mu.Unlock()
-	require.NotEmpty(t, xfers)
-	assert.Equal(t, sampleXfer{head: 240, count: 240}, xfers[0],
-		"the retry must re-send the same run; a failed transfer must not advance lastSent")
+	assert.Equal(t, []bool{false}, tr.droppedSnapshot())
 }
 
 func TestRunSampleTransferLoop_CtxCancelExitsDuringIdle(t *testing.T) {
-	// A steady flow with no new samples must still honour ctx cancel
-	// promptly (the loop blocks on the ticker, not on a read).
 	probe := func() (uint64, error) { return 500, nil }
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe,
-		func(uint64, int) error { t.Error("no transfer expected on an idle flow"); return nil },
-		func() error { return nil }, func() error { return nil }, 480, testReadableWindow, time.Millisecond, &recordingTracker{})
-
-	cancel()
+	transfer := func(uint64, int) (uint64, error) {
+		t.Error("no transfer expected on an idle flow")
+		return 0, nil
+	}
+	_, stop := runSampleLoop(probe, transfer, func() error { return nil }, 480, testReadableWindow, time.Second, &recordingTracker{})
+	stopped := make(chan struct{})
+	go func() { stop(); close(stopped) }()
 	select {
-	case <-done:
+	case <-stopped:
 	case <-time.After(time.Second):
 		t.Fatal("loop did not honour ctx cancel on an idle flow")
 	}

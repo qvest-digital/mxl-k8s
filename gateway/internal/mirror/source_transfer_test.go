@@ -3,7 +3,6 @@ package mirror
 import (
 	"context"
 	"errors"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -40,63 +39,7 @@ func (r *ringSource) GetGrainSliceNonBlocking(idx uint64, _ uint16) (mxl.Grain, 
 	return r.GetGrainNonBlocking(idx)
 }
 
-// backpressuredSender answers every TransferGrain the way an initiator
-// does when one of its targets has a full window: the grain went to
-// the other targets, and the call reports not-ready.
-type backpressuredSender struct {
-	mu    sync.Mutex
-	calls map[uint64]int
-}
-
-func (s *backpressuredSender) TransferGrain(idx uint64, _, _ uint16) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.calls[idx]++
-	return fabrics.ErrNotReady
-}
-
-// A target that refuses a grain must cost that target the grain, not
-// every other target a duplicate. The loop used to read not-ready as
-// "retry this index" and sent the same grain to every target of the
-// initiator on every tick while one of them stayed backpressured.
-func TestGrainTransfer_BackpressuredTargetCausesNoResend(t *testing.T) {
-	src := &ringSource{start: time.Now(), interval: 20 * time.Millisecond, ringGrains: 100}
-	dst := &backpressuredSender{calls: map[uint64]int{}}
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-	defer cancel()
-
-	transfer := newGrainTransfer(ctx, src, dst, pacer{}, false, func() {})
-	done := make(chan struct{})
-	runTransferLoop(ctx, done, "f", func() (uint64, error) { return src.head(), nil }, transfer,
-		func() error { return nil }, 2*time.Millisecond, nil)
-	<-done
-
-	dst.mu.Lock()
-	defer dst.mu.Unlock()
-	require.NotEmpty(t, dst.calls)
-	for idx, n := range dst.calls {
-		assert.Equalf(t, 1, n, "grain %d was handed to the initiator %d times", idx, n)
-	}
-}
-
-func TestInitiatorOptions(t *testing.T) {
-	video := newPacer(mxl.Rational{Num: 50, Den: 1}, 0.5, 8, "k")
-	require.True(t, video.enabled())
-
-	assert.JSONEq(t, `{"grainsInFlight": 8, "chunksPerGrain": 1}`, initiatorOptions(0, 100, pacer{}, true),
-		"the default window, whole grains when pacing is off")
-	assert.JSONEq(t, `{"grainsInFlight": 2, "chunksPerGrain": 1}`, initiatorOptions(8, 8, pacer{}, true),
-		"a quarter of a small ring: a grain must complete before its slot is written again")
-	assert.JSONEq(t, `{"grainsInFlight": 16, "chunksPerGrain": 1}`, initiatorOptions(30, 1000, pacer{}, true),
-		"never more than libmxl-fabrics allows")
-	assert.JSONEq(t, `{"grainsInFlight": 8, "chunksPerGrain": 8}`, initiatorOptions(8, 100, video, true),
-		"a paced video grain is one transfer of pacingChunks calls")
-	assert.JSONEq(t, `{"grainsInFlight": 8, "chunksPerGrain": 1}`, initiatorOptions(8, 100, video, false),
-		"a data grain goes as one range whatever the pacer does")
-}
-
-// offeredCounter counts what the loop hands over, for the throughput
-// case below.
+// offeredCounter counts what the loop hands over.
 type offeredCounter struct{ n atomic.Int64 }
 
 func (c *offeredCounter) TransferGrain(uint64, uint16, uint16) error {
@@ -104,18 +47,18 @@ func (c *offeredCounter) TransferGrain(uint64, uint16, uint16) error {
 	return nil
 }
 
-// Whatever happens per target, every grain the producer wrote is
-// offered once while the loop keeps up.
-func TestGrainTransfer_OffersEveryGrainOnce(t *testing.T) {
+// While transfers complete within their grain interval, every grain
+// the producer wrote is sent once.
+func TestGrainTransfer_SendsEveryGrainOnceWhileKeepingUp(t *testing.T) {
 	src := &ringSource{start: time.Now(), interval: 10 * time.Millisecond, ringGrains: 100}
 	dst := &offeredCounter{}
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	first := src.head()
-	transfer := newGrainTransfer(ctx, src, dst, pacer{}, false, func() {})
+	transfer := newGrainTransfer(src, dst, false, 5120)
 	done := make(chan struct{})
 	runTransferLoop(ctx, done, "f", func() (uint64, error) { return src.head(), nil }, transfer,
-		func() error { return nil }, 2*time.Millisecond, nil)
+		func() error { return nil }, 2*time.Millisecond, src.interval, &recordingTracker{})
 	<-done
 	produced := int64(src.head() - first)
 	assert.InDelta(t, produced, dst.n.Load(), 2)
@@ -137,82 +80,98 @@ func (s flaggedSource) GetGrainSliceNonBlocking(idx uint64, _ uint16) (mxl.Grain
 }
 
 // recordingSender records every slice range handed to the initiator.
-type recordingSender struct{ calls [][3]uint64 }
+type recordingSender struct {
+	calls [][3]uint64
+	err   error
+}
 
 func (s *recordingSender) TransferGrain(idx uint64, start, end uint16) error {
 	s.calls = append(s.calls, [3]uint64{idx, uint64(start), uint64(end)})
-	return nil
+	return s.err
 }
 
 // A grain its producer committed as invalid carries no picture: libmxl
 // flags the slot of an index the producer skipped and leaves the bytes
-// an earlier lap wrote there. The target commits every arrival as a
-// whole valid grain - OpenGrain clears the flag and the commit marks
-// every slice valid - so a forwarded invalid grain reached every reader
-// on every target as a valid one carrying that earlier lap's payload.
+// an earlier lap wrote there.
 //
 // None of a video grain is sent: the target writer flags the index
-// invalid when the next grain commits past it, and the source counts
-// it unsent. A data writer never completes a grain, so it flags no
-// index it skips; a data grain goes as its header alone, which the
-// target commits invalid. That header is offered like any grain, and
-// a target that stops completing it is stalled like any other.
+// invalid when the next grain commits past it. A data writer never
+// completes a grain, so it flags no index it skips; a data grain goes as
+// its header alone, which the target commits invalid.
 func TestGrainTransfer_InvalidGrainIsNotForwarded(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		data    bool
-		g       mxl.Grain
-		want    [][3]uint64
-		invalid bool
+		name string
+		data bool
+		g    mxl.Grain
+		want [][3]uint64
+		sent bool
 	}{
 		{"video", false, mxl.Grain{Index: 1001, Flags: mxl.GrainFlagInvalid, TotalSlices: 1080, ValidSlices: 1080, GrainSize: 5529600},
-			nil, true},
+			nil, false},
 		{"data", true, mxl.Grain{Index: 1001, Flags: mxl.GrainFlagInvalid, TotalSlices: 4096, ValidSlices: 64, GrainSize: 4096},
-			[][3]uint64{{1001, 0, 0}}, false},
+			[][3]uint64{{1001, 0, 0}}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dst := &recordingSender{}
-			transfer := newGrainTransfer(context.Background(), flaggedSource{1001: tc.g}, dst, pacer{}, tc.data, func() {})
+			transfer := newGrainTransfer(flaggedSource{1001: tc.g}, dst, tc.data, 1)
 
-			invalid, err := transfer(1001, false)
+			sent, bytes, err := transfer(1001)
 
 			require.NoError(t, err)
-			assert.Equal(t, tc.invalid, invalid, "whether the grain counts as unsent")
-			assert.Equal(t, tc.want, dst.calls, "what of an invalid grain was handed to the initiator")
+			assert.Equal(t, tc.sent, sent)
+			assert.Zero(t, bytes, "an invalid grain carries no payload")
+			assert.Equal(t, tc.want, dst.calls)
 		})
 	}
 }
 
-// parkingInitiator is a verbs initiator with nothing to complete: a
-// blocking MakeProgress parks for its whole timeout, as libmxl's
-// blockOnCQ does on an empty completion queue.
-type parkingInitiator struct{ recordingSender }
+// A valid video grain goes whole, a data grain as its valid slices.
+func TestGrainTransfer_SendsTheGrainsSlices(t *testing.T) {
+	video := flaggedSource{7: {Index: 7, TotalSlices: 1080, ValidSlices: 1080}}
+	dst := &recordingSender{}
+	sent, bytes, err := newGrainTransfer(video, dst, false, 5120)(7)
+	require.NoError(t, err)
+	assert.True(t, sent)
+	assert.Equal(t, uint64(1080*5120), bytes)
+	assert.Equal(t, [][3]uint64{{7, 0, 1080}}, dst.calls)
 
-func (*parkingInitiator) MakeProgress(timeout time.Duration) error {
-	time.Sleep(timeout)
-	return nil
+	data := flaggedSource{7: {Index: 7, TotalSlices: 4096, ValidSlices: 64}}
+	dst = &recordingSender{}
+	sent, bytes, err = newGrainTransfer(data, dst, true, 1)(7)
+	require.NoError(t, err)
+	assert.True(t, sent)
+	assert.Equal(t, uint64(64), bytes)
+	assert.Equal(t, [][3]uint64{{7, 0, 64}}, dst.calls)
 }
 
-func (*parkingInitiator) MakeProgressNonBlocking() error { return nil }
+// A failed post is told apart from a grain the reader cannot hand out.
+func TestGrainTransfer_WrapsAFailedPost(t *testing.T) {
+	src := flaggedSource{7: {Index: 7, TotalSlices: 1080, ValidSlices: 1080}}
+	_, _, err := newGrainTransfer(src, &recordingSender{err: fabrics.ErrNotReady}, false, 1)(7)
+	require.ErrorIs(t, err, errPost)
+	require.ErrorIs(t, err, fabrics.ErrNotReady)
 
-// A paced grain's chunks are unsignalled but the last, so nothing lands
-// on the completion queue between them. Driving the queues there with
-// the blocking call parked for its timeout after every chunk: a grain
-// paced over 10 ms took 150 ms in 16 chunks, and every mirror of the
-// flow fell behind its producer and resynced.
-func TestInitiatorGrainTransfer_PacedGrainKeepsItsWindow(t *testing.T) {
-	const chunks = 16
-	p := newPacer(mxl.Rational{Num: 50, Den: 1}, 0.5, chunks, "k")
-	require.True(t, p.enabled())
-	in := &parkingInitiator{}
-	src := flaggedSource{1001: {Index: 1001, TotalSlices: 1080, ValidSlices: 1080, GrainSize: 5529600}}
-	transfer := newInitiatorGrainTransfer(context.Background(), src, in, p, false, "f")
+	_, _, err = newGrainTransfer(src, &recordingSender{}, false, 1)(8)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, errPost)
+}
 
-	start := time.Now()
-	_, err := transfer(1001, true)
-	took := time.Since(start)
+// One sample batch can take a write per channel and wrap, so the
+// completion queue is sized for it; a grain's writes fit the default.
+func TestInitiatorOptions(t *testing.T) {
+	audio := mxl.FlowConfig{Common: mxl.CommonFlowConfig{Format: mxl.FormatAudio},
+		Continuous: mxl.ContinuousFlowConfig{ChannelCount: 16}}
+	assert.JSONEq(t, `{"cqDepth": 33}`, initiatorOptions(audio))
+	assert.Empty(t, initiatorOptions(mxl.FlowConfig{Common: mxl.CommonFlowConfig{Format: mxl.FormatVideo}}))
+}
 
-	require.NoError(t, err)
-	require.Len(t, in.calls, chunks)
-	assert.Less(t, took, 3*p.window, "a grain paced over %v took %v", p.window, took)
+func TestSliceBytes(t *testing.T) {
+	cfg := mxl.FlowConfig{Discrete: mxl.DiscreteFlowConfig{SliceSizes: [4]uint32{3840, 1920, 1920, 0}}}
+	assert.Equal(t, uint64(7680), sliceBytes(cfg))
+}
+
+func TestGrainInterval(t *testing.T) {
+	assert.Equal(t, 20*time.Millisecond, grainInterval(mxl.Rational{Num: 50, Den: 1}))
+	assert.Equal(t, 33366666*time.Nanosecond, grainInterval(mxl.Rational{Num: 30000, Den: 1001}))
+	assert.Zero(t, grainInterval(mxl.Rational{}))
 }

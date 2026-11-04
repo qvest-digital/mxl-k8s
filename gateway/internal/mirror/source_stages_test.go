@@ -27,7 +27,7 @@ func TestSourceReconcile_TargetAddedReportsStageDurations(t *testing.T) {
 	)
 	f.opener.openFn = func(string, fabrics.Provider) (*sharedSource, error) {
 		time.Sleep(60 * time.Millisecond)
-		return runningSource(), nil
+		return &sharedSource{}, nil
 	}
 	var mu sync.Mutex
 	var added map[string]any
@@ -48,7 +48,7 @@ func TestSourceReconcile_TargetAddedReportsStageDurations(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.NotNil(t, added, "no target added line")
-	for _, stage := range []string{"took", "lookup", "originReopen", "close", "liveCheck", "open", "attach", "openReader", "openSetup"} {
+	for _, stage := range []string{"took", "lookup", "originReopen", "close", "liveCheck", "open", "attach", "openReader"} {
 		require.Contains(t, added, stage)
 	}
 	open, err := time.ParseDuration(added["open"].(string))
@@ -59,9 +59,8 @@ func TestSourceReconcile_TargetAddedReportsStageDurations(t *testing.T) {
 
 // After a target gateway restart the target publishes a new TargetInfo
 // while the source still holds the entry it added against the old one,
-// queued behind other re-adds. The shared source goes on transferring
-// to its other targets and stamps lastSentAt on this entry too, and
-// libmxl-fabrics accepts those transfers for a target it is not
+// queued behind other re-adds. The entry's loop goes on transferring,
+// and an initiator completes transfers for a target it is not
 // connected to. Publishing that lastSentAt would tell the target a
 // source is sending into its new fabric side before any source has
 // been added to it, and the target would set itself up again before the
