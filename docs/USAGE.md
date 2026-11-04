@@ -79,6 +79,14 @@ prerequisite, not a suggestion.
   needs neither the shim nor an `MxlReceiver` to get a flow mirrored,
   and `MxlFlowRedundancySet`s. The chart's values reference describes
   what it changes.
+  With mxlfs, MXL pods take the domain through the agent's CSI volume
+  (`agent.csi.enabled`, driver `mxl.qvest-digital.com`, volume
+  attributes `domain` and `access`). The agent refuses to publish it
+  until it has mounted the domain or left it plain. A pod that mounts
+  the domain directory as a `hostPath` can start before the agent, as
+  after a node restart, and create a flow in the plain directory; the
+  agent then leaves that domain plain and records a `MxlfsUnavailable`
+  warning event on the Node.
 - Routable inter-node networking on whatever interface the
   libfabric endpoints bind to. The gateway runs `hostNetwork`, so
   the address it publishes in `MxlFlowMirror.status.targetInfo` is
