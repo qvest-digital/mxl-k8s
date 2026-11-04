@@ -12,8 +12,9 @@ Kubernetes control plane for MXL (Media eXchange Layer). Installs the operator, 
   `FAN_REPORT_DFID_NAME`).
 - Prometheus Operator CRDs (`monitoring.coreos.com`) optional, only
   when `*.metrics.serviceMonitor.enabled=true`.
-- The mxlfs kernel module optional, only when `mxlfs.enabled=true`. A
-  node without it keeps plain domain directories.
+- The [mxlfs](https://github.com/danielclasen/mxlfs) kernel module,
+  only when `mxlfs.enabled=true`. A node without it keeps plain domain
+  directories.
 
 ## Install via Helm CLI
 

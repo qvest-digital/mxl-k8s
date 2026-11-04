@@ -71,7 +71,14 @@ prerequisite, not a suggestion.
   chart does not provision this today. The KIND demo relies on
   Kubernetes `hostPath` with `DirectoryOrCreate`. A production
   deployment should back the directory with a `tmpfs` mount, via
-  `systemd-tmpfiles.d(5)` or a small node-init DaemonSet.
+  `systemd-tmpfiles.d(5)` or a small node-init DaemonSet, or run the
+  chart with `mxlfs.enabled=true`: the agent then mounts an
+  [mxlfs](https://github.com/danielclasen/mxlfs) on every domain
+  directory itself, which needs the mxlfs kernel module on the node.
+  mxlfs adds placeholders for flows a node does not hold, so a consumer
+  needs neither the shim nor an `MxlReceiver` to get a flow mirrored,
+  and `MxlFlowRedundancySet`s. The chart's values reference describes
+  what it changes.
 - Routable inter-node networking on whatever interface the
   libfabric endpoints bind to. The gateway runs `hostNetwork`, so
   the address it publishes in `MxlFlowMirror.status.targetInfo` is
