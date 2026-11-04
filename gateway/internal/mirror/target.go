@@ -1341,12 +1341,6 @@ func (e *targetEntry) recordInvalid(reason invalidReason) {
 // classifyFabricError already reads that as fabricTransient, so the
 // loop retries and keeps its handles.
 //
-// idleSleep survives the switch as a spin guard, not as the wait: a
-// provider whose blocking read returns not-ready immediately would
-// otherwise spin a core. On a provider that does block, the sleep is
-// only ever reached after a full timeout, and an arriving grain still
-// wakes the read at once.
-//
 // For every grain ReadGrain reports as received, completeFn decides
 // whether the whole grain has landed - a paced source transfers one
 // grain as several slice ranges and each range signals separately -
@@ -1377,7 +1371,7 @@ func runTargetProgressLoop(
 ) {
 	defer close(done)
 	l := ctrl.Log.WithName("target-progress")
-	const idleSleep = 1 * time.Millisecond
+	const transientSleep = 1 * time.Millisecond
 	for {
 		select {
 		case <-ctx.Done():
@@ -1421,11 +1415,7 @@ func runTargetProgressLoop(
 				tracker.recordCommit(idx, time.Now())
 			}
 		case kind == fabricIdle:
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(idleSleep):
-			}
+			// The blocking read already waited out its timeout.
 		case kind == fabricTransient:
 			// Disturbed, not broken: the handles are still usable, so
 			// poll again instead of rebuilding the fabric side.
@@ -1434,7 +1424,7 @@ func runTargetProgressLoop(
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(idleSleep):
+			case <-time.After(transientSleep):
 			}
 		default:
 			l.Error(err, "ReadGrain - target is no longer safe to poll, exiting loop",
@@ -1540,8 +1530,7 @@ func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, invalidReason, 
 // continuous (audio) flow until ctx is canceled or ReadSamples reports
 // a non-recoverable error. It mirrors runTargetProgressLoop: the
 // blocking ReadSamples advances the libfabric event + completion
-// queues and parks until a run arrives, with the same idle sleep kept
-// as a spin guard for providers that do not block. There is no
+// queues and parks until a run arrives. There is no
 // completeness gate here - TransferSamples carries no slice range, so
 // a run of samples arrives whole or not at all. For every run of
 // samples ReadSamples reports as arrived, commit does the
@@ -1559,7 +1548,7 @@ func runTargetSampleProgressLoop(
 ) {
 	defer close(done)
 	l := ctrl.Log.WithName("target-sample-progress")
-	const idleSleep = 1 * time.Millisecond
+	const transientSleep = 1 * time.Millisecond
 	for {
 		select {
 		case <-ctx.Done():
@@ -1593,11 +1582,7 @@ func runTargetSampleProgressLoop(
 				tracker.recordCommit(head, time.Now())
 			}
 		case kind == fabricIdle:
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(idleSleep):
-			}
+			// The blocking read already waited out its timeout.
 		case kind == fabricTransient:
 			// Disturbed, not broken: the handles are still usable, so
 			// poll again instead of rebuilding the fabric side.
@@ -1606,7 +1591,7 @@ func runTargetSampleProgressLoop(
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(idleSleep):
+			case <-time.After(transientSleep):
 			}
 		default:
 			l.Error(err, "ReadSamples - target is no longer safe to poll, exiting loop",
