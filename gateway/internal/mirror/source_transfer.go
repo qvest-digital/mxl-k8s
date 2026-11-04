@@ -54,13 +54,13 @@ type grainSender interface {
 }
 
 // newGrainTransfer is the TransferFunc of a discrete (video or data)
-// flow. sliceBytes is the payload of one slice across all planes.
-func newGrainTransfer(src grainSource, dst grainSender, data bool, sliceBytes uint64) TransferFunc {
+// flow. perSlice is the payload of one slice across all planes.
+func newGrainTransfer(src grainSource, dst grainSender, data bool, perSlice uint64) TransferFunc {
 	post := func(idx uint64, start, end uint16) (bool, uint64, error) {
 		if err := dst.TransferGrain(idx, start, end); err != nil {
 			return false, 0, fmt.Errorf("%w: %w", errPost, err)
 		}
-		return true, uint64(end-start) * sliceBytes, nil
+		return true, uint64(end-start) * perSlice, nil
 	}
 	return func(idx uint64) (bool, uint64, error) {
 		grain, err := readForTransfer(src, idx, data)
