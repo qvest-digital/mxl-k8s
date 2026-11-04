@@ -135,12 +135,6 @@ type SourceReconciler struct {
 	// half a transfer batch for a continuous flow.
 	PollInterval time.Duration
 
-	// PacingFraction, PacingChunks and GrainsInFlight are ignored: a
-	// grain is one transfer, and a mirror has one in flight.
-	PacingFraction float64
-	PacingChunks   int
-	GrainsInFlight int
-
 	// FlushInterval is how often the per-mirror status flusher
 	// checks the sourceEntry trackers and publishes SourceProgress
 	// when the observed state has transitioned. Defaults to 1s.
