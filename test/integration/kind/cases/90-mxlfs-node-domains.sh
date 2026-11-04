@@ -159,9 +159,15 @@ mirrors=$("${KUBECTL[@]}" -n "$NAMESPACE" get mxlflowmirrors \
 
 echo "-> a reader on another node, with no shim and no MxlReceiver"
 read_in mxl-mxlfs-consumer "$FLOW" || fail "${FLOW} could not be read on ${node_b}"
-phase=$("${KUBECTL[@]}" get mxlflow "$FLOW" \
-  -o "jsonpath={.status.locations[?(@.nodeName==\"${node_b}\")].phase}")
-case "$phase" in Ready|Mirroring) ;; *) fail "${FLOW} not mirrored to ${node_b} (phase '${phase}')" ;; esac
+# The location is read while a reader still uses the mirror.
+in_pod mxl-mxlfs-consumer /usr/local/bin/read-grain -domain /run/mxl/domain \
+    -flow "$FLOW" -count 300 >/dev/null 2>&1 &
+reader=$!
+phase=$(wait_phase "mxlflow/${FLOW}" "{.status.locations[?(@.nodeName==\"${node_b}\")].phase}" \
+          '^(Ready|Mirroring)$' 10) || phase=""
+kill "$reader" 2>/dev/null || true
+wait "$reader" 2>/dev/null || true
+[ -n "$phase" ] || fail "${FLOW} not mirrored to ${node_b} while it is read there"
 echo "   ${FLOW} on ${node_b}: ${phase}"
 
 echo "-> a redundancy set over members on ${node_a} and ${node_b}, read on ${node_a}"
