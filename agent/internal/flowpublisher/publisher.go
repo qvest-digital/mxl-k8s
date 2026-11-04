@@ -81,8 +81,14 @@ type Publisher struct {
 	// it is.
 	Producer func(ctx context.Context, pid int32) bool
 
-	// ReadLocks reads the node's lock table for Producer to be asked
-	// about. Nil reads /proc/locks through agent/internal/flowlock.
+	// Ours reports whether a pid holding a writer's lock on a flow is
+	// mxl-k8s's own: a process in one of its pods. A flow whose writers
+	// are all its own is no producer's, whatever directory it is in. Nil,
+	// as off mxlfs, makes no writer its own.
+	Ours func(ctx context.Context, pid int32) bool
+
+	// ReadLocks reads the node's lock table for Producer and Ours to be
+	// asked about. Nil reads /proc/locks through agent/internal/flowlock.
 	ReadLocks func() (flowlock.Locks, error)
 }
 
@@ -105,11 +111,11 @@ func (p *Publisher) writerAttached(flowID string) (bool, error) {
 	return flowlock.WriterAttached(p.DomainPath, flowID)
 }
 
-// readLocks is the lock table producerWrites reads, read only where a
-// Producer can ask about it. Unreadable, it holds no writer, which
-// leaves the mirror inference as it is.
+// readLocks is the lock table producerWrites and onlyOursWrite read,
+// read only where a Producer or Ours can ask about it. Unreadable, it
+// holds no writer, which leaves the mirror inference as it is.
 func (p *Publisher) readLocks(ctx context.Context) flowlock.Locks {
-	if p.Producer == nil {
+	if p.Producer == nil && p.Ours == nil {
 		return nil
 	}
 	read := p.ReadLocks
@@ -140,6 +146,24 @@ func (p *Publisher) producerWrites(ctx context.Context, locks flowlock.Locks, fl
 		}
 	}
 	return false
+}
+
+// onlyOursWrite reports whether the flow has writers and every one is
+// mxl-k8s's own.
+func (p *Publisher) onlyOursWrite(ctx context.Context, locks flowlock.Locks, flowID string) bool {
+	if p.Ours == nil || locks == nil {
+		return false
+	}
+	pids, err := locks.WriterPIDs(p.DomainPath, flowID)
+	if err != nil || len(pids) == 0 {
+		return false
+	}
+	for _, pid := range pids {
+		if !p.Ours(ctx, pid) {
+			return false
+		}
+	}
+	return true
 }
 
 // FlowIDFromDirName extracts the flow UUID from a `<uuid>.mxl-flow`
@@ -226,11 +250,22 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	// local producer's, unless Producer finds a producer among the
 	// writers.
 	phase := mxlv1alpha1.MxlFlowLocationOrigin
+	locks := p.readLocks(ctx)
 	isMirror, err := p.isMirrorTarget(ctx, flowID)
 	if err != nil {
 		l.Error(err, "list MxlFlowMirrors; defaulting to Origin", "flowID", flowID)
-	} else if isMirror && !p.producerWrites(ctx, p.readLocks(ctx), flowID) {
+	} else if isMirror && !p.producerWrites(ctx, locks, flowID) {
 		phase = mxlv1alpha1.MxlFlowLocationReady
+	}
+	// A directory no mirror targets whose only writers are mxl-k8s's own
+	// is the gateway's. On mxlfs that is a placeholder the gateway is
+	// replacing with one of the flow's current geometry; the checks above
+	// can span its steps, finding no marker once the old one is gone, the
+	// old definition, and then the new placeholder's writer. Published as
+	// Origin, the old definition would overwrite the producer's.
+	if phase == mxlv1alpha1.MxlFlowLocationOrigin && p.onlyOursWrite(ctx, locks, flowID) {
+		l.V(1).Info("flow directory has only mxl-k8s's own writers", "flowID", flowID)
+		return p.markStale(ctx, flowID)
 	}
 
 	// Only the Origin creates the MxlFlow. Any other copy holds the
