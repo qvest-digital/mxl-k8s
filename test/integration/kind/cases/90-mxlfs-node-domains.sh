@@ -31,9 +31,7 @@ SET=mxl-mxlfs-set
 CM=mxl-mxlfs-flows
 PODS="mxl-mxlfs-writer mxl-mxlfs-member1 mxl-mxlfs-member2 mxl-mxlfs-consumer mxl-mxlfs-set-reader"
 
-args=$("${KUBECTL[@]}" -n "$NAMESPACE" get daemonset mxl-k8s-agent \
-         -o 'jsonpath={.spec.template.spec.containers[?(@.name=="agent")].args}' 2>/dev/null || true)
-if ! echo "$args" | grep -q -- '"--mxlfs"'; then
+if ! agent_runs_mxlfs; then
   echo "  agent runs without --mxlfs; cluster is up without MXLFS=1"
   exit 0
 fi
@@ -71,11 +69,12 @@ with_id() { echo "$base" | sed -E "s/\"id\": *\"[0-9a-f-]+\"/\"id\": \"$1\"/"; }
     --from-literal=member1.json="$(with_id "$MEMBER1")" \
     --from-literal=member2.json="$(with_id "$MEMBER2")" >/dev/null
 
-# pod <name> <node> <command...>: a demo-tools pod with the node's
-# /run/mxl, as the demo pods mount it.
+# pod <name> <node> <read|write> <command...>: a demo-tools pod with the
+# domain through the agent's CSI volume, and the node's /run/mxl read-only
+# for the agent's ready marker.
 pod() {
-  local name="$1" node="$2" cmd
-  shift 2
+  local name="$1" node="$2" access="$3" cmd
+  shift 3
   cmd=$(printf '"%s", ' "$@")
   cat <<EOF
 apiVersion: v1
@@ -95,23 +94,26 @@ spec:
         capabilities:
           add: ["IPC_LOCK", "SYS_RESOURCE"]
       volumeMounts:
-        - {name: mxl-run, mountPath: /run/mxl}
+        - {name: mxl-run, mountPath: /run/mxl, readOnly: true}
+        - {name: mxl-domain, mountPath: /run/mxl/domain}
         - {name: flows, mountPath: /flows}
   volumes:
     - name: mxl-run
       hostPath: {path: /run/mxl, type: Directory}
+    - name: mxl-domain
+      csi: {driver: mxl.qvest-digital.com, volumeAttributes: {access: ${access}}}
     - name: flows
       configMap: {name: ${CM}}
 ---
 EOF
 }
-writer() { pod "$1" "$2" /usr/local/bin/write-grain -domain /run/mxl/domain -flow-def "/flows/$3.json"; }
+writer() { pod "$1" "$2" write /usr/local/bin/write-grain -domain /run/mxl/domain -flow-def "/flows/$3.json"; }
 
 {
   writer mxl-mxlfs-writer "$node_a" flow
   writer mxl-mxlfs-member1 "$node_a" member1
   writer mxl-mxlfs-member2 "$node_b" member2
-  pod mxl-mxlfs-consumer "$node_b" /bin/sh -c "sleep infinity"
+  pod mxl-mxlfs-consumer "$node_b" read /bin/sh -c "sleep infinity"
 } | "${KUBECTL[@]}" -n "$NAMESPACE" apply -f - >/dev/null
 
 for p in mxl-mxlfs-writer mxl-mxlfs-member1 mxl-mxlfs-member2 mxl-mxlfs-consumer; do
@@ -179,7 +181,7 @@ spec:
 EOF
 # The reader opens the output once and prints every grain; a second
 # "flow format=" line would mean it had to open the output again.
-pod mxl-mxlfs-set-reader "$node_a" /bin/sh -c \
+pod mxl-mxlfs-set-reader "$node_a" read /bin/sh -c \
     "until /usr/local/bin/read-grain -domain /run/mxl/domain -flow ${OUTPUT}; do sleep 1; done" \
   | "${KUBECTL[@]}" -n "$NAMESPACE" apply -f - >/dev/null
 "${KUBECTL[@]}" -n "$NAMESPACE" wait --for=condition=Ready pod/mxl-mxlfs-set-reader \

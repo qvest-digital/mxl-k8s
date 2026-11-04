@@ -191,8 +191,11 @@ ERROR: BUILD must be 'local' or a non-empty image tag
 
 ## mxlfs domains (`MXLFS`)
 
-`MXLFS=1 make kind-up` installs the chart with `mxlfs.enabled=true`, so
-the agent on every node mounts an mxlfs on the domain directories. KIND
+`MXLFS=1 make kind-up` installs the chart with `mxlfs.enabled=true` and
+`agent.csi.enabled=true`, so the agent on every node mounts an mxlfs on
+the domain directories, and applies the demo from
+[`examples/kind/demo-mxlfs/`](../examples/kind/demo-mxlfs/), whose pods
+take the domain through the agent's CSI volume. KIND
 nodes are containers on the host kernel, so the
 [mxlfs](https://github.com/danielclasen/mxlfs) module has to be loaded
 on the host; `kind-up.sh` stops before the chart install when the

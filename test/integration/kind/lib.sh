@@ -113,6 +113,36 @@ resolve_pod() {
   echo "$pod"
 }
 
+# agent_runs_mxlfs -- whether the agent serves the node domains from
+# mxlfs (mxlfs.enabled).
+agent_runs_mxlfs() {
+  "${KUBECTL[@]}" -n "$NAMESPACE" get daemonset mxl-k8s-agent \
+      -o 'jsonpath={.spec.template.spec.containers[?(@.name=="agent")].args}' \
+    | grep -q -- '"--mxlfs"'
+}
+
+# demo_manifest <examples/tcp-demo manifest> -- prints the path of that
+# demo pod as this cluster runs it: the file itself, or, where the agent
+# runs with --mxlfs, the pod with its domain through the agent's CSI
+# volume (examples/kind/csi-domain), rendered under $KIND_DIAG_DIR.
+demo_manifest() {
+  local src="$1" dir
+  if ! agent_runs_mxlfs; then
+    echo "$src"
+    return 0
+  fi
+  # kustomize takes a component only by a relative path.
+  dir="${KIND_DIAG_DIR}/manifests/$(basename "$src" .yaml)"
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  cp "$src" "$dir/pod-in.yaml"
+  cp -R "$(dirname "$KIND_TEST_LIB")/../../../examples/kind/csi-domain" "$dir/csi-domain"
+  printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - pod-in.yaml\ncomponents:\n  - csi-domain\n' \
+    > "$dir/kustomization.yaml"
+  "${KUBECTL[@]}" kustomize "$dir" > "$dir/pod.yaml"
+  echo "$dir/pod.yaml"
+}
+
 # collect_diagnostics
 # Dumps cluster state and component logs into $KIND_DIAG_DIR. Called
 # by run.sh once at the end of the suite if any case failed, so the

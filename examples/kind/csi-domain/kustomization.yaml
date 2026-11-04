@@ -1,0 +1,59 @@
+# Gives the demo pods their domain through the agent's CSI volume
+# (agent.csi.enabled), which the agent publishes only once it has
+# mounted mxlfs on the domain. A hostPath domain lets a pod that starts
+# before the agent, as after a node restart, write a flow into the plain
+# directory, and the agent then leaves the domain plain. /run/mxl stays a
+# hostPath for the agent's intent socket and the shim it drops there.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+  - target: {kind: Pod, name: mxl-tcp-demo-writer}
+    patch: |-
+      apiVersion: v1
+      kind: Pod
+      metadata: {name: mxl-tcp-demo-writer}
+      spec:
+        containers:
+          - name: writer
+            volumeMounts:
+              - {name: mxl-domain-csi, mountPath: /run/mxl/domain}
+        volumes:
+          - name: mxl-domain-csi
+            csi: {driver: mxl.qvest-digital.com, volumeAttributes: {access: write}}
+  - target: {kind: Pod, name: mxl-tcp-demo-audio-writer}
+    patch: |-
+      apiVersion: v1
+      kind: Pod
+      metadata: {name: mxl-tcp-demo-audio-writer}
+      spec:
+        volumes:
+          - name: mxl-domain
+            hostPath: null
+            csi: {driver: mxl.qvest-digital.com, volumeAttributes: {access: write}}
+  - target: {kind: Pod, name: mxl-tcp-demo-reader}
+    patch: |-
+      apiVersion: v1
+      kind: Pod
+      metadata: {name: mxl-tcp-demo-reader}
+      spec:
+        containers:
+          - name: reader
+            volumeMounts:
+              - {name: mxl-domain-csi, mountPath: /run/mxl/domain}
+        volumes:
+          - name: mxl-domain-csi
+            csi: {driver: mxl.qvest-digital.com}
+  - target: {kind: Pod, name: mxl-tcp-demo-audio-reader}
+    patch: |-
+      apiVersion: v1
+      kind: Pod
+      metadata: {name: mxl-tcp-demo-audio-reader}
+      spec:
+        containers:
+          - name: reader
+            volumeMounts:
+              - {name: mxl-domain-csi, mountPath: /run/mxl/domain}
+        volumes:
+          - name: mxl-domain-csi
+            csi: {driver: mxl.qvest-digital.com}

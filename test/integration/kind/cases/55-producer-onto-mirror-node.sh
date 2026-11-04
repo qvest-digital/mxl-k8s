@@ -31,9 +31,9 @@ set -uo pipefail
 . "${KIND_TEST_LIB:?KIND_TEST_LIB not set}"
 
 WRITER_POD="${WRITER_POD:-mxl-tcp-demo-writer}"
-WRITER_MANIFEST="${WRITER_MANIFEST:-${PWD}/examples/tcp-demo/10-writer.yaml}"
+WRITER_MANIFEST="${WRITER_MANIFEST:-$(demo_manifest "${PWD}/examples/tcp-demo/10-writer.yaml")}"
 READER_POD="${READER_POD:-mxl-tcp-demo-reader}"
-READER_MANIFEST="${READER_MANIFEST:-${PWD}/examples/tcp-demo/21-reader.yaml}"
+READER_MANIFEST="${READER_MANIFEST:-$(demo_manifest "${PWD}/examples/tcp-demo/21-reader.yaml")}"
 CLAIM_TIMEOUT_SECS="${CLAIM_TIMEOUT_SECS:-90}"
 SELF_MIRROR_TIMEOUT_SECS="${SELF_MIRROR_TIMEOUT_SECS:-90}"
 SURVIVAL_SETTLE_SECS="${SURVIVAL_SETTLE_SECS:-10}"
