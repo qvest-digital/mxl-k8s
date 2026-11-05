@@ -78,8 +78,8 @@ a single node:
 
 - **Source side.** Writer fills payload directly in tmpfs. Commit is
   one counter update. The source gateway, which maps the *same*
-  tmpfs pages, polls `Reader.Runtime()` and sees the counter move
-  with no copy or signal. `Initiator.TransferGrain` reads from its
+  tmpfs pages, waits in a blocking read for the grain and sees it
+  with no copy. `Initiator.TransferGrain` reads from its
   libfabric-registered region and emits an RDMA write.
 - **Target side.** The RDMA write lands in this node's registered
   region, which *is* a slice of this node's tmpfs file. The target
@@ -164,13 +164,15 @@ Steps for one grain index *N*:
    fills the payload bytes directly into the mmap'd ring slot, and
    calls `Commit(slices, ...)`. The commit writes the grain header
    and advances the flow's `HeadIndex` in tmpfs.
-2. **Source gateway's transfer goroutine** for the mirror polls
-   `Reader.Runtime()` (every 2 ms while nothing is new), and for the
-   next index calls `GetGrainNonBlocking(idx)` followed by
-   `Initiator.TransferGrain(idx, 0, slices)`, then
-   `Initiator.MakeProgress` until it stops returning not-ready. The
-   grain is read from the gateway's mapping of the *same tmpfs
-   file* -- the bytes never leave RAM on this node.
+2. **Source gateway's transfer goroutine** for the mirror waits for
+   the next index in `GetGrainSlice(idx, start+batch, 5 ms)`, where
+   batch is the flow's `maxSyncBatchSizeHint`, and calls
+   `Initiator.TransferGrain(idx, start, validSlices)`, then
+   `Initiator.MakeProgress` until it stops returning not-ready. It
+   repeats that for the same grain until every slice went; an invalid
+   grain goes as its header alone. The grain is read from the
+   gateway's mapping of the *same tmpfs file* -- the bytes never
+   leave RAM on this node.
 3. **libfabric** performs an RDMA write into the target node's
    registered region. For the `tcp` provider this is a sequence of
    socket sends to the remote target; for `verbs`/EFA it is a real
