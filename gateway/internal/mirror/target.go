@@ -1220,10 +1220,10 @@ func (r *TargetReconciler) openFabricSide(handles *instance.Handles, writer *mxl
 
 // targetCQDepth is the completion queue depth of every target,
 // passed as the cqDepth option docs/Fabrics.md describes for receivers
-// whose read loop can fall behind. A target here has been measured
-// 269 ms behind its writes, 14 grains of a 50 fps flow, and a
-// 1.1.0-rc.42 source keeps up to 16 sample batches in flight; 64 holds
-// both with room to spare. With the libmxl-fabrics this gateway links,
+// whose read loop can fall behind. Mirror latency has reached 269 ms,
+// 14 grains of a 50 fps flow, which bounds how far a target's reads
+// trailed its writes, and a 1.1.0-rc.42 source keeps up to 16 sample
+// batches in flight; 64 holds both with room to spare. With the libmxl-fabrics this gateway links,
 // it is also how many receives a connected target keeps posted for
 // writes that carry immediate data.
 const targetCQDepth = 64
