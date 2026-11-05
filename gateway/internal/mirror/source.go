@@ -1126,6 +1126,15 @@ func newSampleTransfer(r *mxl.Reader, in *fabrics.Initiator, bufferLength uint64
 // before its initiator is destroyed.
 const detachTimeout = 500 * time.Millisecond
 
+// drainRemoved drives a removed target's disconnect, which completes
+// once progress stops returning not-ready, for up to detachTimeout. An
+// interrupt is checked as in a transfer.
+func drainRemoved(progress, poll ProgressFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), detachTimeout)
+	defer cancel()
+	_, _ = awaitTransfer(ctx, progress, poll, time.Now(), 0)
+}
+
 // detach stops the mirror's loop, removes its target and destroys its
 // initiator.
 func (o *libmxlOpener) detach(link *sourceLink) {
@@ -1137,14 +1146,7 @@ func (o *libmxlOpener) detach(link *sourceLink) {
 		if err := link.initiator.RemoveTarget(link.info); err != nil {
 			ctrl.Log.WithName("source").V(1).Info("RemoveTarget", "error", err.Error())
 		} else {
-			// The disconnect completes once progress stops returning
-			// not-ready.
-			deadline := time.Now().Add(detachTimeout)
-			for time.Now().Before(deadline) {
-				if !errors.Is(link.progress(), fabrics.ErrNotReady) {
-					break
-				}
-			}
+			drainRemoved(link.progress, link.initiator.MakeProgressNonBlocking)
 		}
 	}
 	if link.initiator != nil {

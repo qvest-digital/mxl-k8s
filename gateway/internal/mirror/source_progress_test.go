@@ -111,6 +111,15 @@ func TestAwaitTransfer_KeepsTheTargetThroughRepeatedSignals(t *testing.T) {
 	assert.Equal(t, 5, *calls)
 }
 
+// A removed target's disconnect is driven past a signal, as a transfer
+// is.
+func TestDrainRemoved_ContinuesPastASignal(t *testing.T) {
+	progress, calls := scriptedProgress(mxl.ErrInterrupted, fabrics.ErrNotReady)
+	poll, _ := scriptedProgress(fabrics.ErrNotReady)
+	drainRemoved(progress, poll)
+	assert.Equal(t, 3, *calls, "the drain ended at the signal")
+}
+
 // A connection-oriented initiator that holds no target any more answers
 // interrupted to the poll as well: RCInitiator::makeProgress throws
 // "No more targets available".
