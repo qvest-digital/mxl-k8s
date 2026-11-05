@@ -213,3 +213,15 @@ func TestGrainInterval(t *testing.T) {
 	assert.Equal(t, 33366666*time.Nanosecond, grainInterval(mxl.Rational{Num: 30000, Den: 1001}))
 	assert.Zero(t, grainInterval(mxl.Rational{}))
 }
+
+// A sample batch is the flow's sync hint, as in runContinuous in
+// tools/mxl-fabrics-demo/demo.cpp, but no more than the 10 ms the
+// target's writer takes by default (NewWriter in target.go), which sizes
+// the bounce-buffer entry the batch lands in.
+func TestSampleBatch_FitsTheTargetsDefaultEntry(t *testing.T) {
+	rate := mxl.Rational{Num: 48000, Den: 1}
+	assert.Equal(t, uint64(480), sampleBatch(960, rate), "a hint above 10 ms is capped")
+	assert.Equal(t, uint64(240), sampleBatch(240, rate), "a hint below 10 ms is kept")
+	assert.Equal(t, uint64(480), sampleBatch(0, rate))
+	assert.Equal(t, uint64(1), sampleBatch(0, mxl.Rational{}))
+}

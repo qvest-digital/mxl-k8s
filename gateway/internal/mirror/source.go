@@ -1014,23 +1014,13 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 	if s.continuous {
 		// maxBatch is the longest run the reader can hand out; the
 		// whole readable window in one TransferSamples is rejected as
-		// invalid argument. One transfer carries the flow's
-		// maxSyncBatchSizeHint, as in tools/mxl-fabrics-demo/demo.cpp,
-		// or about 10 ms of audio for a flow without one.
+		// invalid argument.
 		s.maxBatch, err = reader.GetMaxReadLengthSamples()
 		if err != nil {
 			_ = reader.Close()
 			return nil, fmt.Errorf("GetMaxReadLengthSamples: %w", err)
 		}
-		s.xferBatch = uint64(cfg.Common.MaxSyncBatchSizeHint)
-		if s.xferBatch == 0 {
-			s.xferBatch = 1
-			if rate := cfg.Common.GrainRate; rate.Den > 0 && rate.Num > 0 {
-				if b := uint64(rate.Num / (100 * rate.Den)); b > 0 {
-					s.xferBatch = b
-				}
-			}
-		}
+		s.xferBatch = sampleBatch(cfg.Common.MaxSyncBatchSizeHint, cfg.Common.GrainRate)
 		if s.maxBatch > 0 && s.xferBatch > s.maxBatch {
 			s.xferBatch = s.maxBatch
 		}
@@ -1136,6 +1126,23 @@ func newSampleTransfer(r *mxl.Reader, in *fabrics.Initiator, bufferLength uint64
 		}
 		return uint64(count) * frameBytes, nil
 	}
+}
+
+// sampleBatch is the samples one transfer of a continuous flow carries:
+// the flow's maxSyncBatchSizeHint, as in tools/mxl-fabrics-demo/demo.cpp,
+// but no more than 10 ms of audio. The target's bounce-buffer entry
+// holds the target flow's hint, and the writer the target gateway
+// creates (TargetReconciler, NewWriter in target.go) takes libmxl's
+// default of 10 ms, whatever hint the producer set.
+func sampleBatch(hint uint32, rate mxl.Rational) uint64 {
+	tenMs := uint64(1)
+	if rate.Den > 0 && rate.Num > 0 {
+		tenMs = max(uint64(rate.Num/(100*rate.Den)), 1)
+	}
+	if hint == 0 {
+		return tenMs
+	}
+	return min(uint64(hint), tenMs)
 }
 
 // detachTimeout bounds how long a removed target's disconnect is driven

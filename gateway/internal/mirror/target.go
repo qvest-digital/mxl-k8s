@@ -899,6 +899,9 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef 
 			}
 		}
 	}
+	// No options: libmxl gives the flow its default sync batch, 10 ms of
+	// audio, which sizes the bounce buffer the source's sample batches
+	// land in. sampleBatch in source.go caps them to it.
 	writer, _, err := mxlInst.NewWriter(flowDef)
 	if err != nil {
 		return nil, fmt.Errorf("%w: NewWriter: %w", errOpenWriterFailed, err)
