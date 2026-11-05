@@ -1204,10 +1204,7 @@ func (r *TargetReconciler) openFabricSide(handles *instance.Handles, writer *mxl
 		_ = target.Close()
 		return nil, nil, "", err
 	}
-	info, err := target.Setup(fabrics.TargetConfig{
-		Interface: iface,
-		Writer:    writer,
-	})
+	info, err := target.Setup(targetConfig(iface, writer))
 	if err != nil {
 		_ = target.Close()
 		return nil, nil, "", fmt.Errorf("Target.Setup: %w", err)
@@ -1219,6 +1216,26 @@ func (r *TargetReconciler) openFabricSide(handles *instance.Handles, writer *mxl
 		return nil, nil, "", fmt.Errorf("TargetInfo.MarshalString: %w", err)
 	}
 	return target, info, s, nil
+}
+
+// targetCQDepth is the completion queue depth of every target,
+// passed as the cqDepth option docs/Fabrics.md describes for receivers
+// whose read loop can fall behind. A target here has been measured
+// 269 ms behind its writes, 14 grains of a 50 fps flow, and a
+// 1.1.0-rc.42 source keeps up to 16 sample batches in flight; 64 holds
+// both with room to spare. With the libmxl-fabrics this gateway links,
+// it is also how many receives a connected target keeps posted for
+// writes that carry immediate data.
+const targetCQDepth = 64
+
+// targetConfig is the libmxl-fabrics setup of a target writing into
+// writer.
+func targetConfig(iface fabrics.InterfaceConfig, writer *mxl.Writer) fabrics.TargetConfig {
+	return fabrics.TargetConfig{
+		Interface: iface,
+		Writer:    writer,
+		Options:   fmt.Sprintf(`{"cqDepth": %d}`, targetCQDepth),
+	}
 }
 
 // openFabricSideDispatch routes the fabric-side open through the
