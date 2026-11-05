@@ -197,11 +197,73 @@ func (rt *recordingTracker) droppedSnapshot() []bool {
 func runGrainLoop(probe RuntimeProbe, transfer TransferFunc, progress ProgressFunc, interval time.Duration, tr progressTracker) (done chan struct{}, stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done = make(chan struct{})
+	probe, transfer = readable(probe, transfer)
 	go runTransferLoop(ctx, done, "flow-a", probe, transfer, progress, progress, time.Millisecond, interval, tr)
 	return done, func() {
 		cancel()
 		<-done
 	}
+}
+
+// readable makes transfer read like a blocking reader: a grain past the
+// head last probed is waited for a millisecond and reported as timed
+// out.
+func readable(probe RuntimeProbe, transfer TransferFunc) (RuntimeProbe, TransferFunc) {
+	var head atomic.Uint64
+	p := func() (uint64, error) {
+		h, err := probe()
+		if err == nil {
+			head.Store(h)
+		}
+		return h, err
+	}
+	return p, func(idx uint64) (uint64, error) {
+		if idx > head.Load() {
+			time.Sleep(time.Millisecond)
+			return 0, mxl.ErrTimeout
+		}
+		return transfer(idx)
+	}
+}
+
+// The loop waits in the blocking read for a grain not written yet, as
+// runDiscrete in tools/mxl-fabrics-demo/demo.cpp blocks in
+// mxlFlowReaderGetGrainSlice, and posts it as soon as the read returns
+// it, without waiting a poll period.
+func TestRunTransferLoop_WaitsInTheBlockingRead(t *testing.T) {
+	src := &blockingSource{ready: time.Now().Add(20 * time.Millisecond)}
+	dst := &offeredCounter{}
+	tr := &recordingTracker{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go runTransferLoop(ctx, done, "f", func() (uint64, error) { return 10, nil },
+		newGrainTransfer(src, dst, false, 1), func() error { return nil }, func() error { return nil },
+		time.Hour, time.Second, tr)
+	defer func() { cancel(); <-done }()
+
+	require.Eventually(t, func() bool { return dst.n.Load() >= 1 }, time.Second, time.Millisecond,
+		"grain 11 was not posted once the read returned it")
+	assert.Equal(t, sourceReadTimeout, src.timeout.Load().(time.Duration))
+}
+
+// blockingSource has grain 11 from ready on; a read of it before then
+// blocks for its timeout and reports a timeout.
+type blockingSource struct {
+	ready   time.Time
+	timeout atomic.Value
+}
+
+func (s *blockingSource) GetGrain(idx uint64, timeout time.Duration) (mxl.Grain, error) {
+	s.timeout.Store(timeout)
+	if idx != 11 || time.Now().Before(s.ready) {
+		time.Sleep(timeout)
+		return mxl.Grain{}, mxl.ErrTimeout
+	}
+	return mxl.Grain{Index: idx, TotalSlices: 1, ValidSlices: 1}, nil
+}
+
+func (s *blockingSource) GetGrainSlice(idx uint64, _ uint16, timeout time.Duration) (mxl.Grain, error) {
+	return s.GetGrain(idx, timeout)
 }
 
 func TestRunTransferLoop_TailsFromHead(t *testing.T) {
@@ -528,7 +590,8 @@ func TestRunTransferLoop_CtxCancelExitsImmediately(t *testing.T) {
 	h := &headScript{heads: []uint64{0}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runTransferLoop(ctx, done, "f", h.probe, func(uint64) (uint64, error) { return 0, nil },
+	probe, transfer := readable(h.probe, func(uint64) (uint64, error) { return 0, nil })
+	go runTransferLoop(ctx, done, "f", probe, transfer,
 		func() error { return nil }, func() error { return nil }, time.Hour, time.Second, &recordingTracker{})
 	cancel()
 	select {

@@ -224,7 +224,8 @@ func TestSource_AStalledMirrorDoesNotHoldAnotherOfTheSameFlow(t *testing.T) {
 			connected = true
 			return nil
 		}
-		runTransferLoop(ctx, done, "flow-1", probe, transfer, progress, progress, time.Millisecond, time.Millisecond, e)
+		p, tr := readable(probe, transfer)
+		runTransferLoop(ctx, done, "flow-1", p, tr, progress, progress, time.Millisecond, time.Millisecond, e)
 	}
 	f.reconcile(t, "m1")
 	f.reconcile(t, "m2")

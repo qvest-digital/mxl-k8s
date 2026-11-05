@@ -200,15 +200,14 @@ func TestRunTransferLoop_RecordsProbedHead(t *testing.T) {
 	probes <- 7
 	close(probes)
 
-	go runTransferLoop(ctx, done, "flow-1",
-		func() (uint64, error) {
-			if h, ok := <-probes; ok {
-				return h, nil
-			}
-			cancel()
-			return 7, nil
-		},
-		func(uint64) (uint64, error) { return 0, nil },
+	probe, transfer := readable(func() (uint64, error) {
+		if h, ok := <-probes; ok {
+			return h, nil
+		}
+		cancel()
+		return 7, nil
+	}, func(uint64) (uint64, error) { return 0, nil })
+	go runTransferLoop(ctx, done, "flow-1", probe, transfer,
 		func() error { return nil }, func() error { return nil },
 		time.Millisecond, time.Second, tracker)
 

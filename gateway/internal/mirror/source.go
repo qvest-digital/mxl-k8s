@@ -75,7 +75,7 @@ func indexMirrorByFlow(obj client.Object) []string {
 var errAddTargetFailed = errors.New("AddTarget failed")
 
 // readerAgedOutMarker is the substring libmxl returns when
-// GetGrainNonBlocking is called for an index the writer has already
+// a grain is read at an index the writer has already
 // overwritten in the ring. Matched on Error() until go-mxl exposes
 // a typed sentinel.
 //
@@ -1231,7 +1231,7 @@ func (e *sourceEntry) recordPassedOver(reason unsentReason, grains uint64) {
 }
 
 // isReaderAgedOut reports whether the error returned by
-// GetGrainNonBlocking / TransferGrain is the libmxl "the writer
+// a grain read or TransferGrain is the libmxl "the writer
 // has lapped the reader" signal.
 func isReaderAgedOut(err error) bool {
 	return err != nil && strings.Contains(err.Error(), readerAgedOutMarker)

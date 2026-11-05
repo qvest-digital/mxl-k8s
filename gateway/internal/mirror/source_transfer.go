@@ -35,14 +35,19 @@ const abandonAfter = 2 * time.Second
 // through this initiator any more.
 var errTargetLost = errors.New("target lost")
 
+// sourceReadTimeout is how long one read of the source ring waits for
+// a grain. It is short because the mirrors of a flow share one reader,
+// whose calls go-mxl serializes.
+const sourceReadTimeout = 5 * time.Millisecond
+
 // errPost wraps a failed TransferGrain or TransferSamples call, so the
 // loop tells it apart from a grain the reader cannot hand out yet.
 var errPost = errors.New("post transfer")
 
 // grainSource is the part of mxl.Reader the grain transfer reads.
 type grainSource interface {
-	GetGrainNonBlocking(index uint64) (mxl.Grain, error)
-	GetGrainSliceNonBlocking(index uint64, minValidSlices uint16) (mxl.Grain, error)
+	GetGrain(index uint64, timeout time.Duration) (mxl.Grain, error)
+	GetGrainSlice(index uint64, minValidSlices uint16, timeout time.Duration) (mxl.Grain, error)
 }
 
 // grainSender is the part of fabrics.Initiator the grain transfer
@@ -84,11 +89,14 @@ func newGrainTransfer(src grainSource, dst grainSender, data bool, perSlice uint
 // slice would retry it until the loop resynced past it, dropping the
 // grains behind it as well. A range of no slices still carries the
 // grain's header, which is what the target commits from.
+//
+// The read blocks for up to sourceReadTimeout, as runDiscrete in
+// tools/mxl-fabrics-demo/demo.cpp blocks in mxlFlowReaderGetGrainSlice.
 func readForTransfer(r grainSource, idx uint64, data bool) (mxl.Grain, error) {
 	if data {
-		return r.GetGrainSliceNonBlocking(idx, 0)
+		return r.GetGrainSlice(idx, mxl.GrainValidSlicesAny, sourceReadTimeout)
 	}
-	return r.GetGrainNonBlocking(idx)
+	return r.GetGrain(idx, sourceReadTimeout)
 }
 
 // sliceBytes is the payload of one slice of a discrete flow, summed
@@ -214,9 +222,9 @@ func retryablePost(err error) bool {
 // done on exit.
 //
 // makeProgress is the progress call the loop waits in, pollProgress
-// its non-blocking variant. poll is how long the loop waits for the
-// producer when it has nothing new, interval one grain of the flow,
-// past which a transfer counts as late.
+// its non-blocking variant. poll is how long the loop waits after a
+// read or post that failed, interval one grain of the flow, past which
+// a transfer counts as late.
 func runTransferLoop(
 	ctx context.Context,
 	done chan struct{},
@@ -253,10 +261,6 @@ func runTransferLoop(
 		}
 		tracker.recordHead(head, time.Now())
 		h := int64(head)
-		if h <= lastSent {
-			wait(ctx, poll)
-			continue
-		}
 
 		next := lastSent + 1
 		if h > maxMirrorLag && lastSent < h-maxMirrorLag {
@@ -292,8 +296,10 @@ func runTransferLoop(
 			l.Error(err, "TransferGrain", "class", classifyFabricError(err).String(), "index", next)
 			tracker.recordDropped(false)
 			return
+		case errors.Is(err, mxl.ErrTimeout):
+			// Not written yet; the read already waited for it.
+			continue
 		default:
-			// Not committed yet; it is read again after poll.
 			l.V(2).Info("grain not transferable yet", "index", next, "head", h, "error", err.Error())
 			wait(ctx, poll)
 			continue

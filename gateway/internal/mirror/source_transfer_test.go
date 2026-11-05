@@ -24,19 +24,21 @@ type ringSource struct {
 
 func (r *ringSource) head() uint64 { return 1000 + uint64(time.Since(r.start)/r.interval) }
 
-func (r *ringSource) GetGrainNonBlocking(idx uint64) (mxl.Grain, error) {
-	h := r.head()
-	switch {
-	case idx > h:
-		return mxl.Grain{}, errors.New("out of range (too early)")
-	case idx+r.ringGrains <= h:
+func (r *ringSource) GetGrain(idx uint64, timeout time.Duration) (mxl.Grain, error) {
+	if idx > r.head() {
+		time.Sleep(timeout)
+		if idx > r.head() {
+			return mxl.Grain{}, mxl.ErrTimeout
+		}
+	}
+	if idx+r.ringGrains <= r.head() {
 		return mxl.Grain{}, errors.New(readerAgedOutMarker)
 	}
 	return mxl.Grain{Index: idx, TotalSlices: 1080, GrainSize: 5529600}, nil
 }
 
-func (r *ringSource) GetGrainSliceNonBlocking(idx uint64, _ uint16) (mxl.Grain, error) {
-	return r.GetGrainNonBlocking(idx)
+func (r *ringSource) GetGrainSlice(idx uint64, _ uint16, timeout time.Duration) (mxl.Grain, error) {
+	return r.GetGrain(idx, timeout)
 }
 
 // offeredCounter counts what the loop hands over.
@@ -67,16 +69,16 @@ func TestGrainTransfer_SendsEveryGrainOnceWhileKeepingUp(t *testing.T) {
 // flaggedSource holds fixed grains by index, as a producer's ring does.
 type flaggedSource map[uint64]mxl.Grain
 
-func (s flaggedSource) GetGrainNonBlocking(idx uint64) (mxl.Grain, error) {
+func (s flaggedSource) GetGrain(idx uint64, _ time.Duration) (mxl.Grain, error) {
 	g, ok := s[idx]
 	if !ok {
-		return mxl.Grain{}, errors.New("out of range (too early)")
+		return mxl.Grain{}, mxl.ErrTimeout
 	}
 	return g, nil
 }
 
-func (s flaggedSource) GetGrainSliceNonBlocking(idx uint64, _ uint16) (mxl.Grain, error) {
-	return s.GetGrainNonBlocking(idx)
+func (s flaggedSource) GetGrainSlice(idx uint64, _ uint16, timeout time.Duration) (mxl.Grain, error) {
+	return s.GetGrain(idx, timeout)
 }
 
 // recordingSender records every slice range handed to the initiator.
