@@ -111,7 +111,8 @@ func TestRunSampleTransferLoop_TransfersDeltaSinceLastPoll(t *testing.T) {
 }
 
 // A delta larger than one batch goes as one batch per transfer, each
-// driven to completion before the next is posted.
+// driven to completion before the next is posted, as runContinuous in
+// tools/mxl-fabrics-demo/demo.cpp does.
 func TestRunSampleTransferLoop_SendsOneBatchAtATime(t *testing.T) {
 	h := &headScript{heads: []uint64{0, 1440}}
 	link := &fakeSampleLink{t: t, notReady: 2}
@@ -127,8 +128,9 @@ func TestRunSampleTransferLoop_SendsOneBatchAtATime(t *testing.T) {
 }
 
 // A batch that misses its deadline is still driven to completion, and
-// the loop then resumes one batch short of the live head, counting what
-// it passed over.
+// the loop then sends the batch ending at the live head, counting what
+// it passed over. The demo's runContinuous jumps to the head once it is
+// too late for a batch; the gateway also does so after a late batch.
 func TestRunSampleTransferLoop_LateBatchResumesAtTheHead(t *testing.T) {
 	var head atomic.Uint64
 	head.Store(0)

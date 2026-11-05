@@ -235,9 +235,10 @@ func TestRunTransferLoop_TailsFromHead(t *testing.T) {
 	assert.Equal(t, []uint64{11, 12, 13, 14, 15}, got)
 }
 
-// libmxl-fabrics guarantees a transfer complete only once MakeProgress
-// stops returning not-ready. The loop drives each transfer that far
-// and posts nothing while it is outstanding.
+// A transfer is complete only once MakeProgress stops returning
+// not-ready (docs/FabricsDeveloperGuide.md, "Transferring discrete flows"). The
+// loop drives each transfer that far and posts nothing while it is
+// outstanding, as runDiscrete in tools/mxl-fabrics-demo/demo.cpp does.
 func TestRunTransferLoop_ProgressesEachTransferUntilItCompletes(t *testing.T) {
 	h := &headScript{heads: []uint64{10, 13}}
 	link := &fakeLink{t: t, notReady: 3}
@@ -256,7 +257,9 @@ func TestRunTransferLoop_ProgressesEachTransferUntilItCompletes(t *testing.T) {
 
 // A transfer that misses its deadline is still driven to completion,
 // with nothing posted meanwhile, and the loop then resumes at the live
-// head instead of queueing what the producer wrote in between.
+// head instead of queueing what the producer wrote in between. The
+// demo's runDiscrete resumes at mxlGetCurrentIndex once it is too late
+// for a grain; the gateway also does so after a late transfer.
 func TestRunTransferLoop_LateTransferResumesAtTheHead(t *testing.T) {
 	var head atomic.Uint64
 	head.Store(10)
@@ -287,9 +290,10 @@ func TestRunTransferLoop_LateTransferResumesAtTheHead(t *testing.T) {
 	assert.Zero(t, tr.agedOuts, "a late transfer is not the reader ageing out")
 }
 
-// On a connection-oriented initiator that dropped its only target every
-// MakeProgress answers interrupted. The loop gives the target up and
-// stops, so the reconciler adds it again.
+// A connection-oriented initiator that dropped its only target answers
+// interrupted, "No more targets" in RCInitiator::makeProgress
+// (lib/fabrics/ofi/src/internal/RCInitiator.cpp). The loop gives the
+// target up and stops, so the reconciler adds it again.
 func TestRunTransferLoop_DroppedTargetStopsTheLoop(t *testing.T) {
 	h := &headScript{heads: []uint64{10, 11}}
 	link := &fakeLink{t: t}
@@ -315,8 +319,11 @@ func TestRunTransferLoop_DroppedTargetStopsTheLoop(t *testing.T) {
 }
 
 // libmxl-fabrics skips a transfer to a target that is not connected
-// yet and reports nothing outstanding. The loop posts nothing and
-// counts nothing until progress reports the target connected.
+// yet and reports nothing outstanding (RCInitiatorEndpoint::transferGrain,
+// RDMInitiatorTarget::transferGrain). The loop posts nothing and counts
+// nothing until progress reports the target connected, as the connect
+// loop after mxlFabricsInitiatorAddTarget in
+// tools/mxl-fabrics-demo/demo.cpp does.
 func TestRunTransferLoop_WaitsForTheTargetToConnect(t *testing.T) {
 	h := &headScript{heads: []uint64{10, 11, 12}}
 	var connected atomic.Bool
@@ -366,6 +373,26 @@ func TestRunTransferLoop_GivesUpATargetThatDoesNotConnect(t *testing.T) {
 	posted, _ := link.snapshot()
 	assert.Empty(t, posted)
 	assert.Zero(t, h.n, "the head was read before the target connected")
+}
+
+// Progress is driven for a posted transfer only, never on a tick: with
+// nothing new from the producer the loop makes no progress call, and
+// nothing is left outstanding to be reaped later
+// (docs/FabricsDeveloperGuide.md, "Transferring discrete flows").
+func TestRunTransferLoop_MakesNoProgressCallWhileIdle(t *testing.T) {
+	h := &headScript{heads: []uint64{10, 11}}
+	link := &fakeLink{t: t, notReady: 2}
+	tr := &recordingTracker{}
+	_, stop := runGrainLoop(h.probe, link.transferGrain, link.makeProgress, time.Second, tr)
+	defer stop()
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) == 1 }, time.Second, time.Millisecond)
+	_, after := link.snapshot()
+
+	// The loop polls the head every millisecond and finds nothing new.
+	require.Eventually(t, func() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.n > 20 }, time.Second, time.Millisecond)
+	_, idle := link.snapshot()
+	assert.Equal(t, 1+3, after, "one call to connect, then two not-ready answers and one completion")
+	assert.Equal(t, after, idle, "progress was called with no transfer outstanding")
 }
 
 // A post the target is not ready for posts nothing. The loop drives

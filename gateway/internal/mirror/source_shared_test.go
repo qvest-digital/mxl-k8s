@@ -151,7 +151,9 @@ func (f *fanoutFixture) entry(name string) *sourceEntry {
 }
 
 // Mirrors of one flow read one ring, so they share one reader. Each
-// gets its own initiator and loop.
+// gets its own initiator and loop: an initiator posts every transfer to
+// all its targets and reports not-ready while any of them has work
+// pending (afterProgressResult in RCInitiator.cpp and RDMInitiator.cpp).
 func TestSource_MirrorsOfOneFlowShareOneReader(t *testing.T) {
 	f := newFanoutFixture(t,
 		fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderTCP),

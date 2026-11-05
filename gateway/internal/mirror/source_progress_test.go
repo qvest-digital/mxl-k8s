@@ -29,8 +29,10 @@ func (d *recordingDriver) MakeProgressNonBlocking() error {
 	return nil
 }
 
-// The interface's capabilities decide the variant, not the provider:
-// EFA blocks wherever libmxl-fabrics reports a wait object for it.
+// The interface's capabilities decide the variant, as makeProgress in
+// tools/mxl-fabrics-demo/demo.cpp does, and progressFuncFor takes no
+// provider: efa blocks like every other provider once its interface
+// reports MXL_FABRICS_IFACE_CAP_BLOCKING_OPERATIONS.
 func TestProgressFuncFor_BlocksWhereTheInterfaceDoes(t *testing.T) {
 	d := &recordingDriver{}
 	require.NoError(t, progressFuncFor(d, fabrics.InterfaceCapRemoteWrite|fabrics.InterfaceCapBlockingOperations)())
@@ -86,8 +88,9 @@ func TestAwaitTransfer_ZeroDeadlineIsNeverLate(t *testing.T) {
 	assert.False(t, late, "a flow without a usable rate has no deadline to miss")
 }
 
-// A signal interrupts a blocking progress call. The poll that checks it
-// is not interrupted by one, so the transfer goes on.
+// A signal interrupts a blocking progress call, and only the blocking
+// call (blockOnCQ in RCInitiator.cpp and RDMInitiator.cpp). The poll
+// that checks it is not interrupted by one, so the transfer goes on.
 func TestAwaitTransfer_ChecksAnInterruptWithAPoll(t *testing.T) {
 	progress, calls := scriptedProgress(mxl.ErrInterrupted, fabrics.ErrNotReady)
 	poll, polls := scriptedProgress(fabrics.ErrNotReady)
@@ -98,7 +101,8 @@ func TestAwaitTransfer_ChecksAnInterruptWithAPoll(t *testing.T) {
 }
 
 // A connection-oriented initiator that holds no target any more answers
-// interrupted to the poll as well.
+// interrupted to the poll as well: RCInitiator::makeProgress throws
+// "No more targets available".
 func TestAwaitTransfer_AnInterruptedPollLosesTheTarget(t *testing.T) {
 	progress, _ := scriptedProgress(mxl.ErrInterrupted)
 	poll, polls := scriptedProgress(mxl.ErrInterrupted)
@@ -113,6 +117,8 @@ func TestAwaitTransfer_EndpointErrorLosesTheTarget(t *testing.T) {
 	require.ErrorIs(t, err, errTargetLost)
 }
 
+// RDMInitiator::makeProgress never reports a lost target, so on efa and
+// shm the bound on an outstanding transfer is what finds it.
 func TestAwaitTransfer_AbandonsATransferThatNeverCompletes(t *testing.T) {
 	progress, _ := scriptedProgress(fabrics.ErrNotReady)
 	_, err := awaitTransfer(context.Background(), progress, noPoll(t), time.Now().Add(-abandonAfter-time.Millisecond), time.Second)
