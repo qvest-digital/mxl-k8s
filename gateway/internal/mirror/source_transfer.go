@@ -303,7 +303,7 @@ func runTransferLoop(
 			tracker.recordDropped(false)
 			return
 		default:
-			// Not committed yet; it is read again once the head moves.
+			// Not committed yet; it is read again after poll.
 			l.V(2).Info("grain not transferable yet", "index", next, "head", h, "error", err.Error())
 			wait(ctx, poll)
 			continue

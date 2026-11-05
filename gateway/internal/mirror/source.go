@@ -150,8 +150,6 @@ type SourceReconciler struct {
 	// defaultReaderStallAfter.
 	ReaderStallAfter time.Duration
 
-	// opener is the seam onto libmxl and libmxl-fabrics.
-	// SetupWithManager binds it to a libmxlOpener; tests build a fake.
 	opener initiatorOpener
 
 	// rebuildFn is the seam the reader-stall watchdog uses to spawn
@@ -1139,7 +1137,8 @@ func (o *libmxlOpener) detach(link *sourceLink) {
 		if err := link.initiator.RemoveTarget(link.info); err != nil {
 			ctrl.Log.WithName("source").V(1).Info("RemoveTarget", "error", err.Error())
 		} else {
-			// The disconnect completes inside MakeProgress.
+			// The disconnect completes once progress stops returning
+			// not-ready.
 			deadline := time.Now().Add(detachTimeout)
 			for time.Now().Before(deadline) {
 				if !errors.Is(link.progress(), fabrics.ErrNotReady) {
@@ -1167,8 +1166,7 @@ const maxMirrorLag int64 = 4
 // sides of a mirror describe a wedge over the same period.
 const defaultReaderStallAfter = 20 * time.Second
 
-// progressTracker is what a transfer loop reports to. Production binds
-// it to the mirror's sourceEntry; tests inject a stub.
+// progressTracker is what a transfer loop reports to.
 type progressTracker interface {
 	recordHead(head uint64, at time.Time)
 	recordOffered(at time.Time)
@@ -1502,12 +1500,10 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 		}
 		// An entry added against a TargetInfo the target has since
 		// replaced is waiting for its reconcile to re-add it, and
-		// publishes nothing meanwhile. Its transfers reach no connection
-		// to the current fabric side, yet complete: a connection-oriented
-		// initiator completes a transfer for a target it is not connected
-		// to without sending it. A publish here would tell the target that
-		// a source is sending into its new fabric side before any source
-		// has been added to it.
+		// publishes nothing meanwhile: its transfers go to the replaced
+		// fabric side, and a publish here would tell the target that a
+		// source is sending into its new one before any source has been
+		// added to it.
 		if r.attachedToReplacedTarget(ctx, entry) {
 			continue
 		}
@@ -1892,10 +1888,9 @@ func observedState(entry *sourceEntry, stallAfter time.Duration) sourceProgressS
 	// True here calls that healthy, and it is the state a source sits
 	// in when its target publishes an endpoint that never accepts: no
 	// transfer completes, so lastSentAt never advances. Left to the
-	// target's stuck-handshake
-	// watchdog rather than reopened here: the reader is demonstrably
-	// reading, and the target gates its own rebuild on seeing this
-	// reason.
+	// target's stuck-handshake watchdog rather than reopened here: the
+	// reader is demonstrably reading, and the target gates its own
+	// rebuild on seeing this reason.
 	if !delivering && !entry.openedAt.IsZero() &&
 		time.Since(entry.openedAt) > stallAfter && !idleOnInvalid(time.Now(), entry, stallAfter) {
 		return sourceProgressState{

@@ -4,8 +4,7 @@ package mirror
 // functions, so their state machines run in tests without libmxl.
 
 // initiatorOpener is the source reconciler's seam onto libmxl and
-// libmxl-fabrics. Production binds it to libmxlOpener; tests bind it to
-// a fake. It is an interface value the constructor sets once.
+// libmxl-fabrics.
 type initiatorOpener interface {
 	// open opens the reader every mirror of one flow transfers from.
 	open(key sourceKey) (*sharedSource, error)

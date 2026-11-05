@@ -1342,9 +1342,8 @@ func (e *targetEntry) recordInvalid(reason invalidReason) {
 // loop retries and keeps its handles.
 //
 // For every grain ReadGrain reports as received, completeFn decides
-// whether every slice of it is valid, and commitFn then does the
-// OpenGrain + Commit dance on the local FlowWriter so consumer
-// FlowReaders see the arrived grain.
+// whether every slice of it is valid, and commitFn then commits it on
+// the local FlowWriter, where consumer FlowReaders see it.
 //
 // Errors from ReadGrain are classified: idle means nothing arrived,
 // transient means the call was disturbed and the handles are still
@@ -1559,16 +1558,12 @@ func runTargetSampleProgressLoop(
 					break
 				}
 				// The arrival's range is already in the ring and the
-				// writer's head is past it: a retransmitted or
-				// overlapping chunk from the source, or a range another
-				// mirror of this flow into this node committed first.
-				// Dropping it is the only correct move -- retrying the
-				// commit can never succeed, and parking on the arrival
-				// stalls the ingress, which is what starves the
-				// initiator's send queue down to the rate at which this
-				// loop gives up on one entry. The commit function has
-				// already counted the arrival if a sibling's commit
-				// vouches for it.
+				// writer's head is past it, as when another mirror of
+				// this flow into this node committed it first. A retried
+				// commit can never succeed, and waiting on the arrival
+				// stops the loop reading the next one. The commit
+				// function has already counted the arrival if a
+				// sibling's commit vouches for it.
 				l.V(1).Info("dropping already-committed sample arrival",
 					"headIndex", head, "count", count, "error", err.Error())
 				break
