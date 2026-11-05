@@ -40,15 +40,29 @@ const ReadyFile = "mxlfs.ready"
 // plain.
 const ReasonUnavailable = "MxlfsUnavailable"
 
+// ReasonHugeRefused is the reason of the Node event for a domain mounted
+// without the huge= option the module refused.
+const ReasonHugeRefused = "MxlfsHugeRefused"
+
 // Mounter decides once per directory whether it is an mxlfs.
 type Mounter struct {
 	// IsMxlfs reports whether dir is an mxlfs. Nil uses mxlfswatch.IsMxlfs.
 	IsMxlfs func(dir string) bool
-	// Mount mounts an mxlfs on dir. Nil uses the mount syscall.
-	Mount func(dir string) error
+	// Mount mounts an mxlfs on dir with the given options. Nil uses the
+	// mount syscall.
+	Mount func(dir, options string) error
+	// Huge is the mount's huge= option, or empty to leave it out. With
+	// always, a file of at least 2 MiB takes a 2 MiB folio for its last
+	// partial 2 MiB, so a NIC maps a registered grain with 2 MiB pages.
+	// An mxlfs module without the option refuses a mount that names it;
+	// the domain is then mounted without it and HugeRefused is told.
+	Huge string
 	// Fallback is told about every directory left plain, and why.
 	Fallback func(dir string, err error)
-	Log      logr.Logger
+	// HugeRefused is told about every domain mounted without Huge, and
+	// why.
+	HugeRefused func(dir string, err error)
+	Log         logr.Logger
 
 	mu      sync.Mutex
 	decided map[string]bool
@@ -78,19 +92,27 @@ func (m *Mounter) Ensure(dir string) error {
 	}
 	if isMxlfs(dir) {
 		m.Log.Info("domain is already an mxlfs", "directory", dir)
-	} else if err := mountEmpty(dir, mount); err != nil {
+	} else if options, err := m.mountEmpty(dir, mount); err != nil {
 		m.Log.Error(err, "domain stays a plain directory", "directory", dir)
 		if m.Fallback != nil {
 			m.Fallback(dir, err)
 		}
 	} else {
-		m.Log.Info("mounted mxlfs", "directory", dir, "options", Options)
+		m.Log.Info("mounted mxlfs", "directory", dir, "options", options)
 	}
 	if m.decided == nil {
 		m.decided = map[string]bool{}
 	}
 	m.decided[dir] = true
 	return nil
+}
+
+// options are the mount options of every domain.
+func (m *Mounter) options() string {
+	if m.Huge == "" {
+		return Options
+	}
+	return Options + ",huge=" + m.Huge
 }
 
 // Decided reports whether Ensure has run for dir: it is an mxlfs, or it
@@ -102,11 +124,12 @@ func (m *Mounter) Decided(dir string) bool {
 }
 
 // mountEmpty mounts on dir unless that would hide a flow: a producer
-// keeps writing the hidden one, and every reader sees an empty domain.
-func mountEmpty(dir string, mount func(string) error) error {
+// keeps writing the hidden one, and every reader sees an empty domain. It
+// returns the options the mount took.
+func (m *Mounter) mountEmpty(dir string, mount func(dir, options string) error) (string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return err
+		return "", err
 	}
 	n := 0
 	for _, e := range entries {
@@ -115,19 +138,33 @@ func mountEmpty(dir string, mount func(string) error) error {
 		}
 	}
 	if n > 0 {
-		return fmt.Errorf("%s holds %d flows a mount would hide", dir, n)
+		return "", fmt.Errorf("%s holds %d flows a mount would hide", dir, n)
 	}
-	if err := mount(dir); err != nil {
-		if errors.Is(err, unix.ENODEV) {
-			return fmt.Errorf("mount mxlfs on %s: %w (the kernel has no mxlfs; is the module loaded?)", dir, err)
+	options := m.options()
+	err = mount(dir, options)
+	// A module that predates huge= refuses it as an unknown parameter.
+	// Without it the domain is still an mxlfs, with folios that end by EOF.
+	if err != nil && m.Huge != "" && errors.Is(err, unix.EINVAL) {
+		refused := err
+		options = Options
+		if err = mount(dir, options); err == nil {
+			m.Log.Error(refused, "mxlfs refused huge=; mounted without it", "directory", dir, "huge", m.Huge)
+			if m.HugeRefused != nil {
+				m.HugeRefused(dir, refused)
+			}
 		}
-		return fmt.Errorf("mount mxlfs on %s: %w", dir, err)
 	}
-	return nil
+	if err != nil {
+		if errors.Is(err, unix.ENODEV) {
+			return "", fmt.Errorf("mount mxlfs on %s: %w (the kernel has no mxlfs; is the module loaded?)", dir, err)
+		}
+		return "", fmt.Errorf("mount mxlfs on %s: %w", dir, err)
+	}
+	return options, nil
 }
 
-func sysMount(dir string) error {
-	return unix.Mount("mxlfs", dir, "mxlfs", 0, Options)
+func sysMount(dir, options string) error {
+	return unix.Mount("mxlfs", dir, "mxlfs", 0, options)
 }
 
 // MarkReady writes ReadyFile to root.
@@ -147,14 +184,24 @@ func ClearReady(root string) error {
 
 // NodeEvent returns a Fallback that records a warning event on node.
 func NodeEvent(c client.Client, node string, log logr.Logger) func(dir string, err error) {
+	return nodeEvent(c, node, log, ReasonUnavailable, "%s stays a plain directory: %v")
+}
+
+// HugeRefusedEvent returns a HugeRefused that records a warning event on
+// node.
+func HugeRefusedEvent(c client.Client, node string, log logr.Logger) func(dir string, err error) {
+	return nodeEvent(c, node, log, ReasonHugeRefused, "%s is mounted without huge=: %v")
+}
+
+func nodeEvent(c client.Client, node string, log logr.Logger, reason, format string) func(dir string, err error) {
 	return func(dir string, err error) {
 		now := metav1.NewTime(time.Now())
 		ev := &corev1.Event{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: node + ".", Namespace: metav1.NamespaceDefault},
 			// A Node's events name it by its name as UID, as the kubelet's do.
 			InvolvedObject: corev1.ObjectReference{Kind: "Node", Name: node, UID: types.UID(node)},
-			Reason:         ReasonUnavailable,
-			Message:        fmt.Sprintf("%s stays a plain directory: %v", dir, err),
+			Reason:         reason,
+			Message:        fmt.Sprintf(format, dir, err),
 			Type:           corev1.EventTypeWarning,
 			Source:         corev1.EventSource{Component: "mxl-domain-agent", Host: node},
 			FirstTimestamp: now,
@@ -164,7 +211,7 @@ func NodeEvent(c client.Client, node string, log logr.Logger) func(dir string, e
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if cerr := c.Create(ctx, ev); cerr != nil {
-			log.Error(cerr, "record event", "reason", ReasonUnavailable, "directory", dir)
+			log.Error(cerr, "record event", "reason", reason, "directory", dir)
 		}
 	}
 }

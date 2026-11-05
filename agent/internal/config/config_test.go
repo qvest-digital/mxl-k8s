@@ -182,6 +182,17 @@ func TestValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			name:    "huge=always passes",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsHuge: "always", KubeAPIQPS: 50, KubeAPIBurst: 100},
+			wantErr: "",
+		},
+		{
+			// tmpfs's never and advise are values mxlfs refuses.
+			name:    "a huge= value mxlfs does not have is rejected",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsHuge: "never", KubeAPIQPS: 50, KubeAPIBurst: 100},
+			wantErr: "--mxlfs-huge",
+		},
+		{
 			name:    "unknown provider rejected",
 			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", Provider: "rdma"},
 			wantErr: "--provider",

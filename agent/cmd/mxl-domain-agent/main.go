@@ -213,8 +213,10 @@ func run(args []string) error {
 			return fmt.Errorf("--mxlfs needs the redundancy set CRD: %w", err)
 		}
 		mounts = &mxlfsmount.Mounter{
-			Fallback: mxlfsmount.NodeEvent(kClient, cfg.NodeName, setupLog),
-			Log:      ctrl.Log.WithName("mxlfsmount"),
+			Fallback:    mxlfsmount.NodeEvent(kClient, cfg.NodeName, setupLog),
+			Huge:        cfg.MxlfsHuge,
+			HugeRefused: mxlfsmount.HugeRefusedEvent(kClient, cfg.NodeName, setupLog),
+			Log:         ctrl.Log.WithName("mxlfsmount"),
 		}
 		if err := mounts.Ensure(cfg.DomainPath); err != nil {
 			return err

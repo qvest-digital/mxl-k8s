@@ -141,6 +141,38 @@ tests:
             mountPath: /run/mxl
             mountPropagation: Bidirectional
 
+  # An mxlfs module without huge= refuses a mount that names it, so the
+  # option is passed only when set.
+  - it: leaves huge= to the module unless mxlfs.huge is set
+    set:
+      mxlfs.enabled: true
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-huge=always
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-huge=within_size
+
+  - it: mounts every domain with huge=always when mxlfs.huge says so
+    set:
+      mxlfs.enabled: true
+      mxlfs.huge: always
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-huge=always
+
+  - it: refuses a huge= value mxlfs does not have
+    set:
+      mxlfs.enabled: true
+      mxlfs.huge: never
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - failedTemplate: {}
+
   - it: holds the gateway until the agent has decided the domains
     set:
       mxlfs.enabled: true
