@@ -214,6 +214,7 @@ func run(args []string) error {
 		}
 		mounts = &mxlfsmount.Mounter{
 			Fallback: mxlfsmount.NodeEvent(kClient, cfg.NodeName, setupLog),
+			Huge:     cfg.MxlfsHuge,
 			Log:      ctrl.Log.WithName("mxlfsmount"),
 		}
 		if err := mounts.Ensure(cfg.DomainPath); err != nil {

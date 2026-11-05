@@ -78,6 +78,9 @@ spec:
             {{- include "mxlk8s.flags.render" (dict "flags" .Values.agent.flags "keepEmpty" (list "shimPath")) | nindent 12 }}
             {{- if .Values.mxlfs.enabled }}
             - --mxlfs
+            {{- with .Values.mxlfs.huge }}
+            - --mxlfs-huge={{ . }}
+            {{- end }}
             {{- end }}
             {{- if .Values.agent.csi.enabled }}
             - --csi-endpoint=unix:///csi/csi.sock

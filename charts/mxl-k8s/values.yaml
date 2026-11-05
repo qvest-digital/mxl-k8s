@@ -109,6 +109,18 @@ domains:
 # for more.
 mxlfs:
   enabled: false
+  # -- huge= mount option of every mxlfs domain, as tmpfs's: within_size
+  # gives a file folios that end by EOF; always gives a file of at least
+  # 2 MiB one 2 MiB folio for its last partial 2 MiB, so a NIC maps a
+  # registered grain with one translation per 2 MiB instead of a page
+  # size the smallest tail folio sets, at up to 2 MiB more memory per
+  # such file (736 KiB for a 1080p v210 grain). Empty leaves the option
+  # out, which an mxlfs module without it needs: such a module refuses
+  # the mount, and the domain stays a plain directory.
+  # @schema
+  # enum: ["", "within_size", "always"]
+  # @schema
+  huge: ""
   # -- Image of the init container that waits for mxlfs.ready. Needs a
   # POSIX sh, test and sleep.
   waitImage: busybox:1.38

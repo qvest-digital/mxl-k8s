@@ -26,18 +26,26 @@ type fallback struct {
 // harness is a Mounter whose mount syscall and statfs are recorded and
 // answered from mxlfs.
 func harness(mxlfs map[string]bool, mountErr error) (*Mounter, *[]string, *[]fallback) {
+	m, mounted, fell, _ := harnessOpts(mxlfs, mountErr)
+	return m, mounted, fell
+}
+
+// harnessOpts is harness, and the options of the last mount.
+func harnessOpts(mxlfs map[string]bool, mountErr error) (*Mounter, *[]string, *[]fallback, *string) {
 	var mounted []string
 	var fell []fallback
+	var options string
 	m := &Mounter{
 		IsMxlfs: func(dir string) bool { return mxlfs[dir] },
-		Mount: func(dir string) error {
+		Mount: func(dir, opts string) error {
 			mounted = append(mounted, dir)
+			options = opts
 			return mountErr
 		},
 		Fallback: func(dir string, err error) { fell = append(fell, fallback{dir, err}) },
 		Log:      logr.Discard(),
 	}
-	return m, &mounted, &fell
+	return m, &mounted, &fell, &options
 }
 
 func TestEnsureLeavesAnMxlfsAlone(t *testing.T) {
@@ -75,6 +83,31 @@ func TestEnsureFallsBackWithoutTheModule(t *testing.T) {
 	assert.Equal(t, dir, (*fell)[0].dir)
 	assert.ErrorIs(t, (*fell)[0].err, unix.ENODEV)
 	assert.True(t, m.Decided(dir), "a plain directory is a decision too")
+}
+
+// huge= reaches the mount only when it is set: a module without the
+// option refuses a mount that names it.
+func TestEnsureMountsWithHugeOnlyWhenSet(t *testing.T) {
+	m, _, _, options := harnessOpts(nil, nil)
+	require.NoError(t, m.Ensure(t.TempDir()))
+	assert.Equal(t, "mode=0777,wait=5000", *options)
+
+	m, _, _, options = harnessOpts(nil, nil)
+	m.Huge = "always"
+	require.NoError(t, m.Ensure(t.TempDir()))
+	assert.Equal(t, "mode=0777,wait=5000,huge=always", *options)
+}
+
+// A module that does not know huge= refuses the mount; the domain stays
+// plain and the Node says why, as without the module.
+func TestEnsureFallsBackWhenTheModuleRefusesHuge(t *testing.T) {
+	dir := t.TempDir()
+	m, _, fell, _ := harnessOpts(nil, unix.EINVAL)
+	m.Huge = "always"
+
+	require.NoError(t, m.Ensure(dir))
+	require.Len(t, *fell, 1)
+	assert.ErrorIs(t, (*fell)[0].err, unix.EINVAL)
 }
 
 func TestEnsureDoesNotHideFlows(t *testing.T) {

@@ -44,8 +44,15 @@ const ReasonUnavailable = "MxlfsUnavailable"
 type Mounter struct {
 	// IsMxlfs reports whether dir is an mxlfs. Nil uses mxlfswatch.IsMxlfs.
 	IsMxlfs func(dir string) bool
-	// Mount mounts an mxlfs on dir. Nil uses the mount syscall.
-	Mount func(dir string) error
+	// Mount mounts an mxlfs on dir with the given options. Nil uses the
+	// mount syscall.
+	Mount func(dir, options string) error
+	// Huge is the mount's huge= option, or empty to leave it out. With
+	// always, a file of at least 2 MiB takes a 2 MiB folio for its last
+	// partial 2 MiB, so a NIC maps a registered grain with 2 MiB pages;
+	// an mxlfs module without the option refuses the mount, and the
+	// domain stays plain.
+	Huge string
 	// Fallback is told about every directory left plain, and why.
 	Fallback func(dir string, err error)
 	Log      logr.Logger
@@ -78,19 +85,27 @@ func (m *Mounter) Ensure(dir string) error {
 	}
 	if isMxlfs(dir) {
 		m.Log.Info("domain is already an mxlfs", "directory", dir)
-	} else if err := mountEmpty(dir, mount); err != nil {
+	} else if err := mountEmpty(dir, func(dir string) error { return mount(dir, m.options()) }); err != nil {
 		m.Log.Error(err, "domain stays a plain directory", "directory", dir)
 		if m.Fallback != nil {
 			m.Fallback(dir, err)
 		}
 	} else {
-		m.Log.Info("mounted mxlfs", "directory", dir, "options", Options)
+		m.Log.Info("mounted mxlfs", "directory", dir, "options", m.options())
 	}
 	if m.decided == nil {
 		m.decided = map[string]bool{}
 	}
 	m.decided[dir] = true
 	return nil
+}
+
+// options are the mount options of every domain.
+func (m *Mounter) options() string {
+	if m.Huge == "" {
+		return Options
+	}
+	return Options + ",huge=" + m.Huge
 }
 
 // Decided reports whether Ensure has run for dir: it is an mxlfs, or it
@@ -126,8 +141,8 @@ func mountEmpty(dir string, mount func(string) error) error {
 	return nil
 }
 
-func sysMount(dir string) error {
-	return unix.Mount("mxlfs", dir, "mxlfs", 0, Options)
+func sysMount(dir, options string) error {
+	return unix.Mount("mxlfs", dir, "mxlfs", 0, options)
 }
 
 // MarkReady writes ReadyFile to root.

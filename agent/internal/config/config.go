@@ -90,6 +90,11 @@ type Config struct {
 	// flow watchers, redundancy set demand. Off, every domain is a plain
 	// directory.
 	Mxlfs bool
+
+	// MxlfsHuge is the huge= option every mxlfs domain is mounted with:
+	// within_size or always. Empty leaves it to the module, which then
+	// needs no such option.
+	MxlfsHuge string
 }
 
 // FromFlags populates a Config from command-line flags.
@@ -121,6 +126,9 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"Run what a domain on mxlfs needs: mirrors for opened placeholders and "+
 			"waited-for flows, and MxlFlowRedundancySet demand. Off, every domain is "+
 			"treated as a plain directory.")
+	fs.StringVar(&c.MxlfsHuge, "mxlfs-huge", "",
+		"huge= mount option of every mxlfs domain (within_size, always). Empty "+
+			"leaves it out, for an mxlfs module without the option.")
 	fs.DurationVar(&c.MaterializeTimeout, "materialize-timeout", 5*time.Second,
 		"Per-request budget for the intent dispatcher waiting for a mirror Ready.")
 	fs.IntVar(&c.IntentMirrorsPerPod, "intent-mirrors-per-pod", 64,
@@ -183,6 +191,11 @@ func (c *Config) Validate() error {
 	if c.IntentMirrorBurst > 0 && c.IntentMirrorBurstWindow <= 0 {
 		return fmt.Errorf("--intent-mirror-burst-window must be positive while --intent-mirror-burst is set, got %v",
 			c.IntentMirrorBurstWindow)
+	}
+	switch c.MxlfsHuge {
+	case "", "within_size", "always":
+	default:
+		return fmt.Errorf("--mxlfs-huge %q is not one of within_size, always", c.MxlfsHuge)
 	}
 	if c.KubeAPIQPS <= 0 {
 		return fmt.Errorf("--kube-api-qps must be positive, got %v", c.KubeAPIQPS)
