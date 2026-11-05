@@ -12,6 +12,11 @@
 # publish the copy's hint on the mirror, and samples have to arrive at
 # delivery rate with no rejected batch.
 #
+# The reader declares its flow with an MxlReceiver, as the demo audio
+# reader does. read-samples exits on a flow with no head, and on mxlfs
+# the reader finds a placeholder, which has none: a mirror request from
+# its open would name a process that has already exited.
+#
 # The writer needs a demo-tools image whose write-samples takes -options.
 
 set -euo pipefail
@@ -29,11 +34,13 @@ MIN_WINDOW_SAMPLES="${AUDIO_RATE_MIN_WINDOW_SAMPLES:-100000}"
 WRITER=mxl-hints-audio-writer
 READER=mxl-hints-audio-reader
 CM=mxl-hints-audio-flow
+RECEIVER=mxl-hints-audio
 
 cleanup() {
   "${KUBECTL[@]}" -n "$NAMESPACE" delete pod "$WRITER" "$READER" \
       --wait=false --ignore-not-found >/dev/null 2>&1 || true
   "${KUBECTL[@]}" -n "$NAMESPACE" delete configmap "$CM" --ignore-not-found >/dev/null 2>&1 || true
+  "${KUBECTL[@]}" -n "$NAMESPACE" delete mxlreceiver "$RECEIVER" --ignore-not-found >/dev/null 2>&1 || true
   "${KUBECTL[@]}" -n "$NAMESPACE" get mxlflowmirrors -o name 2>/dev/null \
     | grep "$FLOW" | xargs -r "${KUBECTL[@]}" -n "$NAMESPACE" delete --wait=false >/dev/null 2>&1 || true
   "${KUBECTL[@]}" -n "$NAMESPACE" wait --for=delete pod/"$WRITER" pod/"$READER" \
@@ -55,6 +62,15 @@ base=$("${KUBECTL[@]}" -n "$NAMESPACE" get configmap mxl-demo-flow-config \
 [ -n "$base" ] || fail "demo audio flow definition missing"
 "${KUBECTL[@]}" -n "$NAMESPACE" create configmap "$CM" \
     --from-literal=flow.json="$(echo "$base" | sed -E "s/\"id\": *\"[0-9a-f-]+\"/\"id\": \"${FLOW}\"/")" >/dev/null
+
+# On mxlfs the pods take the domain through the agent's CSI volume, as
+# the demo pods do (examples/kind/csi-domain).
+writer_domain='hostPath: {path: /run/mxl/domain, type: Directory}'
+reader_domain=$writer_domain
+if agent_runs_mxlfs; then
+  writer_domain='csi: {driver: mxl.qvest-digital.com, volumeAttributes: {access: write}}'
+  reader_domain='csi: {driver: mxl.qvest-digital.com}'
+fi
 
 since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 "${KUBECTL[@]}" -n "$NAMESPACE" apply -f - <<EOF >/dev/null
@@ -79,7 +95,7 @@ spec:
         - {name: flows, mountPath: /flows}
   volumes:
     - name: mxl-domain
-      hostPath: {path: /run/mxl/domain, type: Directory}
+      ${writer_domain}
     - name: flows
       configMap: {name: ${CM}}
 ---
@@ -96,16 +112,25 @@ spec:
       command: ["/bin/sh", "-c"]
       args:
         - until /usr/local/bin/read-samples -domain /run/mxl/domain -flow ${FLOW}; do sleep 1; done
-      env:
-        - {name: LD_PRELOAD, value: /run/mxl/libmxl-intent.so}
       securityContext:
         capabilities:
           add: ["IPC_LOCK", "SYS_RESOURCE"]
       volumeMounts:
-        - {name: mxl-run, mountPath: /run/mxl}
+        - {name: mxl-domain, mountPath: /run/mxl/domain}
   volumes:
-    - name: mxl-run
-      hostPath: {path: /run/mxl, type: Directory}
+    - name: mxl-domain
+      ${reader_domain}
+---
+apiVersion: mxl.qvest-digital.com/v1alpha1
+kind: MxlReceiver
+metadata:
+  name: ${RECEIVER}
+spec:
+  flowID: "${FLOW}"
+  provider: tcp
+  podRef:
+    name: ${READER}
+    namespace: ${NAMESPACE}
 EOF
 
 "${KUBECTL[@]}" -n "$NAMESPACE" wait --for=condition=Ready "pod/${WRITER}" \

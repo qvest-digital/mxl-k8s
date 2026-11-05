@@ -147,6 +147,27 @@ func TestProducersIsAResolvedPodThatIsNotOurs(t *testing.T) {
 		"one lookup per pod that resolves; one that does not is asked about again")
 }
 
+// Ours is the other half: a pid whose pod does not resolve is no more
+// mxl-k8s's own than it is a producer, so a flow it writes keeps its
+// Origin.
+func TestOursIsAResolvedPodOfOurs(t *testing.T) {
+	pod := func(ns, component string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns,
+			Labels: map[string]string{"app.kubernetes.io/component": component}}}
+	}
+	pods := &pidsInPods{
+		uid: map[int32]string{1: "gw", 3: "mf", 4: "gone"},
+		pod: map[string]*corev1.Pod{"gw": pod("mxl-system", "gateway"), "mf": pod("media", "")},
+	}
+	p, err := newProducers(pods, "mxl-system")
+	require.NoError(t, err)
+	ctx := context.Background()
+	assert.True(t, p.Ours(ctx, 1), "the gateway")
+	assert.False(t, p.Ours(ctx, 3), "a media function")
+	assert.False(t, p.Ours(ctx, 4), "a pid whose pod does not resolve")
+	assert.False(t, p.Ours(ctx, 5), "a pid in no pod")
+}
+
 // Without the agent's namespace no pod is mxl-k8s's own, and the gateway
 // filling every mirror copy on the node would be taken for its producer.
 func TestProducersNeedTheAgentsNamespace(t *testing.T) {

@@ -55,6 +55,7 @@ Tunables (all optional, environment variables):
 | `GRAFANA_AUTH` | `admin:admin` | Case 48 Grafana API credentials |
 | `IDLE_PAUSE_SETTLE_SECS` | `30` | Case 63 time a paused producer is left before each gateway restart |
 | `IDLE_RESUME_TIMEOUT_SECS` | `60` | Case 63 wait for a grain on the target after the producer resumes |
+| `MXLFS_SET_WINDOW_SECS` | `10` | Case 90 time the redundancy set output is read after its local member goes away |
 | `KIND_DIAG_DIR` | `$PWD/kind-diagnostics` | Where failure diagnostics land |
 | `CASE_GLOB` | `cases/*.sh` | Case selection glob |
 

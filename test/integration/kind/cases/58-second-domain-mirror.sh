@@ -221,8 +221,10 @@ phase=$("${KUBECTL[@]}" get mxlflow "$FLOW_SHARED" \
 "${KUBECTL[@]}" -n "$NAMESPACE" exec "$CONSUMER" -c consumer -- \
   test -d "${DOMAIN_DIR}/${FLOW_SHARED}.mxl-flow" \
   || fail "the mirror did not write into ${DOMAIN_DIR} on ${node_b}"
-if "${KUBECTL[@]}" -n "$NAMESPACE" exec "$CONSUMER" -c consumer -- \
-     test -e "/run/mxl/domain/${FLOW_SHARED}.mxl-flow"; then
+# On mxlfs the gateway holds a placeholder there for the primary's flow,
+# as on every node without a copy; its marker says nothing filled it.
+if "${KUBECTL[@]}" -n "$NAMESPACE" exec "$CONSUMER" -c consumer -- sh -c \
+     "test -e /run/mxl/domain/${FLOW_SHARED}.mxl-flow && ! test -e /run/mxl/domain/.mxlfs-placeholders/${FLOW_SHARED}"; then
   fail "the second domain's mirror wrote into the primary domain on ${node_b}"
 fi
 echo "   written into ${DOMAIN_DIR}; primary domain untouched"

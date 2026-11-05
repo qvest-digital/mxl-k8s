@@ -189,6 +189,35 @@ any side effects:
 ERROR: BUILD must be 'local' or a non-empty image tag
 ```
 
+## mxlfs domains (`MXLFS`)
+
+`MXLFS=1 make kind-up` installs the chart with `mxlfs.enabled=true` and
+`agent.csi.enabled=true`, so the agent on every node mounts an mxlfs on
+the domain directories, and applies the demo from
+[`examples/kind/demo-mxlfs/`](../examples/kind/demo-mxlfs/), whose pods
+take the domain through the agent's CSI volume. KIND
+nodes are containers on the host kernel, so the
+[mxlfs](https://github.com/danielclasen/mxlfs) module has to be loaded
+on the host; `kind-up.sh` stops before the chart install when the
+nodes' kernel lists no mxlfs in `/proc/filesystems`. Bring the cluster
+up from scratch (`make kind-down` first): a domain directory that
+already holds flows is left a plain directory.
+
+On such a cluster every case runs against mxlfs domains, and case
+`90-mxlfs-node-domains` covers what only mxlfs does: the mounts and the
+agent's ready marker, a mirror requested by a consumer that carries no
+shim and has no `MxlReceiver`, and an `MxlFlowRedundancySet` read
+through the loss of its local member. On a cluster without mxlfs the
+case passes without asserting anything. The `kind-integration` job
+runs on GitHub-hosted runners, which have no mxlfs module, so there
+the case is skipped; it runs where a developer or a self-hosted runner
+has the module loaded:
+
+```sh
+MXLFS=1 make kind-up
+make kind-test
+```
+
 ## Integration suite
 
 `make kind-test` runs the bash suite under

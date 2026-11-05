@@ -305,6 +305,42 @@ func TestPlaceholderOfAnotherGeometryIsReplaced(t *testing.T) {
 	require.EqualValues(t, 640, onDiskWidth(t, h), "the placeholder kept the geometry the flow no longer has")
 }
 
+// The agent must find the marker at every point of a replacement, or
+// it reads the old directory, or the new placeholder's writer, as a
+// producer's flow.
+func TestReplacedPlaceholderKeepsItsMarker(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	reconcileFlow(t, m)
+	setDefinition(t, m, larger)
+	var marked []bool
+	m.Domain = func(context.Context, string) (Handles, error) {
+		marked = append(marked, IsPlaceholder(h.dir, flowID))
+		return h, nil
+	}
+
+	reconcileFlow(t, m)
+
+	require.Equal(t, []bool{true}, marked, "the marker went before the new placeholder was held")
+	require.True(t, IsPlaceholder(h.dir, flowID))
+	require.EqualValues(t, 640, onDiskWidth(t, h))
+}
+
+// A replacement that cannot complete leaves no marker behind.
+func TestFailedReplacementRemovesTheMarker(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	reconcileFlow(t, m)
+	setDefinition(t, m, larger)
+	m.Domain = func(context.Context, string) (Handles, error) { return nil, errors.New("domain gone") }
+
+	_, err := m.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: flowID}})
+
+	require.Error(t, err)
+	require.Empty(t, m.Held())
+	require.False(t, IsPlaceholder(h.dir, flowID))
+}
+
 // A producer that opened the placeholder writes into it: only giving it
 // up to the producer is left, which CheckLocalWriters does.
 func TestPlaceholderAProducerOpenedIsNotReplaced(t *testing.T) {

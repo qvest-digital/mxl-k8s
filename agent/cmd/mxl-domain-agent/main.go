@@ -118,7 +118,7 @@ func run(args []string) error {
 	ns, nsErr := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 	namespace := strings.TrimSpace(string(ns))
 	own := ownPod(namespace)
-	var producer func(ctx context.Context, pid int32) bool
+	var producer, ourWriter func(ctx context.Context, pid int32) bool
 	if cfg.Mxlfs {
 		p, err := newProducers(pods, namespace)
 		if err != nil {
@@ -127,7 +127,7 @@ func run(args []string) error {
 			}
 			return fmt.Errorf("--mxlfs: %w", err)
 		}
-		producer = p.Producer
+		producer, ourWriter = p.Producer, p.Ours
 	}
 	var intentDispatcher *intent.Dispatcher
 	if cfg.IntentSocketPath != "" || cfg.Mxlfs {
@@ -183,7 +183,7 @@ func run(args []string) error {
 	}
 	if cfg.Mxlfs {
 		tracking.Mxlfs = &trackerMxlfs{IsMxlfs: mxlfswatch.IsMxlfs, IsOutput: sets.IsOutput, Run: startMxlfs,
-			Producer: producer}
+			Producer: producer, Ours: ourWriter}
 	}
 	trackers.Start = func(ctx context.Context, name, dir string) (tracker.Tracker, error) {
 		return tracking.start(ctx, name, filepath.Join(root, dir))
@@ -510,8 +510,8 @@ type trackerMxlfs struct {
 	// Run starts runMxlfs for dir and returns what waits for it to end
 	// once ctx has, or fails with none of it running.
 	Run func(ctx context.Context, dir string, fp *flowpublisher.Publisher) (wait func(), err error)
-	// Producer is the publisher's Producer.
-	Producer func(ctx context.Context, pid int32) bool
+	// Producer and Ours are the publisher's.
+	Producer, Ours func(ctx context.Context, pid int32) bool
 }
 
 // on reports whether dir is on mxlfs, and if it is gives fp what a
@@ -521,7 +521,7 @@ func (m *trackerMxlfs) on(dir string, fp *flowpublisher.Publisher) bool {
 		return false
 	}
 	fp.IsOutput = m.IsOutput
-	fp.Producer = m.Producer
+	fp.Producer, fp.Ours = m.Producer, m.Ours
 	return true
 }
 
@@ -712,6 +712,23 @@ func (p *producers) Producer(ctx context.Context, pid int32) bool {
 	p.byUID[uid] = known
 	p.mu.Unlock()
 	return known
+}
+
+// Ours reports a pid as mxl-k8s's own when it runs in one of its pods.
+// One whose pod does not resolve is not.
+func (p *producers) Ours(ctx context.Context, pid int32) bool {
+	// Producer resolves the pod and remembers which it is.
+	if p.Producer(ctx, pid) {
+		return false
+	}
+	uid, err := p.pods.UIDForPID(pid)
+	if err != nil {
+		return false
+	}
+	p.mu.Lock()
+	producer, resolved := p.byUID[uid]
+	p.mu.Unlock()
+	return resolved && !producer
 }
 
 // domainDevices maps each domain directory's device to the domain's name,

@@ -12,7 +12,7 @@ set -euo pipefail
 . "$KIND_TEST_LIB"
 
 READER_POD="${READER_POD:-mxl-tcp-demo-reader}"
-READER_MANIFEST="${READER_MANIFEST:-${PWD}/examples/tcp-demo/21-reader.yaml}"
+READER_MANIFEST="${READER_MANIFEST:-$(demo_manifest "${PWD}/examples/tcp-demo/21-reader.yaml")}"
 GC_TIMEOUT_SECS="${GC_TIMEOUT_SECS:-30}"
 
 # The deleted reader consumes the video flow, so only that flow's
