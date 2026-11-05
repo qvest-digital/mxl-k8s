@@ -76,15 +76,15 @@ func TestCommitArrivedGrain_SecondWriterOfSameFlowSeesAlreadyCommitted(t *testin
 	first, second := twoWriters(t, sharedFlowVideoDef)
 
 	const idx = 1000
-	_, _, err := commitArrivedGrain(first, idx)
+	_, _, err := commitArrivedGrain(first, idx, nil)
 	require.NoError(t, err)
 
-	_, _, err = commitArrivedGrain(second, idx)
+	_, _, err = commitArrivedGrain(second, idx, nil)
 	require.ErrorIs(t, err, errGrainAlreadyCommitted)
 
-	_, _, err = commitArrivedGrain(second, idx+1)
+	_, _, err = commitArrivedGrain(second, idx+1, nil)
 	require.NoError(t, err, "the next grain commits through the other writer")
-	_, _, err = commitArrivedGrain(first, idx+1)
+	_, _, err = commitArrivedGrain(first, idx+1, nil)
 	require.ErrorIs(t, err, errGrainAlreadyCommitted)
 }
 
@@ -112,7 +112,7 @@ func TestCommitArrivedGrain_DataGrainKeepsItsLength(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, ga.Commit(64, 0))
 
-	_, _, err = commitArrivedGrain(w, idx)
+	_, _, err = commitArrivedGrain(w, idx, nil)
 	require.NoError(t, err)
 
 	g, err := w.GrainInfo(idx)
@@ -179,7 +179,7 @@ func TestEmptyDataGrainIsMirroredEmpty(t *testing.T) {
 
 	// What the initiator's header-only write leaves in the target's
 	// slot is the same header, as in the test above.
-	_, _, err = commitArrivedGrain(w, idx)
+	_, _, err = commitArrivedGrain(w, idx, nil)
 	require.NoError(t, err)
 	got, err := w.GrainInfo(idx)
 	require.NoError(t, err)
@@ -217,7 +217,7 @@ func TestCommitArrivedGrain_SliceBatchesCommitAsTheyLand(t *testing.T) {
 	require.NoError(t, ga.Cancel())
 
 	land(270)
-	n, reason, err := commitArrivedGrain(target, idx)
+	n, reason, err := commitArrivedGrain(target, idx, nil)
 	require.NoError(t, err)
 	assert.Empty(t, reason)
 	assert.Zero(t, n, "the payload is counted with the last batch")
@@ -226,15 +226,52 @@ func TestCommitArrivedGrain_SliceBatchesCommitAsTheyLand(t *testing.T) {
 	assert.Equal(t, uint16(270), g.ValidSlices, "the first batch is readable as it landed")
 
 	land(total)
-	n, _, err = commitArrivedGrain(target, idx)
+	n, _, err = commitArrivedGrain(target, idx, nil)
 	require.NoError(t, err, "a grain the target has not completed is reopened for its next batch")
 	assert.Positive(t, n)
 	g, err = target.GrainInfo(idx)
 	require.NoError(t, err)
 	assert.True(t, g.Complete(), "the last batch completes the grain")
 
-	_, _, err = commitArrivedGrain(target, idx)
+	_, _, err = commitArrivedGrain(target, idx, nil)
 	require.ErrorIs(t, err, errGrainAlreadyCommitted, "a completed grain is not reopened")
+}
+
+// Two mirrors of a flow into this node write one slot, and
+// libmxl-fabrics sets its valid slices from each arrival's range. A
+// sibling's earlier batch landing after a later one lowers them; the
+// commit of that arrival keeps what the flow already committed.
+func TestSharedFlow_ASiblingsEarlierBatchDoesNotLowerAnOpenGrain(t *testing.T) {
+	dir := t.TempDir()
+	newWriter := func() *mxl.Writer {
+		inst, err := mxl.NewInstance(dir, "")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = inst.Close() })
+		w, _, err := inst.NewWriter(sharedFlowVideoDef)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = w.Close() })
+		return w
+	}
+	target, initiator := newWriter(), newWriter()
+	flow := &sharedFlow{}
+	const idx = 1000
+	land := func(valid uint16) {
+		t.Helper()
+		ga, err := initiator.OpenGrain(idx)
+		require.NoError(t, err)
+		require.NoError(t, ga.Commit(valid, 0))
+	}
+
+	land(540)
+	_, _, err := flow.commitGrain(target, idx, nil)
+	require.NoError(t, err)
+	land(270) // the sibling's first batch, late
+	_, _, err = flow.commitGrain(target, idx, nil)
+	require.NoError(t, err)
+
+	g, err := target.GrainInfo(idx)
+	require.NoError(t, err)
+	assert.Equal(t, uint16(540), g.ValidSlices, "a sibling's earlier batch lowered the committed slices")
 }
 
 // Two progress loops committing one flow through two writers at once

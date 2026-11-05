@@ -1458,7 +1458,18 @@ const (
 // and libmxl-fabrics sets the slot's valid slices from the range a
 // transfer carried (RMAGrainIngressProtocol::read), so it commits
 // empty, as one whose header names another index does.
-func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, invalidReason, error) {
+//
+// Two mirrors of a flow can write into this node's ring at once: the
+// operator keeps one mirror per (flow, node) for each consumer namespace
+// (mirrorNameForReceiver in operator/internal/receiver/controller.go),
+// and a mirror whose origin moves is sent by its old and its new source
+// for a moment. libmxl-fabrics sets the slot's valid slices from each
+// arrival's range, so a sibling's earlier batch lowers them. open, when
+// set, records the grain the writer holds open and the most slices
+// committed of it, and such an arrival commits no fewer. A grain the
+// writer has completed cannot be reopened, so a late batch of it leaves
+// the slot's count lowered until the sibling's last batch lands.
+func commitArrivedGrain(writer *mxl.Writer, idx uint64, open *partialGrain) (uint64, invalidReason, error) {
 	hdr, err := writer.GrainInfo(idx)
 	if err != nil {
 		return 0, "", fmt.Errorf("GrainInfo(%d): %w", idx, err)
@@ -1484,6 +1495,8 @@ func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, invalidReason, 
 		valid = ga.TotalSlices
 	case reason == invalidIndexMismatch:
 		valid = 0
+	case !data && open != nil && open.idx == idx:
+		valid = max(valid, open.valid)
 	}
 	if reason != "" {
 		flags = mxl.GrainFlagInvalid
@@ -1492,10 +1505,23 @@ func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, invalidReason, 
 		return 0, "", fmt.Errorf("Commit(%d): %w", idx, err)
 	}
 	if !data && valid < ga.TotalSlices {
+		if open != nil {
+			*open = partialGrain{idx: idx, valid: valid}
+		}
 		// The grain's payload is counted once, with its last batch.
 		return 0, reason, nil
 	}
+	if open != nil {
+		*open = partialGrain{}
+	}
 	return uint64(ga.GrainSize), reason, nil
+}
+
+// partialGrain is a video grain a flow's writer holds open and the
+// valid slices committed of it. The zero value raises no commit.
+type partialGrain struct {
+	idx   uint64
+	valid uint16
 }
 
 // runTargetSampleProgressLoop drives a libmxl-fabrics Target for a
