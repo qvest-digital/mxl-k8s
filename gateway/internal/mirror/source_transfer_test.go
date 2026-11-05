@@ -24,9 +24,12 @@ type ringSource struct {
 
 func (r *ringSource) head() uint64 { return 1000 + uint64(time.Since(r.start)/r.interval) }
 
+// GetGrain waits, as a blocking read does, until the producer writes idx
+// or timeout passes.
 func (r *ringSource) GetGrain(idx uint64, timeout time.Duration) (mxl.Grain, error) {
 	if idx > r.head() {
-		time.Sleep(timeout)
+		written := r.start.Add(time.Duration(idx-1000) * r.interval)
+		time.Sleep(min(time.Until(written), timeout))
 		if idx > r.head() {
 			return mxl.Grain{}, mxl.ErrTimeout
 		}

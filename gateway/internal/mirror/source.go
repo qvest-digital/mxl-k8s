@@ -173,8 +173,8 @@ type SourceReconciler struct {
 
 	mu sync.Mutex
 	// sources holds the per-mirror half, keyed by MxlFlowMirror;
-	// shared holds the reader every mirror of one flow on one provider
-	// transfers from.
+	// shared holds what the mirrors of one flow on one provider have in
+	// common.
 	sources  map[types.NamespacedName]*sourceEntry
 	shared   map[sourceKey]*sharedSource
 	attempts attemptTable[sourceAddInputs]
@@ -190,8 +190,8 @@ type SourceReconciler struct {
 	redialEvents chan event.GenericEvent
 	// rebuilds counts consecutive reader reopens per shared source. It
 	// outlives the sharedSource the watchdog tears down, so the budget
-	// survives the reopen it is bounding, and it is per reader so a flow
-	// mirrored to N nodes does not get N budgets.
+	// survives the reopen it is bounding, and it is per shared source so
+	// a flow mirrored to N nodes does not get N budgets.
 	rebuilds map[sourceKey]uint32
 }
 
@@ -209,9 +209,13 @@ func (k sourceKey) ref() mxlv1alpha1.FlowRef {
 	return mxlv1alpha1.FlowRef{Domain: k.domain, ID: k.flowID}
 }
 
-// sharedSource is the FlowReader every mirror of one flow on one
-// provider transfers from. Each mirror sets its own initiator up on it,
-// so a target that stops completing holds up no other mirror.
+// sharedSource is what the mirrors of one flow on one provider have in
+// common: the flow's configuration, read once, and the set of mirrors,
+// which a reader rebuild or an origin rotation tears down together.
+// Each mirror opens its own reader and initiator, as every libmxl-fabrics
+// demo runs one reader and one initiator per transfer loop, so neither
+// a target that stops completing nor a reader blocked in a read holds
+// up another mirror.
 type sharedSource struct {
 	key sourceKey
 
@@ -219,7 +223,6 @@ type sharedSource struct {
 	// took, logged with the first target added to it.
 	openSteps openSteps
 
-	reader  *mxl.Reader
 	handles *instance.Handles
 	cfg     mxl.FlowConfig
 
@@ -258,9 +261,10 @@ type sharedSource struct {
 	rebuilding atomic.Bool
 }
 
-// sourceLink is one mirror's initiator, the target added to it and the
-// loop transferring to it.
+// sourceLink is one mirror's reader and initiator, the target added to
+// it and the loop transferring to it.
 type sourceLink struct {
+	reader    *mxl.Reader
 	initiator *fabrics.Initiator
 	info      *fabrics.TargetInfo
 	progress  ProgressFunc
@@ -585,16 +589,15 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// now-invalid ring.
 	//
 	// Judged against the shared source rather than against this
-	// mirror's entry, because the reader is what rotates: a mirror
-	// attaching to a source that was opened before the rotation would
-	// otherwise inherit the dead ring and never look again.
+	// mirror's entry: the other mirrors' readers were opened before the
+	// rotation and would otherwise stay on the dead ring.
 	if shared != nil && originRotated(shared.lastObservedOriginAt.Load(), originAt, shared.openedAt) {
 		l.Info("flow origin rotated, reopening reader")
 		for _, k := range r.closeSharedSource(skey) {
 			if k == req.NamespacedName {
 				continue
 			}
-			// Every mirror that shared the reader lost it. Driving
+			// Every mirror of the source lost its reader. Driving
 			// them here rather than waiting for a watch keeps the
 			// reopen self-contained, for the same reason
 			// rebuildWedgedReader drives its own: the events that
@@ -807,7 +810,6 @@ func (r *SourceReconciler) openShared(skey sourceKey, originAt *time.Time) (s *s
 	r.mu.Lock()
 	if dup := r.shared[skey]; dup != nil {
 		r.mu.Unlock()
-		closeShared(s)
 		return dup, false, nil
 	}
 	r.shared[skey] = s
@@ -815,10 +817,10 @@ func (r *SourceReconciler) openShared(skey sourceKey, originAt *time.Time) (s *s
 	return s, true, nil
 }
 
-// releaseIfUnused closes a shared source no mirror is attached to.
-// The open path leaves one behind whenever the attach that would have
-// been its first fails, and a reader on a flow no mirror transfers
-// keeps libmxl from ever reclaiming that flow.
+// releaseIfUnused drops a shared source no mirror is attached to, which
+// the open path leaves behind whenever the attach that would have been
+// its first fails, so the next attach reads the flow's configuration
+// again.
 func (r *SourceReconciler) releaseIfUnused(s *sharedSource) {
 	r.mu.Lock()
 	if len(s.mirrors) > 0 || r.shared[s.key] != s {
@@ -827,7 +829,6 @@ func (r *SourceReconciler) releaseIfUnused(s *sharedSource) {
 	}
 	delete(r.shared, s.key)
 	r.mu.Unlock()
-	closeShared(s)
 }
 
 // reopenEvicted drives a mirror whose shared source was torn down back
@@ -1002,7 +1003,6 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 	s := &sharedSource{
 		key:        key,
 		openSteps:  openSteps{reader: time.Since(start)},
-		reader:     reader,
 		handles:    handles,
 		cfg:        cfg,
 		continuous: cfg.Common.Format == mxl.FormatAudio,
@@ -1043,47 +1043,61 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 	if s.poll <= 0 {
 		s.poll = 2 * time.Millisecond
 	}
+	// The reader only answered for the flow; each mirror opens its own.
+	_ = reader.Close()
 	return s, nil
 }
 
-// attach sets up an initiator for one mirror on the shared reader, adds
-// its target and starts its transfer loop.
+// attach opens a reader and an initiator for one mirror, adds its
+// target and starts its transfer loop.
 func (o *libmxlOpener) attach(s *sharedSource, targetInfoStr string, e *sourceEntry) (*sourceLink, error) {
 	fabInst := s.handles.Fabrics()
 	if fabInst == nil {
 		return nil, fmt.Errorf("fabrics instance closed")
 	}
+	mxlInst := s.handles.MXL()
+	if mxlInst == nil {
+		return nil, fmt.Errorf("mxl instance closed")
+	}
 	iface, err := resolveInterface(fabInst, o.Selector, s.key.provider)
 	if err != nil {
 		return nil, err
 	}
+	reader, err := mxlInst.NewReader(s.key.flowID)
+	if err != nil {
+		return nil, fmt.Errorf("NewReader: %w", err)
+	}
 	initiator, err := fabInst.NewInitiator()
 	if err != nil {
+		_ = reader.Close()
 		return nil, fmt.Errorf("NewInitiator: %w", err)
 	}
 	if err := initiator.Setup(fabrics.InitiatorConfig{
 		Interface: iface,
-		Reader:    s.reader,
+		Reader:    reader,
 		Options:   initiatorOptions(s.cfg),
 	}); err != nil {
 		_ = initiator.Close()
+		_ = reader.Close()
 		return nil, fmt.Errorf("Initiator.Setup: %w", err)
 	}
 	info, err := fabrics.ParseTargetInfo(targetInfoStr)
 	if err != nil {
 		_ = initiator.Close()
+		_ = reader.Close()
 		return nil, fmt.Errorf("ParseTargetInfo: %w", err)
 	}
 	if err := initiator.AddTarget(info); err != nil {
 		_ = info.Close()
 		_ = initiator.Close()
+		_ = reader.Close()
 		return nil, fmt.Errorf("%w: %w", errAddTargetFailed, err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	progress := progressFuncFor(initiator, iface.Caps.Flags)
-	link := &sourceLink{initiator: initiator, info: info, progress: progress, cancel: cancel, done: make(chan struct{})}
-	reader := s.reader
+	link := &sourceLink{reader: reader, initiator: initiator, info: info, progress: progress,
+		cancel: cancel, done: make(chan struct{})}
 	probe := func() (uint64, error) {
 		rt, err := reader.Runtime()
 		if err != nil {
@@ -1136,8 +1150,8 @@ func drainRemoved(progress, poll ProgressFunc) {
 	_, _ = awaitTransfer(ctx, progress, poll, time.Now(), 0)
 }
 
-// detach stops the mirror's loop, removes its target and destroys its
-// initiator.
+// detach stops the mirror's loop, removes its target and closes its
+// initiator and reader.
 func (o *libmxlOpener) detach(link *sourceLink) {
 	if link == nil {
 		return
@@ -1155,6 +1169,9 @@ func (o *libmxlOpener) detach(link *sourceLink) {
 	}
 	if link.info != nil {
 		_ = link.info.Close()
+	}
+	if link.reader != nil {
+		_ = link.reader.Close()
 	}
 }
 
@@ -1248,20 +1265,17 @@ func isReaderAgedOut(err error) bool {
 	return err != nil && strings.Contains(err.Error(), readerAgedOutMarker)
 }
 
-// closeEntry detaches one mirror: its status flusher and link stopped,
-// and the reader left open for whatever other mirrors of the flow are
-// still attached. Only the last mirror to leave closes the reader. A
-// no-op when key holds nothing.
+// closeEntry detaches one mirror: its status flusher and link, reader
+// included, stopped. The last mirror to leave drops the shared source.
+// A no-op when key holds nothing.
 func (r *SourceReconciler) closeEntry(key types.NamespacedName) {
 	r.mu.Lock()
 	entry := r.sources[key]
 	delete(r.sources, key)
-	var orphan *sharedSource
 	if entry != nil && entry.shared != nil {
 		s := entry.shared
 		if s.detach(key) && r.shared[s.key] == s {
 			delete(r.shared, s.key)
-			orphan = s
 		}
 	}
 	r.mu.Unlock()
@@ -1272,15 +1286,13 @@ func (r *SourceReconciler) closeEntry(key types.NamespacedName) {
 	// r.mu itself, and detach crosses into libmxl-fabrics.
 	stopFlusher(entry)
 	r.detachLink(entry)
-	closeShared(orphan)
 }
 
-// closeSharedSource tears the whole shared source down -- every
-// mirror's link and the reader -- and returns the mirrors that were
-// attached so the caller can drive them
-// back through Reconcile against a fresh reader. Used by the paths
-// that invalidate the reader itself: an origin rotation and the
-// reader-stall rebuild.
+// closeSharedSource tears the whole shared source down, every mirror's
+// link and reader with it, and returns the mirrors that were attached so
+// the caller can drive them back through Reconcile against fresh
+// readers. Used by the paths that invalidate the readers: an origin
+// rotation and the reader-stall rebuild.
 func (r *SourceReconciler) closeSharedSource(skey sourceKey) []types.NamespacedName {
 	r.mu.Lock()
 	s := r.shared[skey]
@@ -1299,11 +1311,17 @@ func (r *SourceReconciler) closeSharedSource(skey sourceKey) []types.NamespacedN
 	}
 	r.mu.Unlock()
 
+	// Every loop is told to stop first, so their reads, each blocking
+	// for up to sourceReadTimeout, end together rather than in turn.
+	for _, e := range entries {
+		if e.link != nil && e.link.cancel != nil {
+			e.link.cancel()
+		}
+	}
 	for _, e := range entries {
 		stopFlusher(e)
 		r.detachLink(e)
 	}
-	closeShared(s)
 	return keys
 }
 
@@ -1340,15 +1358,6 @@ func stopFlusher(e *sourceEntry) {
 	if e.flusherDone != nil {
 		<-e.flusherDone
 	}
-}
-
-// closeShared closes the reader of a source no mirror is attached to
-// any more.
-func closeShared(s *sharedSource) {
-	if s == nil || s.reader == nil {
-		return
-	}
-	_ = s.reader.Close()
 }
 
 // sourceProgressState is the SourceProgress condition the source
@@ -1636,8 +1645,7 @@ func (r *SourceReconciler) bumpReaderRebuilds(skey sourceKey) uint32 {
 
 // beginRebuild claims the reader rebuild for this mirror's shared
 // source, so a second flusher tick -- this mirror's or that of any
-// other mirror attached to the same reader -- cannot spawn a competing
-// reopen of the one reader they share.
+// other mirror of the source -- cannot spawn a competing reopen.
 func (e *sourceEntry) beginRebuild() bool {
 	if e.shared == nil {
 		return true
@@ -1720,10 +1728,11 @@ func (r *SourceReconciler) dispatchReaderRebuild(key types.NamespacedName) {
 // would otherwise wake the reconciler (origin Lease renewals, MxlFlow
 // status writes) all stop precisely when the producer is in trouble.
 func (r *SourceReconciler) rebuildWedgedReader(ctx context.Context, key types.NamespacedName) {
-	// The whole shared source goes, not just this mirror's link: the
-	// wedge is in the reader, and every mirror of the flow reads from
-	// it. Each of them is then driven back through Reconcile, which
-	// re-opens the source once and attaches the rest to it.
+	// The whole shared source goes, not just this mirror's link: every
+	// mirror's reader was opened on the same flow, so one left on a ring
+	// the producer replaced is not alone. Each mirror is then driven
+	// back through Reconcile, which re-opens the source once and
+	// attaches the rest to it.
 	for _, k := range r.closeMirrorSource(key) {
 		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: k}); err != nil {
 			ctrl.Log.WithName("source-flush").Error(err, "reopen source reader",

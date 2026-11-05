@@ -36,9 +36,10 @@ const abandonAfter = 2 * time.Second
 var errTargetLost = errors.New("target lost")
 
 // sourceReadTimeout is how long one read of the source ring waits for
-// a grain. It is short because the mirrors of a flow share one reader,
-// whose calls go-mxl serializes.
-const sourceReadTimeout = 5 * time.Millisecond
+// a grain, as in runDiscrete in tools/mxl-fabrics-demo/demo.cpp. A
+// stopped loop notices its context once the read returns, so stopping
+// a mirror takes up to this long.
+const sourceReadTimeout = 200 * time.Millisecond
 
 // errPost wraps a failed TransferGrain or TransferSamples call, so the
 // loop tells it apart from a grain the reader cannot hand out yet.

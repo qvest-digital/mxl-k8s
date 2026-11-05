@@ -110,15 +110,8 @@ func (f *fanoutFixture) closeAll() {
 		f.r.closeEntry(k)
 	}
 	f.r.mu.Lock()
-	shared := make([]*sharedSource, 0, len(f.r.shared))
-	for _, s := range f.r.shared {
-		shared = append(shared, s)
-	}
 	f.r.shared = map[sourceKey]*sharedSource{}
 	f.r.mu.Unlock()
-	for _, s := range shared {
-		closeShared(s)
-	}
 }
 
 func (f *fanoutFixture) reconcile(t *testing.T, name string) {
