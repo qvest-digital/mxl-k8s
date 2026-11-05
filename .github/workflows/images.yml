@@ -55,7 +55,7 @@ jobs:
     # release_tag (or the dev-build sentinel) and bypass the per-
     # image filter in meta.
     if: github.event_name == 'pull_request' || github.event_name == 'push'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 2
     outputs:
       operator:    ${{ steps.f.outputs.operator }}
@@ -198,7 +198,7 @@ jobs:
   deps-impact:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.deps_only == 'true' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     outputs:
       binary_affected: ${{ steps.d.outputs.binary_affected }}
@@ -304,7 +304,7 @@ jobs:
     # skipped for every diff that is not requirement-file-only, so
     # meta must run even when its dependencies were skipped.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       images: ${{ steps.m.outputs.images }}
       push: ${{ steps.m.outputs.push }}
@@ -702,7 +702,7 @@ jobs:
   merge:
     needs: [meta, build]
     if: ${{ !cancelled() && needs.meta.outputs.push == 'true' && needs.meta.outputs.has_images == 'true' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -761,7 +761,7 @@ jobs:
   retag:
     needs: [meta, merge]
     if: ${{ !cancelled() && needs.meta.outputs.kind_wanted == 'true' && needs.merge.result == 'success' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: docker/setup-buildx-action@v4
@@ -814,7 +814,7 @@ jobs:
           && needs.meta.outputs.kind_wanted == 'true'
           && (needs.meta.outputs.has_images != 'true'
               || (needs.merge.result == 'success' && needs.retag.result == 'success')) }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
@@ -886,7 +886,7 @@ jobs:
   images-summary:
     needs: [changes, deps-impact, meta, build, merge, retag, kind-integration]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 2
     steps:
       - name: Verify upstream jobs
