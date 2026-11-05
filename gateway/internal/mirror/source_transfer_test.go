@@ -90,37 +90,28 @@ func (s *recordingSender) TransferGrain(idx uint64, start, end uint16) error {
 	return s.err
 }
 
-// A grain its producer committed as invalid carries no picture: libmxl
-// flags the slot of an index the producer skipped and leaves the bytes
-// an earlier lap wrote there.
-//
-// None of a video grain is sent: the target writer flags the index
-// invalid when the next grain commits past it. A data writer never
-// completes a grain, so it flags no index it skips; a data grain goes as
-// its header alone, which the target commits invalid.
-func TestGrainTransfer_InvalidGrainIsNotForwarded(t *testing.T) {
+// An invalid grain goes as its header alone, which the target commits
+// invalid: docs/FabricsDeveloperGuide.md, "Transferring discrete flows",
+// and runDiscrete in tools/mxl-fabrics-demo/demo.cpp transfer slices 0
+// to 0 for it.
+func TestGrainTransfer_InvalidGrainGoesAsItsHeader(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		data bool
 		g    mxl.Grain
-		want [][3]uint64
-		sent bool
 	}{
-		{"video", false, mxl.Grain{Index: 1001, Flags: mxl.GrainFlagInvalid, TotalSlices: 1080, ValidSlices: 1080, GrainSize: 5529600},
-			nil, false},
-		{"data", true, mxl.Grain{Index: 1001, Flags: mxl.GrainFlagInvalid, TotalSlices: 4096, ValidSlices: 64, GrainSize: 4096},
-			[][3]uint64{{1001, 0, 0}}, true},
+		{"video", false, mxl.Grain{Index: 1001, Flags: mxl.GrainFlagInvalid, TotalSlices: 1080, ValidSlices: 1080, GrainSize: 5529600}},
+		{"data", true, mxl.Grain{Index: 1001, Flags: mxl.GrainFlagInvalid, TotalSlices: 4096, ValidSlices: 64, GrainSize: 4096}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dst := &recordingSender{}
 			transfer := newGrainTransfer(flaggedSource{1001: tc.g}, dst, tc.data, 1)
 
-			sent, bytes, err := transfer(1001)
+			bytes, err := transfer(1001)
 
 			require.NoError(t, err)
-			assert.Equal(t, tc.sent, sent)
 			assert.Zero(t, bytes, "an invalid grain carries no payload")
-			assert.Equal(t, tc.want, dst.calls)
+			assert.Equal(t, [][3]uint64{{1001, 0, 0}}, dst.calls)
 		})
 	}
 }
@@ -129,17 +120,15 @@ func TestGrainTransfer_InvalidGrainIsNotForwarded(t *testing.T) {
 func TestGrainTransfer_SendsTheGrainsSlices(t *testing.T) {
 	video := flaggedSource{7: {Index: 7, TotalSlices: 1080, ValidSlices: 1080}}
 	dst := &recordingSender{}
-	sent, bytes, err := newGrainTransfer(video, dst, false, 5120)(7)
+	bytes, err := newGrainTransfer(video, dst, false, 5120)(7)
 	require.NoError(t, err)
-	assert.True(t, sent)
 	assert.Equal(t, uint64(1080*5120), bytes)
 	assert.Equal(t, [][3]uint64{{7, 0, 1080}}, dst.calls)
 
 	data := flaggedSource{7: {Index: 7, TotalSlices: 4096, ValidSlices: 64}}
 	dst = &recordingSender{}
-	sent, bytes, err = newGrainTransfer(data, dst, true, 1)(7)
+	bytes, err = newGrainTransfer(data, dst, true, 1)(7)
 	require.NoError(t, err)
-	assert.True(t, sent)
 	assert.Equal(t, uint64(64), bytes)
 	assert.Equal(t, [][3]uint64{{7, 0, 64}}, dst.calls)
 }
@@ -147,11 +136,11 @@ func TestGrainTransfer_SendsTheGrainsSlices(t *testing.T) {
 // A failed post is told apart from a grain the reader cannot hand out.
 func TestGrainTransfer_WrapsAFailedPost(t *testing.T) {
 	src := flaggedSource{7: {Index: 7, TotalSlices: 1080, ValidSlices: 1080}}
-	_, _, err := newGrainTransfer(src, &recordingSender{err: fabrics.ErrNotReady}, false, 1)(7)
+	_, err := newGrainTransfer(src, &recordingSender{err: fabrics.ErrNotReady}, false, 1)(7)
 	require.ErrorIs(t, err, errPost)
 	require.ErrorIs(t, err, fabrics.ErrNotReady)
 
-	_, _, err = newGrainTransfer(src, &recordingSender{}, false, 1)(8)
+	_, err = newGrainTransfer(src, &recordingSender{}, false, 1)(8)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, errPost)
 }

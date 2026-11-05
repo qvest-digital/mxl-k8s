@@ -71,7 +71,7 @@ type fakeLink struct {
 	progress    int
 }
 
-func (f *fakeLink) transferGrain(idx uint64) (bool, uint64, error) {
+func (f *fakeLink) transferGrain(idx uint64) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.outstanding {
@@ -79,7 +79,7 @@ func (f *fakeLink) transferGrain(idx uint64) (bool, uint64, error) {
 	}
 	f.outstanding, f.current, f.pending = true, idx, f.notReady
 	f.posted = append(f.posted, idx)
-	return true, 100, nil
+	return 100, nil
 }
 
 func (f *fakeLink) makeProgress() error {
@@ -112,11 +112,9 @@ type recordingTracker struct {
 	completed []uint64
 	bytes     uint64
 	late      int
-	offered   int
 	dropped   []bool
 	agedOuts  int
 	skipped   uint64
-	invalid   int
 	passed    map[unsentReason]uint64
 	heads     []uint64
 }
@@ -125,12 +123,6 @@ type recordingTracker struct {
 // tests that are not about ageing out. It is larger than any head they
 // reach, so nothing in them is ever old enough to abandon.
 const testReadableWindow = 1 << 20
-
-func (rt *recordingTracker) recordOffered(time.Time) {
-	rt.mu.Lock()
-	rt.offered++
-	rt.mu.Unlock()
-}
 
 func (rt *recordingTracker) recordCompleted(idx, bytes uint64, late bool, _ time.Time) {
 	rt.mu.Lock()
@@ -166,12 +158,6 @@ func (rt *recordingTracker) recordPassedOver(reason unsentReason, grains uint64)
 		rt.passed = map[unsentReason]uint64{}
 	}
 	rt.passed[reason] += grains
-	rt.mu.Unlock()
-}
-
-func (rt *recordingTracker) recordInvalid(time.Time) {
-	rt.mu.Lock()
-	rt.invalid++
 	rt.mu.Unlock()
 }
 
@@ -335,7 +321,7 @@ func TestRunTransferLoop_WaitsForTheTargetToConnect(t *testing.T) {
 		}
 		return link.makeProgress()
 	}
-	transfer := func(idx uint64) (bool, uint64, error) {
+	transfer := func(idx uint64) (uint64, error) {
 		if !connected.Load() {
 			t.Errorf("grain %d posted before the target connected", idx)
 		}
@@ -398,14 +384,14 @@ func TestRunTransferLoop_RetriesAPostTheTargetWasNotReadyFor(t *testing.T) {
 	h := &headScript{heads: []uint64{10, 11}}
 	var posts []uint64
 	var mu sync.Mutex
-	transfer := func(idx uint64) (bool, uint64, error) {
+	transfer := func(idx uint64) (uint64, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		posts = append(posts, idx)
 		if len(posts) == 1 {
-			return false, 0, fmt.Errorf("%w: %w", errPost, fabrics.ErrNotReady)
+			return 0, fmt.Errorf("%w: %w", errPost, fabrics.ErrNotReady)
 		}
-		return true, 1, nil
+		return 1, nil
 	}
 	var progress atomic.Int32
 	tr := &recordingTracker{}
@@ -421,8 +407,8 @@ func TestRunTransferLoop_RetriesAPostTheTargetWasNotReadyFor(t *testing.T) {
 
 func TestRunTransferLoop_FailedPostGivesTheTargetUp(t *testing.T) {
 	h := &headScript{heads: []uint64{10, 11}}
-	transfer := func(uint64) (bool, uint64, error) {
-		return false, 0, fmt.Errorf("%w: %w", errPost, errors.New("endpoint gone"))
+	transfer := func(uint64) (uint64, error) {
+		return 0, fmt.Errorf("%w: %w", errPost, errors.New("endpoint gone"))
 	}
 	tr := &recordingTracker{}
 	done, stop := runGrainLoop(h.probe, transfer, func() error { return nil }, time.Second, tr)
@@ -434,30 +420,6 @@ func TestRunTransferLoop_FailedPostGivesTheTargetUp(t *testing.T) {
 		t.Fatal("the loop kept running after a failed post")
 	}
 	assert.Equal(t, []bool{false}, tr.droppedSnapshot(), "nothing was outstanding")
-}
-
-// An invalid video grain posts nothing and moves the loop on: the index
-// is the target writer's to flag.
-func TestRunTransferLoop_CountsInvalidGrains(t *testing.T) {
-	h := &headScript{heads: []uint64{10, 14}}
-	link := &fakeLink{t: t}
-	transfer := func(idx uint64) (bool, uint64, error) {
-		if idx == 12 || idx == 13 {
-			return false, 0, nil
-		}
-		return link.transferGrain(idx)
-	}
-	tr := &recordingTracker{}
-	_, stop := runGrainLoop(h.probe, transfer, link.makeProgress, time.Second, tr)
-	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) >= 2 }, time.Second, time.Millisecond)
-	stop()
-
-	got, _ := tr.snapshot()
-	assert.Equal(t, []uint64{11, 14}, got)
-	tr.mu.Lock()
-	defer tr.mu.Unlock()
-	assert.Equal(t, 2, tr.invalid)
-	assert.Equal(t, 2, tr.offered, "an invalid grain is not counted as offered")
 }
 
 func TestRunTransferLoop_ResyncsToHeadWhenLapped(t *testing.T) {
@@ -505,12 +467,12 @@ func TestRunTransferLoop_AdvancesLastSentOnAgedOutError(t *testing.T) {
 	link := &fakeLink{t: t}
 	var mu sync.Mutex
 	var attempts []uint64
-	transfer := func(idx uint64) (bool, uint64, error) {
+	transfer := func(idx uint64) (uint64, error) {
 		mu.Lock()
 		attempts = append(attempts, idx)
 		mu.Unlock()
 		if idx == 1 {
-			return false, 0, errors.New("MXL_ERR_OUT_OF_RANGE: requested index 1 is out of range (too late)")
+			return 0, errors.New("MXL_ERR_OUT_OF_RANGE: requested index 1 is out of range (too late)")
 		}
 		return link.transferGrain(idx)
 	}
@@ -535,9 +497,9 @@ func TestRunTransferLoop_AdvancesLastSentOnAgedOutError(t *testing.T) {
 func TestRunTransferLoop_UnreadableGrainIsReadAgain(t *testing.T) {
 	h := &headScript{heads: []uint64{0, 3}}
 	var calls atomic.Int32
-	transfer := func(idx uint64) (bool, uint64, error) {
+	transfer := func(idx uint64) (uint64, error) {
 		calls.Add(1)
-		return false, 0, errors.New("out of range (too early)")
+		return 0, errors.New("out of range (too early)")
 	}
 	tr := &recordingTracker{}
 	_, stop := runGrainLoop(h.probe, transfer, func() error { return nil }, time.Second, tr)
@@ -549,9 +511,9 @@ func TestRunTransferLoop_UnreadableGrainIsReadAgain(t *testing.T) {
 
 func TestRunTransferLoop_InitialProbeErrorReturnsEarly(t *testing.T) {
 	probe := func() (uint64, error) { return 0, errors.New("dead reader") }
-	transfer := func(uint64) (bool, uint64, error) {
+	transfer := func(uint64) (uint64, error) {
 		t.Error("transferGrain must not be called when the initial probe errors")
-		return false, 0, nil
+		return 0, nil
 	}
 	done, stop := runGrainLoop(probe, transfer, func() error { return nil }, time.Second, &recordingTracker{})
 	defer stop()
@@ -566,7 +528,7 @@ func TestRunTransferLoop_CtxCancelExitsImmediately(t *testing.T) {
 	h := &headScript{heads: []uint64{0}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runTransferLoop(ctx, done, "f", h.probe, func(uint64) (bool, uint64, error) { return true, 0, nil },
+	go runTransferLoop(ctx, done, "f", h.probe, func(uint64) (uint64, error) { return 0, nil },
 		func() error { return nil }, func() error { return nil }, time.Hour, time.Second, &recordingTracker{})
 	cancel()
 	select {
@@ -1209,7 +1171,7 @@ func TestPublishSourceProgress_IncludesLastSentAt(t *testing.T) {
 func TestSourceStateEqual_DereferencesLastSentAtPointers(t *testing.T) {
 	// observedState allocates a fresh *time.Time on every flusher tick
 	// (copying the atomic-loaded value through a local variable to
-	// detach it from the pointer that recordOffered stored). The
+	// detach it from the pointer that recordCompleted stored). The
 	// dedupe must therefore compare timestamps by value: a struct-level
 	// == would always disagree once lastSentAt is non-nil and the
 	// flusher would publish on every tick. Codifies the contract:

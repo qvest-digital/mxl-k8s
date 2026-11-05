@@ -1432,14 +1432,15 @@ func runTargetProgressLoop(
 }
 
 // arrivalComplete reports whether an arrived grain may be committed. A
-// video grain is committed once its header reports every slice valid.
-// A data grain is never complete,
+// video grain is committed once its header reports every slice valid,
+// or flags it invalid: the source sends an invalid grain as its header
+// alone. A data grain is never complete,
 // its valid slices being its length, and the source sends it in one
 // write, so it is committed as it arrives. TotalSlices == 0 is a grain
 // the source never subdivides, so there is nothing to wait for;
 // Complete() reports false for it.
 func arrivalComplete(g mxl.Grain, data bool) bool {
-	return data || g.TotalSlices == 0 || g.Complete()
+	return data || g.TotalSlices == 0 || g.Complete() || g.Invalid()
 }
 
 // commitArrivedGrain advances the local flow's HeadIndex for a grain

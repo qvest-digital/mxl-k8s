@@ -54,27 +54,21 @@ type grainSender interface {
 // newGrainTransfer is the TransferFunc of a discrete (video or data)
 // flow. perSlice is the payload of one slice across all planes.
 func newGrainTransfer(src grainSource, dst grainSender, data bool, perSlice uint64) TransferFunc {
-	post := func(idx uint64, start, end uint16) (bool, uint64, error) {
+	post := func(idx uint64, start, end uint16) (uint64, error) {
 		if err := dst.TransferGrain(idx, start, end); err != nil {
-			return false, 0, fmt.Errorf("%w: %w", errPost, err)
+			return 0, fmt.Errorf("%w: %w", errPost, err)
 		}
-		return true, uint64(end-start) * perSlice, nil
+		return uint64(end-start) * perSlice, nil
 	}
-	return func(idx uint64) (bool, uint64, error) {
+	return func(idx uint64) (uint64, error) {
 		grain, err := readForTransfer(src, idx, data)
 		if err != nil {
-			return false, 0, err
+			return 0, err
 		}
 		if grain.Invalid() {
-			// libmxl left an earlier lap's bytes in the slot. A video
-			// target writer flags the index invalid once the next grain
-			// commits past it, so nothing is sent. A data writer never
-			// completes a grain and flags no index it skips, so the
-			// header goes over and the target commits it invalid.
-			if data {
-				return post(idx, 0, 0)
-			}
-			return false, 0, nil
+			// Its slot holds no picture, so only the header goes, which
+			// the target commits invalid.
+			return post(idx, 0, 0)
 		}
 		if data {
 			// A data grain's valid slices are its length.
@@ -279,7 +273,7 @@ func runTransferLoop(
 			next = h
 		}
 
-		sent, bytes, err := transferGrain(uint64(next))
+		bytes, err := transferGrain(uint64(next))
 		switch {
 		case err == nil:
 		case isReaderAgedOut(err):
@@ -304,14 +298,7 @@ func runTransferLoop(
 			wait(ctx, poll)
 			continue
 		}
-		if !sent {
-			tracker.recordInvalid(time.Now())
-			lastSent = next
-			continue
-		}
-
 		posted := time.Now()
-		tracker.recordOffered(posted)
 		late, err := awaitTransfer(ctx, makeProgress, pollProgress, posted, interval)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -406,7 +393,6 @@ func runSampleTransferLoop(
 		}
 
 		posted := time.Now()
-		tracker.recordOffered(posted)
 		late, err := awaitTransfer(ctx, makeProgress, pollProgress, posted, interval)
 		if err != nil {
 			if ctx.Err() == nil {

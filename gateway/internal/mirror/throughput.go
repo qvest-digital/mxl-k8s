@@ -18,10 +18,10 @@ type Throughput struct {
 	// flow only, and is zero everywhere else.
 	SkippedSamples uint64
 
-	// InvalidGrains, ResyncGrains and AgedOutGrains are meaningful on
-	// the source half of a discrete flow only: the grains it did not
-	// offer, by unsentReason.
-	InvalidGrains, ResyncGrains, AgedOutGrains uint64
+	// ResyncGrains and AgedOutGrains are meaningful on the source half
+	// of a discrete flow only: the grains it did not offer, by
+	// unsentReason.
+	ResyncGrains, AgedOutGrains uint64
 
 	// InvalidFromSource and IndexMismatch are meaningful on the target
 	// half only: arrivals committed invalid, by invalidReason.
@@ -85,10 +85,10 @@ var (
 
 	descSourceUnsent = prometheus.NewDesc(
 		"mxl_gateway_mirror_source_unsent_grains_total",
-		"Grains the source half did not offer to the initiator, by reason: invalid (the producer committed a video grain "+
-			"invalid), resync (the loop fell more than a few grains behind the head and resumed near it) or aged_out (the "+
-			"producer had reused the slot). Each one is a grain no target receives. An invalid data grain is not counted "+
-			"here: its header is offered, and the target commits it invalid.",
+		"Grains the source half did not offer to the initiator, by reason: resync (the loop fell more than a few grains "+
+			"behind the head and resumed at it) or aged_out (the producer had reused the slot). Each one is a grain no "+
+			"target receives. An invalid grain is not counted here: its header is offered, and the target commits it "+
+			"invalid.",
 		append(append([]string{}, transferLabels...), "reason"), nil)
 
 	descTargetInvalid = prometheus.NewDesc(
@@ -155,7 +155,6 @@ func (c *ThroughputCollector) Collect(ch chan<- prometheus.Metric) {
 	emit(descTransmitted, c.Source, func(t Throughput) uint64 { return t.Bytes })
 	emit(descReceived, c.Target, func(t Throughput) uint64 { return t.Bytes })
 	emit(descSkipped, c.Source, func(t Throughput) uint64 { return t.SkippedSamples })
-	emit(descSourceUnsent, c.Source, func(t Throughput) uint64 { return t.InvalidGrains }, string(unsentInvalid))
 	emit(descSourceUnsent, c.Source, func(t Throughput) uint64 { return t.ResyncGrains }, string(unsentResync))
 	emit(descSourceUnsent, c.Source, func(t Throughput) uint64 { return t.AgedOutGrains }, string(unsentAgedOut))
 	emit(descTargetInvalid, c.Target, func(t Throughput) uint64 { return t.InvalidFromSource }, string(invalidFromSource))
@@ -214,7 +213,6 @@ func (r *SourceReconciler) Throughput() []Throughput {
 			Bytes:    e.bytes.Load(),
 
 			SkippedSamples: e.skipped.Load(),
-			InvalidGrains:  e.invalidGrains.Load(),
 			ResyncGrains:   e.resyncGrains.Load(),
 			AgedOutGrains:  e.agedOutGrains.Load(),
 			Transfers:      e.transferCounts(),

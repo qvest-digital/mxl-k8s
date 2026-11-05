@@ -194,6 +194,8 @@ func TestArrivalComplete(t *testing.T) {
 	require.False(t, arrivalComplete(partial, false), "a paced video grain waits for its last range")
 	require.True(t, arrivalComplete(mxl.Grain{TotalSlices: 1080, ValidSlices: 1080}, false))
 	require.True(t, arrivalComplete(mxl.Grain{}, false))
+	require.True(t, arrivalComplete(mxl.Grain{TotalSlices: 1080, Flags: mxl.GrainFlagInvalid}, false),
+		"an invalid video grain arrives as its header alone and is committed invalid")
 }
 
 // Two progress loops committing one flow through two writers at once

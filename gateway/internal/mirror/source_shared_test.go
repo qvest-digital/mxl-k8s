@@ -209,11 +209,11 @@ func TestSource_AStalledMirrorDoesNotHoldAnotherOfTheSameFlow(t *testing.T) {
 	var stalledPosts atomic.Int32
 	f.opener.loopFn = func(ctx context.Context, info string, e *sourceEntry) {
 		done := make(chan struct{})
-		transfer := func(uint64) (bool, uint64, error) {
+		transfer := func(uint64) (uint64, error) {
 			if info == "info-stalled" {
 				stalledPosts.Add(1)
 			}
-			return true, 1, nil
+			return 1, nil
 		}
 		connected := false
 		progress := func() error {
@@ -422,11 +422,11 @@ func TestTransferLoop_CountsTheGrainsItPassesOver(t *testing.T) {
 	// maxMirrorLag, grain 1031 has aged out: the loop jumps to the head
 	// and drops 1031..1034.
 	h := &headScript{heads: []uint64{1000, 1001, 1002, 1030, 1034}}
-	transfer := func(idx uint64) (bool, uint64, error) {
+	transfer := func(idx uint64) (uint64, error) {
 		if idx == 1031 {
-			return false, 0, errors.New(readerAgedOutMarker)
+			return 0, errors.New(readerAgedOutMarker)
 		}
-		return true, 0, nil
+		return 0, nil
 	}
 	_, stop := runGrainLoop(h.probe, transfer, func() error { return nil }, time.Second, e)
 	require.Eventually(t, func() bool { return e.agedOutGrains.Load() > 0 }, time.Second, time.Millisecond)
@@ -434,10 +434,9 @@ func TestTransferLoop_CountsTheGrainsItPassesOver(t *testing.T) {
 
 	col := &ThroughputCollector{NodeName: "n01", Source: f.r}
 	require.NoError(t, testutil.CollectAndCompare(col, strings.NewReader(`
-# HELP mxl_gateway_mirror_source_unsent_grains_total Grains the source half did not offer to the initiator, by reason: invalid (the producer committed a video grain invalid), resync (the loop fell more than a few grains behind the head and resumed near it) or aged_out (the producer had reused the slot). Each one is a grain no target receives. An invalid data grain is not counted here: its header is offered, and the target commits it invalid.
+# HELP mxl_gateway_mirror_source_unsent_grains_total Grains the source half did not offer to the initiator, by reason: resync (the loop fell more than a few grains behind the head and resumed at it) or aged_out (the producer had reused the slot). Each one is a grain no target receives. An invalid grain is not counted here: its header is offered, and the target commits it invalid.
 # TYPE mxl_gateway_mirror_source_unsent_grains_total counter
 mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-1",node="n01",peer_node="node-b",provider="verbs",reason="aged_out"} 4
-mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-1",node="n01",peer_node="node-b",provider="verbs",reason="invalid"} 0
 mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-1",node="n01",peer_node="node-b",provider="verbs",reason="resync"} 27
 `), "mxl_gateway_mirror_source_unsent_grains_total"))
 }
