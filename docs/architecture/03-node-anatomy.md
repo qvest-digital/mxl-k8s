@@ -228,7 +228,7 @@ takes longer than one grain interval (one batch, for audio) is
 counted late, and the loop then resumes at the live head: grains the
 producer committed meanwhile are skipped, never queued. A transfer
 outstanding for 2 s, or a target the initiator dropped, ends the loop,
-and the mirror's target is added again. Consumer reads honour libmxl's normal grain-ring
-semantics -- if the consumer is too slow it will start receiving
-"grain aged out" errors from `GetGrain`. mxl-k8s does not
-interpose on this; the ring is libmxl's, not ours.
+and the mirror's target is added again. Consumer reads honour libmxl's
+normal grain-ring semantics -- if the consumer is too slow it will
+start receiving "grain aged out" errors from `GetGrain`. mxl-k8s does
+not interpose on this; the ring is libmxl's, not ours.
