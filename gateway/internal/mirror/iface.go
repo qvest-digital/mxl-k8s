@@ -6,17 +6,18 @@ package mirror
 // initiatorOpener is the source reconciler's seam onto libmxl and
 // libmxl-fabrics.
 type initiatorOpener interface {
-	// open opens the reader every mirror of one flow transfers from.
+	// open reads the configuration of the flow key names, which every
+	// mirror of it on that provider shares.
 	open(key sourceKey) (*sharedSource, error)
 
-	// attach sets up an initiator for one mirror on s's reader, adds
-	// the mirror's target to it and starts the transfer loop reporting
-	// to e. An AddTarget failure is wrapped in errAddTargetFailed so
-	// the reconciler can back off without reopening the reader.
+	// attach opens a reader and an initiator for one mirror, adds the
+	// mirror's target and starts the transfer loop reporting to e. An
+	// AddTarget failure is wrapped in errAddTargetFailed so the
+	// reconciler can back off without opening the source again.
 	attach(s *sharedSource, targetInfoStr string, e *sourceEntry) (*sourceLink, error)
 
 	// detach stops the loop, removes the target and closes the
-	// initiator. The reader stays open for the other mirrors.
+	// initiator and the mirror's reader.
 	detach(link *sourceLink)
 }
 

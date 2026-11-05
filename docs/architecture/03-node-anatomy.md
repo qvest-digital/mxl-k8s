@@ -165,7 +165,7 @@ Steps for one grain index *N*:
    calls `Commit(slices, ...)`. The commit writes the grain header
    and advances the flow's `HeadIndex` in tmpfs.
 2. **Source gateway's transfer goroutine** for the mirror waits for
-   the next index in `GetGrainSlice(idx, start+batch, 5 ms)`, where
+   the next index in `GetGrainSlice(idx, start+batch, 200 ms)`, where
    batch is the flow's `maxSyncBatchSizeHint`, and calls
    `Initiator.TransferGrain(idx, start, validSlices)`, then
    `Initiator.MakeProgress` until it stops returning not-ready. It

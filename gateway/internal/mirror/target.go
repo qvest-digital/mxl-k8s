@@ -1454,8 +1454,10 @@ const (
 // grain's header. An arrival is committed invalid when the header
 // carries the invalid flag or another index. An invalid video grain is
 // committed whole, so the writer completes it and the next arrival
-// commits past it; an invalid data grain keeps the length its header
-// carried, none when the header names another index.
+// commits past it. An invalid data grain arrives as its header alone,
+// and libmxl-fabrics sets the slot's valid slices from the range a
+// transfer carried (RMAGrainIngressProtocol::read), so it commits
+// empty, as one whose header names another index does.
 func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, invalidReason, error) {
 	hdr, err := writer.GrainInfo(idx)
 	if err != nil {

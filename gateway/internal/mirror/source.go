@@ -130,9 +130,10 @@ type SourceReconciler struct {
 	// MxlDomain a mirror reads from.
 	Domains *instance.Set
 
-	// PollInterval is how often a mirror's transfer loop polls the
-	// source head while nothing new is there. Defaults to 2ms, and to
-	// half a transfer batch for a continuous flow.
+	// PollInterval is how long a mirror's transfer loop waits after a
+	// read or post that failed, and the shortest wait of an audio loop
+	// for its next batch. Defaults to 2ms, and to half a transfer batch
+	// for a continuous flow.
 	PollInterval time.Duration
 
 	// FlushInterval is how often the per-mirror status flusher
