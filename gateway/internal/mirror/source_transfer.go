@@ -216,7 +216,7 @@ func awaitTransfer(ctx context.Context, progress, poll ProgressFunc, posted time
 			if elapsed > abandonAfter {
 				return true, fmt.Errorf("%w: not ready for %s", errTargetLost, elapsed.Round(time.Millisecond))
 			}
-		case kind == fabricTransient:
+		case errors.Is(perr, mxl.ErrInterrupted):
 			return true, fmt.Errorf("%w: %w: %w", errTargetLost, errEvicted, perr)
 		default:
 			return true, fmt.Errorf("%w: %w", errTargetLost, perr)

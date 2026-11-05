@@ -447,6 +447,9 @@ func TestRunTransferLoop_GivesUpATargetThatDoesNotConnect(t *testing.T) {
 		t.Fatal("the loop kept waiting for a target that does not connect")
 	}
 	assert.Equal(t, []bool{false}, tr.droppedSnapshot())
+	tr.mu.Lock()
+	assert.Zero(t, tr.evicted, "a target that never connected is still held by the initiator")
+	tr.mu.Unlock()
 	posted, _ := link.snapshot()
 	assert.Empty(t, posted)
 	assert.Zero(t, h.n, "the head was read before the target connected")
@@ -1507,6 +1510,12 @@ func TestAwaitTransfer_AbandonedTargetIsNotEvicted(t *testing.T) {
 	poll, _ := scriptedProgress(mxl.ErrInterrupted)
 	_, err = awaitTransfer(context.Background(), progress, poll, time.Now(), time.Second)
 	require.ErrorIs(t, err, errEvicted)
+
+	progress, _ = scriptedProgress(mxl.ErrInterrupted)
+	poll, _ = scriptedProgress(mxl.ErrTimeout)
+	_, err = awaitTransfer(context.Background(), progress, poll, time.Now(), time.Second)
+	require.ErrorIs(t, err, errTargetLost)
+	assert.NotErrorIs(t, err, errEvicted, "only an interrupted poll means the initiator dropped the target")
 }
 
 // A post the initiator rejects for good leaves the target connected: it
