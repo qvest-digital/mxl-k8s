@@ -450,3 +450,41 @@ func TestSharedFlow_SamplesCommitAfterRewindOnAFreshWriter(t *testing.T) {
 	_, err = flow.commitSamples(fresh, 1440, 480, nil)
 	require.ErrorIs(t, err, errSamplesAlreadyCommitted, "the head follows the rewind")
 }
+
+// An invalid video grain is not sent, so the target never receives its
+// index. Committing the next arrival opens past it, and libmxl's writer
+// flags the skipped index invalid (openGrain in
+// PosixDiscreteFlowWriter.cpp), which is what readers on the target see.
+func TestCommitArrivedGrain_AnIndexNotSentIsFlaggedInvalid(t *testing.T) {
+	dir := t.TempDir()
+	newWriter := func() *mxl.Writer {
+		inst, err := mxl.NewInstance(dir, "")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = inst.Close() })
+		w, _, err := inst.NewWriter(sharedFlowVideoDef)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = w.Close() })
+		return w
+	}
+	// The target's writer, and one writer per arrival standing in for
+	// the initiator's header writes, so none of them skips an index.
+	target := newWriter()
+	land := func(idx uint64) {
+		t.Helper()
+		ga, err := newWriter().OpenGrain(idx)
+		require.NoError(t, err)
+		require.NoError(t, ga.Commit(ga.TotalSlices, 0))
+	}
+	land(1000)
+	_, _, err := commitArrivedGrain(target, 1000, nil)
+	require.NoError(t, err)
+	land(1002)
+	_, _, err = commitArrivedGrain(target, 1002, nil)
+	require.NoError(t, err)
+
+	g, err := target.GrainInfo(1001)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1001), g.Index)
+	assert.True(t, g.Invalid(), "the index the source did not send is not flagged invalid")
+	assert.Zero(t, g.ValidSlices)
+}

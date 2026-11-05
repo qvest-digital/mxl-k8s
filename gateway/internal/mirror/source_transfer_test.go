@@ -95,31 +95,27 @@ func (s *recordingSender) TransferGrain(idx uint64, start, end uint16) error {
 	return s.err
 }
 
-// An invalid grain goes as its header alone, which the target commits
-// invalid: docs/FabricsDeveloperGuide.md, "Transferring discrete flows",
-// and runDiscrete in tools/mxl-fabrics-demo/demo.cpp transfer slices 0
-// to 0 for it.
-func TestGrainTransfer_InvalidGrainGoesAsItsHeader(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		data bool
-		g    mxl.Grain
-	}{
-		{"video", false, mxl.Grain{Index: 1001, Flags: mxl.GrainFlagInvalid, TotalSlices: 1080, ValidSlices: 1080, GrainSize: 5529600}},
-		{"data", true, mxl.Grain{Index: 1001, Flags: mxl.GrainFlagInvalid, TotalSlices: 4096, ValidSlices: 64, GrainSize: 4096}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dst := &recordingSender{}
-			transfer := newGrainTransfer(flaggedSource{1001: tc.g}, dst, tc.data, 1, 0)
+// An invalid video grain is not posted, although
+// docs/FabricsDeveloperGuide.md and runDiscrete in
+// tools/mxl-fabrics-demo/demo.cpp send its header: back-to-back
+// header-only writes outran the one receive a verbs target has posted.
+// An invalid data grain goes as its header, which the target commits
+// invalid.
+func TestGrainTransfer_InvalidVideoGrainIsNotPosted(t *testing.T) {
+	video := flaggedSource{1001: {Index: 1001, Flags: mxl.GrainFlagInvalid, TotalSlices: 1080, ValidSlices: 1080}}
+	dst := &recordingSender{}
+	_, bytes, err := newGrainTransfer(video, dst, false, 1, 0)(1001, 0)
+	require.ErrorIs(t, err, errInvalidGrain)
+	assert.Zero(t, bytes)
+	assert.Empty(t, dst.calls, "an invalid video grain was posted")
 
-			next, bytes, err := transfer(1001, 0)
-
-			require.NoError(t, err)
-			assert.Zero(t, next, "the header completes the grain")
-			assert.Zero(t, bytes, "an invalid grain carries no payload")
-			assert.Equal(t, [][3]uint64{{1001, 0, 0}}, dst.calls)
-		})
-	}
+	data := flaggedSource{1001: {Index: 1001, Flags: mxl.GrainFlagInvalid, TotalSlices: 4096, ValidSlices: 64}}
+	dst = &recordingSender{}
+	next, bytes, err := newGrainTransfer(data, dst, true, 1, 0)(1001, 0)
+	require.NoError(t, err)
+	assert.Zero(t, next)
+	assert.Zero(t, bytes, "an invalid grain carries no payload")
+	assert.Equal(t, [][3]uint64{{1001, 0, 0}}, dst.calls)
 }
 
 // A valid video grain goes whole, a data grain as its valid slices.

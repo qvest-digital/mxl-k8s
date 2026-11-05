@@ -350,6 +350,14 @@ type sourceEntry struct {
 	// whatever it already held. Zero is the only healthy value.
 	skipped atomic.Uint64
 
+	// invalidGrains counts grains the producer committed invalid of
+	// which the transfer loop sent nothing; invalidAt is when the loop
+	// last passed one, offeredAt when it last posted anything else.
+	// See idleOnInvalid.
+	invalidGrains atomic.Uint64
+	invalidAt     atomic.Pointer[time.Time]
+	offeredAt     atomic.Pointer[time.Time]
+
 	// resyncGrains and agedOutGrains count the grains the transfer loop
 	// passed over without offering, by unsentReason.
 	resyncGrains  atomic.Uint64
@@ -1215,6 +1223,7 @@ const defaultReaderStallAfter = 20 * time.Second
 // progressTracker is what a transfer loop reports to.
 type progressTracker interface {
 	recordHead(head uint64, at time.Time)
+	recordOffered(at time.Time)
 	recordCompleted(idx, bytes uint64, late bool, at time.Time)
 	recordDropped(outstanding bool)
 	// recordTargetLost marks the target as dropped by the initiator or
@@ -1224,6 +1233,7 @@ type progressTracker interface {
 	recordPostFailed(err error)
 	recordAgedOut(at time.Time)
 	recordSkipped(samples uint64)
+	recordInvalid(at time.Time)
 	recordPassedOver(reason unsentReason, grains uint64)
 }
 
@@ -1231,6 +1241,8 @@ type progressTracker interface {
 type unsentReason string
 
 const (
+	// unsentInvalid is a grain its producer committed invalid.
+	unsentInvalid unsentReason = "invalid"
 	// unsentResync is a grain the loop jumped over when it trailed the
 	// head by more than maxMirrorLag.
 	unsentResync unsentReason = "resync"
@@ -1287,8 +1299,35 @@ func (e *sourceEntry) recordHead(head uint64, at time.Time) {
 	e.headAdvancedAt.Store(&t)
 }
 
+// recordOffered stamps a post. It says nothing about delivery, but that
+// the source had something to send.
+func (e *sourceEntry) recordOffered(at time.Time) {
+	t := at
+	e.offeredAt.Store(&t)
+}
+
+// idleOnInvalid reports whether the head has moved over nothing but
+// invalid grains for longer than after, as a merge output with every
+// member down does. Such a source offers the initiator nothing, so a
+// target that completes nothing is not stalled and its transfers are
+// not failing to land.
+func idleOnInvalid(now time.Time, e *sourceEntry, after time.Duration) bool {
+	inv := e.invalidAt.Load()
+	if inv == nil || now.Sub(*inv) > after {
+		return false
+	}
+	off := e.offeredAt.Load()
+	return off == nil || now.Sub(*off) > after
+}
+
 func (e *sourceEntry) recordSkipped(samples uint64) {
 	e.skipped.Add(samples)
+}
+
+func (e *sourceEntry) recordInvalid(at time.Time) {
+	e.invalidGrains.Add(1)
+	t := at
+	e.invalidAt.Store(&t)
 }
 
 func (e *sourceEntry) recordPassedOver(reason unsentReason, grains uint64) {
@@ -1918,7 +1957,7 @@ func observedState(entry *sourceEntry, stallAfter time.Duration) sourceProgressS
 	// reader is demonstrably reading, and the target gates its own
 	// rebuild on seeing this reason.
 	if !delivering && !entry.openedAt.IsZero() &&
-		time.Since(entry.openedAt) > stallAfter {
+		time.Since(entry.openedAt) > stallAfter && !idleOnInvalid(time.Now(), entry, stallAfter) {
 		return sourceProgressState{
 			status: metav1.ConditionFalse,
 			reason: mxlv1alpha1.ReasonTransfersNotLanding,

@@ -44,11 +44,13 @@ mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01"
 		"mxl_gateway_mirror_received_bytes_total", "mxl_gateway_mirror_transmitted_bytes_total"))
 }
 
-// The source sends an invalid grain as its header, so only the target
-// counts invalid grains: the ones it committed invalid, by reason.
+// Invalid grains are counted on both halves: the source's what it did
+// not send, the target's what it committed invalid, by reason.
 func TestThroughputCollectorReportsInvalidGrains(t *testing.T) {
 	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
 	sent := &sourceEntry{shared: testShared("flow-a", fabrics.ProviderVerbs), peerNode: "n02"}
+	sent.recordInvalid(time.Now())
+	sent.recordInvalid(time.Now())
 	src.sources[types.NamespacedName{Namespace: "p", Name: "a"}] = sent
 
 	tgt := &TargetReconciler{targets: map[types.NamespacedName]*targetEntry{}}
@@ -61,9 +63,10 @@ func TestThroughputCollectorReportsInvalidGrains(t *testing.T) {
 
 	c := &ThroughputCollector{NodeName: "n01", Source: src, Target: tgt}
 	expected := `
-# HELP mxl_gateway_mirror_source_unsent_grains_total Grains the source half did not offer to the initiator, by reason: resync (the loop fell more than a few grains behind the head and resumed at it) or aged_out (the producer had reused the slot). Each one is a grain no target receives. An invalid grain is not counted here: its header is offered, and the target commits it invalid.
+# HELP mxl_gateway_mirror_source_unsent_grains_total Grains the source half did not offer to the initiator, by reason: invalid (the producer committed a video grain invalid), resync (the loop fell more than a few grains behind the head and resumed at it) or aged_out (the producer had reused the slot). Each one is a grain no target receives. An invalid data grain is not counted here: its header is offered, and the target commits it invalid.
 # TYPE mxl_gateway_mirror_source_unsent_grains_total counter
 mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs",reason="aged_out"} 0
+mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs",reason="invalid"} 2
 mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs",reason="resync"} 0
 # HELP mxl_gateway_mirror_target_invalid_grains_total Arrived grains the target half committed invalid: flagged invalid at the source (invalid_from_source), or whose slot header names another index than the one committed, a later write into the slot having landed (index_mismatch). The commit rewrites that header, so the later grain is flagged invalid too, not served.
 # TYPE mxl_gateway_mirror_target_invalid_grains_total counter
