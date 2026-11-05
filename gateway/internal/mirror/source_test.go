@@ -118,8 +118,8 @@ type recordingTracker struct {
 	passed    map[unsentReason]uint64
 	offered   int
 	invalid   int
-	// lost counts recordTargetLost, postErrors recordPostFailed.
-	lost       int
+	// evicted counts recordTargetEvicted, postErrors recordPostFailed.
+	evicted    int
 	postErrors []string
 	heads      []uint64
 }
@@ -169,9 +169,9 @@ func (rt *recordingTracker) recordInvalid(time.Time) {
 	rt.mu.Unlock()
 }
 
-func (rt *recordingTracker) recordTargetLost() {
+func (rt *recordingTracker) recordTargetEvicted() {
 	rt.mu.Lock()
-	rt.lost++
+	rt.evicted++
 	rt.mu.Unlock()
 }
 
@@ -1471,10 +1471,9 @@ func TestPublishSourceProgress_OmitsLastSentAtWhenNeverTransferred(t *testing.T)
 			"target-side rebuild on every freshly created mirror")
 }
 
-// A target the initiator dropped is marked lost, so detach does not
-// remove it from an initiator that already evicted it (removeTarget in
-// RCInitiator.cpp answers "not found" for it).
-func TestRunTransferLoop_MarksADroppedTargetLost(t *testing.T) {
+// A target the initiator evicted is marked so: removeTarget in
+// RCInitiator.cpp answers "not found" for it.
+func TestRunTransferLoop_MarksAnEvictedTarget(t *testing.T) {
 	h := &headScript{heads: []uint64{10, 11}}
 	link := &fakeLink{t: t}
 	var calls atomic.Int32
@@ -1491,8 +1490,23 @@ func TestRunTransferLoop_MarksADroppedTargetLost(t *testing.T) {
 
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
-	assert.Equal(t, 1, tr.lost)
+	assert.Equal(t, 1, tr.evicted)
 	assert.Empty(t, tr.postErrors)
+}
+
+// A target given up for staying not-ready is still held by the
+// initiator (an RC endpoint is evicted only once Done, an RDM target
+// never), so it is not marked evicted and detach removes it.
+func TestAwaitTransfer_AbandonedTargetIsNotEvicted(t *testing.T) {
+	progress, _ := scriptedProgress(fabrics.ErrNotReady)
+	_, err := awaitTransfer(context.Background(), progress, noPoll(t), time.Now().Add(-abandonAfter-time.Millisecond), time.Second)
+	require.ErrorIs(t, err, errTargetLost)
+	assert.NotErrorIs(t, err, errEvicted)
+
+	progress, _ = scriptedProgress(mxl.ErrInterrupted)
+	poll, _ := scriptedProgress(mxl.ErrInterrupted)
+	_, err = awaitTransfer(context.Background(), progress, poll, time.Now(), time.Second)
+	require.ErrorIs(t, err, errEvicted)
 }
 
 // A post the initiator rejects for good leaves the target connected: it
@@ -1509,15 +1523,17 @@ func TestRunTransferLoop_KeepsAPostRejectedForGood(t *testing.T) {
 
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
-	assert.Zero(t, tr.lost)
+	assert.Zero(t, tr.evicted)
 	require.Len(t, tr.postErrors, 1)
 }
 
-// A link's loop marks the link itself when its target is lost.
-func TestLinkTracker_MarksTheLink(t *testing.T) {
-	link := &sourceLink{}
-	linkTracker{sourceEntry: &sourceEntry{}, link: link}.recordTargetLost()
-	assert.True(t, link.targetLost.Load())
+// detach removes the target of a link whose initiator still holds it,
+// and not of one the initiator evicted.
+func TestSourceLink_RemovesATargetUnlessEvicted(t *testing.T) {
+	link := &sourceLink{initiator: &fabrics.Initiator{}, info: &fabrics.TargetInfo{}}
+	assert.True(t, link.removesTarget(), "a held target was not removed")
+	linkTracker{sourceEntry: &sourceEntry{}, link: link}.recordTargetEvicted()
+	assert.False(t, link.removesTarget(), "an evicted target was removed again")
 }
 
 // The loop moves past an invalid video grain without posting it and

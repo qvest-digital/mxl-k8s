@@ -35,6 +35,11 @@ const abandonAfter = 2 * time.Second
 // through this initiator any more.
 var errTargetLost = errors.New("target lost")
 
+// errEvicted marks a lost target the initiator no longer holds: a
+// connection-oriented initiator answers interrupted to a non-blocking
+// progress call once it has evicted its last target.
+var errEvicted = errors.New("evicted by the initiator")
+
 // sourceReadTimeout is how long one read of the source ring waits for
 // a grain, as in runDiscrete in tools/mxl-fabrics-demo/demo.cpp. A
 // stopped loop notices its context once the read returns, so stopping
@@ -210,6 +215,8 @@ func awaitTransfer(ctx context.Context, progress, poll ProgressFunc, posted time
 			if elapsed > abandonAfter {
 				return true, fmt.Errorf("%w: not ready for %s", errTargetLost, elapsed.Round(time.Millisecond))
 			}
+		case kind == fabricTransient:
+			return true, fmt.Errorf("%w: %w: %w", errTargetLost, errEvicted, perr)
 		default:
 			return true, fmt.Errorf("%w: %w", errTargetLost, perr)
 		}
@@ -224,7 +231,9 @@ func awaitConnected(ctx context.Context, l logr.Logger, progress, poll ProgressF
 	if _, err := awaitTransfer(ctx, progress, poll, time.Now(), 0); err != nil {
 		if ctx.Err() == nil {
 			l.Info("mirror target did not connect", "error", err.Error())
-			tracker.recordTargetLost()
+			if errors.Is(err, errEvicted) {
+				tracker.recordTargetEvicted()
+			}
 			tracker.recordDropped(false)
 		}
 		return false
@@ -355,7 +364,9 @@ func runTransferLoop(
 		if err != nil {
 			if ctx.Err() == nil {
 				l.Info("lost the mirror target", "index", next, "error", err.Error())
-				tracker.recordTargetLost()
+				if errors.Is(err, errEvicted) {
+					tracker.recordTargetEvicted()
+				}
 				tracker.recordDropped(true)
 			}
 			return
@@ -459,7 +470,9 @@ func runSampleTransferLoop(
 		if err != nil {
 			if ctx.Err() == nil {
 				l.Info("lost the mirror target", "headIndex", end, "error", err.Error())
-				tracker.recordTargetLost()
+				if errors.Is(err, errEvicted) {
+					tracker.recordTargetEvicted()
+				}
 				tracker.recordDropped(true)
 			}
 			return

@@ -271,19 +271,25 @@ type sourceLink struct {
 	progress  ProgressFunc
 	cancel    context.CancelFunc
 	done      chan struct{}
-	// targetLost is set by the loop before it closes done, when the
-	// initiator dropped the target or never connected it.
-	targetLost atomic.Bool
+	// evicted is set by the loop before it closes done, when the
+	// initiator reported it holds the target no more.
+	evicted atomic.Bool
+}
+
+// removesTarget reports whether detach removes the link's target from
+// its initiator: not once the initiator evicted it.
+func (l *sourceLink) removesTarget() bool {
+	return l.initiator != nil && l.info != nil && !l.evicted.Load()
 }
 
 // linkTracker is the tracker a link's loop reports to: the mirror's
-// entry, and the link for a lost target.
+// entry, and the link for an evicted target.
 type linkTracker struct {
 	*sourceEntry
 	link *sourceLink
 }
 
-func (t linkTracker) recordTargetLost() { t.link.targetLost.Store(true) }
+func (t linkTracker) recordTargetEvicted() { t.link.evicted.Store(true) }
 
 // stop cancels the loop and waits for it to return. Idempotent.
 func (l *sourceLink) stop() {
@@ -1188,10 +1194,11 @@ func (o *libmxlOpener) detach(link *sourceLink) {
 		return
 	}
 	link.stop()
-	// A connection-oriented initiator has already evicted a target it
-	// dropped (evictDeadEndpoints in RCInitiator.cpp), and removing it
-	// again only fails with "not found".
-	if link.initiator != nil && link.info != nil && !link.targetLost.Load() {
+	// A target the initiator evicted (evictDeadEndpoints in
+	// RCInitiator.cpp) is not removed again, which only fails with "not
+	// found". One given up for staying not-ready or never connecting is
+	// still held and is removed, so the initiator shuts it down.
+	if link.removesTarget() {
 		if err := link.initiator.RemoveTarget(link.info); err != nil {
 			ctrl.Log.WithName("source").V(1).Info("RemoveTarget", "error", err.Error())
 		} else {
@@ -1226,9 +1233,9 @@ type progressTracker interface {
 	recordOffered(at time.Time)
 	recordCompleted(idx, bytes uint64, late bool, at time.Time)
 	recordDropped(outstanding bool)
-	// recordTargetLost marks the target as dropped by the initiator or
-	// never connected, so detach does not remove it again.
-	recordTargetLost()
+	// recordTargetEvicted marks the target as evicted by the initiator,
+	// so detach does not remove it again.
+	recordTargetEvicted()
 	// recordPostFailed keeps a post the initiator rejected for good.
 	recordPostFailed(err error)
 	recordAgedOut(at time.Time)
@@ -1262,8 +1269,8 @@ func (e *sourceEntry) recordCompleted(idx, bytes uint64, late bool, at time.Time
 	}
 }
 
-// recordTargetLost is the link's to act on; see linkTracker.
-func (e *sourceEntry) recordTargetLost() {}
+// recordTargetEvicted is the link's to act on; see linkTracker.
+func (e *sourceEntry) recordTargetEvicted() {}
 
 // recordPostFailed keeps the text of a post the initiator rejected for
 // good, which observedState publishes while the mirror waits to add its
