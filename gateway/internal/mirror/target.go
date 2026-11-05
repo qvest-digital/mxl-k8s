@@ -1468,7 +1468,10 @@ const (
 // set, records the grain the writer holds open and the most slices
 // committed of it, and such an arrival commits no fewer. A grain the
 // writer has completed cannot be reopened, so a late batch of it leaves
-// the slot's count lowered until the sibling's last batch lands.
+// the slot's count lowered until the sibling's last batch lands. Only a
+// producer that commits partial grains with a sync hint below the
+// grain's slices is sent in more than one batch, so only its grains are
+// exposed.
 func commitArrivedGrain(writer *mxl.Writer, idx uint64, open *partialGrain) (uint64, invalidReason, error) {
 	hdr, err := writer.GrainInfo(idx)
 	if err != nil {
