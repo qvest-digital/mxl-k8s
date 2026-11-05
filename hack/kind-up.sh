@@ -26,6 +26,14 @@
 #
 # Set IMAGE_REGISTRY=<prefix> to override the registry prefix.
 # Default is ghcr.io/qvest-digital/mxl-k8s.
+#
+# Set MXLFS=1 to serve the node domains from mxlfs (mxlfs.enabled), with
+# the agent's CSI volume on (agent.csi.enabled) and the demo pods taking
+# their domain through it (examples/kind/demo-mxlfs). KIND nodes share the
+# host kernel, so the mxlfs module has to be loaded on the host; the
+# script stops before installing the chart when the nodes' kernel has no
+# mxlfs. Start from a new cluster: the agent leaves a domain directory
+# that already holds flows a plain directory.
 
 set -euo pipefail
 
@@ -61,6 +69,7 @@ if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
   export KIND_EXPERIMENTAL_PROVIDER=podman
 fi
 
+MXLFS="${MXLFS:-0}"
 MIRROR_TIMEOUT_SECS="${MIRROR_TIMEOUT_SECS:-180}"
 ROLLOUT_TIMEOUT_SECS="${ROLLOUT_TIMEOUT_SECS:-300}"
 
@@ -183,6 +192,18 @@ load_image() {
   fi
 }
 
+MXLFS_SET=()
+DEMO_DIR=demo
+if [ "$MXLFS" = "1" ]; then
+  node="${CLUSTER_NAME}-control-plane"
+  if ! $CONTAINER_RUNTIME exec "$node" grep -qw mxlfs /proc/filesystems; then
+    echo "ERROR: MXLFS=1 but the kernel of the KIND nodes has no mxlfs; load the module on the host" >&2
+    exit 1
+  fi
+  MXLFS_SET=(--set mxlfs.enabled=true --set agent.csi.enabled=true)
+  DEMO_DIR=demo-mxlfs
+fi
+
 log "Loading images into the cluster"
 for tag in "${IMAGE_TAGS[@]}"; do
   echo "  -> ${tag}"
@@ -258,6 +279,7 @@ helm upgrade --install mxl-k8s "${REPO_ROOT}/charts/mxl-k8s" \
   --set exporter.image.tag="$TAG" \
   --set exporter.enabled=true \
   ${MONITORING_SET[@]+"${MONITORING_SET[@]}"} \
+  ${MXLFS_SET[@]+"${MXLFS_SET[@]}"} \
   --wait --timeout="${ROLLOUT_TIMEOUT_SECS}s"
 
 apply_demo() {
@@ -265,7 +287,7 @@ apply_demo() {
   # the writer/receiver/reader manifests in ../../tcp-demo without
   # duplicating them under examples/kind/demo/.
   "${KUBECTL[@]}" kustomize --load-restrictor=LoadRestrictionsNone \
-      "${REPO_ROOT}/examples/kind/demo/" \
+      "${REPO_ROOT}/examples/kind/${DEMO_DIR}/" \
     | "${KUBECTL[@]}" apply -f -
 }
 

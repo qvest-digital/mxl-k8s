@@ -13,7 +13,7 @@ set -euo pipefail
 . "$KIND_TEST_LIB"
 
 WRITER_POD="${WRITER_POD:-mxl-tcp-demo-writer}"
-WRITER_MANIFEST="${WRITER_MANIFEST:-${PWD}/examples/tcp-demo/10-writer.yaml}"
+WRITER_MANIFEST="${WRITER_MANIFEST:-$(demo_manifest "${PWD}/examples/tcp-demo/10-writer.yaml")}"
 RECOVERY_TIMEOUT_SECS="${RECOVERY_TIMEOUT_SECS:-90}"
 
 mirror=$("${KUBECTL[@]}" -n "$NAMESPACE" get mxlfm \

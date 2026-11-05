@@ -379,9 +379,10 @@ type TargetReconciler struct {
 }
 
 // targetOpenInputs is what an open attempt depends on. A change to
-// either makes the next attempt a new one rather than a retry.
+// any makes the next attempt a new one rather than a retry.
 type targetOpenInputs struct {
 	flowDef  string
+	hints    placeholder.Hints
 	provider fabrics.Provider
 }
 
@@ -416,8 +417,10 @@ type targetEntry struct {
 	// entry writing it; see sharedFlow.
 	flow *sharedFlow
 
-	// def is the flow definition the entry was opened with.
+	// def is the flow definition the entry was opened with, and cfg the
+	// flow as its writer opened it.
 	def string
+	cfg mxl.FlowConfig
 
 	// commits counts grains the progress loop has committed, and
 	// arrivals of grains a sibling mirror of the flow committed shortly
@@ -537,6 +540,10 @@ func (e *targetEntry) stopProgressLoop(grace time.Duration) bool {
 	}
 	return waitClosed(done, grace)
 }
+
+// syncHint is the maxSyncBatchSizeHint of the flow the entry writes, 0
+// for an entry opened without a writer.
+func (e *targetEntry) syncHint() uint32 { return e.cfg.Common.MaxSyncBatchSizeHint }
 
 // abandon marks the entry torn down and hands back the writer, so a
 // caller that has already removed it from r.targets can release the
@@ -696,9 +703,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// recent commits means the fabric side has likely died silently
 	// (no fatal ReadGrain error to trigger recoverFromFatalError) and
 	// the flow file in the consumer pod is no longer being filled.
-	if r.Retire != nil {
-		r.replaceOtherGeometry(ctx, req.NamespacedName, mirror.Ref().Name())
-	}
+	r.replaceOtherGeometry(ctx, req.NamespacedName, mirror.Ref().Name())
 	if res, rebuilding := r.followRepoint(ctx, req.NamespacedName, &mirror); rebuilding {
 		return res, nil
 	}
@@ -751,7 +756,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// been unopenable across the bounce reads as Materializing again
 	// and the escalation to Degraded restarts from zero. Matches the
 	// source side's seeding of status.attemptCount.
-	inputs := targetOpenInputs{flowDef: string(flow.Spec.Definition.Raw), provider: provider}
+	inputs := targetOpenInputs{flowDef: string(flow.Spec.Definition.Raw), hints: placeholder.HintsOf(&flow), provider: provider}
 	r.mu.Lock()
 	r.attempts.seed(req.NamespacedName, uint32(mirror.Status.TargetAttemptCount))
 	remaining, gated := r.attempts.wait(req.NamespacedName, inputs, r.now())
@@ -762,7 +767,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
 
-	entry, err := r.openTargetDispatch(req.NamespacedName, mirror.Spec.Domain, string(flow.Spec.Definition.Raw), provider)
+	entry, err := r.openTargetDispatch(req.NamespacedName, mirror.Spec.Domain, inputs)
 	if errors.Is(err, errLocalWriter) {
 		return r.standDown(ctx, &mirror, inputs)
 	}
@@ -788,7 +793,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	// Publish the descriptor before the phase: a Ready mirror whose
 	// targetInfo has not landed yet is one the source side cannot dial.
-	if err := r.applyTargetInfo(ctx, &mirror, entry.infoStr); err != nil {
+	if err := r.applyTargetInfo(ctx, &mirror, entry.infoStr, entry.syncHint()); err != nil {
 		r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Ref().Name()))
 		return ctrl.Result{}, fmt.Errorf("publish target info: %w", err)
 	}
@@ -872,7 +877,8 @@ func (r *TargetReconciler) now() time.Time {
 // progress goroutine uses it to invoke recovery if the libmxl-fabrics
 // Target dies (the writer is retained across recoveries to keep the
 // flow file valid for consumer pods).
-func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef string, provider fabrics.Provider) (*targetEntry, error) {
+func (r *TargetReconciler) openTarget(key types.NamespacedName, domain string, in targetOpenInputs) (*targetEntry, error) {
+	flowDef, provider := in.flowDef, in.provider
 	handles, err := r.Domains.For(context.Background(), domain)
 	if err != nil {
 		return nil, err
@@ -899,9 +905,14 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef 
 			}
 		}
 	}
-	writer, _, err := mxlInst.NewWriter(flowDef)
+	// With the origin's hints, as the target of tools/mxl-fabrics-demo is
+	// given the producer's flow options: an audio target's bounce-buffer
+	// entries hold one batch of the copy's sync hint, and the source sends
+	// batches of the origin's. Without published hints libmxl's defaults
+	// apply, which the source reads back from targetMaxSyncBatchSizeHint.
+	writer, err := openWriter(mxlInst, handles.DomainPath(), flowDef, in.hints, r.Retire)
 	if err != nil {
-		return nil, fmt.Errorf("%w: NewWriter: %w", errOpenWriterFailed, err)
+		return nil, err
 	}
 	// The ring has to be in place before the fabric side registers it:
 	// pinning a lazily allocated mxlfs ring would fault it in page by page.
@@ -925,6 +936,7 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef 
 	// down and the install cannot be refused.
 	entry := &targetEntry{
 		writer:   writer,
+		cfg:      writer.Config(),
 		handles:  handles,
 		provider: provider,
 		flow:     r.sharedFlowFor(handles, writer.Config().Common.ID),
@@ -935,11 +947,36 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef 
 
 // openTargetDispatch routes the open through the test seam when set,
 // falling back to the cgo openTarget in production.
-func (r *TargetReconciler) openTargetDispatch(key types.NamespacedName, domain, flowDef string, provider fabrics.Provider) (*targetEntry, error) {
+func (r *TargetReconciler) openTargetDispatch(key types.NamespacedName, domain string, in targetOpenInputs) (*targetEntry, error) {
 	if r.openTargetFn != nil {
-		return r.openTargetFn(key, flowDef, provider)
+		return r.openTargetFn(key, in.flowDef, in.provider)
 	}
-	return r.openTarget(key, domain, flowDef, provider)
+	return r.openTarget(key, domain, in)
+}
+
+// openWriter opens the target's writer on flowDef with hints. libmxl
+// opens a flow that exists as it is, so an audio flow already there
+// with other hints is removed and created anew, as clearOtherGeometry
+// does for another geometry; one another writer still holds fails the
+// open until it is released.
+func openWriter(inst *mxl.Instance, domain, flowDef string, hints placeholder.Hints, retire func(domain, id string)) (*mxl.Writer, error) {
+	writer, _, err := inst.NewWriterOpts(flowDef, hints.Options())
+	if err != nil {
+		return nil, fmt.Errorf("%w: NewWriter: %w", errOpenWriterFailed, err)
+	}
+	if !hints.Differ(writer.Config()) {
+		return writer, nil
+	}
+	_ = writer.Close()
+	id, _ := flowIDFromDef(flowDef)
+	if err := clearFlowDir(filepath.Join(domain, id+".mxl-flow"), retire, errOtherHints); err != nil {
+		return nil, err
+	}
+	writer, _, err = inst.NewWriterOpts(flowDef, hints.Options())
+	if err != nil {
+		return nil, fmt.Errorf("%w: NewWriter: %w", errOpenWriterFailed, err)
+	}
+	return writer, nil
 }
 
 // standDown yields a target to a process on this node that writes its
@@ -1167,10 +1204,7 @@ func (r *TargetReconciler) openFabricSide(handles *instance.Handles, writer *mxl
 		_ = target.Close()
 		return nil, nil, "", err
 	}
-	info, err := target.Setup(fabrics.TargetConfig{
-		Interface: iface,
-		Writer:    writer,
-	})
+	info, err := target.Setup(targetConfig(iface, writer))
 	if err != nil {
 		_ = target.Close()
 		return nil, nil, "", fmt.Errorf("Target.Setup: %w", err)
@@ -1182,6 +1216,26 @@ func (r *TargetReconciler) openFabricSide(handles *instance.Handles, writer *mxl
 		return nil, nil, "", fmt.Errorf("TargetInfo.MarshalString: %w", err)
 	}
 	return target, info, s, nil
+}
+
+// targetCQDepth is the completion queue depth of every target,
+// passed as the cqDepth option docs/Fabrics.md describes for receivers
+// whose read loop can fall behind. Mirror latency has reached 269 ms,
+// 14 grains of a 50 fps flow, which bounds how far a target's reads
+// trailed its writes, and a 1.1.0-rc.42 source keeps up to 16 sample
+// batches in flight; 64 holds both with room to spare. With the libmxl-fabrics this gateway links,
+// it is also how many receives a connected target keeps posted for
+// writes that carry immediate data.
+const targetCQDepth = 64
+
+// targetConfig is the libmxl-fabrics setup of a target writing into
+// writer.
+func targetConfig(iface fabrics.InterfaceConfig, writer *mxl.Writer) fabrics.TargetConfig {
+	return fabrics.TargetConfig{
+		Interface: iface,
+		Writer:    writer,
+		Options:   fmt.Sprintf(`{"cqDepth": %d}`, targetCQDepth),
+	}
 }
 
 // openFabricSideDispatch routes the fabric-side open through the
@@ -1266,21 +1320,13 @@ func (r *TargetReconciler) startProgressLoop(
 		go runTargetSampleProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)
 	} else {
 		readFn := func() (uint64, error) { return target.ReadGrain(targetReadTimeout) }
-		data := writer.Config().Common.Format == mxl.FormatData
-		completeFn := func(idx uint64) (bool, error) {
-			g, err := flow.grainInfo(writer, idx)
-			if err != nil {
-				return false, err
-			}
-			return arrivalComplete(g, data), nil
-		}
 		commitFn := func(idx uint64) error {
 			n, reason, err := flow.commitGrain(writer, idx, entry)
 			entry.bytes.Add(n)
 			entry.recordInvalid(reason)
 			return err
 		}
-		go runTargetProgressLoop(loopCtx, done, readFn, completeFn, commitFn, onFatal, entry)
+		go runTargetProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)
 	}
 	return true
 }
@@ -1341,17 +1387,9 @@ func (e *targetEntry) recordInvalid(reason invalidReason) {
 // classifyFabricError already reads that as fabricTransient, so the
 // loop retries and keeps its handles.
 //
-// idleSleep survives the switch as a spin guard, not as the wait: a
-// provider whose blocking read returns not-ready immediately would
-// otherwise spin a core. On a provider that does block, the sleep is
-// only ever reached after a full timeout, and an arriving grain still
-// wakes the read at once.
-//
-// For every grain ReadGrain reports as received, completeFn decides
-// whether the whole grain has landed - a paced source transfers one
-// grain as several slice ranges and each range signals separately -
-// and commitFn then does the OpenGrain + Commit dance on the local
-// FlowWriter so consumer FlowReaders see the arrived grain.
+// Every grain ReadGrain reports as received, a batch of its slices or
+// all of it, is committed by commitFn on the local FlowWriter, where
+// consumer FlowReaders see it.
 //
 // Errors from ReadGrain are classified: idle means nothing arrived,
 // transient means the call was disturbed and the handles are still
@@ -1361,23 +1399,21 @@ func (e *targetEntry) recordInvalid(reason invalidReason) {
 // next ReadGrain call segfaults inside cgo. We exit the loop and
 // call onFatal so the reconciler can rebuild the fabric side.
 //
-// The loop takes readFn, completeFn and commitFn as injected closures
-// so the state machine - the only piece prone to bugs and the only
-// piece worth unit-testing - is isolated from cgo. Production passes a
-// closure over fabrics.Target.ReadGrain, one over mxl.Writer.GrainInfo
-// and one over commitArrivedGrain(writer, ...).
+// The loop takes readFn and commitFn as injected closures so the state
+// machine - the only piece prone to bugs and the only piece worth
+// unit-testing - is isolated from cgo. Production passes a closure over
+// fabrics.Target.ReadGrain and one over commitArrivedGrain(writer, ...).
 func runTargetProgressLoop(
 	ctx context.Context,
 	done chan struct{},
 	readGrain ReadGrainFunc,
-	grainComplete GrainCompleteFunc,
 	commit CommitFunc,
 	onFatal func(),
 	tracker commitTracker,
 ) {
 	defer close(done)
 	l := ctrl.Log.WithName("target-progress")
-	const idleSleep = 1 * time.Millisecond
+	const transientSleep = 1 * time.Millisecond
 	for {
 		select {
 		case <-ctx.Done():
@@ -1387,22 +1423,6 @@ func runTargetProgressLoop(
 		idx, err := readGrain()
 		switch kind := classifyFabricError(err); {
 		case err == nil:
-			// A grain the source paced arrives as several slice ranges,
-			// each signalling separately with a growing valid-slice
-			// count. Committing on the first would publish a grain with
-			// most of its lines unwritten, and commitArrivedGrain marks
-			// every slice valid regardless. Only the arrival that
-			// completes the grain may commit it.
-			if grainComplete != nil {
-				ok, cerr := grainComplete(idx)
-				if cerr != nil {
-					l.Error(cerr, "grain completeness check", "idx", idx)
-					break
-				}
-				if !ok {
-					break
-				}
-			}
 			if err := commit(idx); err != nil {
 				if !errors.Is(err, errGrainAlreadyCommitted) {
 					l.Error(err, "commit received grain", "idx", idx)
@@ -1421,11 +1441,7 @@ func runTargetProgressLoop(
 				tracker.recordCommit(idx, time.Now())
 			}
 		case kind == fabricIdle:
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(idleSleep):
-			}
+			// The blocking read already waited out its timeout.
 		case kind == fabricTransient:
 			// Disturbed, not broken: the handles are still usable, so
 			// poll again instead of rebuilding the fabric side.
@@ -1434,7 +1450,7 @@ func runTargetProgressLoop(
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(idleSleep):
+			case <-time.After(transientSleep):
 			}
 		default:
 			l.Error(err, "ReadGrain - target is no longer safe to poll, exiting loop",
@@ -1445,17 +1461,6 @@ func runTargetProgressLoop(
 			return
 		}
 	}
-}
-
-// arrivalComplete reports whether an arrived grain may be committed. A
-// video grain the source paced arrives as several slice ranges and is
-// committed once all of them are in. A data grain is never complete,
-// its valid slices being its length, and the source sends it in one
-// write, so it is committed as it arrives. TotalSlices == 0 is a grain
-// the source never subdivides, so there is nothing to wait for;
-// Complete() reports false for it.
-func arrivalComplete(g mxl.Grain, data bool) bool {
-	return data || g.TotalSlices == 0 || g.Complete()
 }
 
 // commitArrivedGrain advances the local flow's HeadIndex for a grain
@@ -1492,15 +1497,38 @@ const (
 	invalidIndexMismatch invalidReason = "index_mismatch"
 )
 
-// The slot's header is read before OpenGrain, which clears its invalid
-// flag and, unless it reopens the grain, its valid slices. An arrival
-// is committed invalid when the header carries the invalid flag or
-// another index. A data grain is
-// committed with the valid slices the initiator's write carried, none
-// included: they are its length, and libmxl data writers never complete
-// a grain. Any other grain is committed whole, an invalid one included,
-// so the writer completes it and the next arrival commits past it.
-func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, invalidReason, error) {
+// A valid arrival is committed with the valid slices the initiator's
+// write carried, as the target in tools/mxl-fabrics-demo/demo.cpp
+// commits the grain info OpenGrain hands back: a video grain sent in
+// slice batches is readable batch by batch, libmxl lets the writer
+// reopen a grain it has not completed, and the batch that carries the
+// last slice completes it. A data grain's valid slices are its length.
+//
+// The slot's header is read before OpenGrain, which resets an older
+// grain's header. An arrival is committed invalid when the header
+// carries the invalid flag or another index. An invalid video grain is
+// committed whole, so the writer completes it and the next arrival
+// commits past it. An invalid data grain arrives as its header alone,
+// and libmxl-fabrics sets the slot's valid slices from the range a
+// transfer carried (RMAGrainIngressProtocol::read), so it commits
+// empty, as one whose header names another index does.
+//
+// Two mirrors of a flow can write into this node's ring at once: the
+// operator keeps one mirror per (flow, node) for each consumer namespace
+// (mirrorNameForReceiver in operator/internal/receiver/controller.go),
+// and a mirror whose origin moves is sent by its old and its new source
+// for a moment. libmxl-fabrics sets the slot's valid slices from each
+// arrival's range, so a sibling's earlier batch lowers them. open, when
+// set, records the grain the writer holds open and the most slices
+// committed of it, and such an arrival commits no fewer. A grain the
+// writer has completed cannot be reopened, so a late batch of it leaves
+// the slot's count lowered until the sibling's last batch of it lands,
+// if it does: a sibling that resyncs or loses its target mid-grain
+// leaves it lowered for good. Only a
+// producer that commits partial grains with a sync hint below the
+// grain's slices is sent in more than one batch, so only its grains are
+// exposed.
+func commitArrivedGrain(writer *mxl.Writer, idx uint64, open *partialGrain) (uint64, invalidReason, error) {
 	hdr, err := writer.GrainInfo(idx)
 	if err != nil {
 		return 0, "", fmt.Errorf("GrainInfo(%d): %w", idx, err)
@@ -1520,12 +1548,14 @@ func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, invalidReason, 
 		}
 		return 0, "", fmt.Errorf("OpenGrain(%d): %w", idx, err)
 	}
-	valid, flags := ga.TotalSlices, uint32(0)
-	if data {
+	valid, flags := hdr.ValidSlices, uint32(0)
+	switch {
+	case reason != "" && !data:
+		valid = ga.TotalSlices
+	case reason == invalidIndexMismatch:
 		valid = 0
-		if reason != invalidIndexMismatch {
-			valid = hdr.ValidSlices
-		}
+	case !data && open != nil && open.idx == idx:
+		valid = max(valid, open.valid)
 	}
 	if reason != "" {
 		flags = mxl.GrainFlagInvalid
@@ -1533,15 +1563,31 @@ func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, invalidReason, 
 	if err := ga.Commit(valid, flags); err != nil {
 		return 0, "", fmt.Errorf("Commit(%d): %w", idx, err)
 	}
+	if !data && valid < ga.TotalSlices {
+		if open != nil {
+			*open = partialGrain{idx: idx, valid: valid}
+		}
+		// The grain's payload is counted once, with its last batch.
+		return 0, reason, nil
+	}
+	if open != nil {
+		*open = partialGrain{}
+	}
 	return uint64(ga.GrainSize), reason, nil
+}
+
+// partialGrain is a video grain a flow's writer holds open and the
+// valid slices committed of it. The zero value raises no commit.
+type partialGrain struct {
+	idx   uint64
+	valid uint16
 }
 
 // runTargetSampleProgressLoop drives a libmxl-fabrics Target for a
 // continuous (audio) flow until ctx is canceled or ReadSamples reports
 // a non-recoverable error. It mirrors runTargetProgressLoop: the
 // blocking ReadSamples advances the libfabric event + completion
-// queues and parks until a run arrives, with the same idle sleep kept
-// as a spin guard for providers that do not block. There is no
+// queues and parks until a run arrives. There is no
 // completeness gate here - TransferSamples carries no slice range, so
 // a run of samples arrives whole or not at all. For every run of
 // samples ReadSamples reports as arrived, commit does the
@@ -1559,7 +1605,7 @@ func runTargetSampleProgressLoop(
 ) {
 	defer close(done)
 	l := ctrl.Log.WithName("target-sample-progress")
-	const idleSleep = 1 * time.Millisecond
+	const transientSleep = 1 * time.Millisecond
 	for {
 		select {
 		case <-ctx.Done():
@@ -1575,16 +1621,12 @@ func runTargetSampleProgressLoop(
 					break
 				}
 				// The arrival's range is already in the ring and the
-				// writer's head is past it: a retransmitted or
-				// overlapping chunk from the source, or a range another
-				// mirror of this flow into this node committed first.
-				// Dropping it is the only correct move -- retrying the
-				// commit can never succeed, and parking on the arrival
-				// stalls the ingress, which is what starves the
-				// initiator's send queue down to the rate at which this
-				// loop gives up on one entry. The commit function has
-				// already counted the arrival if a sibling's commit
-				// vouches for it.
+				// writer's head is past it, as when another mirror of
+				// this flow into this node committed it first. A retried
+				// commit can never succeed, and waiting on the arrival
+				// stops the loop reading the next one. The commit
+				// function has already counted the arrival if a
+				// sibling's commit vouches for it.
 				l.V(1).Info("dropping already-committed sample arrival",
 					"headIndex", head, "count", count, "error", err.Error())
 				break
@@ -1593,11 +1635,7 @@ func runTargetSampleProgressLoop(
 				tracker.recordCommit(head, time.Now())
 			}
 		case kind == fabricIdle:
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(idleSleep):
-			}
+			// The blocking read already waited out its timeout.
 		case kind == fabricTransient:
 			// Disturbed, not broken: the handles are still usable, so
 			// poll again instead of rebuilding the fabric side.
@@ -1606,7 +1644,7 @@ func runTargetSampleProgressLoop(
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(idleSleep):
+			case <-time.After(transientSleep):
 			}
 		default:
 			l.Error(err, "ReadSamples - target is no longer safe to poll, exiting loop",
@@ -1677,6 +1715,17 @@ func clearOtherGeometry(dir, def string, retire func(domain, id string)) error {
 	if err == nil && placeholder.SameGeometry(onDisk, []byte(def)) {
 		return nil
 	}
+	return clearFlowDir(dir, retire, errOtherGeometry)
+}
+
+// errOtherHints is why a target does not open yet on an audio flow
+// created with other batch size hints that a writer here still holds.
+var errOtherHints = errors.New("the flow here has other batch size hints and a writer still holds it")
+
+// clearFlowDir removes the flow directory dir after retiring a
+// placeholder held there, or returns held when another writer still
+// holds it.
+func clearFlowDir(dir string, retire func(domain, id string), held error) error {
 	if retire != nil {
 		retire(filepath.Dir(dir), strings.TrimSuffix(filepath.Base(dir), ".mxl-flow"))
 	}
@@ -1685,7 +1734,7 @@ func clearOtherGeometry(dir, def string, retire func(domain, id string)) error {
 		return fmt.Errorf("check writers of %s: %w", dir, err)
 	}
 	if n > 0 {
-		return errOtherGeometry
+		return held
 	}
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("remove %s: %w", dir, err)
@@ -1696,7 +1745,10 @@ func clearOtherGeometry(dir, def string, retire func(domain, id string)) error {
 // replaceOtherGeometry closes the live target of key when the flow's
 // definition has since changed geometry: the producer came back in
 // another layout, and the ring the target registered can only take the
-// old one. The open that follows lays the flow out anew.
+// old one. The open that follows lays the flow out anew. Geometry is
+// checked on mxlfs only. On any domain an audio target is also replaced
+// when the origin's batch size hints have changed, since its
+// bounce-buffer entries hold one batch of the old sync hint.
 func (r *TargetReconciler) replaceOtherGeometry(ctx context.Context, key types.NamespacedName, flowName string) {
 	r.mu.Lock()
 	entry := r.targets[key]
@@ -1708,10 +1760,14 @@ func (r *TargetReconciler) replaceOtherGeometry(ctx context.Context, key types.N
 	if err := r.Get(ctx, types.NamespacedName{Name: flowName}, &flow); err != nil || len(flow.Spec.Definition.Raw) == 0 {
 		return
 	}
-	if placeholder.SameGeometry([]byte(entry.def), flow.Spec.Definition.Raw) {
+	switch {
+	case r.Retire != nil && !placeholder.SameGeometry([]byte(entry.def), flow.Spec.Definition.Raw):
+		log.FromContext(ctx).Info("flow changed geometry; replacing the target", "flow", flowName)
+	case placeholder.HintsOf(&flow).Differ(entry.cfg):
+		log.FromContext(ctx).Info("flow changed batch size hints; replacing the target", "flow", flowName)
+	default:
 		return
 	}
-	log.FromContext(ctx).Info("flow changed geometry; replacing the target", "flow", flowName)
 	r.closeEntry(key, r.localFlowDisposition(ctx, flowName))
 }
 
@@ -1977,7 +2033,7 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 	// nobody answers and its send queue never drains, so the publish
 	// is the rebuild's success criteria: on failure the entry drops
 	// and the next Reconcile rebuilds fabric side and publish together.
-	if err := r.applyTargetInfo(ctx, mirror, s); err != nil {
+	if err := r.applyTargetInfo(ctx, mirror, s, entry.syncHint()); err != nil {
 		l.Error(err, "publish rebuilt TargetInfo")
 		r.dropFailedEntry(key, entry)
 		return
@@ -2148,19 +2204,24 @@ func closeTargetHandles(e *targetEntry, disp flowDisposition, grace time.Duratio
 // applyTargetInfo writes status.targetInfo under its own field
 // manager. Called only where the descriptor is produced - the initial
 // open and each fabric-side rebuild - so an unchanged descriptor costs
-// nothing for the life of the mirror.
+// nothing for the life of the mirror. targetMaxSyncBatchSizeHint, the
+// sync hint of the writer the descriptor serves, goes in the same
+// payload, so a source never reads one without the other.
 //
 // Owning the field alone is what makes that safe. SSA releases a field
 // its manager omits, but only that manager's claim: progress payloads
 // written under targetFieldOwner never mention targetInfo, so they
 // cannot release a claim they never held.
-func (r *TargetReconciler) applyTargetInfo(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, info string) error {
+func (r *TargetReconciler) applyTargetInfo(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, info string, syncHint uint32) error {
 	patch := &unstructured.Unstructured{}
 	patch.SetGroupVersionKind(mxlv1alpha1.GroupVersion.WithKind("MxlFlowMirror"))
 	patch.SetNamespace(mirror.Namespace)
 	patch.SetName(mirror.Name)
-	if err := unstructured.SetNestedField(patch.Object,
-		map[string]any{"targetInfo": info}, "status"); err != nil {
+	status := map[string]any{"targetInfo": info}
+	if syncHint > 0 {
+		status["targetMaxSyncBatchSizeHint"] = int64(syncHint)
+	}
+	if err := unstructured.SetNestedField(patch.Object, status, "status"); err != nil {
 		return fmt.Errorf("build targetInfo payload: %w", err)
 	}
 	return r.Status().Patch(ctx, patch, client.Apply,

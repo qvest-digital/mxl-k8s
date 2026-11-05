@@ -33,6 +33,8 @@ type sharedFlow struct {
 	// value libmxl rejects a run against; haveHead is false until one is.
 	lastHead uint64
 	haveHead bool
+	// open is the grain the writer holds open; see commitArrivedGrain.
+	open partialGrain
 }
 
 // sharedFlowKey names one flow in one libmxl instance: the scope libmxl
@@ -50,13 +52,6 @@ func (r *TargetReconciler) sharedFlowFor(handles *instance.Handles, flowID [16]b
 	return f.(*sharedFlow)
 }
 
-// grainInfo reads a grain's header under the flow's lock.
-func (f *sharedFlow) grainInfo(writer *mxl.Writer, idx uint64) (mxl.Grain, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return writer.GrainInfo(idx)
-}
-
 // commitGrain commits an arrived grain. An arrival whose grain is
 // already committed returns errGrainAlreadyCommitted and is recorded on
 // tracker against the flow's last commit, when that is fresh: the grain
@@ -64,7 +59,7 @@ func (f *sharedFlow) grainInfo(writer *mxl.Writer, idx uint64) (mxl.Grain, error
 // would otherwise read as receiving nothing and be rebuilt.
 func (f *sharedFlow) commitGrain(writer *mxl.Writer, idx uint64, tracker commitTracker) (uint64, invalidReason, error) {
 	f.mu.Lock()
-	n, reason, err := commitArrivedGrain(writer, idx)
+	n, reason, err := commitArrivedGrain(writer, idx, &f.open)
 	now := time.Now()
 	if err == nil {
 		f.lastCommitAt = now

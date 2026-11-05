@@ -48,10 +48,16 @@ func TestPublishAppeared_WriterDetached_PublishesStaleAndReleasesLease(t *testin
 	domain := t.TempDir()
 	writeFlowDir(t, domain, validFlowID)
 
+	// The producer this node published as Origin has left its directory
+	// behind.
+	flow := existingFlow()
+	flow.Status.Locations = []mxlv1alpha1.MxlFlowLocation{
+		{NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+	}
 	c := fake.NewClientBuilder().
 		WithScheme(newScheme(t)).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
-		WithObjects(existingFlow()).
+		WithObjects(flow).
 		Build()
 	lease := &fakeLease{}
 	p := &Publisher{
@@ -69,6 +75,34 @@ func TestPublishAppeared_WriterDetached_PublishesStaleAndReleasesLease(t *testin
 		"renewing here would keep the flow's liveness signal alive on a "+
 			"copy that has no writer, which is the one thing the Lease "+
 			"exists to rule out")
+	assert.Equal(t, []string{validFlowID}, lease.released)
+}
+
+// A directory with no writer on a node the flow does not list is no
+// copy of it, as a placeholder the gateway created and released is not.
+func TestPublishAppeared_WriterDetachedOnUnlistedNode_AddsNoLocation(t *testing.T) {
+	domain := t.TempDir()
+	writeFlowDir(t, domain, validFlowID)
+
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(existingFlow()).
+		Build()
+	lease := &fakeLease{}
+	p := &Publisher{
+		Client: c, WriterAttached: writerDetached,
+		DomainPath: domain, NodeName: "n1", Lease: lease,
+	}
+
+	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
+
+	var got mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
+	assert.Empty(t, got.Status.Locations,
+		"a Stale entry for a node that never held the flow reads as a "+
+			"copy there, so a node that was never asked for the flow "+
+			"would appear to have had it")
 	assert.Equal(t, []string{validFlowID}, lease.released)
 }
 

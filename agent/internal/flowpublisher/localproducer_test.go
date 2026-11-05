@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -67,6 +68,68 @@ func TestPublishAppeared_ProducerInAMirrorTarget_ClaimsOrigin(t *testing.T) {
 
 	assert.Equal(t, mxlv1alpha1.MxlFlowLocationOrigin, phaseOnNode(t, c, "n1"))
 	assert.Equal(t, []string{validFlowID}, lease.renewed)
+}
+
+// On mxlfs the gateway replaces a placeholder of a geometry the flow no
+// longer has: the old placeholder's marker goes while the new one's
+// writer, the gateway's, is attached. A directory read in that window
+// has a writer, no mirror and the old definition. Taken for the
+// producer's, it claimed Origin on a node nothing produces on and wrote
+// the old geometry over the one the producer had just published.
+func TestPublishAppeared_OnlyMxlK8sWrites_ClaimsNothing(t *testing.T) {
+	domain := t.TempDir()
+	dir := filepath.Join(domain, validFlowID+".mxl-flow")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, FlowDefName),
+		[]byte(`{"id":"`+validFlowID+`","frame_width":1280}`), 0o644))
+	holdWriter(t, domain)
+	produced := []byte(`{"id":"` + validFlowID + `","frame_width":1920}`)
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: ObjectMeta(validFlowID),
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: validFlowID, Definition: runtime.RawExtension{Raw: produced}},
+		Status: mxlv1alpha1.MxlFlowStatus{Locations: []mxlv1alpha1.MxlFlowLocation{
+			{NodeName: "n2", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+		}},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(flow).
+		Build()
+	lease := &fakeLease{}
+	p := &Publisher{
+		Client: c, WriterAttached: writerAttached, Producer: noProducer, Ours: thisProcess,
+		DomainPath: domain, NodeName: "n1", Lease: lease,
+	}
+
+	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
+
+	var got mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(flow), &got))
+	assert.JSONEq(t, string(produced), string(got.Spec.Definition.Raw),
+		"only the producer's directory describes the flow")
+	assert.Empty(t, localPhase(t, &got, "n1"))
+	assert.Empty(t, lease.renewed)
+}
+
+// A writer neither a producer nor mxl-k8s's own, as one whose pod does
+// not resolve yet, is no evidence against the Origin it always had.
+func TestPublishAppeared_UnresolvedWriter_ClaimsOrigin(t *testing.T) {
+	domain := t.TempDir()
+	writeFlowDir(t, domain, validFlowID)
+	holdWriter(t, domain)
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		Build()
+	p := &Publisher{
+		Client: c, WriterAttached: writerAttached, Producer: noProducer, Ours: noProducer,
+		DomainPath: domain, NodeName: "n1",
+	}
+
+	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
+
+	assert.Equal(t, mxlv1alpha1.MxlFlowLocationOrigin, phaseOnNode(t, c, "n1"))
 }
 
 // A placeholder a mirror had already filled has no marker left to

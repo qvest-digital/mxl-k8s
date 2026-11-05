@@ -19,15 +19,16 @@ appears in the install snippets that follow.
   `FAN_REPORT_DFID_NAME`).
 - Prometheus Operator CRDs (`monitoring.coreos.com`) optional, only
   when `*.metrics.serviceMonitor.enabled=true`.
-- The mxlfs kernel module optional, only when `mxlfs.enabled=true`. A
-  node without it keeps plain domain directories.
+- The [mxlfs](https://github.com/danielclasen/mxlfs) kernel module,
+  only when `mxlfs.enabled=true`. A node without it keeps plain domain
+  directories.
 
 ## Install via Helm CLI
 
 <!-- x-release-please-start-version -->
 ```sh
 helm install mxl oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
-  --version 1.1.0-rc.42 \
+  --version 1.1.0-rc.43 \
   --namespace mxl-system --create-namespace
 ```
 <!-- x-release-please-end -->
@@ -42,7 +43,7 @@ apply the chart's CRDs before enabling mxlfs:
 <!-- x-release-please-start-version -->
 ```sh
 helm show crds oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
-  --version 1.1.0-rc.42 | kubectl apply --server-side -f -
+  --version 1.1.0-rc.43 | kubectl apply --server-side -f -
 ```
 <!-- x-release-please-end -->
 
@@ -73,7 +74,7 @@ spec:
   chart:
     spec:
       chart: mxl-k8s
-      version: "1.1.0-rc.42"
+      version: "1.1.0-rc.43"
       sourceRef:
         kind: HelmRepository
         name: mxl-k8s
