@@ -100,6 +100,17 @@ func TestAwaitTransfer_ChecksAnInterruptWithAPoll(t *testing.T) {
 	assert.Equal(t, 3, *calls)
 }
 
+// Signals can interrupt several blocking calls in a row. Each interrupt
+// whose poll answers not-ready is a signal, and the target is kept.
+func TestAwaitTransfer_KeepsTheTargetThroughRepeatedSignals(t *testing.T) {
+	progress, calls := scriptedProgress(mxl.ErrInterrupted, mxl.ErrInterrupted, mxl.ErrInterrupted, mxl.ErrInterrupted)
+	poll, polls := scriptedProgress(fabrics.ErrNotReady, fabrics.ErrNotReady, fabrics.ErrNotReady, fabrics.ErrNotReady)
+	_, err := awaitTransfer(context.Background(), progress, poll, time.Now(), time.Second)
+	require.NoError(t, err, "repeated signals are not a dropped target")
+	assert.Equal(t, 4, *polls)
+	assert.Equal(t, 5, *calls)
+}
+
 // A connection-oriented initiator that holds no target any more answers
 // interrupted to the poll as well: RCInitiator::makeProgress throws
 // "No more targets available".
