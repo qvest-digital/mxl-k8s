@@ -195,7 +195,7 @@ load_image() {
 MXLFS_SET=()
 DEMO_DIR=demo
 if [ "$MXLFS" = "1" ]; then
-  node=$(kind get nodes --name "$CLUSTER_NAME" | head -1)
+  node="${CLUSTER_NAME}-control-plane"
   if ! $CONTAINER_RUNTIME exec "$node" grep -qw mxlfs /proc/filesystems; then
     echo "ERROR: MXLFS=1 but the kernel of the KIND nodes has no mxlfs; load the module on the host" >&2
     exit 1
