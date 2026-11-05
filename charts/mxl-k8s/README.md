@@ -14,7 +14,8 @@ Kubernetes control plane for MXL (Media eXchange Layer). Installs the operator, 
   when `*.metrics.serviceMonitor.enabled=true`.
 - The [mxlfs](https://github.com/danielclasen/mxlfs) kernel module,
   only when `mxlfs.enabled=true`. A node without it keeps plain domain
-  directories.
+  directories. `mxlfs.huge` needs mxlfs 0.1.0-rc.4 or later;
+  an older module gets the domain mounted without `huge=`.
 
 ## Install via Helm CLI
 
