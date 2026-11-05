@@ -305,6 +305,8 @@ spec:
                   leaves it unset, and the source then assumes libmxl's default of
                   10 ms of samples.
                 format: int64
+                maximum: 4294967295
+                minimum: 1
                 type: integer
             type: object
         type: object

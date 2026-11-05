@@ -136,7 +136,8 @@ type MxlFlowStatus struct {
 	// +kubebuilder:validation:Maximum=4294967295
 	MaxSyncBatchSizeHint int64 `json:"maxSyncBatchSizeHint,omitempty"`
 
-	// MaxCommitBatchSizeHint is described with MaxSyncBatchSizeHint.
+	// MaxCommitBatchSizeHint is the flow's maxCommitBatchSizeHint on its
+	// origin node; see MaxSyncBatchSizeHint.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=4294967295
