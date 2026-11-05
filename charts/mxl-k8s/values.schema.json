@@ -2014,7 +2014,7 @@
             },
             "verbsAckTimeout": {
               "default": 14,
-              "description": "ACK timeout exponent for libfabric's verbs provider, set as FI_VERBS_ACK_TIMEOUT when rdma.enabled and the providers include verbs (or any). A connection retransmits an unacknowledged packet after 4.096us x 2^n and fails after 7 retries; 14 is 67ms per retry, 0.47s to fail, against 537ms and 3.8s at the RDMA-CM default 17. Only libfabric builds carrying the option read it; others keep the kernel default whatever this says. -1 leaves it unset.",
+              "description": "Local ACK timeout of the verbs provider's RC queue pairs, as the exponent n of 4.096us x 2^n: 14 is 67ms. Set as FI_VERBS_ACK_TIMEOUT when rdma.enabled and the providers include verbs (or any). Only the libfabric patch carried by the go-mxl image reads it. -1 leaves it unset, and a queue pair keeps the timeout RDMA-CM computes. No effect on a device whose driver does not program a queue pair's ACK timeout, such as irdma.",
               "maximum": 31,
               "minimum": -1,
               "title": "verbsAckTimeout",
