@@ -336,14 +336,20 @@ func TestEngineLoopFindsAStalledMember(t *testing.T) {
 	setHead := func(m int, head uint64) {
 		atomic.StoreUint64((*uint64)(unsafe.Pointer(&e.members[m].info.runtime.headIndex)), head)
 	}
-	const window = 100 * time.Millisecond
+	// A stalled member counts as moving again only after RecoverAfter
+	// of moves no half window apart, as the loop observes them. A delay
+	// of half the window in the loop or in the goroutine moving the
+	// heads restarts RecoverAfter, so the test keeps the shortest window
+	// the engine uses.
+	const window = StallAfter
 	e.progress = newProgress(e.heads(), time.Now(), window)
 	changed := make(chan struct{}, 8)
 	e.spec.Stalls = func() { changed <- struct{}{} }
 	ctx, cancel := context.WithCancel(context.Background())
-	stop := make(chan struct{})
+	stop, moverDone := make(chan struct{}), make(chan struct{})
 	var resumed atomic.Bool
 	go func() {
+		defer close(moverDone)
 		for h := uint64(1); ; h++ {
 			setHead(1, h)
 			if resumed.Load() {
@@ -358,12 +364,14 @@ func TestEngineLoopFindsAStalledMember(t *testing.T) {
 	}()
 	setHead(0, 1)
 	go e.run(ctx)
-	defer func() { cancel(); <-e.done; close(stop) }()
+	// The heads are written into the members' mappings, which the
+	// cleanup unmaps.
+	defer func() { cancel(); <-e.done; close(stop); <-moverDone }()
 
 	for {
 		select {
 		case <-changed:
-		case <-time.After(time.Second):
+		case <-time.After(2 * window):
 			t.Fatal("the loop did not report a member that stood still")
 		}
 		if stalled, _ := e.Stalled(); len(stalled) > 0 {
