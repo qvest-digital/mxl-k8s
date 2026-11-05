@@ -213,11 +213,13 @@ func TestSource_AStalledMirrorDoesNotHoldAnotherOfTheSameFlow(t *testing.T) {
 			}
 			return true, 1, nil
 		}
+		connected := false
 		progress := func() error {
-			if info == "info-stalled" {
+			if info == "info-stalled" && connected {
 				time.Sleep(time.Millisecond)
 				return fabrics.ErrNotReady
 			}
+			connected = true
 			return nil
 		}
 		runTransferLoop(ctx, done, "flow-1", probe, transfer, progress, progress, time.Millisecond, time.Millisecond, e)

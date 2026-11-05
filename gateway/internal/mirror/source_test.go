@@ -245,7 +245,7 @@ func TestRunTransferLoop_ProgressesEachTransferUntilItCompletes(t *testing.T) {
 
 	posted, progress := link.snapshot()
 	assert.Equal(t, []uint64{11, 12, 13}, posted)
-	assert.Equal(t, 3*4, progress, "three not-ready answers and one completion per transfer")
+	assert.Equal(t, 1+3*4, progress, "one call to connect, then three not-ready answers and one completion per transfer")
 	got, _ := tr.snapshot()
 	assert.Equal(t, []uint64{11, 12, 13}, got)
 	assert.Zero(t, tr.late)
@@ -290,7 +290,13 @@ func TestRunTransferLoop_LateTransferResumesAtTheHead(t *testing.T) {
 func TestRunTransferLoop_DroppedTargetStopsTheLoop(t *testing.T) {
 	h := &headScript{heads: []uint64{10, 11}}
 	link := &fakeLink{t: t}
-	progress := func() error { return mxl.ErrInterrupted }
+	var calls atomic.Int32
+	progress := func() error {
+		if calls.Add(1) == 1 {
+			return nil // connected
+		}
+		return mxl.ErrInterrupted
+	}
 	tr := &recordingTracker{}
 	done, stop := runGrainLoop(h.probe, link.transferGrain, progress, time.Second, tr)
 	defer stop()
@@ -303,6 +309,60 @@ func TestRunTransferLoop_DroppedTargetStopsTheLoop(t *testing.T) {
 	assert.Equal(t, []bool{true}, tr.droppedSnapshot(), "the outstanding transfer is counted lost")
 	got, _ := tr.snapshot()
 	assert.Empty(t, got)
+}
+
+// libmxl-fabrics skips a transfer to a target that is not connected
+// yet and reports nothing outstanding. The loop posts nothing and
+// counts nothing until progress reports the target connected.
+func TestRunTransferLoop_WaitsForTheTargetToConnect(t *testing.T) {
+	h := &headScript{heads: []uint64{10, 11, 12}}
+	var connected atomic.Bool
+	var calls atomic.Int32
+	link := &fakeLink{t: t}
+	progress := func() error {
+		if !connected.Load() {
+			if calls.Add(1) < 5 {
+				return fabrics.ErrNotReady
+			}
+			connected.Store(true)
+			return nil
+		}
+		return link.makeProgress()
+	}
+	transfer := func(idx uint64) (bool, uint64, error) {
+		if !connected.Load() {
+			t.Errorf("grain %d posted before the target connected", idx)
+		}
+		return link.transferGrain(idx)
+	}
+	tr := &recordingTracker{}
+	_, stop := runGrainLoop(h.probe, transfer, progress, time.Second, tr)
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) == 2 }, time.Second, time.Millisecond)
+	stop()
+
+	assert.EqualValues(t, 5, calls.Load())
+	got, _ := tr.snapshot()
+	assert.Equal(t, []uint64{11, 12}, got, "the loop tunes in at the head it saw once connected")
+}
+
+// A target that does not connect within abandonAfter is given up with
+// nothing posted, so the reconciler adds it again.
+func TestRunTransferLoop_GivesUpATargetThatDoesNotConnect(t *testing.T) {
+	h := &headScript{heads: []uint64{10, 11}}
+	link := &fakeLink{t: t}
+	tr := &recordingTracker{}
+	done, stop := runGrainLoop(h.probe, link.transferGrain, func() error { return fabrics.ErrNotReady }, time.Second, tr)
+	defer stop()
+
+	select {
+	case <-done:
+	case <-time.After(abandonAfter + time.Second):
+		t.Fatal("the loop kept waiting for a target that does not connect")
+	}
+	assert.Equal(t, []bool{false}, tr.droppedSnapshot())
+	posted, _ := link.snapshot()
+	assert.Empty(t, posted)
+	assert.Zero(t, h.n, "the head was read before the target connected")
 }
 
 // A post the target is not ready for posts nothing. The loop drives

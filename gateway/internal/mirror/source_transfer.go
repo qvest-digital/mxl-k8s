@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
@@ -172,6 +173,21 @@ func awaitTransfer(ctx context.Context, progress, poll ProgressFunc, posted time
 	}
 }
 
+// awaitConnected calls progress after AddTarget until the target is
+// connected: libmxl-fabrics skips a transfer to a target it has not
+// connected yet, with no error, and then reports nothing outstanding.
+// It reports whether the target connected within abandonAfter.
+func awaitConnected(ctx context.Context, l logr.Logger, progress, poll ProgressFunc, tracker progressTracker) bool {
+	if _, err := awaitTransfer(ctx, progress, poll, time.Now(), 0); err != nil {
+		if ctx.Err() == nil {
+			l.Info("mirror target did not connect", "error", err.Error())
+			tracker.recordDropped(false)
+		}
+		return false
+	}
+	return true
+}
+
 // wait blocks for d or until ctx is done, and reports whether ctx is
 // still live.
 func wait(ctx context.Context, d time.Duration) bool {
@@ -216,6 +232,9 @@ func runTransferLoop(
 	defer close(done)
 
 	l := ctrl.Log.WithName("transfer").WithValues("flowID", flowID)
+	if !awaitConnected(ctx, l, makeProgress, pollProgress, tracker) {
+		return
+	}
 
 	// Tail the live flow rather than replay grains the producer may
 	// already have aged out of the ring.
@@ -337,6 +356,9 @@ func runSampleTransferLoop(
 	defer close(done)
 
 	l := ctrl.Log.WithName("sample-transfer").WithValues("flowID", flowID)
+	if !awaitConnected(ctx, l, makeProgress, pollProgress, tracker) {
+		return
+	}
 
 	agedOut := maxReadable
 	if agedOut > xferBatch {

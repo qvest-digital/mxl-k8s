@@ -122,7 +122,7 @@ func TestRunSampleTransferLoop_SendsOneBatchAtATime(t *testing.T) {
 
 	posted, progress := link.snapshot()
 	assert.Equal(t, []sampleXfer{{480, 480}, {960, 480}, {1440, 480}}, posted)
-	assert.Equal(t, 3*3, progress, "two not-ready answers and one completion per batch")
+	assert.Equal(t, 1+3*3, progress, "one call to connect, then two not-ready answers and one completion per batch")
 	assert.Zero(t, tr.skippedSnapshot())
 }
 
@@ -180,8 +180,14 @@ func TestRunSampleTransferLoop_DroppedTargetStopsTheLoop(t *testing.T) {
 	h := &headScript{heads: []uint64{0, 480}}
 	link := &fakeSampleLink{t: t}
 	tr := &recordingTracker{}
-	done, stop := runSampleLoop(h.probe, link.transferSamples, func() error { return mxl.ErrInterrupted },
-		480, testReadableWindow, time.Second, tr)
+	var calls atomic.Int32
+	progress := func() error {
+		if calls.Add(1) == 1 {
+			return nil // connected
+		}
+		return mxl.ErrInterrupted
+	}
+	done, stop := runSampleLoop(h.probe, link.transferSamples, progress, 480, testReadableWindow, time.Second, tr)
 	defer stop()
 	select {
 	case <-done:
