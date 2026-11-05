@@ -529,3 +529,28 @@ func TestRunFlusher_ClearsRebuildBudgetOnProgress(t *testing.T) {
 }
 
 func ptrTime(t time.Time) *time.Time { return &t }
+
+// A source whose head moves over nothing but invalid grains, as a merge
+// output with every member down, offers its target nothing, so the
+// target completing nothing is not a stall. Once it offers a grain that
+// does not land, it is one.
+func TestObservedState_AllInvalidSourceIsNotTransfersNotLanding(t *testing.T) {
+	const window = 80 * time.Millisecond
+	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1"}
+	e.openedAt = time.Now().Add(-time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	start := time.Now()
+	head := func() (uint64, error) { return 1000 + uint64(time.Since(start)/(5*time.Millisecond)), nil }
+	allInvalid := func(uint64) (bool, uint64, error) { return false, 0, nil }
+	ok := func() error { return nil }
+	go runTransferLoop(ctx, done, "flow-1", head, allInvalid, ok, ok, time.Millisecond, time.Second, e)
+	defer func() { cancel(); <-done }()
+
+	require.Eventually(t, func() bool { return e.invalidGrains.Load() > 0 }, time.Second, time.Millisecond)
+	assert.NotEqual(t, mxlv1alpha1.ReasonTransfersNotLanding, observedState(e, window).reason,
+		"a source with nothing to send reported its transfers as not landing")
+
+	e.recordOffered(time.Now())
+	assert.Equal(t, mxlv1alpha1.ReasonTransfersNotLanding, observedState(e, window).reason)
+}
