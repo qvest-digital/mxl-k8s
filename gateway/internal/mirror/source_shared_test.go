@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
+	"github.com/qvest-digital/go-mxl/mxl"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -434,4 +436,38 @@ mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-1",node="n
 mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-1",node="n01",peer_node="node-b",provider="verbs",reason="invalid"} 0
 mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-1",node="n01",peer_node="node-b",provider="verbs",reason="resync"} 27
 `), "mxl_gateway_mirror_source_unsent_grains_total"))
+}
+
+// Each mirror's sample batch is bounded by the sync hint its own target
+// published with targetInfo: one target holds entries of 240 samples,
+// another publishes none and holds libmxl's 10 ms default.
+func TestSource_SampleBatchFollowsEachTargetsPublishedHint(t *testing.T) {
+	small := fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderTCP)
+	small.Status.TargetMaxSyncBatchSizeHint = 240
+	f := newFanoutFixture(t, small, fanoutMirror("m2", "flow-1", "node-c", "info-c", mxlv1alpha1.ProviderTCP))
+	rate := mxl.Rational{Num: 48000, Den: 1}
+	f.opener.openFn = func(string, fabrics.Provider) (*sharedSource, error) {
+		return &sharedSource{
+			continuous: true,
+			cfg:        mxl.FlowConfig{Common: mxl.CommonFlowConfig{Format: mxl.FormatAudio, GrainRate: rate, MaxSyncBatchSizeHint: 960}},
+			interval:   grainInterval(rate),
+		}, nil
+	}
+	var mu sync.Mutex
+	batches := map[string]uint64{}
+	f.opener.loopFn = func(ctx context.Context, info string, e *sourceEntry) {
+		batch, _, _ := e.shared.sampleTiming(e.targetSyncHint)
+		mu.Lock()
+		batches[info] = batch
+		mu.Unlock()
+		<-ctx.Done()
+	}
+
+	f.reconcile(t, "m1")
+	f.reconcile(t, "m2")
+
+	require.Eventually(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(batches) == 2 }, time.Second, 10*time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, map[string]uint64{"info-b": 240, "info-c": 480}, batches)
 }
