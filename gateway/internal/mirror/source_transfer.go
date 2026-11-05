@@ -91,12 +91,13 @@ func newGrainTransfer(src grainSource, dst grainSender, data bool, perSlice uint
 			// Not posted, although docs/FabricsDeveloperGuide.md sends an
 			// invalid grain's header. A verbs target has one receive
 			// posted per endpoint and reposts it on its next read, and
-			// header-only writes sent back to back outran it on irdma
-			// (transport retry counter exceeded). The target writer flags
-			// the index invalid once the next grain commits past it.
+			// header-only writes sent back to back coincided with
+			// "transport retry counter exceeded" on one verbs device. The
+			// target writer flags the index invalid once the next grain
+			// commits past it.
 			return 0, 0, errInvalidGrain
 		case grain.Invalid():
-			// A data writer never completes a grain and flags no index it
+			// A data writer rarely completes a grain and flags no index it
 			// skips, so the header goes and the target commits it invalid.
 			bytes, err := post(idx, 0, 0)
 			return 0, bytes, err
