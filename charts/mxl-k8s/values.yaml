@@ -743,13 +743,15 @@ gateway:
     # type: integer
     # minimum: -1
     # maximum: 31
+    # not:
+    #   const: 0
     # @schema
     # -- Local ACK timeout of the verbs provider's RC queue pairs, as
-    # the exponent n of 4.096us x 2^n: 14 is 67ms. Set as
-    # FI_VERBS_ACK_TIMEOUT when rdma.enabled and the providers include
-    # verbs (or any). Only the libfabric patch carried by the go-mxl
-    # image reads it. -1 leaves it unset, and a queue pair keeps the
-    # timeout RDMA-CM computes. No effect on a device whose driver does
+    # the exponent n of 4.096us x 2^n: 14 is 67ms. 1 to 31, or -1.
+    # Set as FI_VERBS_ACK_TIMEOUT when rdma.enabled and the providers
+    # include verbs (or any). Only the libfabric patch carried by the
+    # go-mxl image reads it. -1 leaves it unset, and a queue pair keeps
+    # the timeout RDMA-CM computes. No effect on a device whose driver does
     # not program a queue pair's ACK timeout, such as irdma.
     verbsAckTimeout: 14
     extraEnv: []

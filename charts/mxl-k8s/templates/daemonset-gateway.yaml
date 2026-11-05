@@ -140,7 +140,7 @@ spec:
             {{- end }}
             {{- $providers := $g.flags.providers | default list }}
             {{- $ack := $g.rdma.verbsAckTimeout }}
-            {{- if and $g.rdma.enabled (not (kindIs "invalid" $ack)) (ge (int $ack) 0) (or (has "verbs" $providers) (has "any" $providers)) }}
+            {{- if and $g.rdma.enabled (not (kindIs "invalid" $ack)) (gt (int $ack) 0) (or (has "verbs" $providers) (has "any" $providers)) }}
             - name: FI_VERBS_ACK_TIMEOUT
               value: {{ int $ack | quote }}
             {{- end }}
