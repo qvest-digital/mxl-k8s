@@ -2,7 +2,7 @@ package mirror
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
+	"github.com/qvest-digital/go-mxl/mxl"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -530,15 +531,42 @@ func TestRunFlusher_ClearsRebuildBudgetOnProgress(t *testing.T) {
 
 func ptrTime(t time.Time) *time.Time { return &t }
 
-// A post the initiator rejects for good is published with its text, so
-// the mirror says why it delivers nothing.
+// A post the initiator rejects for good is published with the error
+// the loop received, which go-mxl carries as the libmxl status alone.
 func TestObservedState_CarriesAPostRejectedForGood(t *testing.T) {
 	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1"}
 	e.openedAt = time.Now()
-	e.recordPostFailed(errors.New("Count is too large for the bounce buffer entry size"))
+	e.recordPostFailed(fmt.Errorf("%w: %w", errPost, mxl.ErrInvalidArg))
 
 	state := observedState(e, defaultReaderStallAfter)
 
 	assert.Equal(t, mxlv1alpha1.ReasonTransfersNotLanding, state.reason)
-	assert.Contains(t, state.message, "Count is too large for the bounce buffer entry size")
+	assert.Contains(t, state.message, "the initiator rejects every transfer")
+	assert.Contains(t, state.message, mxl.ErrInvalidArg.Error())
+}
+
+// A source whose head moves over nothing but invalid grains, as a merge
+// output with every member down, offers its target nothing, so the
+// target completing nothing is not a stall. Once it offers a grain that
+// does not land, it is one.
+func TestObservedState_AllInvalidSourceIsNotTransfersNotLanding(t *testing.T) {
+	const window = 80 * time.Millisecond
+	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1"}
+	e.openedAt = time.Now().Add(-time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	start := time.Now()
+	head := func() (uint64, error) { return 1000 + uint64(time.Since(start)/(5*time.Millisecond)), nil }
+	allInvalid := func(uint64) (uint64, error) { return 0, errInvalidGrain }
+	probe, transfer := readable(head, allInvalid)
+	ok := func() error { return nil }
+	go runTransferLoop(ctx, done, "flow-1", probe, transfer, ok, ok, time.Millisecond, time.Second, e)
+	defer func() { cancel(); <-done }()
+
+	require.Eventually(t, func() bool { return e.invalidGrains.Load() > 0 }, time.Second, time.Millisecond)
+	assert.NotEqual(t, mxlv1alpha1.ReasonTransfersNotLanding, observedState(e, window).reason,
+		"a source with nothing to send reported its transfers as not landing")
+
+	e.recordOffered(time.Now())
+	assert.Equal(t, mxlv1alpha1.ReasonTransfersNotLanding, observedState(e, window).reason)
 }
