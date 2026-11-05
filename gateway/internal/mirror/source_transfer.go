@@ -26,13 +26,6 @@ const progressTimeout = 10 * time.Millisecond
 // target is treated as lost and added again.
 const abandonAfter = 2 * time.Second
 
-// droppedAfterInterrupts is how many consecutive interrupted
-// MakeProgress answers mean the initiator holds no target any more.
-// libmxl-fabrics answers interrupted for a signal and, on a
-// connection-oriented initiator, for having dropped its last target;
-// only the second repeats.
-const droppedAfterInterrupts = 3
-
 // errTargetLost reports a transfer whose target cannot be reached
 // through this initiator any more.
 var errTargetLost = errors.New("target lost")
@@ -145,31 +138,33 @@ func progressFuncFor(in progressDriver, caps fabrics.InterfaceCapFlags) Progress
 	return func() error { return in.MakeProgress(progressTimeout) }
 }
 
-// awaitTransfer calls progress until the outstanding transfer
-// completes, and reports whether that took longer than deadline. It
-// returns errTargetLost when the target dropped, the initiator failed
-// or the transfer stayed outstanding past abandonAfter, and ctx.Err()
-// once ctx is done.
-func awaitTransfer(ctx context.Context, progress ProgressFunc, posted time.Time, deadline time.Duration) (late bool, err error) {
-	interrupts := 0
+// awaitTransfer calls progress until it stops returning not-ready, and
+// reports whether that took longer than deadline. It returns
+// errTargetLost when the target dropped, the initiator failed or
+// progress stayed not-ready past abandonAfter, and ctx.Err() once ctx
+// is done.
+//
+// An interrupted progress call is checked with one call of poll, the
+// non-blocking variant, which no signal interrupts: a connection-
+// oriented initiator answers interrupted to it once it holds no
+// target. A reliable-datagram initiator never does, so there only
+// abandonAfter detects a lost target.
+func awaitTransfer(ctx context.Context, progress, poll ProgressFunc, posted time.Time, deadline time.Duration) (late bool, err error) {
 	for {
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
 		perr := progress()
+		if classifyFabricError(perr) == fabricTransient {
+			perr = poll()
+		}
 		elapsed := time.Since(posted)
 		switch kind := classifyFabricError(perr); {
 		case perr == nil:
 			return deadline > 0 && elapsed > deadline, nil
 		case kind == fabricIdle:
-			interrupts = 0
 			if elapsed > abandonAfter {
-				return true, fmt.Errorf("%w: transfer outstanding for %s", errTargetLost, elapsed.Round(time.Millisecond))
-			}
-		case kind == fabricTransient:
-			interrupts++
-			if interrupts >= droppedAfterInterrupts {
-				return true, fmt.Errorf("%w: %w", errTargetLost, perr)
+				return true, fmt.Errorf("%w: not ready for %s", errTargetLost, elapsed.Round(time.Millisecond))
 			}
 		default:
 			return true, fmt.Errorf("%w: %w", errTargetLost, perr)
@@ -204,16 +199,17 @@ func retryablePost(err error) bool {
 // mirror's target until ctx is canceled or the target is lost. Closes
 // done on exit.
 //
-// poll is how long the loop waits for the producer when it has nothing
-// new, interval one grain of the flow and the deadline of each
-// transfer.
+// makeProgress is the progress call the loop waits in, pollProgress
+// its non-blocking variant. poll is how long the loop waits for the
+// producer when it has nothing new, interval one grain of the flow and
+// the deadline of each transfer.
 func runTransferLoop(
 	ctx context.Context,
 	done chan struct{},
 	flowID string,
 	probeRuntime RuntimeProbe,
 	transferGrain TransferFunc,
-	makeProgress ProgressFunc,
+	makeProgress, pollProgress ProgressFunc,
 	poll, interval time.Duration,
 	tracker progressTracker,
 ) {
@@ -301,7 +297,7 @@ func runTransferLoop(
 
 		posted := time.Now()
 		tracker.recordOffered(posted)
-		late, err := awaitTransfer(ctx, makeProgress, posted, interval)
+		late, err := awaitTransfer(ctx, makeProgress, pollProgress, posted, interval)
 		if err != nil {
 			if ctx.Err() == nil {
 				l.Info("lost the mirror target", "index", next, "error", err.Error())
@@ -332,7 +328,7 @@ func runSampleTransferLoop(
 	flowID string,
 	probeRuntime RuntimeProbe,
 	transferSamples SampleTransferFunc,
-	makeProgress ProgressFunc,
+	makeProgress, pollProgress ProgressFunc,
 	xferBatch uint64,
 	maxReadable uint64,
 	poll, interval time.Duration,
@@ -400,7 +396,7 @@ func runSampleTransferLoop(
 
 		posted := time.Now()
 		tracker.recordOffered(posted)
-		late, err := awaitTransfer(ctx, makeProgress, posted, interval)
+		late, err := awaitTransfer(ctx, makeProgress, pollProgress, posted, interval)
 		if err != nil {
 			if ctx.Err() == nil {
 				l.Info("lost the mirror target", "headIndex", end, "error", err.Error())

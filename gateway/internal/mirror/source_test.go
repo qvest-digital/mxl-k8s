@@ -211,7 +211,7 @@ func (rt *recordingTracker) droppedSnapshot() []bool {
 func runGrainLoop(probe RuntimeProbe, transfer TransferFunc, progress ProgressFunc, interval time.Duration, tr progressTracker) (done chan struct{}, stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done = make(chan struct{})
-	go runTransferLoop(ctx, done, "flow-a", probe, transfer, progress, time.Millisecond, interval, tr)
+	go runTransferLoop(ctx, done, "flow-a", probe, transfer, progress, progress, time.Millisecond, interval, tr)
 	return done, func() {
 		cancel()
 		<-done
@@ -476,7 +476,7 @@ func TestRunTransferLoop_CtxCancelExitsImmediately(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go runTransferLoop(ctx, done, "f", h.probe, func(uint64) (bool, uint64, error) { return true, 0, nil },
-		func() error { return nil }, time.Hour, time.Second, &recordingTracker{})
+		func() error { return nil }, func() error { return nil }, time.Hour, time.Second, &recordingTracker{})
 	cancel()
 	select {
 	case <-done:

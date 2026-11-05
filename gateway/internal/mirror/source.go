@@ -1094,10 +1094,10 @@ func (o *libmxlOpener) attach(s *sharedSource, targetInfoStr string, e *sourceEn
 	if s.continuous {
 		go runSampleTransferLoop(ctx, link.done, s.key.flowID, probe,
 			newSampleTransfer(reader, initiator, uint64(s.cfg.Continuous.BufferLength)),
-			progress, s.xferBatch, s.maxBatch, s.poll, s.interval, e)
+			progress, initiator.MakeProgressNonBlocking, s.xferBatch, s.maxBatch, s.poll, s.interval, e)
 	} else {
 		transfer := newGrainTransfer(reader, initiator, s.cfg.Common.Format == mxl.FormatData, sliceBytes(s.cfg))
-		go runTransferLoop(ctx, link.done, s.key.flowID, probe, transfer, progress, s.poll, s.interval, e)
+		go runTransferLoop(ctx, link.done, s.key.flowID, probe, transfer, progress, initiator.MakeProgressNonBlocking, s.poll, s.interval, e)
 	}
 	return link, nil
 }

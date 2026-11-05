@@ -55,9 +55,18 @@ func scriptedProgress(answers ...error) (ProgressFunc, *int) {
 	}, &calls
 }
 
+// noPoll fails the test when awaitTransfer polls, which it does only
+// after an interrupt.
+func noPoll(t *testing.T) ProgressFunc {
+	return func() error {
+		t.Error("polled without an interrupt")
+		return nil
+	}
+}
+
 func TestAwaitTransfer_ProgressesUntilNotReadyStops(t *testing.T) {
 	progress, calls := scriptedProgress(fabrics.ErrNotReady, fabrics.ErrNotReady, fabrics.ErrNotReady)
-	late, err := awaitTransfer(context.Background(), progress, time.Now(), time.Second)
+	late, err := awaitTransfer(context.Background(), progress, noPoll(t), time.Now(), time.Second)
 	require.NoError(t, err)
 	assert.False(t, late)
 	assert.Equal(t, 4, *calls, "a transfer is complete only once MakeProgress stops returning not-ready")
@@ -65,44 +74,48 @@ func TestAwaitTransfer_ProgressesUntilNotReadyStops(t *testing.T) {
 
 func TestAwaitTransfer_ReportsAMissedDeadline(t *testing.T) {
 	progress, _ := scriptedProgress(fabrics.ErrNotReady)
-	late, err := awaitTransfer(context.Background(), progress, time.Now().Add(-50*time.Millisecond), 20*time.Millisecond)
+	late, err := awaitTransfer(context.Background(), progress, noPoll(t), time.Now().Add(-50*time.Millisecond), 20*time.Millisecond)
 	require.NoError(t, err)
 	assert.True(t, late)
 }
 
 func TestAwaitTransfer_ZeroDeadlineIsNeverLate(t *testing.T) {
 	progress, _ := scriptedProgress()
-	late, err := awaitTransfer(context.Background(), progress, time.Now().Add(-time.Second), 0)
+	late, err := awaitTransfer(context.Background(), progress, noPoll(t), time.Now().Add(-time.Second), 0)
 	require.NoError(t, err)
 	assert.False(t, late, "a flow without a usable rate has no deadline to miss")
 }
 
-// A connection-oriented initiator that dropped its only target answers
-// interrupted on every call; one signal does not.
-func TestAwaitTransfer_RepeatedInterruptsMeanTheTargetDropped(t *testing.T) {
-	progress, _ := scriptedProgress(mxl.ErrInterrupted, fabrics.ErrNotReady)
-	_, err := awaitTransfer(context.Background(), progress, time.Now(), time.Second)
-	require.NoError(t, err, "a single interrupt is a signal, not a dropped target")
+// A signal interrupts a blocking progress call. The poll that checks it
+// is not interrupted by one, so the transfer goes on.
+func TestAwaitTransfer_ChecksAnInterruptWithAPoll(t *testing.T) {
+	progress, calls := scriptedProgress(mxl.ErrInterrupted, fabrics.ErrNotReady)
+	poll, polls := scriptedProgress(fabrics.ErrNotReady)
+	_, err := awaitTransfer(context.Background(), progress, poll, time.Now(), time.Second)
+	require.NoError(t, err, "a signal is not a dropped target")
+	assert.Equal(t, 1, *polls)
+	assert.Equal(t, 3, *calls)
+}
 
-	interrupts := make([]error, droppedAfterInterrupts)
-	for i := range interrupts {
-		interrupts[i] = mxl.ErrInterrupted
-	}
-	progress, calls := scriptedProgress(interrupts...)
-	_, err = awaitTransfer(context.Background(), progress, time.Now(), time.Second)
+// A connection-oriented initiator that holds no target any more answers
+// interrupted to the poll as well.
+func TestAwaitTransfer_AnInterruptedPollLosesTheTarget(t *testing.T) {
+	progress, _ := scriptedProgress(mxl.ErrInterrupted)
+	poll, polls := scriptedProgress(mxl.ErrInterrupted)
+	_, err := awaitTransfer(context.Background(), progress, poll, time.Now(), time.Second)
 	require.ErrorIs(t, err, errTargetLost)
-	assert.Equal(t, droppedAfterInterrupts, *calls)
+	assert.Equal(t, 1, *polls)
 }
 
 func TestAwaitTransfer_EndpointErrorLosesTheTarget(t *testing.T) {
 	progress, _ := scriptedProgress(errors.New("endpoint gone"))
-	_, err := awaitTransfer(context.Background(), progress, time.Now(), time.Second)
+	_, err := awaitTransfer(context.Background(), progress, noPoll(t), time.Now(), time.Second)
 	require.ErrorIs(t, err, errTargetLost)
 }
 
 func TestAwaitTransfer_AbandonsATransferThatNeverCompletes(t *testing.T) {
 	progress, _ := scriptedProgress(fabrics.ErrNotReady)
-	_, err := awaitTransfer(context.Background(), progress, time.Now().Add(-abandonAfter-time.Millisecond), time.Second)
+	_, err := awaitTransfer(context.Background(), progress, noPoll(t), time.Now().Add(-abandonAfter-time.Millisecond), time.Second)
 	require.ErrorIs(t, err, errTargetLost)
 }
 
@@ -110,7 +123,7 @@ func TestAwaitTransfer_StopsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	progress, calls := scriptedProgress()
-	_, err := awaitTransfer(ctx, progress, time.Now(), time.Second)
+	_, err := awaitTransfer(ctx, progress, noPoll(t), time.Now(), time.Second)
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Zero(t, *calls)
 }

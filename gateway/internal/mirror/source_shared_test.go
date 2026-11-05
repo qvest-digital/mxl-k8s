@@ -220,7 +220,7 @@ func TestSource_AStalledMirrorDoesNotHoldAnotherOfTheSameFlow(t *testing.T) {
 			}
 			return nil
 		}
-		runTransferLoop(ctx, done, "flow-1", probe, transfer, progress, time.Millisecond, time.Millisecond, e)
+		runTransferLoop(ctx, done, "flow-1", probe, transfer, progress, progress, time.Millisecond, time.Millisecond, e)
 	}
 	f.reconcile(t, "m1")
 	f.reconcile(t, "m2")

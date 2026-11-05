@@ -84,7 +84,7 @@ func (f *fakeSampleLink) snapshot() ([]sampleXfer, int) {
 func runSampleLoop(probe RuntimeProbe, transfer SampleTransferFunc, progress ProgressFunc, xferBatch, window uint64, interval time.Duration, tr progressTracker) (done chan struct{}, stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done = make(chan struct{})
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, progress, xferBatch, window, time.Millisecond, interval, tr)
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, progress, progress, xferBatch, window, time.Millisecond, interval, tr)
 	return done, func() {
 		cancel()
 		<-done

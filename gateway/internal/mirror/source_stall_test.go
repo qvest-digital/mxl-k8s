@@ -209,7 +209,7 @@ func TestRunTransferLoop_RecordsProbedHead(t *testing.T) {
 			return 7, nil
 		},
 		func(uint64) (bool, uint64, error) { return true, 0, nil },
-		func() error { return nil },
+		func() error { return nil }, func() error { return nil },
 		time.Millisecond, time.Second, tracker)
 
 	<-done
@@ -249,7 +249,7 @@ func TestRunSampleTransferLoop_RecordsProbedHead(t *testing.T) {
 			t.Error("a head that never advances leaves nothing to transfer")
 			return 0, nil
 		},
-		func() error { return nil },
+		func() error { return nil }, func() error { return nil },
 		480, testReadableWindow, time.Millisecond, time.Second, tracker)
 
 	<-done

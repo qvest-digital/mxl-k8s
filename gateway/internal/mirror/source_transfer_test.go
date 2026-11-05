@@ -58,7 +58,7 @@ func TestGrainTransfer_SendsEveryGrainOnceWhileKeepingUp(t *testing.T) {
 	transfer := newGrainTransfer(src, dst, false, 5120)
 	done := make(chan struct{})
 	runTransferLoop(ctx, done, "f", func() (uint64, error) { return src.head(), nil }, transfer,
-		func() error { return nil }, 2*time.Millisecond, src.interval, &recordingTracker{})
+		func() error { return nil }, func() error { return nil }, 2*time.Millisecond, src.interval, &recordingTracker{})
 	<-done
 	produced := int64(src.head() - first)
 	assert.InDelta(t, produced, dst.n.Load(), 2)
