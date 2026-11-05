@@ -83,7 +83,7 @@ func TestTarget_ProgressWritesCarryNoTargetInfo(t *testing.T) {
 		mxlv1alpha1.MxlFlowMirrorStatus{})
 	r, seen := newCapturingTarget(t, mirror)
 
-	require.NoError(t, r.applyTargetInfo(context.Background(), mirror, "info-1"))
+	require.NoError(t, r.applyTargetInfo(context.Background(), mirror, "info-1", 0))
 	commit := time.Now()
 	require.NoError(t, r.applyTargetStatus(context.Background(), mirror,
 		mxlv1alpha1.MxlFlowMirrorReady, &commit, &metav1.Condition{
@@ -166,4 +166,25 @@ func TestTarget_PhaseChangeIsNeverQuantised(t *testing.T) {
 		"a Ready->Degraded transition sharing one timestamp must still "+
 			"publish; suppressing it would hide the failure the status "+
 			"exists to report")
+}
+
+// The source bounds a sample batch by the target's sync hint, so it
+// must never read a hint that belongs to another descriptor than the
+// one it dials: both go in one payload under one manager. A target
+// without a writer config publishes no hint, which the source reads as
+// libmxl's default.
+func TestTarget_TargetInfoCarriesTheWritersSyncHint(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1",
+		mxlv1alpha1.MxlFlowMirrorStatus{})
+	r, seen := newCapturingTarget(t, mirror)
+
+	require.NoError(t, r.applyTargetInfo(context.Background(), mirror, "info-1", 960))
+	require.NoError(t, r.applyTargetInfo(context.Background(), mirror, "info-2", 0))
+
+	require.Len(t, *seen, 2)
+	assert.Equal(t, targetInfoFieldOwner, (*seen)[0].owner)
+	assert.Equal(t, "info-1", (*seen)[0].status["targetInfo"])
+	assert.EqualValues(t, 960, (*seen)[0].status["targetMaxSyncBatchSizeHint"])
+	assert.False(t, (*seen)[1].has("targetMaxSyncBatchSizeHint"))
 }

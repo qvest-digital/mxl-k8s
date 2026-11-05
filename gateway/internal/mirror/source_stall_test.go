@@ -2,6 +2,7 @@ package mirror
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
+	"github.com/qvest-digital/go-mxl/mxl"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -24,19 +26,17 @@ func stalledEntry(head uint64, headAt *time.Time, transfers uint64, sentAt time.
 	// reader rebuild budget and the writer-liveness seam through it.
 	// Added against the TargetInfo the test mirrors publish, so the
 	// flusher treats it as attached to the current fabric side.
-	// Connected, as an initiator reporting completions to it is.
 	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1"}
-	e.connected.Store(true)
 	e.lastHead.Store(head)
 	if headAt != nil {
 		t := *headAt
 		e.headAdvancedAt.Store(&t)
 	}
 	if transfers > 0 {
-		if sentAt.IsZero() {
-			e.progress.Store(transfers)
-		} else {
-			e.recordDelivered(transfers, sentAt)
+		e.progress.Store(transfers)
+		if !sentAt.IsZero() {
+			t := sentAt
+			e.lastSentAt.Store(&t)
 		}
 	}
 	return e
@@ -170,7 +170,7 @@ func TestObservedState_TransfersStoppedWithLiveHead(t *testing.T) {
 func TestRecordHead_StampsOnlyOnChange(t *testing.T) {
 	// headAdvancedAt has to measure how long the reader has stood
 	// still, not how long ago it was last polled: the loop probes
-	// every ProgressInterval regardless of whether the head moved.
+	// every PollInterval regardless of whether the head moved.
 	e := &sourceEntry{}
 	t0 := time.Now()
 
@@ -202,17 +202,16 @@ func TestRunTransferLoop_RecordsProbedHead(t *testing.T) {
 	probes <- 7
 	close(probes)
 
-	go runTransferLoop(ctx, done, "flow-1",
-		func() (uint64, error) {
-			if h, ok := <-probes; ok {
-				return h, nil
-			}
-			cancel()
-			return 7, nil
-		},
-		func(uint64, bool) (bool, error) { return true, nil },
-		func() error { return nil },
-		time.Millisecond, tracker)
+	probe, transfer := readable(func() (uint64, error) {
+		if h, ok := <-probes; ok {
+			return h, nil
+		}
+		cancel()
+		return 7, nil
+	}, func(uint64) (uint64, error) { return 0, nil })
+	go runTransferLoop(ctx, done, "flow-1", probe, transfer,
+		func() error { return nil }, func() error { return nil },
+		time.Millisecond, time.Second, tracker)
 
 	<-done
 	heads := tracker.headSnapshot()
@@ -247,13 +246,12 @@ func TestRunSampleTransferLoop_RecordsProbedHead(t *testing.T) {
 			cancel()
 			return 4800, nil
 		},
-		func(uint64, int) error {
+		func(uint64, int) (uint64, error) {
 			t.Error("a head that never advances leaves nothing to transfer")
-			return nil
+			return 0, nil
 		},
-		func() error { return nil },
-		func() error { return nil },
-		480, testReadableWindow, time.Millisecond, tracker)
+		func() error { return nil }, func() error { return nil },
+		480, testReadableWindow, func(uint64) time.Duration { return 0 }, time.Millisecond, time.Second, tracker)
 
 	<-done
 	heads := tracker.headSnapshot()
@@ -532,3 +530,45 @@ func TestRunFlusher_ClearsRebuildBudgetOnProgress(t *testing.T) {
 }
 
 func ptrTime(t time.Time) *time.Time { return &t }
+
+// A post the initiator rejects for good is published with the error
+// the loop received, which go-mxl carries as the libmxl status alone.
+func TestObservedState_CarriesAPostRejectedForGood(t *testing.T) {
+	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1"}
+	e.openedAt = time.Now()
+	e.recordPostFailed(fmt.Errorf("%w: %w", errPost, mxl.ErrInvalidArg))
+
+	state := observedState(e, defaultReaderStallAfter)
+
+	assert.Equal(t, mxlv1alpha1.ReasonTransfersNotLanding, state.reason)
+	assert.Contains(t, state.message, "the initiator rejects every transfer")
+	assert.Contains(t, state.message, mxl.ErrInvalidArg.Error())
+}
+
+// A source whose head moves over nothing but invalid grains, as a merge
+// output with every member down, posts each one as its header, as
+// runDiscrete in tools/mxl-fabrics-demo/demo.cpp does. Those headers
+// land, so the mirror is not reported as TransfersNotLanding.
+func TestObservedState_AllInvalidSourceDeliversHeaders(t *testing.T) {
+	src := flaggedSource{}
+	for idx := uint64(1000); idx <= 1003; idx++ {
+		src[idx] = mxl.Grain{Index: idx, Flags: mxl.GrainFlagInvalid, TotalSlices: 1080, ValidSlices: 1080, GrainSize: 5529600}
+	}
+	dst := &recordingSender{}
+	h := &headScript{heads: []uint64{1000, 1003}}
+	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1"}
+	e.openedAt = time.Now().Add(-time.Minute)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	ok := func() error { return nil }
+	go runTransferLoop(ctx, done, "flow-1", h.probe, newGrainTransfer(src, dst, false, 5120, 0), ok, ok,
+		time.Millisecond, time.Second, e)
+
+	require.Eventually(t, func() bool { return e.progress.Load() == 3 }, time.Second, time.Millisecond)
+	assert.NotEqual(t, mxlv1alpha1.ReasonTransfersNotLanding, observedState(e, defaultReaderStallAfter).reason,
+		"a source whose headers land reported its transfers as not landing")
+	cancel()
+	<-done
+	assert.Equal(t, [][3]uint64{{1001, 0, 0}, {1002, 0, 0}, {1003, 0, 0}}, dst.calls)
+	assert.Zero(t, e.bytes.Load(), "an invalid grain carries no payload")
+}

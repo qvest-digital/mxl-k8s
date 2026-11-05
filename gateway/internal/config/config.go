@@ -91,22 +91,6 @@ type Config struct {
 	// it wants to span several ProbePeriod.
 	RDMAEnumerationGrace time.Duration
 
-	// PacingFraction is how much of a grain's own edit-rate interval
-	// the source gateway spreads that grain's transmission over. It
-	// caps peak rate at the flow's own rate divided by this, and costs
-	// up to this much of a grain interval in added latency. Negative
-	// disables pacing and restores whole-grain transfers, which is the
-	// default.
-	PacingFraction float64
-
-	// PacingChunks is how many slice ranges a paced grain is split
-	// into. Under 2 disables pacing.
-	PacingChunks int
-
-	// GrainsInFlight is how many grains one mirror target may have
-	// posted and not completed before further grains skip it.
-	GrainsInFlight int
-
 	// DegradedAfter is the inactivity window the target-side
 	// reconciler uses to demote a Ready mirror to Degraded and to
 	// invalidate its Reconcile fast-path. Matches the operator-side
@@ -214,21 +198,6 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"How long the host device discrepancy must hold before --rdma-enumeration-liveness "+
 			"fails the probe. Spans several --probe-period so a single enumeration does not "+
 			"decide it.")
-	fs.Float64Var(&c.PacingFraction, "pacing-fraction", -1,
-		"Fraction of a grain's own interval to spread that grain's transmission over. "+
-			"Caps peak rate at the flow's rate divided by this, and costs up to this much "+
-			"of a grain interval in latency. Negative disables pacing, which is the "+
-			"default; 0.5 is where to start when enabling it. Mirrors over efa are "+
-			"never paced.")
-	fs.IntVar(&c.PacingChunks, "pacing-chunks", 8,
-		"Number of slice ranges a paced grain is split into. Higher shortens the burst "+
-			"further at the cost of one cgo call and one RMA write per plane each. "+
-			"Under 2 disables pacing.")
-	fs.IntVar(&c.GrainsInFlight, "grains-in-flight", 8,
-		"Grains one mirror target may have posted and not completed. A grain offered to a "+
-			"target with this many in flight is skipped for that target alone. Capped at a "+
-			"quarter of the source ring and at 16; the cap bounds how many grains are in flight, "+
-			"not how long one takes.")
 	fs.DurationVar(&c.DegradedAfter, "degraded-after", 10*time.Second,
 		"Grain-commit inactivity after which the target gateway demotes a mirror to Degraded.")
 	fs.DurationVar(&c.DomainGCInterval, "domain-gc-interval", domaingc.DefaultInterval,
@@ -340,13 +309,6 @@ func (c *Config) Validate() error {
 	}
 	if c.KubeAPIBurst <= 0 {
 		return fmt.Errorf("--kube-api-burst must be positive, got %d", c.KubeAPIBurst)
-	}
-	// A fraction at or above 1 spreads a grain over its whole interval
-	// or beyond, so its transmission runs into the next grain's and the
-	// mirror never catches up. Disabling is spelled with a negative
-	// value, which keeps zero meaning "unset" for the reconciler.
-	if c.PacingFraction >= 1 {
-		return fmt.Errorf("--pacing-fraction must be below 1, got %v", c.PacingFraction)
 	}
 	return nil
 }
