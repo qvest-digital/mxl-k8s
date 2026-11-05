@@ -210,14 +210,43 @@ func TestGrainInterval(t *testing.T) {
 	assert.Zero(t, grainInterval(mxl.Rational{}))
 }
 
-// A sample batch is the flow's sync hint, as in runContinuous in
-// tools/mxl-fabrics-demo/demo.cpp, but no more than the 10 ms the
-// target's writer takes by default (NewWriter in target.go), which sizes
-// the bounce-buffer entry the batch lands in.
-func TestSampleBatch_FitsTheTargetsDefaultEntry(t *testing.T) {
+// A sample batch is the source flow's sync hint, as in runContinuous in
+// tools/mxl-fabrics-demo/demo.cpp, but no more than the target's
+// bounce-buffer entry holds: one batch of the target flow's sync hint,
+// or of libmxl's 10 ms default for a target that publishes none.
+// libmxl-fabrics rejects a larger batch for good.
+func TestSampleBatch_FitsTheTargetsEntry(t *testing.T) {
 	rate := mxl.Rational{Num: 48000, Den: 1}
-	assert.Equal(t, uint64(480), sampleBatch(960, rate), "a hint above 10 ms is capped")
-	assert.Equal(t, uint64(240), sampleBatch(240, rate), "a hint below 10 ms is kept")
-	assert.Equal(t, uint64(480), sampleBatch(0, rate))
-	assert.Equal(t, uint64(1), sampleBatch(0, mxl.Rational{}))
+	assert.Equal(t, uint64(960), sampleBatch(960, 960, rate), "a target created with the source's hints takes its batch")
+	assert.Equal(t, uint64(480), sampleBatch(960, 480, rate), "a smaller target entry caps the batch")
+	assert.Equal(t, uint64(240), sampleBatch(240, 960, rate), "a source hint below the entry is kept")
+	assert.Equal(t, uint64(480), sampleBatch(960, 0, rate), "a target that publishes no hint holds 10 ms")
+	assert.Equal(t, uint64(240), sampleBatch(240, 0, rate))
+	assert.Equal(t, uint64(480), sampleBatch(0, 0, rate))
+	assert.Equal(t, uint64(1), sampleBatch(0, 0, mxl.Rational{}))
+}
+
+// A mirror's batch, the time it covers and the head poll follow its own
+// target: two mirrors of one flow can have targets of different entries.
+func TestSampleTiming_FollowsTheTarget(t *testing.T) {
+	s := &sharedSource{
+		cfg: mxl.FlowConfig{Common: mxl.CommonFlowConfig{
+			Format: mxl.FormatAudio, GrainRate: mxl.Rational{Num: 48000, Den: 1}, MaxSyncBatchSizeHint: 960,
+		}},
+		interval: grainInterval(mxl.Rational{Num: 48000, Den: 1}),
+		maxBatch: 1 << 20,
+	}
+	batch, interval, poll := s.sampleTiming(960)
+	assert.Equal(t, uint64(960), batch)
+	assert.Equal(t, 960*s.interval, interval)
+	assert.Equal(t, 10*time.Millisecond, poll)
+
+	batch, interval, poll = s.sampleTiming(0)
+	assert.Equal(t, uint64(480), batch)
+	assert.Equal(t, 480*s.interval, interval)
+	assert.Equal(t, 5*time.Millisecond, poll)
+
+	s.maxBatch = 256
+	batch, _, _ = s.sampleTiming(960)
+	assert.Equal(t, uint64(256), batch, "no batch is longer than the reader hands out")
 }

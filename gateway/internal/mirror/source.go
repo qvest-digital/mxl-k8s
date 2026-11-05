@@ -228,18 +228,20 @@ type sharedSource struct {
 	cfg     mxl.FlowConfig
 
 	// continuous is set for an audio flow, whose indices count samples
-	// rather than grains. xferBatch is the samples one transfer carries
-	// and maxBatch the longest run the reader hands out.
-	continuous          bool
-	xferBatch, maxBatch uint64
+	// rather than grains. maxBatch is the longest run the reader hands
+	// out; the samples one transfer carries depend on the target, see
+	// sampleTiming.
+	continuous bool
+	maxBatch   uint64
 
 	// sliceBatch is the slices of a video grain one transfer adds, the
 	// flow's maxSyncBatchSizeHint; zero sends the grain whole.
 	sliceBatch uint16
 
-	// interval is the time one transfer covers, a grain or a batch of
-	// samples, past which it counts as late. poll is how often a loop
-	// with nothing to send probes the head.
+	// interval is the time one grain or sample covers; a transfer that
+	// takes longer than the grains or samples it carries counts as late.
+	// poll is how often a loop with nothing to send probes the head,
+	// zero for a continuous flow's default.
 	interval, poll time.Duration
 
 	// mirrors is the attached set, written under the reconciler's mutex.
@@ -315,6 +317,10 @@ type sourceEntry struct {
 	// link is this mirror's initiator, target and transfer loop. Set
 	// once attach returns, before the entry is published.
 	link *sourceLink
+
+	// targetSyncHint is the sync hint the target published with
+	// infoStr, which bounds a sample batch; 0 when it published none.
+	targetSyncHint uint32
 
 	// infoStr is the serialized TargetInfo the target was added with.
 	// We keep it so a later reconcile can detect that the target has
@@ -731,7 +737,9 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		shared:   shared,
 		infoStr:  mirror.Status.TargetInfo,
 		peerNode: mirror.Spec.TargetNode,
-		openedAt: time.Now(),
+		// Published with TargetInfo, so it describes the same target.
+		targetSyncHint: uint32(mirror.Status.TargetMaxSyncBatchSizeHint),
+		openedAt:       time.Now(),
 	}
 	// Carry the published lastSentAt onto the fresh entry: a rebuilt
 	// entry has no transfers of its own, and an omitted field is one
@@ -1048,18 +1056,10 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 			_ = reader.Close()
 			return nil, fmt.Errorf("GetMaxReadLengthSamples: %w", err)
 		}
-		s.xferBatch = sampleBatch(cfg.Common.MaxSyncBatchSizeHint, cfg.Common.GrainRate)
-		if s.maxBatch > 0 && s.xferBatch > s.maxBatch {
-			s.xferBatch = s.maxBatch
-		}
-		s.interval *= time.Duration(s.xferBatch)
-		if s.poll <= 0 {
-			s.poll = defaultSamplePollInterval(cfg.Common.GrainRate, s.xferBatch)
-		}
 	} else if hint := cfg.Common.MaxSyncBatchSizeHint; hint < uint32(mxl.GrainValidSlicesAll) {
 		s.sliceBatch = uint16(hint)
 	}
-	if s.poll <= 0 {
+	if !s.continuous && s.poll <= 0 {
 		s.poll = 2 * time.Millisecond
 	}
 	// The reader only answered for the flow; each mirror opens its own.
@@ -1128,9 +1128,10 @@ func (o *libmxlOpener) attach(s *sharedSource, targetInfoStr string, e *sourceEn
 	if s.continuous {
 		rate := s.cfg.Common.GrainRate
 		untilIndex := func(index uint64) time.Duration { return time.Duration(mxl.NsUntilIndex(index, rate)) }
+		batch, interval, poll := s.sampleTiming(e.targetSyncHint)
 		go runSampleTransferLoop(ctx, link.done, s.key.flowID, probe,
 			newSampleTransfer(reader, initiator, uint64(s.cfg.Continuous.BufferLength)),
-			progress, initiator.MakeProgressNonBlocking, s.xferBatch, s.maxBatch, untilIndex, s.poll, s.interval, tr)
+			progress, initiator.MakeProgressNonBlocking, batch, s.maxBatch, untilIndex, poll, interval, tr)
 	} else {
 		transfer := newGrainTransfer(reader, initiator, s.cfg.Common.Format == mxl.FormatData, sliceBytes(s.cfg), s.sliceBatch)
 		go runTransferLoop(ctx, link.done, s.key.flowID, probe, transfer, progress, initiator.MakeProgressNonBlocking, s.poll, s.interval, tr)
@@ -1157,21 +1158,43 @@ func newSampleTransfer(r *mxl.Reader, in *fabrics.Initiator, bufferLength uint64
 	}
 }
 
+// sampleTiming is, for a target whose flow has the sync hint target,
+// the samples one transfer carries, the time they cover and how often
+// the loop polls the head.
+func (s *sharedSource) sampleTiming(target uint32) (batch uint64, interval, poll time.Duration) {
+	rate := s.cfg.Common.GrainRate
+	batch = sampleBatch(s.cfg.Common.MaxSyncBatchSizeHint, target, rate)
+	if s.maxBatch > 0 && batch > s.maxBatch {
+		batch = s.maxBatch
+	}
+	poll = s.poll
+	if poll <= 0 {
+		poll = defaultSamplePollInterval(rate, batch)
+	}
+	if poll <= 0 {
+		poll = 2 * time.Millisecond
+	}
+	return batch, s.interval * time.Duration(batch), poll
+}
+
 // sampleBatch is the samples one transfer of a continuous flow carries:
-// the flow's maxSyncBatchSizeHint, as in tools/mxl-fabrics-demo/demo.cpp,
-// but no more than 10 ms of audio. The target's bounce-buffer entry
-// holds the target flow's hint, and the writer the target gateway
-// creates (TargetReconciler, NewWriter in target.go) takes libmxl's
-// default of 10 ms, whatever hint the producer set.
-func sampleBatch(hint uint32, rate mxl.Rational) uint64 {
-	tenMs := uint64(1)
-	if rate.Den > 0 && rate.Num > 0 {
-		tenMs = max(uint64(rate.Num/(100*rate.Den)), 1)
+// the source flow's maxSyncBatchSizeHint, as tools/mxl-fabrics-demo/demo.cpp
+// sends, but no more than the target's bounce-buffer entry holds, which
+// is the target flow's sync hint. libmxl-fabrics rejects a larger batch
+// for good. A target gateway that does not publish its hint (target 0)
+// created its flow without options, so its entry holds libmxl's
+// default of 10 ms.
+func sampleBatch(source, target uint32, rate mxl.Rational) uint64 {
+	if target == 0 {
+		target = 1
+		if rate.Den > 0 && rate.Num > 0 {
+			target = max(uint32(rate.Num/(100*rate.Den)), 1)
+		}
 	}
-	if hint == 0 {
-		return tenMs
+	if source == 0 {
+		return uint64(target)
 	}
-	return min(uint64(hint), tenMs)
+	return uint64(min(source, target))
 }
 
 // detachTimeout bounds how long a removed target's disconnect is driven

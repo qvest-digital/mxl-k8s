@@ -416,8 +416,10 @@ type targetEntry struct {
 	// entry writing it; see sharedFlow.
 	flow *sharedFlow
 
-	// def is the flow definition the entry was opened with.
+	// def is the flow definition the entry was opened with, and cfg the
+	// flow as its writer opened it.
 	def string
+	cfg mxl.FlowConfig
 
 	// commits counts grains the progress loop has committed, and
 	// arrivals of grains a sibling mirror of the flow committed shortly
@@ -537,6 +539,10 @@ func (e *targetEntry) stopProgressLoop(grace time.Duration) bool {
 	}
 	return waitClosed(done, grace)
 }
+
+// syncHint is the maxSyncBatchSizeHint of the flow the entry writes, 0
+// for an entry opened without a writer.
+func (e *targetEntry) syncHint() uint32 { return e.cfg.Common.MaxSyncBatchSizeHint }
 
 // abandon marks the entry torn down and hands back the writer, so a
 // caller that has already removed it from r.targets can release the
@@ -788,7 +794,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	// Publish the descriptor before the phase: a Ready mirror whose
 	// targetInfo has not landed yet is one the source side cannot dial.
-	if err := r.applyTargetInfo(ctx, &mirror, entry.infoStr); err != nil {
+	if err := r.applyTargetInfo(ctx, &mirror, entry.infoStr, entry.syncHint()); err != nil {
 		r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Ref().Name()))
 		return ctrl.Result{}, fmt.Errorf("publish target info: %w", err)
 	}
@@ -901,7 +907,7 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef 
 	}
 	// No options: libmxl gives the flow its default sync batch, 10 ms of
 	// audio, which sizes the bounce buffer the source's sample batches
-	// land in. sampleBatch in source.go caps them to it.
+	// land in. The source reads it back from targetMaxSyncBatchSizeHint.
 	writer, _, err := mxlInst.NewWriter(flowDef)
 	if err != nil {
 		return nil, fmt.Errorf("%w: NewWriter: %w", errOpenWriterFailed, err)
@@ -928,6 +934,7 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef 
 	// down and the install cannot be refused.
 	entry := &targetEntry{
 		writer:   writer,
+		cfg:      writer.Config(),
 		handles:  handles,
 		provider: provider,
 		flow:     r.sharedFlowFor(handles, writer.Config().Common.ID),
@@ -1964,7 +1971,7 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 	// nobody answers and its send queue never drains, so the publish
 	// is the rebuild's success criteria: on failure the entry drops
 	// and the next Reconcile rebuilds fabric side and publish together.
-	if err := r.applyTargetInfo(ctx, mirror, s); err != nil {
+	if err := r.applyTargetInfo(ctx, mirror, s, entry.syncHint()); err != nil {
 		l.Error(err, "publish rebuilt TargetInfo")
 		r.dropFailedEntry(key, entry)
 		return
@@ -2135,19 +2142,24 @@ func closeTargetHandles(e *targetEntry, disp flowDisposition, grace time.Duratio
 // applyTargetInfo writes status.targetInfo under its own field
 // manager. Called only where the descriptor is produced - the initial
 // open and each fabric-side rebuild - so an unchanged descriptor costs
-// nothing for the life of the mirror.
+// nothing for the life of the mirror. targetMaxSyncBatchSizeHint, the
+// sync hint of the writer the descriptor serves, goes in the same
+// payload, so a source never reads one without the other.
 //
 // Owning the field alone is what makes that safe. SSA releases a field
 // its manager omits, but only that manager's claim: progress payloads
 // written under targetFieldOwner never mention targetInfo, so they
 // cannot release a claim they never held.
-func (r *TargetReconciler) applyTargetInfo(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, info string) error {
+func (r *TargetReconciler) applyTargetInfo(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, info string, syncHint uint32) error {
 	patch := &unstructured.Unstructured{}
 	patch.SetGroupVersionKind(mxlv1alpha1.GroupVersion.WithKind("MxlFlowMirror"))
 	patch.SetNamespace(mirror.Namespace)
 	patch.SetName(mirror.Name)
-	if err := unstructured.SetNestedField(patch.Object,
-		map[string]any{"targetInfo": info}, "status"); err != nil {
+	status := map[string]any{"targetInfo": info}
+	if syncHint > 0 {
+		status["targetMaxSyncBatchSizeHint"] = int64(syncHint)
+	}
+	if err := unstructured.SetNestedField(patch.Object, status, "status"); err != nil {
 		return fmt.Errorf("build targetInfo payload: %w", err)
 	}
 	return r.Status().Patch(ctx, patch, client.Apply,
