@@ -127,11 +127,11 @@ func TestRunSampleTransferLoop_SendsOneBatchAtATime(t *testing.T) {
 	assert.Zero(t, tr.skippedSnapshot())
 }
 
-// A batch that misses its deadline is still driven to completion, and
-// the loop then sends the batch ending at the live head, counting what
-// it passed over. The demo's runContinuous jumps to the head once it is
-// too late for a batch; the gateway also does so after a late batch.
-func TestRunSampleTransferLoop_LateBatchResumesAtTheHead(t *testing.T) {
+// A batch that completes after its interval is counted late and the
+// next batch starts where it ended, as runContinuous in
+// tools/mxl-fabrics-demo/demo.cpp continues at headIndex + batchSize.
+// Nothing is skipped.
+func TestRunSampleTransferLoop_LateBatchIsFollowedByTheNextBatch(t *testing.T) {
 	var head atomic.Uint64
 	head.Store(0)
 	probe := func() (uint64, error) { return head.Load(), nil }
@@ -139,25 +139,28 @@ func TestRunSampleTransferLoop_LateBatchResumesAtTheHead(t *testing.T) {
 	link.hold = func(end uint64) {
 		if end == 480 && head.Load() == 480 {
 			time.Sleep(20 * time.Millisecond)
-			head.Store(4800)
+			head.Store(1440)
 		}
 	}
 	tr := &recordingTracker{}
 	_, stop := runSampleLoop(probe, link.transferSamples, link.makeProgress, 480, testReadableWindow, 5*time.Millisecond, tr)
 	require.Eventually(t, func() bool { return len(tr.headSnapshot()) > 1 }, time.Second, time.Millisecond)
 	head.Store(480)
-	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) >= 2 }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) >= 3 }, time.Second, time.Millisecond)
 	stop()
 
 	posted, _ := link.snapshot()
-	assert.Equal(t, []sampleXfer{{480, 480}, {4800, 480}}, posted[:2])
-	assert.Equal(t, uint64(4800-480-480), tr.skippedSnapshot())
+	assert.Equal(t, []sampleXfer{{480, 480}, {960, 480}, {1440, 480}}, posted[:3])
+	assert.Zero(t, tr.skippedSnapshot(), "a late batch skips nothing")
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	assert.Equal(t, 1, tr.late)
 	assert.Zero(t, tr.agedOuts, "a late batch is not the reader ageing out")
 }
 
+// Samples are skipped only once they have left the readable window,
+// where runContinuous in tools/mxl-fabrics-demo/demo.cpp, told it is
+// too late, jumps to the head.
 func TestRunSampleTransferLoop_RecordsSkippedSamplesWhenLapped(t *testing.T) {
 	// The counter behind mxl_gateway_mirror_skipped_samples_total: the
 	// only signal separating "the target received this" from "the

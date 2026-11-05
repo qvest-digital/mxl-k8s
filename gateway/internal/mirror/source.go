@@ -230,8 +230,8 @@ type sharedSource struct {
 	xferBatch, maxBatch uint64
 
 	// interval is the time one transfer covers, a grain or a batch of
-	// samples, and its deadline. poll is how often a loop with nothing
-	// to send probes the head.
+	// samples, past which it counts as late. poll is how often a loop
+	// with nothing to send probes the head.
 	interval, poll time.Duration
 
 	// mirrors is the attached set, written under the reconciler's mutex.

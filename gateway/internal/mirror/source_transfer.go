@@ -17,8 +17,12 @@ import (
 // until it stops returning not-ready, as libmxl-fabrics requires before
 // the transfer counts as complete. Nothing else is posted meanwhile:
 // grains and samples the producer commits while a transfer is
-// outstanding wait in the ring, and once one transfer missed its
-// deadline the loop skips them and resumes at the live head.
+// outstanding wait in the ring, and the next transfer starts where the
+// last one ended, as in tools/mxl-fabrics-demo/demo.cpp. A transfer
+// that completes after its interval is counted late and changes
+// nothing else. Grains are skipped only once the reader can no longer
+// hand them out or the loop trails the head by more than maxMirrorLag,
+// samples only once they have left the readable window.
 
 // progressTimeout is how long one blocking MakeProgress call waits.
 const progressTimeout = 10 * time.Millisecond
@@ -217,8 +221,8 @@ func retryablePost(err error) bool {
 //
 // makeProgress is the progress call the loop waits in, pollProgress
 // its non-blocking variant. poll is how long the loop waits for the
-// producer when it has nothing new, interval one grain of the flow and
-// the deadline of each transfer.
+// producer when it has nothing new, interval one grain of the flow,
+// past which a transfer counts as late.
 func runTransferLoop(
 	ctx context.Context,
 	done chan struct{},
@@ -246,7 +250,6 @@ func runTransferLoop(
 	lastSent := int64(head0)
 	tracker.recordHead(head0, time.Now())
 
-	resync := false
 	for ctx.Err() == nil {
 		head, err := probeRuntime()
 		if err != nil {
@@ -262,13 +265,7 @@ func runTransferLoop(
 		}
 
 		next := lastSent + 1
-		switch {
-		case resync:
-			// The last transfer missed its deadline: what the producer
-			// committed meanwhile is skipped, not queued.
-			tracker.recordPassedOver(unsentResync, uint64(h-next))
-			next = h
-		case h > maxMirrorLag && lastSent < h-maxMirrorLag:
+		if h > maxMirrorLag && lastSent < h-maxMirrorLag {
 			// The first probe after attach can report head 0, and a
 			// loop held up long enough trails grains the producer has
 			// rewritten. Either way only the live head is still sure
@@ -281,7 +278,6 @@ func runTransferLoop(
 			}
 			next = h
 		}
-		resync = false
 
 		sent, bytes, err := transferGrain(uint64(next))
 		switch {
@@ -326,7 +322,6 @@ func runTransferLoop(
 		}
 		tracker.recordCompleted(uint64(next), bytes, late, time.Now())
 		lastSent = next
-		resync = late
 	}
 }
 
@@ -336,11 +331,11 @@ func runTransferLoop(
 //
 // One transfer carries at most xferBatch samples, which caps it below
 // the target's bounce-buffer entry; interval is the time one batch
-// spans and the deadline of each transfer. Samples are abandoned only
-// once they have left the readable window, maxReadable, or after a
-// transfer missed its deadline. A skipped range is not a gap the target
-// can see: the next transfer commits at its own index, so the target's
-// head moves over the range and republishes stale ring content there.
+// spans, past which a transfer counts as late. Samples are abandoned
+// only once they have left the readable window, maxReadable. A skipped
+// range is not a gap the target can see: the next transfer commits at
+// its own index, so the target's head moves over the range and
+// republishes stale ring content there.
 func runSampleTransferLoop(
 	ctx context.Context,
 	done chan struct{},
@@ -373,7 +368,6 @@ func runSampleTransferLoop(
 	lastSent := head0
 	tracker.recordHead(head0, time.Now())
 
-	resync := false
 	for ctx.Err() == nil {
 		head, err := probeRuntime()
 		if err != nil {
@@ -387,18 +381,13 @@ func runSampleTransferLoop(
 			continue
 		}
 
-		switch {
-		case resync && head-lastSent > xferBatch:
-			tracker.recordSkipped(head - xferBatch - lastSent)
-			lastSent = head - xferBatch
-		case agedOut > 0 && head-lastSent > agedOut:
+		if agedOut > 0 && head-lastSent > agedOut {
 			l.Info("reader fell behind writer, skipping samples",
 				"fromIndex", lastSent+1, "toIndex", head)
 			tracker.recordAgedOut(time.Now())
 			tracker.recordSkipped(head - agedOut - lastSent)
 			lastSent = head - agedOut
 		}
-		resync = false
 
 		count := min(head-lastSent, xferBatch)
 		end := lastSent + count
@@ -428,6 +417,5 @@ func runSampleTransferLoop(
 		}
 		tracker.recordCompleted(end, bytes, late, time.Now())
 		lastSent = end
-		resync = late
 	}
 }

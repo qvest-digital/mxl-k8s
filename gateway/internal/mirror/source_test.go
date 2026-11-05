@@ -252,12 +252,11 @@ func TestRunTransferLoop_ProgressesEachTransferUntilItCompletes(t *testing.T) {
 	assert.Zero(t, tr.late)
 }
 
-// A transfer that misses its deadline is still driven to completion,
-// with nothing posted meanwhile, and the loop then resumes at the live
-// head instead of queueing what the producer wrote in between. The
-// demo's runDiscrete resumes at mxlGetCurrentIndex once it is too late
-// for a grain; the gateway also does so after a late transfer.
-func TestRunTransferLoop_LateTransferResumesAtTheHead(t *testing.T) {
+// A transfer that completes after its interval is counted late, with
+// nothing posted meanwhile, and the next transfer is the next grain, not
+// the head, as runDiscrete in tools/mxl-fabrics-demo/demo.cpp continues
+// at ++grainIndex. Nothing is skipped.
+func TestRunTransferLoop_LateTransferIsFollowedByTheNextGrain(t *testing.T) {
 	var head atomic.Uint64
 	head.Store(10)
 	probe := func() (uint64, error) { return head.Load(), nil }
@@ -275,15 +274,15 @@ func TestRunTransferLoop_LateTransferResumesAtTheHead(t *testing.T) {
 	_, stop := runGrainLoop(probe, link.transferGrain, link.makeProgress, 5*time.Millisecond, tr)
 	require.Eventually(t, func() bool { return len(tr.headSnapshot()) > 1 }, time.Second, time.Millisecond)
 	head.Store(11)
-	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) >= 2 }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) >= 4 }, time.Second, time.Millisecond)
 	stop()
 
 	posted, _ := link.snapshot()
-	assert.Equal(t, []uint64{11, 14}, posted[:2], "the grains written while 11 was outstanding are skipped")
+	assert.Equal(t, []uint64{11, 12, 13, 14}, posted[:4], "the grains written while 11 was outstanding go next")
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	assert.Equal(t, 1, tr.late)
-	assert.Equal(t, uint64(2), tr.passed[unsentResync], "grains 12 and 13 are counted as passed over")
+	assert.Zero(t, tr.passed[unsentResync], "a late transfer skips nothing")
 	assert.Zero(t, tr.agedOuts, "a late transfer is not the reader ageing out")
 }
 
@@ -478,6 +477,8 @@ func TestRunTransferLoop_ResyncsToHeadWhenLapped(t *testing.T) {
 	assert.Zero(t, agedOuts, "the attach case never held the grains it skips")
 }
 
+// The loop resyncs to the head once it trails it by more than
+// maxMirrorLag grains, the gateway's own bound on mirror latency.
 func TestRunTransferLoop_ResyncRecordsAgedOutOnFallBehind(t *testing.T) {
 	h := &headScript{heads: []uint64{0, 2, 2, 100}}
 	link := &fakeLink{t: t}
@@ -493,10 +494,13 @@ func TestRunTransferLoop_ResyncRecordsAgedOutOnFallBehind(t *testing.T) {
 	assert.Equal(t, uint64(97), tr.passed[unsentResync])
 }
 
+// A grain the reader reports too late for makes the loop jump to the
+// head, as runDiscrete in tools/mxl-fabrics-demo/demo.cpp jumps to
+// mxlGetCurrentIndex on MXL_ERR_OUT_OF_RANGE_TOO_LATE.
 func TestRunTransferLoop_AdvancesLastSentOnAgedOutError(t *testing.T) {
 	// A grain ages out while the lag stays within maxMirrorLag, so it
-	// surfaces only as the reader's error. The loop jumps to the head
-	// and never retries the unrecoverable indices.
+	// surfaces only as the reader's error. The loop never retries the
+	// unrecoverable indices.
 	h := &headScript{heads: []uint64{0, 3, 3, 6}}
 	link := &fakeLink{t: t}
 	var mu sync.Mutex
@@ -526,8 +530,8 @@ func TestRunTransferLoop_AdvancesLastSentOnAgedOutError(t *testing.T) {
 	assert.Equal(t, uint64(3), tr.passed[unsentAgedOut])
 }
 
-// A grain the reader cannot hand out yet is read again once the head
-// moves; the loop does not give the target up over it.
+// A grain the reader cannot hand out yet is read again after a poll;
+// the loop does not give the target up over it.
 func TestRunTransferLoop_UnreadableGrainIsReadAgain(t *testing.T) {
 	h := &headScript{heads: []uint64{0, 3}}
 	var calls atomic.Int32

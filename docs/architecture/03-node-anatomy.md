@@ -223,12 +223,15 @@ Three details from the diagram are worth pulling out:
   mirror's target and one transfer goroutine. A target that stops
   completing transfers holds up no other mirror of the flow.
 
-Each mirror has at most one transfer outstanding. A transfer that
-takes longer than one grain interval (one batch, for audio) is
-counted late, and the loop then resumes at the live head: grains the
-producer committed meanwhile are skipped, never queued. A transfer
-outstanding for 2 s, or a target the initiator dropped, ends the loop,
-and the mirror's target is added again. Consumer reads honour libmxl's
+Each mirror has at most one transfer outstanding. Grains the producer
+commits meanwhile wait in its ring, and the next transfer starts where
+the last one ended. A transfer that takes longer than one grain
+interval (one batch, for audio) is counted late. The loop skips
+grains only once the reader can no longer hand them out or it trails
+the head by more than four grains, and samples only once they have
+left the reader's window. A transfer outstanding for 2 s, or a target
+the initiator dropped, ends the loop, and the mirror's target is added
+again. Consumer reads honour libmxl's
 normal grain-ring semantics -- if the consumer is too slow it will
 start receiving "grain aged out" errors from `GetGrain`. mxl-k8s does
 not interpose on this; the ring is libmxl's, not ours.
