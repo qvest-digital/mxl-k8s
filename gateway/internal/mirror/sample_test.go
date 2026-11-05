@@ -123,7 +123,7 @@ func TestRunSampleTransferLoop_SendsOneBatchAtATime(t *testing.T) {
 	posted, progress := link.snapshot()
 	assert.Equal(t, []sampleXfer{{480, 480}, {960, 480}, {1440, 480}}, posted)
 	assert.Equal(t, 1+3*3, progress, "one call to connect, then two not-ready answers and one completion per batch")
-	assert.Zero(t, tr.skippedSnapshot())
+	assert.Empty(t, tr.skipped)
 }
 
 // A batch that misses its deadline is still driven to completion, and
@@ -149,7 +149,8 @@ func TestRunSampleTransferLoop_LateBatchResumesAtTheHead(t *testing.T) {
 
 	posted, _ := link.snapshot()
 	assert.Equal(t, []sampleXfer{{480, 480}, {4800, 480}}, posted[:2])
-	assert.Equal(t, uint64(4800-480-480), tr.skippedSnapshot())
+	assert.Equal(t, uint64(4800-480-480), tr.skippedSnapshot(unsentResync))
+	assert.Zero(t, tr.skippedSnapshot(unsentAgedOut))
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	assert.Equal(t, 1, tr.late)
@@ -166,12 +167,13 @@ func TestRunSampleTransferLoop_RecordsSkippedSamplesWhenLapped(t *testing.T) {
 	link := &fakeSampleLink{t: t}
 	tr := &recordingTracker{}
 	_, stop := runSampleLoop(h.probe, link.transferSamples, link.makeProgress, xferBatch, window, time.Second, tr)
-	require.Eventually(t, func() bool { return tr.skippedSnapshot() > 0 }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { return tr.skippedSnapshot(unsentAgedOut) > 0 }, time.Second, time.Millisecond)
 	stop()
 
 	// The window less one batch of slack stays readable, so everything
 	// before head-(window-xferBatch) is abandoned.
-	assert.Equal(t, 100000-(window-xferBatch), tr.skippedSnapshot())
+	assert.Equal(t, 100000-(window-xferBatch), tr.skippedSnapshot(unsentAgedOut))
+	assert.Zero(t, tr.skippedSnapshot(unsentResync))
 	_, agedOuts := tr.snapshot()
 	assert.Positive(t, agedOuts)
 }

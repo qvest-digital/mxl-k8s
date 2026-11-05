@@ -389,13 +389,13 @@ func runSampleTransferLoop(
 
 		switch {
 		case resync && head-lastSent > xferBatch:
-			tracker.recordSkipped(head - xferBatch - lastSent)
+			tracker.recordSkipped(unsentResync, head-xferBatch-lastSent)
 			lastSent = head - xferBatch
 		case agedOut > 0 && head-lastSent > agedOut:
 			l.Info("reader fell behind writer, skipping samples",
 				"fromIndex", lastSent+1, "toIndex", head)
 			tracker.recordAgedOut(time.Now())
-			tracker.recordSkipped(head - agedOut - lastSent)
+			tracker.recordSkipped(unsentAgedOut, head-agedOut-lastSent)
 			lastSent = head - agedOut
 		}
 		resync = false

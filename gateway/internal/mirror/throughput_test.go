@@ -63,7 +63,7 @@ func TestThroughputCollectorReportsInvalidGrains(t *testing.T) {
 
 	c := &ThroughputCollector{NodeName: "n01", Source: src, Target: tgt}
 	expected := `
-# HELP mxl_gateway_mirror_source_unsent_grains_total Grains the source half did not offer to the initiator, by reason: invalid (the producer committed a video grain invalid), resync (the loop fell more than a few grains behind the head and resumed near it) or aged_out (the producer had reused the slot). Each one is a grain no target receives. An invalid data grain is not counted here: its header is offered, and the target commits it invalid.
+# HELP mxl_gateway_mirror_source_unsent_grains_total Grains the source half did not offer to the initiator, by reason: invalid (the producer committed a video grain invalid), resync (the loop resumed at the head after a transfer completed late, or after falling more than a few grains behind) or aged_out (the producer had reused the slot). Each one is a grain no target receives. An invalid data grain is not counted here: its header is offered, and the target commits it invalid.
 # TYPE mxl_gateway_mirror_source_unsent_grains_total counter
 mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs",reason="aged_out"} 0
 mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs",reason="invalid"} 2
@@ -137,14 +137,16 @@ func TestThroughputCollectorReportsSkippedSamples(t *testing.T) {
 	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
 	e := &sourceEntry{shared: testShared("flow-a", fabrics.ProviderVerbs), peerNode: "n02"}
 	e.bytes.Store(1024)
-	e.skipped.Store(19200)
+	e.resyncSamples.Store(480)
+	e.agedOutSamples.Store(19200)
 	src.sources[types.NamespacedName{Namespace: "p", Name: "a"}] = e
 
 	c := &ThroughputCollector{NodeName: "n01", Source: src}
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(`
-# HELP mxl_gateway_mirror_skipped_samples_total Samples the source half advanced past without sending, having left the readable window. The target's head still moves over them, so each is published as stale ring content.
+# HELP mxl_gateway_mirror_skipped_samples_total Samples the source half advanced past without sending, by reason: resync (the loop resumed at the head after a transfer completed late) or aged_out (the samples had left the readable window). The target's head still moves over them, so each is published as stale ring content.
 # TYPE mxl_gateway_mirror_skipped_samples_total counter
-mxl_gateway_mirror_skipped_samples_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 19200
+mxl_gateway_mirror_skipped_samples_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs",reason="aged_out"} 19200
+mxl_gateway_mirror_skipped_samples_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs",reason="resync"} 480
 `), "mxl_gateway_mirror_skipped_samples_total"))
 }
 
