@@ -67,7 +67,7 @@ jobs:
   # the result is enough to cascade: lint and render both need it, and
   # a skipped dependency skips them too.
   changes:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 2
     outputs:
       chart: ${{ steps.decide.outputs.chart }}
@@ -107,7 +107,7 @@ jobs:
           fi
 
   meta:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: changes
     if: needs.changes.outputs.chart == 'true'
     outputs:
@@ -157,7 +157,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   lint:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: meta
     steps:
       - uses: actions/checkout@v7
@@ -224,7 +224,7 @@ jobs:
         run: helm unittest charts/mxl-k8s -f 'tests/unit/*_test.yaml'
 
   render:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: meta
     strategy:
       fail-fast: false
@@ -257,7 +257,7 @@ jobs:
             /tmp/render.yaml
 
   package-push:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: [meta, lint, render]
     if: needs.meta.outputs.publish == 'true'
     steps:
@@ -342,7 +342,7 @@ jobs:
   chart-summary:
     needs: [changes, meta, lint, render, package-push]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 2
     steps:
       - name: Verify upstream jobs
