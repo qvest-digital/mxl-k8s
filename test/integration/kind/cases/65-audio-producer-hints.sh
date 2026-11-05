@@ -165,6 +165,6 @@ fi
 progress=$("${KUBECTL[@]}" -n "$NAMESPACE" get "mxlflowmirror/${mirror}" \
              -o 'jsonpath={.status.conditions[?(@.type=="SourceProgress")].message}')
 case "$progress" in
-  *"too large"*) fail "mirror ${mirror} SourceProgress reports a rejected batch: ${progress}" ;;
+  *"rejects every transfer"*) fail "mirror ${mirror} SourceProgress reports a rejected batch: ${progress}" ;;
 esac
 echo "   no batch rejected"
