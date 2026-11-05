@@ -249,7 +249,7 @@ func TestRunSampleTransferLoop_RecordsProbedHead(t *testing.T) {
 			return 0, nil
 		},
 		func() error { return nil }, func() error { return nil },
-		480, testReadableWindow, time.Millisecond, time.Second, tracker)
+		480, testReadableWindow, func(uint64) time.Duration { return 0 }, time.Millisecond, time.Second, tracker)
 
 	<-done
 	heads := tracker.headSnapshot()

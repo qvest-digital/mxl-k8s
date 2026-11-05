@@ -351,13 +351,15 @@ func runTransferLoop(
 // flow to one mirror's target until ctx is canceled or the target is
 // lost. Closes done on exit.
 //
-// One transfer carries at most xferBatch samples, which caps it below
-// the target's bounce-buffer entry; interval is the time one batch
-// spans, past which a transfer counts as late. Samples are abandoned
-// only once they have left the readable window, maxReadable. A skipped
-// range is not a gap the target can see: the next transfer commits at
-// its own index, so the target's head moves over the range and
-// republishes stale ring content there.
+// Each transfer carries xferBatch samples, and the loop waits until the
+// next batch is due, untilIndex being the time until a sample index is,
+// as runContinuous in tools/mxl-fabrics-demo/demo.cpp transfers batches
+// of maxSyncBatchSizeHint and sleeps until the next index. interval is
+// the time one batch spans, past which a transfer counts as late.
+// Samples are abandoned only once they have left the readable window,
+// maxReadable. A skipped range is not a gap the target can see: the
+// next transfer commits at its own index, so the target's head moves
+// over the range and republishes stale ring content there.
 func runSampleTransferLoop(
 	ctx context.Context,
 	done chan struct{},
@@ -367,6 +369,7 @@ func runSampleTransferLoop(
 	makeProgress, pollProgress ProgressFunc,
 	xferBatch uint64,
 	maxReadable uint64,
+	untilIndex func(index uint64) time.Duration,
 	poll, interval time.Duration,
 	tracker progressTracker,
 ) {
@@ -398,8 +401,10 @@ func runSampleTransferLoop(
 			continue
 		}
 		tracker.recordHead(head, time.Now())
-		if head <= lastSent {
-			wait(ctx, poll)
+		if head < lastSent+xferBatch {
+			// Capped at one batch: untilIndex reads this node's clock,
+			// not the producer's.
+			wait(ctx, min(max(untilIndex(lastSent+xferBatch), poll), interval))
 			continue
 		}
 
@@ -411,9 +416,8 @@ func runSampleTransferLoop(
 			lastSent = head - agedOut
 		}
 
-		count := min(head-lastSent, xferBatch)
-		end := lastSent + count
-		bytes, err := transferSamples(end, int(count))
+		end := lastSent + xferBatch
+		bytes, err := transferSamples(end, int(xferBatch))
 		switch {
 		case err == nil:
 		case retryablePost(err):
@@ -422,7 +426,7 @@ func runSampleTransferLoop(
 			continue
 		default:
 			l.Error(err, "TransferSamples", "class", classifyFabricError(err).String(),
-				"headIndex", end, "count", count)
+				"headIndex", end, "count", xferBatch)
 			tracker.recordDropped(false)
 			return
 		}

@@ -84,30 +84,47 @@ func (f *fakeSampleLink) snapshot() ([]sampleXfer, int) {
 func runSampleLoop(probe RuntimeProbe, transfer SampleTransferFunc, progress ProgressFunc, xferBatch, window uint64, interval time.Duration, tr progressTracker) (done chan struct{}, stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done = make(chan struct{})
-	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, progress, progress, xferBatch, window, time.Millisecond, interval, tr)
+	noWait := func(uint64) time.Duration { return 0 }
+	go runSampleTransferLoop(ctx, done, "flow-audio", probe, transfer, progress, progress, xferBatch, window, noWait,
+		time.Millisecond, interval, tr)
 	return done, func() {
 		cancel()
 		<-done
 	}
 }
 
-func TestRunSampleTransferLoop_TransfersDeltaSinceLastPoll(t *testing.T) {
-	// The first probe is where the mirror tunes in. The next head
-	// 96 samples on is one run ending at it, sent once.
-	h := &headScript{heads: []uint64{1000, 1096}}
+// Each transfer is one full batch, sent once it is due: the loop waits
+// for the producer to commit the whole batch, as runContinuous in
+// tools/mxl-fabrics-demo/demo.cpp transfers maxSyncBatchSizeHint samples
+// and then sleeps until the next index.
+func TestRunSampleTransferLoop_SendsFullBatchesWhenDue(t *testing.T) {
+	h := &headScript{heads: []uint64{1000, 1096, 1192, 1288, 1384, 1480}}
 	link := &fakeSampleLink{t: t}
 	tr := &recordingTracker{}
-	_, stop := runSampleLoop(h.probe, link.transferSamples, link.makeProgress, 480, testReadableWindow, time.Second, tr)
+	var mu sync.Mutex
+	var due []uint64
+	untilIndex := func(index uint64) time.Duration {
+		mu.Lock()
+		due = append(due, index)
+		mu.Unlock()
+		return 0
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go runSampleTransferLoop(ctx, done, "flow-audio", h.probe, link.transferSamples, link.makeProgress, link.makeProgress,
+		480, testReadableWindow, untilIndex, time.Millisecond, time.Second, tr)
 	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) == 1 }, time.Second, time.Millisecond)
 	time.Sleep(10 * time.Millisecond)
-	stop()
+	cancel()
+	<-done
 
 	posted, _ := link.snapshot()
-	assert.Equal(t, []sampleXfer{{head: 1096, count: 96}}, posted)
-	got, agedOuts := tr.snapshot()
-	assert.Equal(t, []uint64{1096}, got)
-	assert.Zero(t, agedOuts)
-	assert.Equal(t, uint64(96*8), tr.bytes)
+	assert.Equal(t, []sampleXfer{{head: 1480, count: 480}}, posted, "a partial batch is not sent")
+	assert.Equal(t, uint64(480*8), tr.bytes)
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, due)
+	assert.Equal(t, uint64(1480), due[0], "the loop waits until the batch ending at 1480 is due")
 }
 
 // A delta larger than one batch goes as one batch per transfer, each

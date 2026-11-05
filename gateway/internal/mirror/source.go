@@ -1011,20 +1011,23 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 	}
 
 	if s.continuous {
-		// maxBatch is the longest run the reader can hand out. One
-		// transfer carries about 10 ms of audio, the producer's
-		// natural commit batch, which stays below the target's
-		// bounce-buffer entry; the whole readable window in one
-		// TransferSamples is rejected as invalid argument.
+		// maxBatch is the longest run the reader can hand out; the
+		// whole readable window in one TransferSamples is rejected as
+		// invalid argument. One transfer carries the flow's
+		// maxSyncBatchSizeHint, as in tools/mxl-fabrics-demo/demo.cpp,
+		// or about 10 ms of audio for a flow without one.
 		s.maxBatch, err = reader.GetMaxReadLengthSamples()
 		if err != nil {
 			_ = reader.Close()
 			return nil, fmt.Errorf("GetMaxReadLengthSamples: %w", err)
 		}
-		s.xferBatch = 1
-		if rate := cfg.Common.GrainRate; rate.Den > 0 && rate.Num > 0 {
-			if b := uint64(rate.Num / (100 * rate.Den)); b > 0 {
-				s.xferBatch = b
+		s.xferBatch = uint64(cfg.Common.MaxSyncBatchSizeHint)
+		if s.xferBatch == 0 {
+			s.xferBatch = 1
+			if rate := cfg.Common.GrainRate; rate.Den > 0 && rate.Num > 0 {
+				if b := uint64(rate.Num / (100 * rate.Den)); b > 0 {
+					s.xferBatch = b
+				}
 			}
 		}
 		if s.maxBatch > 0 && s.xferBatch > s.maxBatch {
@@ -1089,9 +1092,11 @@ func (o *libmxlOpener) attach(s *sharedSource, targetInfoStr string, e *sourceEn
 		return rt.HeadIndex, nil
 	}
 	if s.continuous {
+		rate := s.cfg.Common.GrainRate
+		untilIndex := func(index uint64) time.Duration { return time.Duration(mxl.NsUntilIndex(index, rate)) }
 		go runSampleTransferLoop(ctx, link.done, s.key.flowID, probe,
 			newSampleTransfer(reader, initiator, uint64(s.cfg.Continuous.BufferLength)),
-			progress, initiator.MakeProgressNonBlocking, s.xferBatch, s.maxBatch, s.poll, s.interval, e)
+			progress, initiator.MakeProgressNonBlocking, s.xferBatch, s.maxBatch, untilIndex, s.poll, s.interval, e)
 	} else {
 		transfer := newGrainTransfer(reader, initiator, s.cfg.Common.Format == mxl.FormatData, sliceBytes(s.cfg), s.sliceBatch)
 		go runTransferLoop(ctx, link.done, s.key.flowID, probe, transfer, progress, initiator.MakeProgressNonBlocking, s.poll, s.interval, e)
