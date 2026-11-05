@@ -151,6 +151,17 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	m.mu.Lock()
 	e := m.held[req.Name]
 	m.mu.Unlock()
+	// The marker of a placeholder being replaced stays until the new one
+	// is held. The agent reads the marker, the definition and the writers
+	// in separate steps, and a gap between the two placeholders lets it
+	// take the old geometry for a producer's flow. A replacement that is
+	// not completed removes it.
+	var retired string
+	defer func() {
+		if retired != "" {
+			_ = os.Remove(retired)
+		}
+	}()
 	if e != nil {
 		// A placeholder a mirror fills is that mirror's copy until it goes.
 		if e.filled {
@@ -166,7 +177,9 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 			return reconcile.Result{}, err
 		}
 		l.Info("retiring placeholder", "origin", hasOrigin(&flow), "domain", e.domain)
-		m.drop(l, req.Name)
+		if old := m.release(l, req.Name); old != nil {
+			retired = MarkerPath(old.domain, old.id)
+		}
 	}
 	if m.hasLocation(&flow) || len(flow.Spec.Definition.Raw) == 0 || !hasOrigin(&flow) {
 		return reconcile.Result{}, nil
@@ -234,6 +247,9 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	}
 	m.held[req.Name] = e
 	m.mu.Unlock()
+	if retired == MarkerPath(domain, e.id) {
+		retired = ""
+	}
 	l.Info("holding placeholder", "domain", domain, "created", created)
 	return reconcile.Result{}, nil
 }
@@ -369,19 +385,26 @@ func (m *Manager) hasLocation(flow *mxlv1alpha1.MxlFlow) bool {
 	return false
 }
 
-// drop releases a placeholder. libmxl removes the flow when this was its
-// last writer.
+// drop releases a placeholder and removes its marker.
 func (m *Manager) drop(l logr.Logger, name string) {
+	if e := m.release(l, name); e != nil {
+		_ = os.Remove(MarkerPath(e.domain, e.id))
+	}
+}
+
+// release closes a placeholder's writer and keeps its marker. libmxl
+// removes the flow when this was its last writer.
+func (m *Manager) release(l logr.Logger, name string) *entry {
 	m.mu.Lock()
 	e := m.held[name]
 	delete(m.held, name)
 	m.mu.Unlock()
 	if e == nil {
-		return
+		return nil
 	}
 	_ = e.writer.Close()
-	_ = os.Remove(MarkerPath(e.domain, e.id))
 	l.Info("dropped placeholder", "domain", e.domain)
+	return e
 }
 
 // leaveAll gives every placeholder up on shutdown and leaves its
