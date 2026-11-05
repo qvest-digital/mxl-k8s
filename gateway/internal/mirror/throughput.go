@@ -62,7 +62,7 @@ var (
 
 	descTransfers = prometheus.NewDesc(
 		"mxl_gateway_mirror_transfers_total",
-		"What became of the transfers (grains, or batches of samples) to a mirror target: completed within one "+
+		"What became of the transfers (grains or batches of their slices, or batches of samples) to a mirror target: completed within one "+
 			"grain or batch interval, late (completed after it), or lost "+
 			"(outstanding when the target was given up and added again). A mirror has one transfer in flight.",
 		append(append([]string{}, transferLabels...), "outcome"), nil)

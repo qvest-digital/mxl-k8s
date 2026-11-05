@@ -46,7 +46,6 @@ var errPost = errors.New("post transfer")
 
 // grainSource is the part of mxl.Reader the grain transfer reads.
 type grainSource interface {
-	GetGrain(index uint64, timeout time.Duration) (mxl.Grain, error)
 	GetGrainSlice(index uint64, minValidSlices uint16, timeout time.Duration) (mxl.Grain, error)
 }
 
@@ -57,46 +56,71 @@ type grainSender interface {
 }
 
 // newGrainTransfer is the TransferFunc of a discrete (video or data)
-// flow. perSlice is the payload of one slice across all planes.
-func newGrainTransfer(src grainSource, dst grainSender, data bool, perSlice uint64) TransferFunc {
+// flow. perSlice is the payload of one slice across all planes, batch
+// the slices a video grain's first batch waits for and each later one
+// adds, zero for the whole grain.
+//
+// A video grain goes in batches as its slices become valid, each read
+// and transferred from where the last one ended, as runDiscrete in
+// tools/mxl-fabrics-demo/demo.cpp does, so the target can receive the
+// first lines of a frame before the producer has written the rest.
+func newGrainTransfer(src grainSource, dst grainSender, data bool, perSlice uint64, batch uint16) TransferFunc {
 	post := func(idx uint64, start, end uint16) (uint64, error) {
 		if err := dst.TransferGrain(idx, start, end); err != nil {
 			return 0, fmt.Errorf("%w: %w", errPost, err)
 		}
 		return uint64(end-start) * perSlice, nil
 	}
-	return func(idx uint64) (uint64, error) {
-		grain, err := readForTransfer(src, idx, data)
+	return func(idx uint64, start uint16) (uint16, uint64, error) {
+		grain, err := readForTransfer(src, idx, data, batchEnd(start, batch))
 		if err != nil {
-			return 0, err
+			return start, 0, err
 		}
-		if grain.Invalid() {
+		switch {
+		case grain.Invalid():
 			// Its slot holds no picture, so only the header goes, which
 			// the target commits invalid.
-			return post(idx, 0, 0)
-		}
-		if data {
+			bytes, err := post(idx, 0, 0)
+			return 0, bytes, err
+		case data:
 			// A data grain's valid slices are its length.
-			return post(idx, 0, grain.ValidSlices)
+			bytes, err := post(idx, 0, grain.ValidSlices)
+			return 0, bytes, err
 		}
-		return post(idx, 0, grain.TotalSlices)
+		end := max(grain.ValidSlices, start)
+		bytes, err := post(idx, start, end)
+		if err != nil || end >= grain.TotalSlices {
+			return 0, bytes, err
+		}
+		return end, bytes, nil
 	}
 }
 
-// readForTransfer reads grain idx as the transfer loop sends it. A data
-// grain is read once committed at all, with no valid slice too: a writer
-// commits an empty one like any other, and a read that waited for a
-// slice would retry it until the loop resynced past it, dropping the
-// grains behind it as well. A range of no slices still carries the
-// grain's header, which is what the target commits from.
+// batchEnd is the valid slices a read starting at start waits for:
+// batch more, or the whole grain for a zero batch. libmxl caps it at the
+// grain's slice count.
+func batchEnd(start, batch uint16) uint16 {
+	if batch == 0 || start > mxl.GrainValidSlicesAll-batch {
+		return mxl.GrainValidSlicesAll
+	}
+	return start + batch
+}
+
+// readForTransfer reads grain idx as the transfer loop sends it, a video
+// grain once it has minValid valid slices. A data grain is read once
+// committed at all, with no valid slice too: a writer commits an empty
+// one like any other, and a read that waited for a slice would retry it
+// until the loop resynced past it, dropping the grains behind it as
+// well. A range of no slices still carries the grain's header, which is
+// what the target commits from.
 //
 // The read blocks for up to sourceReadTimeout, as runDiscrete in
 // tools/mxl-fabrics-demo/demo.cpp blocks in mxlFlowReaderGetGrainSlice.
-func readForTransfer(r grainSource, idx uint64, data bool) (mxl.Grain, error) {
+func readForTransfer(r grainSource, idx uint64, data bool, minValid uint16) (mxl.Grain, error) {
 	if data {
-		return r.GetGrainSlice(idx, mxl.GrainValidSlicesAny, sourceReadTimeout)
+		minValid = mxl.GrainValidSlicesAny
 	}
-	return r.GetGrain(idx, sourceReadTimeout)
+	return r.GetGrainSlice(idx, minValid, sourceReadTimeout)
 }
 
 // sliceBytes is the payload of one slice of a discrete flow, summed
@@ -252,6 +276,8 @@ func runTransferLoop(
 	lastSent := int64(head0)
 	tracker.recordHead(head0, time.Now())
 
+	// start is the slice the next batch of grain lastSent+1 starts at.
+	var start uint16
 	for ctx.Err() == nil {
 		head, err := probeRuntime()
 		if err != nil {
@@ -263,7 +289,7 @@ func runTransferLoop(
 		h := int64(head)
 
 		next := lastSent + 1
-		if h > maxMirrorLag && lastSent < h-maxMirrorLag {
+		if start == 0 && h > maxMirrorLag && lastSent < h-maxMirrorLag {
 			// The first probe after attach can report head 0, and a
 			// loop held up long enough trails grains the producer has
 			// rewritten. Either way only the live head is still sure
@@ -277,14 +303,14 @@ func runTransferLoop(
 			next = h
 		}
 
-		bytes, err := transferGrain(uint64(next))
+		nextStart, bytes, err := transferGrain(uint64(next), start)
 		switch {
 		case err == nil:
 		case isReaderAgedOut(err):
 			l.Info("reader aged out, skipping grains", "fromIndex", next, "toIndex", h)
 			tracker.recordAgedOut(time.Now())
 			tracker.recordPassedOver(unsentAgedOut, uint64(h-next+1))
-			lastSent = h
+			lastSent, start = h, 0
 			continue
 		case errors.Is(err, errPost) && retryablePost(err):
 			// Nothing was posted. Progress is what moves a connecting
@@ -314,7 +340,10 @@ func runTransferLoop(
 			return
 		}
 		tracker.recordCompleted(uint64(next), bytes, late, time.Now())
-		lastSent = next
+		start = nextStart
+		if start == 0 {
+			lastSent = next
+		}
 	}
 }
 

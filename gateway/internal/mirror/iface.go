@@ -25,10 +25,12 @@ type initiatorOpener interface {
 // a value the scenario controls.
 type RuntimeProbe func() (head uint64, err error)
 
-// TransferFunc posts grain idx of a discrete flow to a mirror's target
-// and returns the payload posted. A failed post is wrapped in errPost;
-// any other error is a grain the reader cannot hand out.
-type TransferFunc func(idx uint64) (bytes uint64, err error)
+// TransferFunc posts the slices of grain idx of a discrete flow from
+// start on to a mirror's target. It returns the slice the grain's next
+// batch starts at, zero once the grain is done, and the payload posted.
+// A failed post is wrapped in errPost; any other error is a grain the
+// reader cannot hand out.
+type TransferFunc func(idx uint64, start uint16) (next uint16, bytes uint64, err error)
 
 // ProgressFunc is one MakeProgress call on a mirror's initiator.
 type ProgressFunc func() error

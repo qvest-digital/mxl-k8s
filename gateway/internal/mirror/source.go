@@ -229,6 +229,10 @@ type sharedSource struct {
 	continuous          bool
 	xferBatch, maxBatch uint64
 
+	// sliceBatch is the slices of a video grain one transfer adds, the
+	// flow's maxSyncBatchSizeHint; zero sends the grain whole.
+	sliceBatch uint16
+
 	// interval is the time one transfer covers, a grain or a batch of
 	// samples, past which it counts as late. poll is how often a loop
 	// with nothing to send probes the head.
@@ -1030,6 +1034,8 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 		if s.poll <= 0 {
 			s.poll = defaultSamplePollInterval(cfg.Common.GrainRate, s.xferBatch)
 		}
+	} else if hint := cfg.Common.MaxSyncBatchSizeHint; hint < uint32(mxl.GrainValidSlicesAll) {
+		s.sliceBatch = uint16(hint)
 	}
 	if s.poll <= 0 {
 		s.poll = 2 * time.Millisecond
@@ -1087,7 +1093,7 @@ func (o *libmxlOpener) attach(s *sharedSource, targetInfoStr string, e *sourceEn
 			newSampleTransfer(reader, initiator, uint64(s.cfg.Continuous.BufferLength)),
 			progress, initiator.MakeProgressNonBlocking, s.xferBatch, s.maxBatch, s.poll, s.interval, e)
 	} else {
-		transfer := newGrainTransfer(reader, initiator, s.cfg.Common.Format == mxl.FormatData, sliceBytes(s.cfg))
+		transfer := newGrainTransfer(reader, initiator, s.cfg.Common.Format == mxl.FormatData, sliceBytes(s.cfg), s.sliceBatch)
 		go runTransferLoop(ctx, link.done, s.key.flowID, probe, transfer, progress, initiator.MakeProgressNonBlocking, s.poll, s.interval, e)
 	}
 	return link, nil

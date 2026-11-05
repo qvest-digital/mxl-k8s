@@ -175,7 +175,7 @@ func TestEmptyDataGrainIsMirroredEmpty(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, ga.Commit(0, 0))
 
-	g, err := readForTransfer(r, idx, true)
+	g, err := readForTransfer(r, idx, true, mxl.GrainValidSlicesAll)
 	require.NoError(t, err, "the source reads an empty data grain")
 	require.Zero(t, g.ValidSlices)
 

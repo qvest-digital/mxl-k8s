@@ -194,21 +194,24 @@ func (rt *recordingTracker) droppedSnapshot() []bool {
 
 // runGrainLoop starts runTransferLoop with a 1 ms poll and returns a
 // stop function that cancels it and waits for it.
-func runGrainLoop(probe RuntimeProbe, transfer TransferFunc, progress ProgressFunc, interval time.Duration, tr progressTracker) (done chan struct{}, stop func()) {
+func runGrainLoop(probe RuntimeProbe, transfer wholeGrain, progress ProgressFunc, interval time.Duration, tr progressTracker) (done chan struct{}, stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done = make(chan struct{})
-	probe, transfer = readable(probe, transfer)
-	go runTransferLoop(ctx, done, "flow-a", probe, transfer, progress, progress, time.Millisecond, interval, tr)
+	p, t := readable(probe, transfer)
+	go runTransferLoop(ctx, done, "flow-a", p, t, progress, progress, time.Millisecond, interval, tr)
 	return done, func() {
 		cancel()
 		<-done
 	}
 }
 
-// readable makes transfer read like a blocking reader: a grain past the
-// head last probed is waited for a millisecond and reported as timed
-// out.
-func readable(probe RuntimeProbe, transfer TransferFunc) (RuntimeProbe, TransferFunc) {
+// wholeGrain posts grain idx in one transfer and returns its payload.
+type wholeGrain func(idx uint64) (uint64, error)
+
+// readable makes transfer a TransferFunc that reads like a blocking
+// reader: a grain past the head last probed is waited for a millisecond
+// and reported as timed out.
+func readable(probe RuntimeProbe, transfer wholeGrain) (RuntimeProbe, TransferFunc) {
 	var head atomic.Uint64
 	p := func() (uint64, error) {
 		h, err := probe()
@@ -217,12 +220,13 @@ func readable(probe RuntimeProbe, transfer TransferFunc) (RuntimeProbe, Transfer
 		}
 		return h, err
 	}
-	return p, func(idx uint64) (uint64, error) {
+	return p, func(idx uint64, _ uint16) (uint16, uint64, error) {
 		if idx > head.Load() {
 			time.Sleep(time.Millisecond)
-			return 0, mxl.ErrTimeout
+			return 0, 0, mxl.ErrTimeout
 		}
-		return transfer(idx)
+		bytes, err := transfer(idx)
+		return 0, bytes, err
 	}
 }
 
@@ -237,7 +241,7 @@ func TestRunTransferLoop_WaitsInTheBlockingRead(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go runTransferLoop(ctx, done, "f", func() (uint64, error) { return 10, nil },
-		newGrainTransfer(src, dst, false, 1), func() error { return nil }, func() error { return nil },
+		newGrainTransfer(src, dst, false, 1, 0), func() error { return nil }, func() error { return nil },
 		time.Hour, time.Second, tr)
 	defer func() { cancel(); <-done }()
 
@@ -437,6 +441,47 @@ func TestRunTransferLoop_MakesNoProgressCallWhileIdle(t *testing.T) {
 	_, idle := link.snapshot()
 	assert.Equal(t, 1+3, after, "one call to connect, then two not-ready answers and one completion")
 	assert.Equal(t, after, idle, "progress was called with no transfer outstanding")
+}
+
+// A grain goes in batches, each driven to completion before the next,
+// and the loop moves to the next grain only after the last batch, as
+// runDiscrete in tools/mxl-fabrics-demo/demo.cpp works on one grain
+// until its slices are all transferred.
+func TestRunTransferLoop_SendsAGrainInSliceBatches(t *testing.T) {
+	h := &headScript{heads: []uint64{10, 12}}
+	link := &fakeLink{t: t, notReady: 1}
+	var mu sync.Mutex
+	var starts []uint16
+	transfer := func(idx uint64, start uint16) (uint16, uint64, error) {
+		mu.Lock()
+		starts = append(starts, start)
+		mu.Unlock()
+		if idx > 12 {
+			time.Sleep(time.Millisecond)
+			return 0, 0, mxl.ErrTimeout
+		}
+		if _, err := link.transferGrain(idx); err != nil {
+			return start, 0, err
+		}
+		if start < 540 {
+			return start + 270, 270, nil
+		}
+		return 0, 540, nil
+	}
+	tr := &recordingTracker{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go runTransferLoop(ctx, done, "f", h.probe, transfer, link.makeProgress, link.makeProgress,
+		time.Millisecond, time.Second, tr)
+	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) >= 6 }, time.Second, time.Millisecond)
+	cancel()
+	<-done
+
+	posted, _ := link.snapshot()
+	assert.Equal(t, []uint64{11, 11, 11, 12, 12, 12}, posted[:6])
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []uint16{0, 270, 540, 0, 270, 540}, starts[:6])
 }
 
 // A post the target is not ready for posts nothing. The loop drives
