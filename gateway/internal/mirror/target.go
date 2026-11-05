@@ -1266,21 +1266,13 @@ func (r *TargetReconciler) startProgressLoop(
 		go runTargetSampleProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)
 	} else {
 		readFn := func() (uint64, error) { return target.ReadGrain(targetReadTimeout) }
-		data := writer.Config().Common.Format == mxl.FormatData
-		completeFn := func(idx uint64) (bool, error) {
-			g, err := flow.grainInfo(writer, idx)
-			if err != nil {
-				return false, err
-			}
-			return arrivalComplete(g, data), nil
-		}
 		commitFn := func(idx uint64) error {
 			n, reason, err := flow.commitGrain(writer, idx, entry)
 			entry.bytes.Add(n)
 			entry.recordInvalid(reason)
 			return err
 		}
-		go runTargetProgressLoop(loopCtx, done, readFn, completeFn, commitFn, onFatal, entry)
+		go runTargetProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)
 	}
 	return true
 }
@@ -1341,9 +1333,9 @@ func (e *targetEntry) recordInvalid(reason invalidReason) {
 // classifyFabricError already reads that as fabricTransient, so the
 // loop retries and keeps its handles.
 //
-// For every grain ReadGrain reports as received, completeFn decides
-// whether every slice of it is valid, and commitFn then commits it on
-// the local FlowWriter, where consumer FlowReaders see it.
+// Every grain ReadGrain reports as received, a batch of its slices or
+// all of it, is committed by commitFn on the local FlowWriter, where
+// consumer FlowReaders see it.
 //
 // Errors from ReadGrain are classified: idle means nothing arrived,
 // transient means the call was disturbed and the handles are still
@@ -1353,16 +1345,14 @@ func (e *targetEntry) recordInvalid(reason invalidReason) {
 // next ReadGrain call segfaults inside cgo. We exit the loop and
 // call onFatal so the reconciler can rebuild the fabric side.
 //
-// The loop takes readFn, completeFn and commitFn as injected closures
-// so the state machine - the only piece prone to bugs and the only
-// piece worth unit-testing - is isolated from cgo. Production passes a
-// closure over fabrics.Target.ReadGrain, one over mxl.Writer.GrainInfo
-// and one over commitArrivedGrain(writer, ...).
+// The loop takes readFn and commitFn as injected closures so the state
+// machine - the only piece prone to bugs and the only piece worth
+// unit-testing - is isolated from cgo. Production passes a closure over
+// fabrics.Target.ReadGrain and one over commitArrivedGrain(writer, ...).
 func runTargetProgressLoop(
 	ctx context.Context,
 	done chan struct{},
 	readGrain ReadGrainFunc,
-	grainComplete GrainCompleteFunc,
 	commit CommitFunc,
 	onFatal func(),
 	tracker commitTracker,
@@ -1379,18 +1369,6 @@ func runTargetProgressLoop(
 		idx, err := readGrain()
 		switch kind := classifyFabricError(err); {
 		case err == nil:
-			// commitArrivedGrain marks every slice valid regardless of
-			// what landed, so a grain short of slices is not committed.
-			if grainComplete != nil {
-				ok, cerr := grainComplete(idx)
-				if cerr != nil {
-					l.Error(cerr, "grain completeness check", "idx", idx)
-					break
-				}
-				if !ok {
-					break
-				}
-			}
 			if err := commit(idx); err != nil {
 				if !errors.Is(err, errGrainAlreadyCommitted) {
 					l.Error(err, "commit received grain", "idx", idx)
@@ -1431,18 +1409,6 @@ func runTargetProgressLoop(
 	}
 }
 
-// arrivalComplete reports whether an arrived grain may be committed. A
-// video grain is committed once its header reports every slice valid,
-// or flags it invalid: the source sends an invalid grain as its header
-// alone. A data grain is never complete,
-// its valid slices being its length, and the source sends it in one
-// write, so it is committed as it arrives. TotalSlices == 0 is a grain
-// the source never subdivides, so there is nothing to wait for;
-// Complete() reports false for it.
-func arrivalComplete(g mxl.Grain, data bool) bool {
-	return data || g.TotalSlices == 0 || g.Complete() || g.Invalid()
-}
-
 // commitArrivedGrain advances the local flow's HeadIndex for a grain
 // whose payload + header were already filled in by the remote
 // initiator's RDMA write. OpenGrain returns a writable handle aliasing
@@ -1477,14 +1443,19 @@ const (
 	invalidIndexMismatch invalidReason = "index_mismatch"
 )
 
-// The slot's header is read before OpenGrain, which clears its invalid
-// flag and, unless it reopens the grain, its valid slices. An arrival
-// is committed invalid when the header carries the invalid flag or
-// another index. A data grain is
-// committed with the valid slices the initiator's write carried, none
-// included: they are its length, and libmxl data writers never complete
-// a grain. Any other grain is committed whole, an invalid one included,
-// so the writer completes it and the next arrival commits past it.
+// A valid arrival is committed with the valid slices the initiator's
+// write carried, as the target in tools/mxl-fabrics-demo/demo.cpp
+// commits the grain info OpenGrain hands back: a video grain sent in
+// slice batches is readable batch by batch, libmxl lets the writer
+// reopen a grain it has not completed, and the batch that carries the
+// last slice completes it. A data grain's valid slices are its length.
+//
+// The slot's header is read before OpenGrain, which resets an older
+// grain's header. An arrival is committed invalid when the header
+// carries the invalid flag or another index. An invalid video grain is
+// committed whole, so the writer completes it and the next arrival
+// commits past it; an invalid data grain keeps the length its header
+// carried, none when the header names another index.
 func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, invalidReason, error) {
 	hdr, err := writer.GrainInfo(idx)
 	if err != nil {
@@ -1505,18 +1476,22 @@ func commitArrivedGrain(writer *mxl.Writer, idx uint64) (uint64, invalidReason, 
 		}
 		return 0, "", fmt.Errorf("OpenGrain(%d): %w", idx, err)
 	}
-	valid, flags := ga.TotalSlices, uint32(0)
-	if data {
+	valid, flags := hdr.ValidSlices, uint32(0)
+	switch {
+	case reason != "" && !data:
+		valid = ga.TotalSlices
+	case reason == invalidIndexMismatch:
 		valid = 0
-		if reason != invalidIndexMismatch {
-			valid = hdr.ValidSlices
-		}
 	}
 	if reason != "" {
 		flags = mxl.GrainFlagInvalid
 	}
 	if err := ga.Commit(valid, flags); err != nil {
 		return 0, "", fmt.Errorf("Commit(%d): %w", idx, err)
+	}
+	if !data && valid < ga.TotalSlices {
+		// The grain's payload is counted once, with its last batch.
+		return 0, reason, nil
 	}
 	return uint64(ga.GrainSize), reason, nil
 }

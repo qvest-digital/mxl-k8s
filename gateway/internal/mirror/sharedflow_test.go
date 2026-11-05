@@ -124,9 +124,8 @@ func TestCommitArrivedGrain_DataGrainKeepsItsLength(t *testing.T) {
 // grains went by their length reads with GetGrainNonBlocking, which
 // hands out no data grain short of all its slices, so it never sends a
 // target a short one; this source reads what the grain holds. A target
-// from before commits only a complete grain, the rule arrivalComplete
-// applies without data, so a short grain from this source is never
-// committed there at the length of a full one.
+// from before commits only a complete grain, so a short grain from this
+// source is never committed there at the length of a full one.
 func TestDataGrainAcrossGatewayVersions(t *testing.T) {
 	inst, err := mxl.NewInstance(t.TempDir(), "")
 	require.NoError(t, err)
@@ -150,8 +149,7 @@ func TestDataGrainAcrossGatewayVersions(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint16(64), g.ValidSlices)
 	require.Less(t, g.ValidSlices, g.TotalSlices)
-	require.False(t, arrivalComplete(g, false), "an older target leaves a short grain uncommitted")
-	require.True(t, arrivalComplete(g, true))
+	require.False(t, g.Complete(), "an older target leaves a short grain uncommitted")
 }
 
 // A data writer commits a grain with nothing in it, as an ANC writer
@@ -188,14 +186,55 @@ func TestEmptyDataGrainIsMirroredEmpty(t *testing.T) {
 	require.Zero(t, got.ValidSlices, "committed as the full grain")
 }
 
-func TestArrivalComplete(t *testing.T) {
-	partial := mxl.Grain{TotalSlices: 4096, ValidSlices: 64}
-	require.True(t, arrivalComplete(partial, true), "a data grain is committed as it arrives")
-	require.False(t, arrivalComplete(partial, false), "a paced video grain waits for its last range")
-	require.True(t, arrivalComplete(mxl.Grain{TotalSlices: 1080, ValidSlices: 1080}, false))
-	require.True(t, arrivalComplete(mxl.Grain{}, false))
-	require.True(t, arrivalComplete(mxl.Grain{TotalSlices: 1080, Flags: mxl.GrainFlagInvalid}, false),
-		"an invalid video grain arrives as its header alone and is committed invalid")
+// A video grain sent in slice batches is committed with each batch's
+// valid slices, as the target in tools/mxl-fabrics-demo/demo.cpp commits
+// the grain info it opens, so readers see the first lines before the
+// rest lands; the batch carrying the last slice completes the grain.
+func TestCommitArrivedGrain_SliceBatchesCommitAsTheyLand(t *testing.T) {
+	dir := t.TempDir()
+	newWriter := func() *mxl.Writer {
+		inst, err := mxl.NewInstance(dir, "")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = inst.Close() })
+		w, _, err := inst.NewWriter(sharedFlowVideoDef)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = w.Close() })
+		return w
+	}
+	// The target's writer, and one of another instance on the same flow
+	// that writes the slot header as the initiator's batches do.
+	target, initiator := newWriter(), newWriter()
+	const idx = 1000
+	land := func(valid uint16) {
+		t.Helper()
+		ga, err := initiator.OpenGrain(idx)
+		require.NoError(t, err)
+		require.NoError(t, ga.Commit(valid, 0))
+	}
+	ga, err := initiator.OpenGrain(idx)
+	require.NoError(t, err)
+	total := ga.TotalSlices
+	require.NoError(t, ga.Cancel())
+
+	land(270)
+	n, reason, err := commitArrivedGrain(target, idx)
+	require.NoError(t, err)
+	assert.Empty(t, reason)
+	assert.Zero(t, n, "the payload is counted with the last batch")
+	g, err := target.GrainInfo(idx)
+	require.NoError(t, err)
+	assert.Equal(t, uint16(270), g.ValidSlices, "the first batch is readable as it landed")
+
+	land(total)
+	n, _, err = commitArrivedGrain(target, idx)
+	require.NoError(t, err, "a grain the target has not completed is reopened for its next batch")
+	assert.Positive(t, n)
+	g, err = target.GrainInfo(idx)
+	require.NoError(t, err)
+	assert.True(t, g.Complete(), "the last batch completes the grain")
+
+	_, _, err = commitArrivedGrain(target, idx)
+	require.ErrorIs(t, err, errGrainAlreadyCommitted, "a completed grain is not reopened")
 }
 
 // Two progress loops committing one flow through two writers at once
@@ -336,7 +375,7 @@ func TestRunTargetProgressLoop_AlreadyCommittedGrainIsDroppedNotFatal(t *testing
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runTargetProgressLoop(ctx, done, read, nil, commit,
+	go runTargetProgressLoop(ctx, done, read, commit,
 		func() { t.Error("an already-committed grain must not be fatal") }, tracker)
 
 	require.Eventually(t, func() bool { return len(tracker.snapshot()) == 2 },

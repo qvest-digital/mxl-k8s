@@ -41,10 +41,6 @@ type ProgressFunc func() error
 // recovery callback to fire.
 type ReadGrainFunc func() (idx uint64, err error)
 
-// GrainCompleteFunc reports whether every slice of an arrived grain is
-// valid, which is when the target commits it.
-type GrainCompleteFunc func(idx uint64) (bool, error)
-
 // CommitFunc finishes one arrived grain on the local writer
 // (OpenGrain + Commit) so consumer FlowReaders see it. Production
 // passes a closure over the per-mirror *mxl.Writer.

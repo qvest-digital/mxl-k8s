@@ -50,13 +50,6 @@ func (r *TargetReconciler) sharedFlowFor(handles *instance.Handles, flowID [16]b
 	return f.(*sharedFlow)
 }
 
-// grainInfo reads a grain's header under the flow's lock.
-func (f *sharedFlow) grainInfo(writer *mxl.Writer, idx uint64) (mxl.Grain, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return writer.GrainInfo(idx)
-}
-
 // commitGrain commits an arrived grain. An arrival whose grain is
 // already committed returns errGrainAlreadyCommitted and is recorded on
 // tracker against the flow's last commit, when that is fresh: the grain

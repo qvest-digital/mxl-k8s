@@ -184,11 +184,12 @@ Steps for one grain index *N*:
    returns the index that just completed; on `ErrNotReady` it calls
    again.
 5. **Target gateway** calls `commitArrivedGrain(writer, idx)`,
-   which is `Writer.OpenGrain(idx)` followed immediately by
-   `Commit(TotalSlices, 0)`. This does not copy data -- the payload
-   and header are already in place. The Commit only advances the
-   local flow's `HeadIndex` so consumer FlowReaders on this node
-   see the new grain.
+   which is `Writer.OpenGrain(idx)` followed immediately by a
+   `Commit` with the valid slices the arrived header carries. This
+   does not copy data -- the payload and header are already in place.
+   The Commit only advances the local flow's `HeadIndex` so consumer
+   FlowReaders on this node see the new grain, a slice batch of it as
+   soon as that batch lands.
 6. **Consumer pod's FlowReader** sees `HeadIndex >= N` on its next
    `GetGrain(N)` call. The grain bytes are returned via a pointer
    into the consumer's mmap of the local data file -- zero-copy on
