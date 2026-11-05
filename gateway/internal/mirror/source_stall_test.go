@@ -2,6 +2,7 @@ package mirror
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -528,3 +529,16 @@ func TestRunFlusher_ClearsRebuildBudgetOnProgress(t *testing.T) {
 }
 
 func ptrTime(t time.Time) *time.Time { return &t }
+
+// A post the initiator rejects for good is published with its text, so
+// the mirror says why it delivers nothing.
+func TestObservedState_CarriesAPostRejectedForGood(t *testing.T) {
+	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1"}
+	e.openedAt = time.Now()
+	e.recordPostFailed(errors.New("Count is too large for the bounce buffer entry size"))
+
+	state := observedState(e, defaultReaderStallAfter)
+
+	assert.Equal(t, mxlv1alpha1.ReasonTransfersNotLanding, state.reason)
+	assert.Contains(t, state.message, "Count is too large for the bounce buffer entry size")
+}

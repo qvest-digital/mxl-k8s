@@ -212,6 +212,7 @@ func awaitConnected(ctx context.Context, l logr.Logger, progress, poll ProgressF
 	if _, err := awaitTransfer(ctx, progress, poll, time.Now(), 0); err != nil {
 		if ctx.Err() == nil {
 			l.Info("mirror target did not connect", "error", err.Error())
+			tracker.recordTargetLost()
 			tracker.recordDropped(false)
 		}
 		return false
@@ -321,6 +322,7 @@ func runTransferLoop(
 			continue
 		case errors.Is(err, errPost):
 			l.Error(err, "TransferGrain", "class", classifyFabricError(err).String(), "index", next)
+			tracker.recordPostFailed(err)
 			tracker.recordDropped(false)
 			return
 		case errors.Is(err, mxl.ErrTimeout):
@@ -336,6 +338,7 @@ func runTransferLoop(
 		if err != nil {
 			if ctx.Err() == nil {
 				l.Info("lost the mirror target", "index", next, "error", err.Error())
+				tracker.recordTargetLost()
 				tracker.recordDropped(true)
 			}
 			return
@@ -428,6 +431,7 @@ func runSampleTransferLoop(
 		default:
 			l.Error(err, "TransferSamples", "class", classifyFabricError(err).String(),
 				"headIndex", end, "count", xferBatch)
+			tracker.recordPostFailed(err)
 			tracker.recordDropped(false)
 			return
 		}
@@ -437,6 +441,7 @@ func runSampleTransferLoop(
 		if err != nil {
 			if ctx.Err() == nil {
 				l.Info("lost the mirror target", "headIndex", end, "error", err.Error())
+				tracker.recordTargetLost()
 				tracker.recordDropped(true)
 			}
 			return

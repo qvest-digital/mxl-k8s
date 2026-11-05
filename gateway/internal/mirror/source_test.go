@@ -116,7 +116,10 @@ type recordingTracker struct {
 	agedOuts  int
 	skipped   uint64
 	passed    map[unsentReason]uint64
-	heads     []uint64
+	// lost counts recordTargetLost, postErrors recordPostFailed.
+	lost       int
+	postErrors []string
+	heads      []uint64
 }
 
 // testReadableWindow stands in for the reader's readable window in the
@@ -149,6 +152,18 @@ func (rt *recordingTracker) recordAgedOut(time.Time) {
 func (rt *recordingTracker) recordSkipped(samples uint64) {
 	rt.mu.Lock()
 	rt.skipped += samples
+	rt.mu.Unlock()
+}
+
+func (rt *recordingTracker) recordTargetLost() {
+	rt.mu.Lock()
+	rt.lost++
+	rt.mu.Unlock()
+}
+
+func (rt *recordingTracker) recordPostFailed(err error) {
+	rt.mu.Lock()
+	rt.postErrors = append(rt.postErrors, err.Error())
 	rt.mu.Unlock()
 }
 
@@ -1440,4 +1455,53 @@ func TestPublishSourceProgress_OmitsLastSentAtWhenNeverTransferred(t *testing.T)
 		"a sourceProgressState with nil lastSentAt must omit the key from "+
 			"the SSA payload; stamping a zero time would trigger an immediate "+
 			"target-side rebuild on every freshly created mirror")
+}
+
+// A target the initiator dropped is marked lost, so detach does not
+// remove it from an initiator that already evicted it (removeTarget in
+// RCInitiator.cpp answers "not found" for it).
+func TestRunTransferLoop_MarksADroppedTargetLost(t *testing.T) {
+	h := &headScript{heads: []uint64{10, 11}}
+	link := &fakeLink{t: t}
+	var calls atomic.Int32
+	progress := func() error {
+		if calls.Add(1) == 1 {
+			return nil // connected
+		}
+		return mxl.ErrInterrupted
+	}
+	tr := &recordingTracker{}
+	done, stop := runGrainLoop(h.probe, link.transferGrain, progress, time.Second, tr)
+	defer stop()
+	<-done
+
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	assert.Equal(t, 1, tr.lost)
+	assert.Empty(t, tr.postErrors)
+}
+
+// A post the initiator rejects for good leaves the target connected: it
+// is kept as the reason, not marked lost.
+func TestRunTransferLoop_KeepsAPostRejectedForGood(t *testing.T) {
+	h := &headScript{heads: []uint64{10, 11}}
+	transfer := func(uint64) (uint64, error) {
+		return 0, fmt.Errorf("%w: %w", errPost, mxl.ErrInvalidArg)
+	}
+	tr := &recordingTracker{}
+	done, stop := runGrainLoop(h.probe, transfer, func() error { return nil }, time.Second, tr)
+	defer stop()
+	<-done
+
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	assert.Zero(t, tr.lost)
+	require.Len(t, tr.postErrors, 1)
+}
+
+// A link's loop marks the link itself when its target is lost.
+func TestLinkTracker_MarksTheLink(t *testing.T) {
+	link := &sourceLink{}
+	linkTracker{sourceEntry: &sourceEntry{}, link: link}.recordTargetLost()
+	assert.True(t, link.targetLost.Load())
 }

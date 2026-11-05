@@ -271,7 +271,19 @@ type sourceLink struct {
 	progress  ProgressFunc
 	cancel    context.CancelFunc
 	done      chan struct{}
+	// targetLost is set by the loop before it closes done, when the
+	// initiator dropped the target or never connected it.
+	targetLost atomic.Bool
 }
+
+// linkTracker is the tracker a link's loop reports to: the mirror's
+// entry, and the link for a lost target.
+type linkTracker struct {
+	*sourceEntry
+	link *sourceLink
+}
+
+func (t linkTracker) recordTargetLost() { t.link.targetLost.Store(true) }
 
 // stop cancels the loop and waits for it to return. Idempotent.
 func (l *sourceLink) stop() {
@@ -360,6 +372,8 @@ type sourceEntry struct {
 	// error message for the same purpose.
 	addTargetAttempts atomic.Uint32
 	lastError         atomic.Pointer[string]
+	// postError is the last post the initiator rejected for good.
+	postError atomic.Pointer[string]
 
 	// openedAt is the wall-clock time this mirror's target was added.
 	// Read-only after construction, set before the entry is published
@@ -1089,6 +1103,7 @@ func (o *libmxlOpener) attach(s *sharedSource, targetInfoStr string, e *sourceEn
 	progress := progressFuncFor(initiator, iface.Caps.Flags)
 	link := &sourceLink{reader: reader, initiator: initiator, info: info, progress: progress,
 		cancel: cancel, done: make(chan struct{})}
+	tr := linkTracker{sourceEntry: e, link: link}
 	probe := func() (uint64, error) {
 		rt, err := reader.Runtime()
 		if err != nil {
@@ -1101,10 +1116,10 @@ func (o *libmxlOpener) attach(s *sharedSource, targetInfoStr string, e *sourceEn
 		untilIndex := func(index uint64) time.Duration { return time.Duration(mxl.NsUntilIndex(index, rate)) }
 		go runSampleTransferLoop(ctx, link.done, s.key.flowID, probe,
 			newSampleTransfer(reader, initiator, uint64(s.cfg.Continuous.BufferLength)),
-			progress, initiator.MakeProgressNonBlocking, s.xferBatch, s.maxBatch, untilIndex, s.poll, s.interval, e)
+			progress, initiator.MakeProgressNonBlocking, s.xferBatch, s.maxBatch, untilIndex, s.poll, s.interval, tr)
 	} else {
 		transfer := newGrainTransfer(reader, initiator, s.cfg.Common.Format == mxl.FormatData, sliceBytes(s.cfg), s.sliceBatch)
-		go runTransferLoop(ctx, link.done, s.key.flowID, probe, transfer, progress, initiator.MakeProgressNonBlocking, s.poll, s.interval, e)
+		go runTransferLoop(ctx, link.done, s.key.flowID, probe, transfer, progress, initiator.MakeProgressNonBlocking, s.poll, s.interval, tr)
 	}
 	return link, nil
 }
@@ -1165,7 +1180,10 @@ func (o *libmxlOpener) detach(link *sourceLink) {
 		return
 	}
 	link.stop()
-	if link.initiator != nil && link.info != nil {
+	// A connection-oriented initiator has already evicted a target it
+	// dropped (evictDeadEndpoints in RCInitiator.cpp), and removing it
+	// again only fails with "not found".
+	if link.initiator != nil && link.info != nil && !link.targetLost.Load() {
 		if err := link.initiator.RemoveTarget(link.info); err != nil {
 			ctrl.Log.WithName("source").V(1).Info("RemoveTarget", "error", err.Error())
 		} else {
@@ -1199,6 +1217,11 @@ type progressTracker interface {
 	recordHead(head uint64, at time.Time)
 	recordCompleted(idx, bytes uint64, late bool, at time.Time)
 	recordDropped(outstanding bool)
+	// recordTargetLost marks the target as dropped by the initiator or
+	// never connected, so detach does not remove it again.
+	recordTargetLost()
+	// recordPostFailed keeps a post the initiator rejected for good.
+	recordPostFailed(err error)
 	recordAgedOut(at time.Time)
 	recordSkipped(samples uint64)
 	recordPassedOver(reason unsentReason, grains uint64)
@@ -1225,6 +1248,17 @@ func (e *sourceEntry) recordCompleted(idx, bytes uint64, late bool, at time.Time
 	if late {
 		e.late.Add(1)
 	}
+}
+
+// recordTargetLost is the link's to act on; see linkTracker.
+func (e *sourceEntry) recordTargetLost() {}
+
+// recordPostFailed keeps the text of a post the initiator rejected for
+// good, which observedState publishes while the mirror waits to add its
+// target again.
+func (e *sourceEntry) recordPostFailed(err error) {
+	msg := err.Error()
+	e.postError.Store(&msg)
 }
 
 // recordDropped marks the target given up, counting the transfer that
@@ -1819,6 +1853,17 @@ func observedState(entry *sourceEntry, stallAfter time.Duration) sourceProgressS
 		}
 	}
 	delivering := sent != nil && time.Since(*sent) <= stallAfter
+	// A post the initiator rejects for good fails on every re-add too,
+	// so the mirror carries its text rather than only reading as
+	// transfers not landing.
+	if p := entry.postError.Load(); p != nil && !delivering {
+		return sourceProgressState{
+			status:     metav1.ConditionFalse,
+			reason:     mxlv1alpha1.ReasonTransfersNotLanding,
+			message:    "the initiator rejects every transfer: " + *p,
+			lastSentAt: sent,
+		}
+	}
 	// An aged-out skip is only evidence about the reader while it is
 	// recent. Held for the stall window rather than until the next
 	// transfer so a reader skipping every tick stays on one condition
