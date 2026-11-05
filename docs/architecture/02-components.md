@@ -313,11 +313,11 @@ The eight steps in order:
    the progress goroutine.
 7. **Source-node gateway's `SourceReconciler` wakes** on the
    mirror's status update -- it has `Watches(MxlFlowMirror)` *and*
-   `Watches(MxlFlow)`. It opens
-   `mxl.Instance.NewReader` ->
-   `fabrics.RegionsForFlowReader` -> `fabrics.Instance.NewInitiator`
-   -> `Initiator.Setup` -> `ParseTargetInfo` -> `AddTarget`, then
-   spawns the transfer goroutine.
+   `Watches(MxlFlow)`. It opens `mxl.Instance.NewReader`, shared by
+   the mirrors of the flow, then for this mirror
+   `fabrics.Instance.NewInitiator` -> `Initiator.Setup` ->
+   `ParseTargetInfo` -> `AddTarget`, and spawns the mirror's
+   transfer goroutine.
 8. **Operator's `receiver.Reconciler` wakes** on the mirror's
    status update via its `Watches(MxlFlowMirror)` and patches
    `MxlReceiver.status` with `boundMirror` and `phase=Bound`.

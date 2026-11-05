@@ -169,9 +169,8 @@ host setup is AWS-specific.
   beside each endpoint carries nothing.
 - EFA delivers the RMA writes of one initiator in any order
   (`fi_info -p efa -v` reports no write-after-write ordering). The
-  gateway therefore never paces grains into per-chunk writes on an
-  efa mirror, whatever `--pacing-fraction` says, and libmxl-fabrics
-  sends each audio transfer as a single write.
+  gateway sends each grain as one transfer, and libmxl-fabrics sends
+  each audio transfer as a single write.
 - Multus is *not* the right tool for EFA pods -- EFA is exposed
   via the host's network namespace. `hostNetwork: true` on the
   gateway DaemonSet (as in the rdma-demo example) keeps the

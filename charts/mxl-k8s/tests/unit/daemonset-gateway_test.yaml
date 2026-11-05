@@ -161,6 +161,16 @@ tests:
             name: FI_VERBS_ACK_TIMEOUT
           any: true
 
+  # The libfabric patch accepts 1 to 31 and treats anything else as
+  # unset, so 0 would read as a timeout the queue pairs never get.
+  - it: rejects rdma.verbsAckTimeout 0
+    set:
+      gateway.rdma.enabled: true
+      gateway.rdma.verbsAckTimeout: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: "at '/gateway/rdma/verbsAckTimeout'"
+
   - it: a gateway without verbs gets no FI_VERBS_ACK_TIMEOUT
     set:
       gateway.rdma.enabled: true

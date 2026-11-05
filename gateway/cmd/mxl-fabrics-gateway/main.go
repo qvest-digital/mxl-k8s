@@ -34,6 +34,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/merge"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/mirror"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/originhints"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/placeholder"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/rdma"
 )
@@ -183,13 +184,16 @@ func run(args []string) error {
 		Selector:         selector,
 		Domains:          domains,
 		ReaderStallAfter: cfg.ReaderStallAfter,
-		PacingFraction:   cfg.PacingFraction,
-		PacingChunks:     cfg.PacingChunks,
-		GrainsInFlight:   cfg.GrainsInFlight,
 		Recorder:         mgr.GetEventRecorderFor("mxl-source-gateway"),
 	}
 	if err := sourceReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup source reconciler: %w", err)
+	}
+	// The batch size hints of the flows produced here, which a mirror's
+	// target creates its copy with.
+	hints := &originhints.Publisher{Client: mgr.GetClient(), NodeName: cfg.NodeName, Domain: placeholder.FromSet(domains)}
+	if err := hints.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup origin hints publisher: %w", err)
 	}
 	// Every domain ready here is opened, used or not, so the sweeper
 	// below runs in each of them.
