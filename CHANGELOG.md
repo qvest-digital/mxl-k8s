@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.1.0-rc.43](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.42...v1.1.0-rc.43) (2026-11-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* **gateway:** the gateway rejects --pacing-fraction, --pacing-chunks and --grains-in-flight, and the chart drops gateway.flags.pacingFraction, gateway.flags.pacingChunks and gateway.flags.grainsInFlight. The gateway no longer exports mxl_gateway_mirror_transfers_posted_total, mxl_gateway_mirror_transfers_in_flight, mxl_gateway_mirror_transfers_torn_total and mxl_gateway_mirror_accounting_errors_total, and mxl_gateway_mirror_transfers_total drops the outcomes failed and skipped. mxl_gateway_mirror_source_unsent_grains_total no longer reports reason="invalid": an invalid grain is sent as its header, and the target's mxl_gateway_mirror_target_invalid_grains_total{reason="invalid_from_source"} counts it. During a rolling upgrade from 1.1.0-rc.42, audio batches from a source gateway not yet upgraded into an upgraded target are rejected when the producer's sync hint is below 10 ms of samples, until both gateways run this version.
+
+### Features
+
+* **api:** add batch size hints to MxlFlow and MxlFlowMirror status ([#418](https://github.com/qvest-digital/mxl-k8s/issues/418)) ([6bd511b](https://github.com/qvest-digital/mxl-k8s/commit/6bd511bc2bb217333a9e0609a5b5f68a8ab3af17))
+* **gateway:** create a mirror's copy with the producer's batch hints ([#415](https://github.com/qvest-digital/mxl-k8s/issues/415)) ([2fc6b5e](https://github.com/qvest-digital/mxl-k8s/commit/2fc6b5ef05e9c4f82b61b0c1602890d0d8232df7))
+
+
+### Bug Fixes
+
+* **gateway:** follow a repointed mirror's source on the target ([#413](https://github.com/qvest-digital/mxl-k8s/issues/413)) ([b9f32f0](https://github.com/qvest-digital/mxl-k8s/commit/b9f32f0af32343d296d2a16bb5244bfb53cad78e))
+* **gateway:** keep 64 receives posted at every target ([#415](https://github.com/qvest-digital/mxl-k8s/issues/415)) ([2fc6b5e](https://github.com/qvest-digital/mxl-k8s/commit/2fc6b5ef05e9c4f82b61b0c1602890d0d8232df7))
+* **gateway:** poll the target again as soon as a blocking read times out ([#415](https://github.com/qvest-digital/mxl-k8s/issues/415)) ([2fc6b5e](https://github.com/qvest-digital/mxl-k8s/commit/2fc6b5ef05e9c4f82b61b0c1602890d0d8232df7))
+
+
+### Code Refactoring
+
+* **gateway:** one initiator per mirror, one transfer in flight ([#415](https://github.com/qvest-digital/mxl-k8s/issues/415)) ([2fc6b5e](https://github.com/qvest-digital/mxl-k8s/commit/2fc6b5ef05e9c4f82b61b0c1602890d0d8232df7))
+
 ## [1.1.0-rc.42](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.41...v1.1.0-rc.42) (2026-11-01)
 
 
