@@ -133,12 +133,21 @@ jobs:
           stale=()
           for key in operator agent gateway exporter shim demo_tools; do
             name="${key//_/-}"
-            rev=$(docker buildx imagetools inspect "ghcr.io/${owner}/mxl-k8s/${name}:dev" \
-                    --format '{{json .Image}}' 2>/dev/null \
-                  | jq -r '(."linux/amd64" // .).config.Labels["org.opencontainers.image.revision"] // empty' \
-                  2>/dev/null || true)
-            if [ -z "$rev" ] || ! git merge-base --is-ancestor "$rev" HEAD 2>/dev/null; then
-              echo "${name}: :dev revision '${rev}' is not in main's history"
+            if ! image=$(docker buildx imagetools inspect "ghcr.io/${owner}/mxl-k8s/${name}:dev" \
+                           --format '{{json .Image}}' 2>&1); then
+              echo "::warning::${name}: cannot inspect :dev, rebuilding it: ${image}"
+              stale+=("$name")
+              continue
+            fi
+            rev=$(jq -r '(."linux/amd64" // .).config.Labels["org.opencontainers.image.revision"] // empty' \
+                    <<<"$image" 2>/dev/null || true)
+            if [ -z "$rev" ]; then
+              echo "::warning::${name}: :dev has no revision label, rebuilding it"
+              stale+=("$name")
+              continue
+            fi
+            if ! git merge-base --is-ancestor "$rev" HEAD 2>/dev/null; then
+              echo "${name}: :dev revision ${rev} is not in main's history"
               stale+=("$name")
               continue
             fi
@@ -485,6 +494,8 @@ jobs:
           fi
           # A stale :dev is rebuilt whatever this push changed: no
           # assertion above holds for what an earlier merge changed.
+          # On an inert push it is published to :dev without the kind
+          # suite, which inert vetoes, as on a release-please commit.
           for k in ${DEV_STALE:-}; do wanted[$k]=true; done
 
           push=false
