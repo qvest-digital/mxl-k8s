@@ -1468,7 +1468,9 @@ const (
 // set, records the grain the writer holds open and the most slices
 // committed of it, and such an arrival commits no fewer. A grain the
 // writer has completed cannot be reopened, so a late batch of it leaves
-// the slot's count lowered until the sibling's last batch lands. Only a
+// the slot's count lowered until the sibling's last batch of it lands,
+// if it does: a sibling that resyncs or loses its target mid-grain
+// leaves it lowered for good. Only a
 // producer that commits partial grains with a sync hint below the
 // grain's slices is sent in more than one batch, so only its grains are
 // exposed.
