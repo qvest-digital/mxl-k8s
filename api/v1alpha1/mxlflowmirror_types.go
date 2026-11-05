@@ -95,6 +95,8 @@ type MxlFlowMirrorStatus struct {
 	// leaves it unset, and the source then assumes libmxl's default of
 	// 10 ms of samples.
 	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4294967295
 	TargetMaxSyncBatchSizeHint int64 `json:"targetMaxSyncBatchSizeHint,omitempty"`
 
 	// ObservedGeneration is the spec generation last reconciled.

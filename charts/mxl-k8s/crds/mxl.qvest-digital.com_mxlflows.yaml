@@ -194,7 +194,9 @@ spec:
                 - nodeName
                 x-kubernetes-list-type: map
               maxCommitBatchSizeHint:
-                description: MaxCommitBatchSizeHint is described with MaxSyncBatchSizeHint.
+                description: |-
+                  MaxCommitBatchSizeHint is the flow's maxCommitBatchSizeHint on its
+                  origin node; see MaxSyncBatchSizeHint.
                 format: int64
                 maximum: 4294967295
                 minimum: 1
