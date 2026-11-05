@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -98,16 +99,64 @@ func TestEnsureMountsWithHugeOnlyWhenSet(t *testing.T) {
 	assert.Equal(t, "mode=0777,wait=5000,huge=always", *options)
 }
 
-// A module that does not know huge= refuses the mount; the domain stays
-// plain and the Node says why, as without the module.
-func TestEnsureFallsBackWhenTheModuleRefusesHuge(t *testing.T) {
+// A module that does not know huge= refuses a mount that names it: the
+// domain is mounted without it, still an mxlfs, and the Node says why
+// under its own reason rather than as a plain directory.
+func TestEnsureMountsWithoutHugeWhenTheModuleRefusesIt(t *testing.T) {
 	dir := t.TempDir()
-	m, _, fell, _ := harnessOpts(nil, unix.EINVAL)
+	var mounts []string
+	var refused []fallback
+	m, _, fell := harness(nil, nil)
 	m.Huge = "always"
+	m.Mount = func(dir, opts string) error {
+		mounts = append(mounts, opts)
+		if strings.Contains(opts, "huge=") {
+			return unix.EINVAL
+		}
+		return nil
+	}
+	m.HugeRefused = func(dir string, err error) { refused = append(refused, fallback{dir, err}) }
 
 	require.NoError(t, m.Ensure(dir))
-	require.Len(t, *fell, 1)
-	assert.ErrorIs(t, (*fell)[0].err, unix.EINVAL)
+	assert.Equal(t, []string{"mode=0777,wait=5000,huge=always", "mode=0777,wait=5000"}, mounts)
+	assert.Empty(t, *fell, "the domain is an mxlfs")
+	require.Len(t, refused, 1)
+	assert.Equal(t, dir, refused[0].dir)
+	assert.ErrorIs(t, refused[0].err, unix.EINVAL)
+	assert.True(t, m.Decided(dir))
+}
+
+// Only a refused huge= is retried: a mount that fails without it too
+// leaves the domain plain, and so does any other error.
+func TestEnsureRetriesWithoutHugeOnlyForEINVAL(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		mounts int
+	}{
+		{"EINVAL again", unix.EINVAL, 2},
+		{"no module", unix.ENODEV, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, mounted, fell := harness(nil, tc.err)
+			m.Huge = "always"
+			m.HugeRefused = func(string, error) { t.Error("HugeRefused told of a mount that failed") }
+
+			require.NoError(t, m.Ensure(t.TempDir()))
+			assert.Len(t, *mounted, tc.mounts)
+			require.Len(t, *fell, 1)
+			assert.ErrorIs(t, (*fell)[0].err, tc.err)
+		})
+	}
+}
+
+// Without huge= set, EINVAL is not a refused option and is not retried.
+func TestEnsureDoesNotRetryWithoutHuge(t *testing.T) {
+	m, mounted, fell := harness(nil, unix.EINVAL)
+
+	require.NoError(t, m.Ensure(t.TempDir()))
+	assert.Len(t, *mounted, 1)
+	assert.Len(t, *fell, 1)
 }
 
 func TestEnsureDoesNotHideFlows(t *testing.T) {
@@ -151,4 +200,21 @@ func TestNodeEventWarnsOnTheNode(t *testing.T) {
 	assert.Equal(t, "Node", ev.InvolvedObject.Kind)
 	assert.Equal(t, "n1", ev.InvolvedObject.Name)
 	assert.Contains(t, ev.Message, "/run/mxl/domain stays a plain directory: no such device")
+}
+
+func TestHugeRefusedEventHasItsOwnReason(t *testing.T) {
+	s := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(s))
+	c := fake.NewClientBuilder().WithScheme(s).Build()
+
+	HugeRefusedEvent(c, "n1", logr.Discard())("/run/mxl/domain", unix.EINVAL)
+
+	var list corev1.EventList
+	require.NoError(t, c.List(context.Background(), &list, client.InNamespace("default")))
+	require.Len(t, list.Items, 1)
+	ev := list.Items[0]
+	assert.Equal(t, corev1.EventTypeWarning, ev.Type)
+	assert.Equal(t, ReasonHugeRefused, ev.Reason)
+	assert.Equal(t, "n1", ev.InvolvedObject.Name)
+	assert.Contains(t, ev.Message, "/run/mxl/domain is mounted without huge=: invalid argument")
 }

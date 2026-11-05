@@ -2470,7 +2470,7 @@
         },
         "huge": {
           "default": "",
-          "description": "huge= mount option of every mxlfs domain, as tmpfs's: within_size gives a file folios that end by EOF; always gives a file of at least 2 MiB one 2 MiB folio for its last partial 2 MiB, so a NIC maps a registered grain with one translation per 2 MiB instead of a page size the smallest tail folio sets, at up to 2 MiB more memory per such file (736 KiB for a 1080p v210 grain). Empty leaves the option out, which an mxlfs module without it needs: such a module refuses the mount, and the domain stays a plain directory. @schema enum: [\"\", \"within_size\", \"always\"] @schema",
+          "description": "huge= mount option of every mxlfs domain, as tmpfs's: within_size gives a file folios that end by EOF; always gives a file of at least 2 MiB one 2 MiB folio for its last partial 2 MiB, so a NIC maps a registered grain with one translation per 2 MiB instead of a page size the smallest tail folio sets, at up to 2 MiB more memory per such file (736 KiB for a 1080p v210 grain). Empty leaves the option out. An mxlfs module without it refuses a mount that names it; the agent then mounts the domain without huge= and records a MxlfsHugeRefused warning event on the Node. A change applies to a domain only when it is mounted again, at the next node reboot. @schema enum: [\"\", \"within_size\", \"always\"] @schema",
           "enum": [
             "",
             "within_size",
