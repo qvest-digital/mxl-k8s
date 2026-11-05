@@ -69,6 +69,37 @@ jobs:
       code:        ${{ steps.f.outputs.code }}
       deps_only:   ${{ steps.n.outputs.non_deps == 'false' }}
       tree_tested: ${{ steps.tree.outputs.tested }}
+      dev_stale:   ${{ steps.dev.outputs.stale }}
+    env:
+      # The per-image filters. The dev step below reads the image
+      # entries too, so they live in one place.
+      FILTERS: |
+        operator:   ['docker/operator.Dockerfile', 'operator/**', 'api/**', 'go.work*']
+        agent:      ['docker/agent.Dockerfile', 'agent/**', 'api/**', 'shim/**', 'go.work*']
+        gateway:    ['docker/gateway.Dockerfile', 'gateway/**', 'api/**', 'go.work*']
+        exporter:   ['docker/exporter.Dockerfile', 'exporter/**', 'api/**', 'go.work*']
+        shim:       ['docker/shim.Dockerfile', 'shim/**']
+        demo_tools: ['docker/demo-tools.Dockerfile']
+        workflow:   ['.github/workflows/images.yml']
+        # True when the diff touches anything that is not
+        # markdown. The negation cannot be folded into the
+        # per-image filters above: dorny/paths-filter honours
+        # '!' only under predicate-quantifier 'every', and those
+        # filters are unions that 'every' could never satisfy.
+        # Standing alone it works under the default quantifier:
+        # true iff some changed file is not a .md.
+        code:       ['!**/*.md']
+        kind:
+          - 'hack/kind-*'
+          - 'docker/**'
+          - 'shim/**'
+          - 'examples/tcp-demo/**'
+          - 'config/crd/**'
+          - 'config/rbac/**'
+          - 'charts/mxl-k8s/**'
+          - 'Makefile'
+          - 'test/integration/kind/**'
+          - '.github/workflows/images.yml'
     steps:
       - uses: actions/checkout@v7
         with:
@@ -81,33 +112,46 @@ jobs:
       - uses: dorny/paths-filter@v4
         id: f
         with:
-          filters: |
-            operator:   ['docker/operator.Dockerfile', 'operator/**', 'api/**', 'go.work*']
-            agent:      ['docker/agent.Dockerfile', 'agent/**', 'api/**', 'shim/**', 'go.work*']
-            gateway:    ['docker/gateway.Dockerfile', 'gateway/**', 'api/**', 'go.work*']
-            exporter:   ['docker/exporter.Dockerfile', 'exporter/**', 'api/**', 'go.work*']
-            shim:       ['docker/shim.Dockerfile', 'shim/**']
-            demo_tools: ['docker/demo-tools.Dockerfile']
-            workflow:   ['.github/workflows/images.yml']
-            # True when the diff touches anything that is not
-            # markdown. The negation cannot be folded into the
-            # per-image filters above: dorny/paths-filter honours
-            # '!' only under predicate-quantifier 'every', and those
-            # filters are unions that 'every' could never satisfy.
-            # Standing alone it works under the default quantifier:
-            # true iff some changed file is not a .md.
-            code:       ['!**/*.md']
-            kind:
-              - 'hack/kind-*'
-              - 'docker/**'
-              - 'shim/**'
-              - 'examples/tcp-demo/**'
-              - 'config/crd/**'
-              - 'config/rbac/**'
-              - 'charts/mxl-k8s/**'
-              - 'Makefile'
-              - 'test/integration/kind/**'
-              - '.github/workflows/images.yml'
+          filters: ${{ env.FILTERS }}
+
+      # Push to main only: the images whose :dev was built from an
+      # older revision than their inputs. The filters above compare
+      # the push with the commit before it, so a merge whose own run
+      # never built -- one cancelled while it waited in the
+      # concurrency group behind a newer push -- leaves its images
+      # unbuilt for good, and every later run that skips them retags
+      # the old :dev. Each image's OCI revision label names the
+      # commit it was built from; an image whose inputs changed since
+      # then is stale. One whose label cannot be read, or names a
+      # commit outside main's history, is stale too: nothing says
+      # otherwise.
+      - id: dev
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -uo pipefail
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          stale=()
+          for key in operator agent gateway exporter shim demo_tools; do
+            name="${key//_/-}"
+            rev=$(docker buildx imagetools inspect "ghcr.io/${owner}/mxl-k8s/${name}:dev" \
+                    --format '{{json .Image}}' 2>/dev/null \
+                  | jq -r '(."linux/amd64" // .).config.Labels["org.opencontainers.image.revision"] // empty' \
+                  2>/dev/null || true)
+            if [ -z "$rev" ] || ! git merge-base --is-ancestor "$rev" HEAD 2>/dev/null; then
+              echo "${name}: :dev revision '${rev}' is not in main's history"
+              stale+=("$name")
+              continue
+            fi
+            spec=()
+            while IFS= read -r glob; do
+              spec+=(":(glob)${glob}")
+            done < <(yq -r ".${key}[]" <<<"$FILTERS")
+            if ! git diff --quiet "$rev" HEAD -- "${spec[@]}"; then
+              echo "${name}: inputs changed since :dev was built from ${rev}"
+              stale+=("$name")
+            fi
+          done
+          echo "stale=${stale[*]}" >> "$GITHUB_OUTPUT"
 
       # Cheap pre-gate for the deps-impact job: true when the diff
       # touches nothing but module requirement files. Needs its own
@@ -363,6 +407,9 @@ jobs:
       # fires only on an explicit 'false', so a release publish is
       # never held back by it.
       CHANGED_CODE:       ${{ needs.changes.outputs.code }}
+      # Push to main: images whose :dev is older than their inputs,
+      # space-separated; see the changes job.
+      DEV_STALE:          ${{ needs.changes.outputs.dev_stale }}
     steps:
       - id: m
         run: |
@@ -436,8 +483,12 @@ jobs:
           if [ "$inert" = "true" ]; then
             for k in "${!wanted[@]}"; do wanted[$k]=false; done
           fi
+          # A stale :dev is rebuilt whatever this push changed: no
+          # assertion above holds for what an earlier merge changed.
+          for k in ${DEV_STALE:-}; do wanted[$k]=true; done
 
           push=false
+          release_commit=false
           declare -a extra_tags=()
 
           if [ -n "${INPUT_RELEASE_TAG:-}" ]; then
@@ -483,9 +534,24 @@ jobs:
               "chore(main): release "*)
                 echo "Release-please merge commit; image publish deferred to workflow_call from release-please.yml."
                 push=false
+                release_commit=true
                 # Empty the wanted set so the loop below produces
-                # an empty images list and build/merge skip.
+                # an empty images list and build/merge skip. The
+                # release publish covers the released images only,
+                # so a dev_only image whose :dev is stale is still
+                # built here.
                 for k in "${!wanted[@]}"; do wanted[$k]=false; done
+                for k in ${DEV_STALE:-}; do
+                  case " ${dev_only[*]} " in
+                    *" ${k} "*)
+                      wanted[$k]=true
+                      push=true
+                      ;;
+                  esac
+                done
+                if [ "$push" = "true" ]; then
+                  extra_tags+=("dev" "sha-${short_sha}")
+                fi
                 ;;
               *)
                 push=true
@@ -573,6 +639,7 @@ jobs:
               if [ "$GITHUB_REF" = "refs/heads/main" ] \
                   && [ "$inert" != "true" ] \
                   && [ "$TREE_TESTED" != "true" ] \
+                  && [ "$release_commit" != "true" ] \
                   && { [ "$CHANGED_KIND" = "true" ] || [ "$has_images" = "true" ]; } \
                   && [ "$push" = "true" ]; then
                 kind_wanted=true
