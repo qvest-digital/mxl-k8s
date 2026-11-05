@@ -193,6 +193,30 @@ spec:
                 x-kubernetes-list-map-keys:
                 - nodeName
                 x-kubernetes-list-type: map
+              maxCommitBatchSizeHint:
+                description: |-
+                  MaxCommitBatchSizeHint is the flow's maxCommitBatchSizeHint on its
+                  origin node; see MaxSyncBatchSizeHint.
+                format: int64
+                maximum: 4294967295
+                minimum: 1
+                type: integer
+              maxSyncBatchSizeHint:
+                description: |-
+                  MaxSyncBatchSizeHint and MaxCommitBatchSizeHint are the batch size
+                  hints libmxl reports for the flow on its origin node, in samples
+                  for a continuous flow and in slices for a grain. The gateway on
+                  the origin node publishes them; unset until it has read them.
+
+                  libmxl takes them from the options of the writer that creates the
+                  flow, and the flow definition does not carry them. A mirror's
+                  target creates its copy with them: libmxl-fabrics sizes an audio
+                  target's bounce-buffer entries from the copy's sync hint, and the
+                  source sends batches of the origin's.
+                format: int64
+                maximum: 4294967295
+                minimum: 1
+                type: integer
               originChangedAt:
                 description: |-
                   OriginChangedAt is when the authoritative copy last moved to a

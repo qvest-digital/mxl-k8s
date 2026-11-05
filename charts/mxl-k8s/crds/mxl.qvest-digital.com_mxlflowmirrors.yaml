@@ -295,6 +295,19 @@ spec:
                   mxlFabricsTargetInfoToString. The initiator-side gateway parses
                   it with mxlFabricsTargetInfoFromString.
                 type: string
+              targetMaxSyncBatchSizeHint:
+                description: |-
+                  TargetMaxSyncBatchSizeHint is the maxSyncBatchSizeHint of the
+                  flow the target gateway writes, published with TargetInfo. For a
+                  continuous flow libmxl-fabrics sizes the target's bounce-buffer
+                  entries from it and rejects a larger sample batch, so the source
+                  gateway sends none. A target gateway that does not publish it
+                  leaves it unset, and the source then assumes libmxl's default of
+                  10 ms of samples.
+                format: int64
+                maximum: 4294967295
+                minimum: 1
+                type: integer
             type: object
         type: object
     served: true
