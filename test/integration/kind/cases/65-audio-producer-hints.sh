@@ -56,6 +56,17 @@ base=$("${KUBECTL[@]}" -n "$NAMESPACE" get configmap mxl-demo-flow-config \
 "${KUBECTL[@]}" -n "$NAMESPACE" create configmap "$CM" \
     --from-literal=flow.json="$(echo "$base" | sed -E "s/\"id\": *\"[0-9a-f-]+\"/\"id\": \"${FLOW}\"/")" >/dev/null
 
+# On mxlfs the pods take the domain through the agent's CSI volume, as
+# the demo pods do (examples/kind/csi-domain).
+writer_domain='hostPath: {path: /run/mxl/domain, type: Directory}'
+reader_domain_mount=''
+reader_domain_volume=''
+if agent_runs_mxlfs; then
+  writer_domain='csi: {driver: mxl.qvest-digital.com, volumeAttributes: {access: write}}'
+  reader_domain_mount='- {name: mxl-domain-csi, mountPath: /run/mxl/domain}'
+  reader_domain_volume='- {name: mxl-domain-csi, csi: {driver: mxl.qvest-digital.com}}'
+fi
+
 since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 "${KUBECTL[@]}" -n "$NAMESPACE" apply -f - <<EOF >/dev/null
 apiVersion: v1
@@ -79,7 +90,7 @@ spec:
         - {name: flows, mountPath: /flows}
   volumes:
     - name: mxl-domain
-      hostPath: {path: /run/mxl/domain, type: Directory}
+      ${writer_domain}
     - name: flows
       configMap: {name: ${CM}}
 ---
@@ -103,9 +114,11 @@ spec:
           add: ["IPC_LOCK", "SYS_RESOURCE"]
       volumeMounts:
         - {name: mxl-run, mountPath: /run/mxl}
+        ${reader_domain_mount}
   volumes:
     - name: mxl-run
       hostPath: {path: /run/mxl, type: Directory}
+    ${reader_domain_volume}
 EOF
 
 "${KUBECTL[@]}" -n "$NAMESPACE" wait --for=condition=Ready "pod/${WRITER}" \
