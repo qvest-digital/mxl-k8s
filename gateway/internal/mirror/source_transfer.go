@@ -46,10 +46,6 @@ var errEvicted = errors.New("evicted by the initiator")
 // a mirror takes up to this long.
 const sourceReadTimeout = 200 * time.Millisecond
 
-// errInvalidGrain reports a video grain its producer committed
-// invalid, of which nothing is posted.
-var errInvalidGrain = errors.New("invalid grain")
-
 // errPost wraps a failed TransferGrain or TransferSamples call, so the
 // loop tells it apart from a grain the reader cannot hand out yet.
 var errPost = errors.New("post transfer")
@@ -87,18 +83,9 @@ func newGrainTransfer(src grainSource, dst grainSender, data bool, perSlice uint
 			return start, 0, err
 		}
 		switch {
-		case grain.Invalid() && !data:
-			// Not posted, although docs/FabricsDeveloperGuide.md sends an
-			// invalid grain's header. A verbs target has one receive
-			// posted per endpoint and reposts it on its next read, and
-			// header-only writes sent back to back coincided with
-			// "transport retry counter exceeded" on one verbs device. The
-			// target writer flags the index invalid once the next grain
-			// commits past it.
-			return 0, 0, errInvalidGrain
 		case grain.Invalid():
-			// A data writer rarely completes a grain and flags no index it
-			// skips, so the header goes and the target commits it invalid.
+			// Its slot holds no picture, so only the header goes, which
+			// the target commits invalid.
 			bytes, err := post(idx, 0, 0)
 			return 0, bytes, err
 		case data:
@@ -350,17 +337,12 @@ func runTransferLoop(
 		case errors.Is(err, mxl.ErrTimeout):
 			// Not written yet; the read already waited for it.
 			continue
-		case errors.Is(err, errInvalidGrain):
-			tracker.recordInvalid(time.Now())
-			lastSent, start = next, 0
-			continue
 		default:
 			l.V(2).Info("grain not transferable yet", "index", next, "head", h, "error", err.Error())
 			wait(ctx, poll)
 			continue
 		}
 		posted := time.Now()
-		tracker.recordOffered(posted)
 		late, err := awaitTransfer(ctx, makeProgress, pollProgress, posted, interval)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -466,7 +448,6 @@ func runSampleTransferLoop(
 		}
 
 		posted := time.Now()
-		tracker.recordOffered(posted)
 		late, err := awaitTransfer(ctx, makeProgress, pollProgress, posted, interval)
 		if err != nil {
 			if ctx.Err() == nil {

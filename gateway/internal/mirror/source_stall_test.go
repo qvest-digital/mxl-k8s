@@ -546,27 +546,29 @@ func TestObservedState_CarriesAPostRejectedForGood(t *testing.T) {
 }
 
 // A source whose head moves over nothing but invalid grains, as a merge
-// output with every member down, offers its target nothing, so the
-// target completing nothing is not a stall. Once it offers a grain that
-// does not land, it is one.
-func TestObservedState_AllInvalidSourceIsNotTransfersNotLanding(t *testing.T) {
-	const window = 80 * time.Millisecond
+// output with every member down, posts each one as its header, as
+// runDiscrete in tools/mxl-fabrics-demo/demo.cpp does. Those headers
+// land, so the mirror is not reported as TransfersNotLanding.
+func TestObservedState_AllInvalidSourceDeliversHeaders(t *testing.T) {
+	src := flaggedSource{}
+	for idx := uint64(1000); idx <= 1003; idx++ {
+		src[idx] = mxl.Grain{Index: idx, Flags: mxl.GrainFlagInvalid, TotalSlices: 1080, ValidSlices: 1080, GrainSize: 5529600}
+	}
+	dst := &recordingSender{}
+	h := &headScript{heads: []uint64{1000, 1003}}
 	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1"}
 	e.openedAt = time.Now().Add(-time.Minute)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	start := time.Now()
-	head := func() (uint64, error) { return 1000 + uint64(time.Since(start)/(5*time.Millisecond)), nil }
-	allInvalid := func(uint64) (uint64, error) { return 0, errInvalidGrain }
-	probe, transfer := readable(head, allInvalid)
 	ok := func() error { return nil }
-	go runTransferLoop(ctx, done, "flow-1", probe, transfer, ok, ok, time.Millisecond, time.Second, e)
-	defer func() { cancel(); <-done }()
+	go runTransferLoop(ctx, done, "flow-1", h.probe, newGrainTransfer(src, dst, false, 5120, 0), ok, ok,
+		time.Millisecond, time.Second, e)
 
-	require.Eventually(t, func() bool { return e.invalidGrains.Load() > 0 }, time.Second, time.Millisecond)
-	assert.NotEqual(t, mxlv1alpha1.ReasonTransfersNotLanding, observedState(e, window).reason,
-		"a source with nothing to send reported its transfers as not landing")
-
-	e.recordOffered(time.Now())
-	assert.Equal(t, mxlv1alpha1.ReasonTransfersNotLanding, observedState(e, window).reason)
+	require.Eventually(t, func() bool { return e.progress.Load() == 3 }, time.Second, time.Millisecond)
+	assert.NotEqual(t, mxlv1alpha1.ReasonTransfersNotLanding, observedState(e, defaultReaderStallAfter).reason,
+		"a source whose headers land reported its transfers as not landing")
+	cancel()
+	<-done
+	assert.Equal(t, [][3]uint64{{1001, 0, 0}, {1002, 0, 0}, {1003, 0, 0}}, dst.calls)
+	assert.Zero(t, e.bytes.Load(), "an invalid grain carries no payload")
 }

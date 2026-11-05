@@ -116,8 +116,6 @@ type recordingTracker struct {
 	agedOuts  int
 	skipped   uint64
 	passed    map[unsentReason]uint64
-	offered   int
-	invalid   int
 	// evicted counts recordTargetEvicted, postErrors recordPostFailed.
 	evicted    int
 	postErrors []string
@@ -154,18 +152,6 @@ func (rt *recordingTracker) recordAgedOut(time.Time) {
 func (rt *recordingTracker) recordSkipped(samples uint64) {
 	rt.mu.Lock()
 	rt.skipped += samples
-	rt.mu.Unlock()
-}
-
-func (rt *recordingTracker) recordOffered(time.Time) {
-	rt.mu.Lock()
-	rt.offered++
-	rt.mu.Unlock()
-}
-
-func (rt *recordingTracker) recordInvalid(time.Time) {
-	rt.mu.Lock()
-	rt.invalid++
 	rt.mu.Unlock()
 }
 
@@ -1543,28 +1529,4 @@ func TestSourceLink_RemovesATargetUnlessEvicted(t *testing.T) {
 	assert.True(t, link.removesTarget(), "a held target was not removed")
 	linkTracker{sourceEntry: &sourceEntry{}, link: link}.recordTargetEvicted()
 	assert.False(t, link.removesTarget(), "an evicted target was removed again")
-}
-
-// The loop moves past an invalid video grain without posting it and
-// counts it; the next grain goes as usual.
-func TestRunTransferLoop_SkipsAnInvalidVideoGrain(t *testing.T) {
-	h := &headScript{heads: []uint64{10, 13}}
-	link := &fakeLink{t: t}
-	transfer := func(idx uint64) (uint64, error) {
-		if idx == 12 {
-			return 0, errInvalidGrain
-		}
-		return link.transferGrain(idx)
-	}
-	tr := &recordingTracker{}
-	_, stop := runGrainLoop(h.probe, transfer, link.makeProgress, time.Second, tr)
-	require.Eventually(t, func() bool { got, _ := tr.snapshot(); return len(got) == 2 }, time.Second, time.Millisecond)
-	stop()
-
-	posted, _ := link.snapshot()
-	assert.Equal(t, []uint64{11, 13}, posted)
-	tr.mu.Lock()
-	defer tr.mu.Unlock()
-	assert.Equal(t, 1, tr.invalid)
-	assert.Equal(t, 2, tr.offered, "an invalid grain is not counted as offered")
 }
