@@ -261,6 +261,7 @@ type sharedSource struct {
 type sourceLink struct {
 	initiator *fabrics.Initiator
 	info      *fabrics.TargetInfo
+	progress  ProgressFunc
 	cancel    context.CancelFunc
 	done      chan struct{}
 }
@@ -1081,8 +1082,8 @@ func (o *libmxlOpener) attach(s *sharedSource, targetInfoStr string, e *sourceEn
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	link := &sourceLink{initiator: initiator, info: info, cancel: cancel, done: make(chan struct{})}
 	progress := progressFuncFor(initiator, iface.Caps.Flags)
+	link := &sourceLink{initiator: initiator, info: info, progress: progress, cancel: cancel, done: make(chan struct{})}
 	reader := s.reader
 	probe := func() (uint64, error) {
 		rt, err := reader.Runtime()
@@ -1138,9 +1139,10 @@ func (o *libmxlOpener) detach(link *sourceLink) {
 		} else {
 			// The disconnect completes inside MakeProgress.
 			deadline := time.Now().Add(detachTimeout)
-			for time.Now().Before(deadline) &&
-				errors.Is(link.initiator.MakeProgressNonBlocking(), fabrics.ErrNotReady) {
-				time.Sleep(time.Millisecond)
+			for time.Now().Before(deadline) {
+				if !errors.Is(link.progress(), fabrics.ErrNotReady) {
+					break
+				}
 			}
 		}
 	}
