@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0-rc.44](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.43...v1.1.0-rc.44) (2026-11-05)
+
+
+### Features
+
+* **agent:** mount mxlfs domains with the huge= option mxlfs.huge names ([#420](https://github.com/qvest-digital/mxl-k8s/issues/420)) ([3f19142](https://github.com/qvest-digital/mxl-k8s/commit/3f1914241d385015ec98cf5b014414605d0428f9))
+
+
+### Bug Fixes
+
+* **agent:** do not claim Origin for a flow only mxl-k8s writes ([#416](https://github.com/qvest-digital/mxl-k8s/issues/416)) ([93b202c](https://github.com/qvest-digital/mxl-k8s/commit/93b202c5cd37f1f02ea08f274d30b905a457983d))
+* **agent:** publish no Stale location for a node the flow does not list ([#416](https://github.com/qvest-digital/mxl-k8s/issues/416)) ([93b202c](https://github.com/qvest-digital/mxl-k8s/commit/93b202c5cd37f1f02ea08f274d30b905a457983d))
+* **gateway:** keep the marker while a placeholder is replaced ([#416](https://github.com/qvest-digital/mxl-k8s/issues/416)) ([93b202c](https://github.com/qvest-digital/mxl-k8s/commit/93b202c5cd37f1f02ea08f274d30b905a457983d))
+
 ## [1.1.0-rc.43](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.42...v1.1.0-rc.43) (2026-11-05)
 
 
