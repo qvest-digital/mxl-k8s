@@ -174,3 +174,19 @@ func TestReconcile_ReplacesALiveAudioTargetWithOtherHints(t *testing.T) {
 		})
 	}
 }
+
+// libmxl rejects a sync hint that is not a multiple of the commit hint,
+// so the target never passes such a pair: the copy takes the sync hint,
+// which sizes its entries, and libmxl's default commit hint.
+func TestOpenWriter_AMismatchedPairOpensWithTheSyncHint(t *testing.T) {
+	dir, inst := hintsDomain(t)
+	flow := &mxlv1alpha1.MxlFlow{Status: mxlv1alpha1.MxlFlowStatus{MaxSyncBatchSizeHint: 960, MaxCommitBatchSizeHint: 400}}
+	w, err := openWriter(inst, dir, sharedFlowAudioDef, placeholder.HintsOf(flow), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = w.Close() })
+	assert.Equal(t, placeholder.Hints{Sync: 960, Commit: 480}, syncCommit(w))
+
+	_, other := hintsDomain(t)
+	_, _, err = other.NewWriterOpts(sharedFlowAudioDef, `{"maxSyncBatchSizeHint":960,"maxCommitBatchSizeHint":400}`)
+	require.Error(t, err, "libmxl takes the pair after all; the guard is unneeded")
+}

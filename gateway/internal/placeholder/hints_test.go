@@ -104,13 +104,31 @@ func TestLeftoverOfOtherHintsIsReplaced(t *testing.T) {
 func TestHints(t *testing.T) {
 	assert.Empty(t, Hints{}.Options())
 	assert.JSONEq(t, `{"maxSyncBatchSizeHint":960,"maxCommitBatchSizeHint":480}`, Hints{Sync: 960, Commit: 480}.Options())
-	assert.Equal(t, Hints{}, HintsOf(audioFlow(960, 0)), "one hint alone is not published")
+	assert.Equal(t, Hints{}, HintsOf(audioFlow(0, 480)), "a commit hint alone is nothing to create with")
+	assert.Equal(t, Hints{Sync: 960}, HintsOf(audioFlow(960, 0)))
+	assert.Equal(t, Hints{Sync: 960}, HintsOf(audioFlow(960, 400)),
+		"libmxl rejects a sync hint that is not a multiple of the commit hint")
+	assert.JSONEq(t, `{"maxSyncBatchSizeHint":960}`, Hints{Sync: 960}.Options())
 
 	audio := mxl.FlowConfig{Common: mxl.CommonFlowConfig{Format: mxl.FormatAudio, MaxSyncBatchSizeHint: 480, MaxCommitBatchSizeHint: 480}}
 	assert.True(t, Hints{Sync: 960, Commit: 480}.Differ(audio))
 	assert.False(t, Hints{Sync: 480, Commit: 480}.Differ(audio))
 	assert.False(t, Hints{}.Differ(audio), "unpublished hints differ from nothing")
+	assert.False(t, Hints{Sync: 480}.Differ(audio), "a commit hint left to libmxl differs from none")
+	assert.True(t, Hints{Sync: 960}.Differ(audio))
 	video := audio
 	video.Common.Format = mxl.FormatVideo
 	assert.False(t, Hints{Sync: 960, Commit: 480}.Differ(video), "a grain flow's hints size nothing on the fabric side")
+}
+
+// Whatever pair an MxlFlow carries, the placeholder is created: a commit
+// hint that libmxl would reject with the sync hint is left out.
+func TestPlaceholderOfAMismatchedPairTakesTheSyncHint(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, audioFlow(960, 400))
+
+	reconcileAudio(t, m)
+
+	require.Equal(t, []string{audioID}, m.Held())
+	assert.Equal(t, uint32(960), onDiskHints(t, h).Sync)
 }

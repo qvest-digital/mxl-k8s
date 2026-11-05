@@ -135,20 +135,31 @@ type Hints struct {
 	Sync, Commit uint32
 }
 
-// HintsOf is the hints flow publishes.
+// HintsOf is the hints flow publishes. libmxl rejects a sync hint that
+// is not a multiple of the commit hint, so a commit hint that does not
+// divide the sync hint is dropped and the copy takes the sync hint
+// alone, which is the one its bounce-buffer entries are sized from.
 func HintsOf(flow *mxlv1alpha1.MxlFlow) Hints {
 	s := flow.Status
-	if s.MaxSyncBatchSizeHint <= 0 || s.MaxCommitBatchSizeHint <= 0 {
+	if s.MaxSyncBatchSizeHint <= 0 {
 		return Hints{}
 	}
-	return Hints{Sync: uint32(s.MaxSyncBatchSizeHint), Commit: uint32(s.MaxCommitBatchSizeHint)}
+	h := Hints{Sync: uint32(s.MaxSyncBatchSizeHint)}
+	if c := uint32(s.MaxCommitBatchSizeHint); c > 0 && h.Sync%c == 0 {
+		h.Commit = c
+	}
+	return h
 }
 
 // Options is the libmxl writer options that create a flow with h, or
-// "" for the zero value, which leaves libmxl's defaults.
+// "" for the zero value, which leaves libmxl's defaults. A zero commit
+// hint is left to libmxl's default.
 func (h Hints) Options() string {
-	if h == (Hints{}) {
+	switch {
+	case h.Sync == 0:
 		return ""
+	case h.Commit == 0:
+		return fmt.Sprintf(`{"maxSyncBatchSizeHint":%d}`, h.Sync)
 	}
 	return fmt.Sprintf(`{"maxSyncBatchSizeHint":%d,"maxCommitBatchSizeHint":%d}`, h.Sync, h.Commit)
 }
@@ -159,10 +170,10 @@ func (h Hints) Options() string {
 // anew; the hint of any other flow sizes nothing on the fabric side.
 // The zero value differs from nothing.
 func (h Hints) Differ(cfg mxl.FlowConfig) bool {
-	if h == (Hints{}) || cfg.Common.Format != mxl.FormatAudio {
+	if h.Sync == 0 || cfg.Common.Format != mxl.FormatAudio {
 		return false
 	}
-	return cfg.Common.MaxSyncBatchSizeHint != h.Sync || cfg.Common.MaxCommitBatchSizeHint != h.Commit
+	return cfg.Common.MaxSyncBatchSizeHint != h.Sync || h.Commit != 0 && cfg.Common.MaxCommitBatchSizeHint != h.Commit
 }
 
 // onDiskDefinition is the definition the flow directory dir was built
