@@ -379,9 +379,10 @@ type TargetReconciler struct {
 }
 
 // targetOpenInputs is what an open attempt depends on. A change to
-// either makes the next attempt a new one rather than a retry.
+// any makes the next attempt a new one rather than a retry.
 type targetOpenInputs struct {
 	flowDef  string
+	hints    placeholder.Hints
 	provider fabrics.Provider
 }
 
@@ -702,9 +703,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// recent commits means the fabric side has likely died silently
 	// (no fatal ReadGrain error to trigger recoverFromFatalError) and
 	// the flow file in the consumer pod is no longer being filled.
-	if r.Retire != nil {
-		r.replaceOtherGeometry(ctx, req.NamespacedName, mirror.Ref().Name())
-	}
+	r.replaceOtherGeometry(ctx, req.NamespacedName, mirror.Ref().Name())
 	if res, rebuilding := r.followRepoint(ctx, req.NamespacedName, &mirror); rebuilding {
 		return res, nil
 	}
@@ -757,7 +756,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// been unopenable across the bounce reads as Materializing again
 	// and the escalation to Degraded restarts from zero. Matches the
 	// source side's seeding of status.attemptCount.
-	inputs := targetOpenInputs{flowDef: string(flow.Spec.Definition.Raw), provider: provider}
+	inputs := targetOpenInputs{flowDef: string(flow.Spec.Definition.Raw), hints: placeholder.HintsOf(&flow), provider: provider}
 	r.mu.Lock()
 	r.attempts.seed(req.NamespacedName, uint32(mirror.Status.TargetAttemptCount))
 	remaining, gated := r.attempts.wait(req.NamespacedName, inputs, r.now())
@@ -768,7 +767,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
 
-	entry, err := r.openTargetDispatch(req.NamespacedName, mirror.Spec.Domain, string(flow.Spec.Definition.Raw), provider)
+	entry, err := r.openTargetDispatch(req.NamespacedName, mirror.Spec.Domain, inputs)
 	if errors.Is(err, errLocalWriter) {
 		return r.standDown(ctx, &mirror, inputs)
 	}
@@ -878,7 +877,8 @@ func (r *TargetReconciler) now() time.Time {
 // progress goroutine uses it to invoke recovery if the libmxl-fabrics
 // Target dies (the writer is retained across recoveries to keep the
 // flow file valid for consumer pods).
-func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef string, provider fabrics.Provider) (*targetEntry, error) {
+func (r *TargetReconciler) openTarget(key types.NamespacedName, domain string, in targetOpenInputs) (*targetEntry, error) {
+	flowDef, provider := in.flowDef, in.provider
 	handles, err := r.Domains.For(context.Background(), domain)
 	if err != nil {
 		return nil, err
@@ -905,12 +905,14 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef 
 			}
 		}
 	}
-	// No options: libmxl gives the flow its default sync batch, 10 ms of
-	// audio, which sizes the bounce buffer the source's sample batches
-	// land in. The source reads it back from targetMaxSyncBatchSizeHint.
-	writer, _, err := mxlInst.NewWriter(flowDef)
+	// With the origin's hints, as the target of tools/mxl-fabrics-demo is
+	// given the producer's flow options: an audio target's bounce-buffer
+	// entries hold one batch of the copy's sync hint, and the source sends
+	// batches of the origin's. Without published hints libmxl's defaults
+	// apply, which the source reads back from targetMaxSyncBatchSizeHint.
+	writer, err := openWriter(mxlInst, handles.DomainPath(), flowDef, in.hints, r.Retire)
 	if err != nil {
-		return nil, fmt.Errorf("%w: NewWriter: %w", errOpenWriterFailed, err)
+		return nil, err
 	}
 	// The ring has to be in place before the fabric side registers it:
 	// pinning a lazily allocated mxlfs ring would fault it in page by page.
@@ -945,11 +947,36 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain, flowDef 
 
 // openTargetDispatch routes the open through the test seam when set,
 // falling back to the cgo openTarget in production.
-func (r *TargetReconciler) openTargetDispatch(key types.NamespacedName, domain, flowDef string, provider fabrics.Provider) (*targetEntry, error) {
+func (r *TargetReconciler) openTargetDispatch(key types.NamespacedName, domain string, in targetOpenInputs) (*targetEntry, error) {
 	if r.openTargetFn != nil {
-		return r.openTargetFn(key, flowDef, provider)
+		return r.openTargetFn(key, in.flowDef, in.provider)
 	}
-	return r.openTarget(key, domain, flowDef, provider)
+	return r.openTarget(key, domain, in)
+}
+
+// openWriter opens the target's writer on flowDef with hints. libmxl
+// opens a flow that exists as it is, so an audio flow already there
+// with other hints is removed and created anew, as clearOtherGeometry
+// does for another geometry; one another writer still holds fails the
+// open until it is released.
+func openWriter(inst *mxl.Instance, domain, flowDef string, hints placeholder.Hints, retire func(domain, id string)) (*mxl.Writer, error) {
+	writer, _, err := inst.NewWriterOpts(flowDef, hints.Options())
+	if err != nil {
+		return nil, fmt.Errorf("%w: NewWriter: %w", errOpenWriterFailed, err)
+	}
+	if !hints.Differ(writer.Config()) {
+		return writer, nil
+	}
+	_ = writer.Close()
+	id, _ := flowIDFromDef(flowDef)
+	if err := clearFlowDir(filepath.Join(domain, id+".mxl-flow"), retire, errOtherHints); err != nil {
+		return nil, err
+	}
+	writer, _, err = inst.NewWriterOpts(flowDef, hints.Options())
+	if err != nil {
+		return nil, fmt.Errorf("%w: NewWriter: %w", errOpenWriterFailed, err)
+	}
+	return writer, nil
 }
 
 // standDown yields a target to a process on this node that writes its
@@ -1671,6 +1698,17 @@ func clearOtherGeometry(dir, def string, retire func(domain, id string)) error {
 	if err == nil && placeholder.SameGeometry(onDisk, []byte(def)) {
 		return nil
 	}
+	return clearFlowDir(dir, retire, errOtherGeometry)
+}
+
+// errOtherHints is why a target does not open yet on an audio flow
+// created with other batch size hints that a writer here still holds.
+var errOtherHints = errors.New("the flow here has other batch size hints and a writer still holds it")
+
+// clearFlowDir removes the flow directory dir after retiring a
+// placeholder held there, or returns held when another writer still
+// holds it.
+func clearFlowDir(dir string, retire func(domain, id string), held error) error {
 	if retire != nil {
 		retire(filepath.Dir(dir), strings.TrimSuffix(filepath.Base(dir), ".mxl-flow"))
 	}
@@ -1679,7 +1717,7 @@ func clearOtherGeometry(dir, def string, retire func(domain, id string)) error {
 		return fmt.Errorf("check writers of %s: %w", dir, err)
 	}
 	if n > 0 {
-		return errOtherGeometry
+		return held
 	}
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("remove %s: %w", dir, err)
@@ -1690,7 +1728,10 @@ func clearOtherGeometry(dir, def string, retire func(domain, id string)) error {
 // replaceOtherGeometry closes the live target of key when the flow's
 // definition has since changed geometry: the producer came back in
 // another layout, and the ring the target registered can only take the
-// old one. The open that follows lays the flow out anew.
+// old one. The open that follows lays the flow out anew. Geometry is
+// checked on mxlfs only. On any domain an audio target is also replaced
+// when the origin's batch size hints have changed, since its
+// bounce-buffer entries hold one batch of the old sync hint.
 func (r *TargetReconciler) replaceOtherGeometry(ctx context.Context, key types.NamespacedName, flowName string) {
 	r.mu.Lock()
 	entry := r.targets[key]
@@ -1702,10 +1743,14 @@ func (r *TargetReconciler) replaceOtherGeometry(ctx context.Context, key types.N
 	if err := r.Get(ctx, types.NamespacedName{Name: flowName}, &flow); err != nil || len(flow.Spec.Definition.Raw) == 0 {
 		return
 	}
-	if placeholder.SameGeometry([]byte(entry.def), flow.Spec.Definition.Raw) {
+	switch {
+	case r.Retire != nil && !placeholder.SameGeometry([]byte(entry.def), flow.Spec.Definition.Raw):
+		log.FromContext(ctx).Info("flow changed geometry; replacing the target", "flow", flowName)
+	case placeholder.HintsOf(&flow).Differ(entry.cfg):
+		log.FromContext(ctx).Info("flow changed batch size hints; replacing the target", "flow", flowName)
+	default:
 		return
 	}
-	log.FromContext(ctx).Info("flow changed geometry; replacing the target", "flow", flowName)
 	r.closeEntry(key, r.localFlowDisposition(ctx, flowName))
 }
 
