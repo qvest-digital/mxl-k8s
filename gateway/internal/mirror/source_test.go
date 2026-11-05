@@ -115,7 +115,7 @@ type recordingTracker struct {
 	offered   int
 	dropped   []bool
 	agedOuts  int
-	skipped   map[unsentReason]uint64
+	skipped   uint64
 	invalid   int
 	passed    map[unsentReason]uint64
 	heads     []uint64
@@ -154,12 +154,9 @@ func (rt *recordingTracker) recordAgedOut(time.Time) {
 	rt.mu.Unlock()
 }
 
-func (rt *recordingTracker) recordSkipped(reason unsentReason, samples uint64) {
+func (rt *recordingTracker) recordSkipped(samples uint64) {
 	rt.mu.Lock()
-	if rt.skipped == nil {
-		rt.skipped = map[unsentReason]uint64{}
-	}
-	rt.skipped[reason] += samples
+	rt.skipped += samples
 	rt.mu.Unlock()
 }
 
@@ -184,10 +181,10 @@ func (rt *recordingTracker) recordHead(head uint64, _ time.Time) {
 	rt.mu.Unlock()
 }
 
-func (rt *recordingTracker) skippedSnapshot(reason unsentReason) uint64 {
+func (rt *recordingTracker) skippedSnapshot() uint64 {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	return rt.skipped[reason]
+	return rt.skipped
 }
 
 func (rt *recordingTracker) headSnapshot() []uint64 {

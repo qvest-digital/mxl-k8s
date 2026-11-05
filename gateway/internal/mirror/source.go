@@ -323,13 +323,11 @@ type sourceEntry struct {
 	// throughput collector at scrape time.
 	bytes atomic.Uint64
 
-	// resyncSamples and agedOutSamples count the samples the transfer
-	// loop advanced past without sending, by unsentReason. It is not the
-	// same as loss on the wire: the target's head still moves over them,
-	// so each one is a hole its ring fills with whatever it already
-	// held. Zero is the only healthy value.
-	resyncSamples  atomic.Uint64
-	agedOutSamples atomic.Uint64
+	// skipped counts samples the transfer loop advanced past without
+	// sending. It is not the same as loss on the wire: the target's head
+	// still moves over them, so each one is a hole its ring fills with
+	// whatever it already held. Zero is the only healthy value.
+	skipped atomic.Uint64
 
 	// invalidGrains counts grains the producer committed invalid of
 	// which the transfer loop sent nothing; invalidAt is when the loop
@@ -1175,24 +1173,21 @@ type progressTracker interface {
 	recordCompleted(idx, bytes uint64, late bool, at time.Time)
 	recordDropped(outstanding bool)
 	recordAgedOut(at time.Time)
-	recordSkipped(reason unsentReason, samples uint64)
+	recordSkipped(samples uint64)
 	recordInvalid(at time.Time)
 	recordPassedOver(reason unsentReason, grains uint64)
 }
 
-// unsentReason says why a transfer loop did not offer a grain or a
-// sample.
+// unsentReason says why the grain transfer loop did not offer a grain.
 type unsentReason string
 
 const (
 	// unsentInvalid is a grain its producer committed invalid.
 	unsentInvalid unsentReason = "invalid"
-	// unsentResync is a grain or sample the loop jumped over to resume
-	// at the head: after a late transfer, or when it trailed the head by
-	// more than maxMirrorLag grains.
+	// unsentResync is a grain the loop jumped over when it trailed the
+	// head by more than maxMirrorLag.
 	unsentResync unsentReason = "resync"
-	// unsentAgedOut is a grain whose slot the producer had reused, or a
-	// sample that had left the readable window.
+	// unsentAgedOut is a grain whose slot the producer had reused.
 	unsentAgedOut unsentReason = "aged_out"
 )
 
@@ -1255,13 +1250,8 @@ func idleOnInvalid(now time.Time, e *sourceEntry, after time.Duration) bool {
 	return off == nil || now.Sub(*off) > after
 }
 
-func (e *sourceEntry) recordSkipped(reason unsentReason, samples uint64) {
-	switch reason {
-	case unsentResync:
-		e.resyncSamples.Add(samples)
-	case unsentAgedOut:
-		e.agedOutSamples.Add(samples)
-	}
+func (e *sourceEntry) recordSkipped(samples uint64) {
+	e.skipped.Add(samples)
 }
 
 func (e *sourceEntry) recordInvalid(at time.Time) {

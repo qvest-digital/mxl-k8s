@@ -14,10 +14,9 @@ type Throughput struct {
 	Provider string
 	Bytes    uint64
 
-	// ResyncSamples and AgedOutSamples are meaningful on the source
-	// half of a continuous flow only: the samples it did not send, by
-	// unsentReason.
-	ResyncSamples, AgedOutSamples uint64
+	// SkippedSamples is meaningful on the source half of a continuous
+	// flow only, and is zero everywhere else.
+	SkippedSamples uint64
 
 	// InvalidGrains, ResyncGrains and AgedOutGrains are meaningful on
 	// the source half of a discrete flow only: the grains it did not
@@ -80,16 +79,14 @@ var (
 
 	descSkipped = prometheus.NewDesc(
 		"mxl_gateway_mirror_skipped_samples_total",
-		"Samples the source half advanced past without sending, by reason: resync (the loop resumed at the head "+
-			"after a transfer completed late) or aged_out (the samples had left the readable window). The target's "+
-			"head still moves over them, so each is published as stale ring content.",
-		append(append([]string{}, transferLabels...), "reason"), nil)
+		"Samples the source half advanced past without sending, having left the readable window. "+
+			"The target's head still moves over them, so each is published as stale ring content.",
+		[]string{"domain", "flow_id", "node", "peer_node", "provider"}, nil)
 
 	descSourceUnsent = prometheus.NewDesc(
 		"mxl_gateway_mirror_source_unsent_grains_total",
 		"Grains the source half did not offer to the initiator, by reason: invalid (the producer committed a video grain "+
-			"invalid), resync (the loop resumed at the head after a transfer completed late, or after falling more than a "+
-			"few grains behind) or aged_out (the "+
+			"invalid), resync (the loop fell more than a few grains behind the head and resumed near it) or aged_out (the "+
 			"producer had reused the slot). Each one is a grain no target receives. An invalid data grain is not counted "+
 			"here: its header is offered, and the target commits it invalid.",
 		append(append([]string{}, transferLabels...), "reason"), nil)
@@ -157,8 +154,7 @@ func (c *ThroughputCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	emit(descTransmitted, c.Source, func(t Throughput) uint64 { return t.Bytes })
 	emit(descReceived, c.Target, func(t Throughput) uint64 { return t.Bytes })
-	emit(descSkipped, c.Source, func(t Throughput) uint64 { return t.ResyncSamples }, string(unsentResync))
-	emit(descSkipped, c.Source, func(t Throughput) uint64 { return t.AgedOutSamples }, string(unsentAgedOut))
+	emit(descSkipped, c.Source, func(t Throughput) uint64 { return t.SkippedSamples })
 	emit(descSourceUnsent, c.Source, func(t Throughput) uint64 { return t.InvalidGrains }, string(unsentInvalid))
 	emit(descSourceUnsent, c.Source, func(t Throughput) uint64 { return t.ResyncGrains }, string(unsentResync))
 	emit(descSourceUnsent, c.Source, func(t Throughput) uint64 { return t.AgedOutGrains }, string(unsentAgedOut))
@@ -217,8 +213,7 @@ func (r *SourceReconciler) Throughput() []Throughput {
 			Provider: e.provider().String(),
 			Bytes:    e.bytes.Load(),
 
-			ResyncSamples:  e.resyncSamples.Load(),
-			AgedOutSamples: e.agedOutSamples.Load(),
+			SkippedSamples: e.skipped.Load(),
 			InvalidGrains:  e.invalidGrains.Load(),
 			ResyncGrains:   e.resyncGrains.Load(),
 			AgedOutGrains:  e.agedOutGrains.Load(),

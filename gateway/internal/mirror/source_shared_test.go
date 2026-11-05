@@ -434,7 +434,7 @@ func TestTransferLoop_CountsTheGrainsItPassesOver(t *testing.T) {
 
 	col := &ThroughputCollector{NodeName: "n01", Source: f.r}
 	require.NoError(t, testutil.CollectAndCompare(col, strings.NewReader(`
-# HELP mxl_gateway_mirror_source_unsent_grains_total Grains the source half did not offer to the initiator, by reason: invalid (the producer committed a video grain invalid), resync (the loop resumed at the head after a transfer completed late, or after falling more than a few grains behind) or aged_out (the producer had reused the slot). Each one is a grain no target receives. An invalid data grain is not counted here: its header is offered, and the target commits it invalid.
+# HELP mxl_gateway_mirror_source_unsent_grains_total Grains the source half did not offer to the initiator, by reason: invalid (the producer committed a video grain invalid), resync (the loop fell more than a few grains behind the head and resumed near it) or aged_out (the producer had reused the slot). Each one is a grain no target receives. An invalid data grain is not counted here: its header is offered, and the target commits it invalid.
 # TYPE mxl_gateway_mirror_source_unsent_grains_total counter
 mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-1",node="n01",peer_node="node-b",provider="verbs",reason="aged_out"} 4
 mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-1",node="n01",peer_node="node-b",provider="verbs",reason="invalid"} 0
