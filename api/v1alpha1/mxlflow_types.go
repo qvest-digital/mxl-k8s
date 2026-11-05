@@ -121,6 +121,27 @@ type MxlFlowStatus struct {
 	// +optional
 	OriginChangedAt *metav1.Time `json:"originChangedAt,omitempty"`
 
+	// MaxSyncBatchSizeHint and MaxCommitBatchSizeHint are the batch size
+	// hints libmxl reports for the flow on its origin node, in samples
+	// for a continuous flow and in slices for a grain. The gateway on
+	// the origin node publishes them; unset until it has read them.
+	//
+	// libmxl takes them from the options of the writer that creates the
+	// flow, and the flow definition does not carry them. A mirror's
+	// target creates its copy with them: libmxl-fabrics sizes an audio
+	// target's bounce-buffer entries from the copy's sync hint, and the
+	// source sends batches of the origin's.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4294967295
+	MaxSyncBatchSizeHint int64 `json:"maxSyncBatchSizeHint,omitempty"`
+
+	// MaxCommitBatchSizeHint is described with MaxSyncBatchSizeHint.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4294967295
+	MaxCommitBatchSizeHint int64 `json:"maxCommitBatchSizeHint,omitempty"`
+
 	// Conditions describes the current state of the flow.
 	// +optional
 	// +listType=map

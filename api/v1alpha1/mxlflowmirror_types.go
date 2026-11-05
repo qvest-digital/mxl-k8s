@@ -87,6 +87,16 @@ type MxlFlowMirrorStatus struct {
 	// +optional
 	TargetInfo string `json:"targetInfo,omitempty"`
 
+	// TargetMaxSyncBatchSizeHint is the maxSyncBatchSizeHint of the
+	// flow the target gateway writes, published with TargetInfo. For a
+	// continuous flow libmxl-fabrics sizes the target's bounce-buffer
+	// entries from it and rejects a larger sample batch, so the source
+	// gateway sends none. A target gateway that does not publish it
+	// leaves it unset, and the source then assumes libmxl's default of
+	// 10 ms of samples.
+	// +optional
+	TargetMaxSyncBatchSizeHint int64 `json:"targetMaxSyncBatchSizeHint,omitempty"`
+
 	// ObservedGeneration is the spec generation last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
