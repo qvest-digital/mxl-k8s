@@ -19,7 +19,9 @@
 // longer has would be taken over as it is, by a mirror or by a producer.
 // A placeholder is therefore held only while the flow has an Origin, the
 // producer whose geometry the MxlFlow describes, and one whose geometry
-// no longer matches the MxlFlow is replaced.
+// no longer matches the MxlFlow is replaced. The same holds for the
+// batch size hints of an audio flow, which libmxl also keeps from the
+// flow's creator; see Hints.
 package placeholder
 
 import (
@@ -91,6 +93,7 @@ type entry struct {
 	domain string // directory
 	id     string
 	writer flowWriter
+	cfg    mxl.FlowConfig // the flow as the writer opened it
 	filled bool
 }
 
@@ -122,6 +125,55 @@ func SameGeometry(a, b []byte) bool {
 		}
 	}
 	return true
+}
+
+// Hints are the batch size hints of a flow's origin, as its MxlFlow
+// publishes them. libmxl takes a flow's hints from the options of the
+// writer that creates it, so a copy carries the origin's only when it
+// is created with them; the zero value is "not published yet".
+type Hints struct {
+	Sync, Commit uint32
+}
+
+// HintsOf is the hints flow publishes. libmxl rejects a sync hint that
+// is not a multiple of the commit hint, so a commit hint that does not
+// divide the sync hint is dropped and the copy takes the sync hint
+// alone, which is the one its bounce-buffer entries are sized from.
+func HintsOf(flow *mxlv1alpha1.MxlFlow) Hints {
+	s := flow.Status
+	if s.MaxSyncBatchSizeHint <= 0 {
+		return Hints{}
+	}
+	h := Hints{Sync: uint32(s.MaxSyncBatchSizeHint)}
+	if c := uint32(s.MaxCommitBatchSizeHint); c > 0 && h.Sync%c == 0 {
+		h.Commit = c
+	}
+	return h
+}
+
+// Options is the libmxl writer options that create a flow with h, or
+// "" for the zero value, which leaves libmxl's defaults. A zero commit
+// hint is left to libmxl's default.
+func (h Hints) Options() string {
+	switch {
+	case h.Sync == 0:
+		return ""
+	case h.Commit == 0:
+		return fmt.Sprintf(`{"maxSyncBatchSizeHint":%d}`, h.Sync)
+	}
+	return fmt.Sprintf(`{"maxSyncBatchSizeHint":%d,"maxCommitBatchSizeHint":%d}`, h.Sync, h.Commit)
+}
+
+// Differ reports whether a continuous flow configured as cfg holds other
+// hints than h. libmxl-fabrics sizes a continuous target's bounce-buffer
+// entries from its flow's sync hint, so such a copy has to be created
+// anew; the hint of any other flow sizes nothing on the fabric side.
+// The zero value differs from nothing.
+func (h Hints) Differ(cfg mxl.FlowConfig) bool {
+	if h.Sync == 0 || cfg.Common.Format != mxl.FormatAudio {
+		return false
+	}
+	return cfg.Common.MaxSyncBatchSizeHint != h.Sync || h.Commit != 0 && cfg.Common.MaxCommitBatchSizeHint != h.Commit
 }
 
 // onDiskDefinition is the definition the flow directory dir was built
@@ -168,7 +220,7 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 			return reconcile.Result{}, nil
 		}
 		def, err := onDiskDefinition(filepath.Dir(m.dataPath(e)))
-		if err == nil && hasOrigin(&flow) && SameGeometry(def, flow.Spec.Definition.Raw) {
+		if err == nil && hasOrigin(&flow) && SameGeometry(def, flow.Spec.Definition.Raw) && !HintsOf(&flow).Differ(e.cfg) {
 			return reconcile.Result{}, nil
 		}
 		// One a producer here opened is the producer's: CheckLocalWriters
@@ -199,7 +251,7 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	// exists at all is read from the directory: a path walk into a
 	// missing flow on mxlfs waits for it and posts it as wanted, under
 	// the gateway's pid, which the agent would mirror.
-	exists, err := present(domain, e.id)
+	exists, err := Present(domain, e.id)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -234,12 +286,29 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 		_ = os.Remove(MarkerPath(domain, e.id))
 		return reconcile.Result{}, errors.New("mxl instance closed")
 	}
-	w, created, err := inst.NewWriter(string(flow.Spec.Definition.Raw))
+	// With the origin's hints, so a mirror filling the placeholder finds
+	// the flow as it would create it. A leftover is opened with the hints
+	// it has; one with other hints that nothing else holds is created anew.
+	hints := HintsOf(&flow)
+	w, created, err := inst.NewWriterOpts(string(flow.Spec.Definition.Raw), hints.Options())
+	if err == nil && !created && hints.Differ(w.Config()) {
+		_ = w.Close()
+		n, werr := flowlocks.Writers(m.dataPath(e))
+		if werr != nil || n > 0 {
+			_ = os.Remove(MarkerPath(domain, e.id))
+			return reconcile.Result{RequeueAfter: m.period()}, werr
+		}
+		if err := os.RemoveAll(filepath.Dir(m.dataPath(e))); err != nil {
+			_ = os.Remove(MarkerPath(domain, e.id))
+			return reconcile.Result{}, err
+		}
+		w, created, err = inst.NewWriterOpts(string(flow.Spec.Definition.Raw), hints.Options())
+	}
 	if err != nil {
 		_ = os.Remove(MarkerPath(domain, e.id))
 		return reconcile.Result{}, fmt.Errorf("create placeholder: %w", err)
 	}
-	e.writer = w
+	e.writer, e.cfg = w, w.Config()
 
 	m.mu.Lock()
 	if m.held == nil {
@@ -349,9 +418,9 @@ func (m *Manager) clearStaleMarkers(domain string) error {
 // foreignWriters is flowlocks.ForeignWriters; tests replace it.
 var foreignWriters = flowlocks.ForeignWriters
 
-// present reports whether domain holds a directory for flow id, without
+// Present reports whether domain holds a directory for flow id, without
 // a lookup of the flow's own name.
-func present(domain, id string) (bool, error) {
+func Present(domain, id string) (bool, error) {
 	entries, err := os.ReadDir(domain)
 	if err != nil {
 		return false, err

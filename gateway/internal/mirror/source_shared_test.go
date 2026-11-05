@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,26 +21,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
+	"github.com/qvest-digital/go-mxl/mxl"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
-// runningSource is a sharedSource whose transfer goroutine is a stand
-// -in that only waits for its context, so a test can tell a loop that
-// is still running from one that has been stopped without linking
-// libmxl.
-func runningSource() *sharedSource {
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		<-ctx.Done()
-	}()
-	return &sharedSource{cancel: cancel, done: done}
-}
-
-func loopRunning(s *sharedSource) bool {
+// linkRunning reports whether a mirror's transfer loop is still
+// running. The fixture's loops are stand-ins that only wait for their
+// context, so a test can tell a running loop from a stopped one without
+// linking libmxl.
+func linkRunning(l *sourceLink) bool {
 	select {
-	case <-s.done:
+	case <-l.done:
 		return false
 	default:
 		return true
@@ -89,9 +81,7 @@ func newFanoutFixture(t *testing.T, mirrors ...*mxlv1alpha1.MxlFlowMirror) *fano
 		Build()
 
 	opener := &fakeOpener{
-		openFn: func(string, fabrics.Provider) (*sharedSource, error) {
-			return runningSource(), nil
-		},
+		loopFn: func(ctx context.Context, _ string, _ *sourceEntry) { <-ctx.Done() },
 	}
 	r := &SourceReconciler{
 		Client:        c,
@@ -122,15 +112,8 @@ func (f *fanoutFixture) closeAll() {
 		f.r.closeEntry(k)
 	}
 	f.r.mu.Lock()
-	shared := make([]*sharedSource, 0, len(f.r.shared))
-	for _, s := range f.r.shared {
-		shared = append(shared, s)
-	}
 	f.r.shared = map[sourceKey]*sharedSource{}
 	f.r.mu.Unlock()
-	for _, s := range shared {
-		closeShared(s)
-	}
 }
 
 func (f *fanoutFixture) reconcile(t *testing.T, name string) {
@@ -162,13 +145,12 @@ func (f *fanoutFixture) entry(name string) *sourceEntry {
 	return f.r.sources[types.NamespacedName{Namespace: "ns1", Name: name}]
 }
 
-func TestSource_MirrorsOfOneFlowShareOneReaderAndInitiator(t *testing.T) {
-	// libmxl-fabrics enqueues a transfer to every target added to an
-	// initiator, so a flow mirrored to N nodes is N AddTarget calls on
-	// one initiator. Opening one initiator per mirror instead read the
-	// same ring N times, ran N transfer loops, and posted N copies of
-	// every grain to the NIC -- work that grew with fan-out for no
-	// payload that reached a peer any sooner.
+// Mirrors of one flow share one source, the flow's configuration read
+// once. Each gets its own reader, initiator and loop: an initiator posts
+// every transfer to all its targets and reports not-ready while any of
+// them has work pending (afterProgressResult in RCInitiator.cpp and
+// RDMInitiator.cpp).
+func TestSource_MirrorsOfOneFlowShareOneSource(t *testing.T) {
 	f := newFanoutFixture(t,
 		fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderTCP),
 		fanoutMirror("m2", "flow-1", "node-c", "info-c", mxlv1alpha1.ProviderTCP),
@@ -178,22 +160,25 @@ func TestSource_MirrorsOfOneFlowShareOneReaderAndInitiator(t *testing.T) {
 		f.reconcile(t, n)
 	}
 
-	assert.Equal(t, int32(1), f.opener.opens.Load(),
-		"three mirrors of one flow must share one reader and one initiator")
-	assert.Equal(t, int32(3), f.opener.attaches.Load(),
-		"each mirror still contributes its own target")
+	assert.Equal(t, int32(1), f.opener.opens.Load(), "three mirrors of one flow must read its configuration once")
+	assert.Equal(t, int32(3), f.opener.attaches.Load(), "each mirror sets up its own initiator")
 	assert.ElementsMatch(t, []string{"info-b", "info-c", "info-d"}, f.opener.addedTargets())
 
 	s := f.sharedFor("flow-1", fabrics.ProviderTCP)
 	require.NotNil(t, s)
-	assert.Len(t, s.attached(), 3,
-		"every mirror must be in the fanout set the transfer loop accounts to")
+	assert.Len(t, s.mirrors, 3)
+	links := map[*sourceLink]bool{}
+	for _, n := range []string{"m1", "m2", "m3"} {
+		e := f.entry(n)
+		require.NotNil(t, e)
+		require.NotNil(t, e.link)
+		assert.True(t, linkRunning(e.link), n)
+		links[e.link] = true
+	}
+	assert.Len(t, links, 3, "no two mirrors share a link")
 }
 
 func TestSource_MirrorsOfOneFlowOnDifferentProvidersDoNotShare(t *testing.T) {
-	// An initiator is set up against one interface, chosen per
-	// provider, so a tcp mirror and a verbs mirror of the same flow
-	// cannot be served by one initiator however alike they look.
 	f := newFanoutFixture(t,
 		fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderTCP),
 		fanoutMirror("m2", "flow-1", "node-c", "info-c", mxlv1alpha1.ProviderVerbs),
@@ -201,17 +186,55 @@ func TestSource_MirrorsOfOneFlowOnDifferentProvidersDoNotShare(t *testing.T) {
 	f.reconcile(t, "m1")
 	f.reconcile(t, "m2")
 
-	assert.Equal(t, int32(2), f.opener.opens.Load(),
-		"two providers cannot share one initiator's interface")
+	assert.Equal(t, int32(2), f.opener.opens.Load())
 	require.NotNil(t, f.sharedFor("flow-1", fabrics.ProviderTCP))
 	require.NotNil(t, f.sharedFor("flow-1", fabrics.ProviderVerbs))
 }
 
+// A transfer that never completes holds up its own mirror only. With
+// one initiator for every mirror of a flow, MakeProgress reported the
+// stalled target as not-ready for all of them.
+func TestSource_AStalledMirrorDoesNotHoldAnotherOfTheSameFlow(t *testing.T) {
+	f := newFanoutFixture(t,
+		fanoutMirror("m1", "flow-1", "node-b", "info-stalled", mxlv1alpha1.ProviderTCP),
+		fanoutMirror("m2", "flow-1", "node-c", "info-healthy", mxlv1alpha1.ProviderTCP),
+	)
+	start := time.Now()
+	// One flow: both loops probe the same head, a grain per ms.
+	probe := func() (uint64, error) { return 1000 + uint64(time.Since(start)/time.Millisecond), nil }
+	var stalledPosts atomic.Int32
+	f.opener.loopFn = func(ctx context.Context, info string, e *sourceEntry) {
+		done := make(chan struct{})
+		transfer := func(uint64) (uint64, error) {
+			if info == "info-stalled" {
+				stalledPosts.Add(1)
+			}
+			return 1, nil
+		}
+		connected := false
+		progress := func() error {
+			if info == "info-stalled" && connected {
+				time.Sleep(time.Millisecond)
+				return fabrics.ErrNotReady
+			}
+			connected = true
+			return nil
+		}
+		p, tr := readable(probe, transfer)
+		runTransferLoop(ctx, done, "flow-1", p, tr, progress, progress, time.Millisecond, time.Millisecond, e)
+	}
+	f.reconcile(t, "m1")
+	f.reconcile(t, "m2")
+
+	require.Eventually(t, func() bool { return f.entry("m2").progress.Load() >= 20 }, time.Second, time.Millisecond,
+		"the healthy mirror keeps completing while the other one's transfer is outstanding")
+	assert.Zero(t, f.entry("m1").progress.Load())
+	assert.Equal(t, int32(1), stalledPosts.Load(), "the stalled mirror posts nothing while its transfer is outstanding")
+}
+
 func TestSource_DeletingOneMirrorLeavesTheOthersTransferring(t *testing.T) {
-	// The failure this guards against is the worst one the sharing
-	// introduces: a teardown that reaches past the mirror being
-	// deleted and closes the reader every other mirror of the flow is
-	// transferring through.
+	// A teardown must not reach past the mirror being deleted and tear
+	// down the source the other mirrors of the flow transfer through.
 	f := newFanoutFixture(t,
 		fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderTCP),
 		fanoutMirror("m2", "flow-1", "node-c", "info-c", mxlv1alpha1.ProviderTCP),
@@ -222,123 +245,43 @@ func TestSource_DeletingOneMirrorLeavesTheOthersTransferring(t *testing.T) {
 	}
 	s := f.sharedFor("flow-1", fabrics.ProviderTCP)
 	require.NotNil(t, s)
+	m2Link := f.entry("m2").link
 
 	f.delete(t, "m2")
 
-	assert.Equal(t, []string{"info-c"}, f.opener.removedTargets(),
-		"only the deleted mirror's target may be removed from the initiator")
-	assert.Equal(t, int32(1), f.opener.opens.Load(),
-		"a detach must not rebuild anything")
-	assert.Same(t, s, f.sharedFor("flow-1", fabrics.ProviderTCP),
-		"the shared source must survive one of its mirrors going away")
-	assert.True(t, loopRunning(s),
-		"the transfer loop still has two targets to feed")
+	assert.Equal(t, []string{"info-c"}, f.opener.removedTargets())
+	assert.Equal(t, int32(1), f.opener.opens.Load(), "a detach must not reopen anything")
+	assert.Same(t, s, f.sharedFor("flow-1", fabrics.ProviderTCP))
+	assert.False(t, linkRunning(m2Link))
 	assert.Nil(t, f.entry("m2"))
-	assert.NotNil(t, f.entry("m1"))
-	assert.NotNil(t, f.entry("m3"))
-	assert.Len(t, s.attached(), 2)
+	assert.True(t, linkRunning(f.entry("m1").link))
+	assert.True(t, linkRunning(f.entry("m3").link))
+	assert.Len(t, s.mirrors, 2)
 }
 
 func TestSource_LastMirrorLeavingClosesTheSharedSource(t *testing.T) {
-	// The other half of the same rule: a reader kept open on a flow no
-	// mirror transfers is what stops libmxl reclaiming that flow.
+	// A source no mirror transfers through is dropped, so the next
+	// mirror reads the flow's configuration again.
 	f := newFanoutFixture(t,
 		fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderTCP),
 		fanoutMirror("m2", "flow-1", "node-c", "info-c", mxlv1alpha1.ProviderTCP),
 	)
 	f.reconcile(t, "m1")
 	f.reconcile(t, "m2")
-	s := f.sharedFor("flow-1", fabrics.ProviderTCP)
-	require.NotNil(t, s)
+	require.NotNil(t, f.sharedFor("flow-1", fabrics.ProviderTCP))
 
 	f.delete(t, "m1")
-	require.True(t, loopRunning(s))
+	require.NotNil(t, f.sharedFor("flow-1", fabrics.ProviderTCP))
 
 	f.delete(t, "m2")
 	assert.Nil(t, f.sharedFor("flow-1", fabrics.ProviderTCP),
 		"the last mirror to leave must release the shared source")
-	assert.False(t, loopRunning(s),
-		"the transfer goroutine must stop once nothing is attached")
 	assert.ElementsMatch(t, []string{"info-b", "info-c"}, f.opener.removedTargets())
-}
-
-func TestSource_AccountingLandsPerMirrorAcrossTheFanout(t *testing.T) {
-	// One TransferGrain call really does enqueue the grain to every
-	// target the initiator holds, so every attached mirror really did
-	// move those bytes and really is at that index. Folding the
-	// counters onto the flow instead would drop the peer_node label
-	// the throughput series are told apart by, and leave every mirror
-	// but the first with a status that never reports progress.
-	f := newFanoutFixture(t,
-		fanoutMirror("m1", "flow-a", "n02", "info-b", mxlv1alpha1.ProviderVerbs),
-		fanoutMirror("m2", "flow-a", "n03", "info-c", mxlv1alpha1.ProviderVerbs),
-	)
-	f.reconcile(t, "m1")
-	f.reconcile(t, "m2")
-
-	s := f.sharedFor("flow-a", fabrics.ProviderVerbs)
-	require.NotNil(t, s)
-	f.entry("m1").connected.Store(true)
-	f.entry("m2").connected.Store(true)
-	// One completion each, of the same grain: the initiator reports
-	// every target on its own.
-	f.opener.setStats(func(*fabrics.TargetInfo) (fabrics.TargetStats, error) {
-		return fabrics.TargetStats{Posted: 1, Completed: 1, BytesCompleted: 1000, LastCompletedIndex: 42}, nil
-	})
-
-	sentAt := time.Now()
-	s.recordHead(41, sentAt)
-	s.recordOffered(42, sentAt)
-
-	for _, n := range []string{"m1", "m2"} {
-		e := f.entry(n)
-		require.NotNil(t, e, n)
-		f.r.observeDelivery(e, sentAt)
-		assert.Equal(t, uint64(1), e.progress.Load(), n)
-		assert.Equal(t, uint64(1000), e.bytes.Load(), n)
-		assert.Equal(t, uint64(41), e.lastHead.Load(), n)
-		require.NotNil(t, e.lastSentAt.Load(), n)
-	}
-
-	col := &ThroughputCollector{NodeName: "n01", Source: f.r}
-	require.NoError(t, testutil.CollectAndCompare(col, strings.NewReader(`
-# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes the fabric reported as delivered for a mirror this node is the source of, including chunks of a grain given up part way, which went over the wire all the same.
-# TYPE mxl_gateway_mirror_transmitted_bytes_total counter
-mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
-mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n03",provider="verbs"} 1000
-`), "mxl_gateway_mirror_transmitted_bytes_total"),
-		"the shared transfer must still be attributed per peer")
-}
-
-func TestSource_AgedOutSkipReachesEveryAttachedMirror(t *testing.T) {
-	// The skip is a property of the reader, and the reader is shared,
-	// so a mirror that is not the one whose flusher happens to look
-	// first must still see it -- otherwise ReaderAgedOut, and the
-	// reopen it asks for, would only ever be published for one of the
-	// mirrors on a wedged flow.
-	f := newFanoutFixture(t,
-		fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderTCP),
-		fanoutMirror("m2", "flow-1", "node-c", "info-c", mxlv1alpha1.ProviderTCP),
-	)
-	f.reconcile(t, "m1")
-	f.reconcile(t, "m2")
-
-	s := f.sharedFor("flow-1", fabrics.ProviderTCP)
-	require.NotNil(t, s)
-	s.recordAgedOut(time.Now())
-
-	for _, n := range []string{"m1", "m2"} {
-		e := f.entry(n)
-		require.NotNil(t, e, n)
-		require.NotNil(t, e.agedOutAt.Load(), n)
-	}
 }
 
 func TestSource_TargetInfoRotationDoesNotDisturbTheOtherMirrors(t *testing.T) {
 	// A target gateway restarting republishes its info on a fresh
-	// address. Rebuilding the whole source for that would drop every
-	// other mirror of the flow, so the rotation is a RemoveTarget plus
-	// an AddTarget on the initiator they all share.
+	// address. Only that mirror's link is replaced.
 	f := newFanoutFixture(t,
 		fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderTCP),
 		fanoutMirror("m2", "flow-1", "node-c", "info-c", mxlv1alpha1.ProviderTCP),
@@ -359,21 +302,19 @@ func TestSource_TargetInfoRotationDoesNotDisturbTheOtherMirrors(t *testing.T) {
 	f.reconcile(t, "m2")
 
 	assert.Equal(t, int32(1), f.opener.opens.Load(),
-		"a rotated target info must not rebuild the reader the other mirrors read")
-	assert.Equal(t, []string{"info-c"}, f.opener.removedTargets(),
-		"only the rotating mirror's stale target may be removed")
+		"a rotated target info must not rebuild the source the other mirrors transfer through")
+	assert.Equal(t, []string{"info-c"}, f.opener.removedTargets())
 	assert.Equal(t, []string{"info-b", "info-c", "info-c2"}, f.opener.addedTargets())
 	assert.Same(t, s, f.sharedFor("flow-1", fabrics.ProviderTCP))
-	assert.True(t, loopRunning(s))
-	assert.Same(t, m1Entry, f.entry("m1"),
-		"the untouched mirror must keep the entry it was transferring through")
+	assert.Same(t, m1Entry, f.entry("m1"))
+	assert.True(t, linkRunning(m1Entry.link))
 	assert.Equal(t, "info-c2", f.entry("m2").infoStr)
 }
 
 func TestSource_ReaderRebuildReopensTheSourceForEveryAttachedMirror(t *testing.T) {
-	// The stall watchdog tears down the reader, and the reader is
-	// shared, so every mirror on it loses its target. Leaving them to
-	// a watch would strand them: the events that would wake them --
+	// The stall watchdog tears down the whole source, so every mirror
+	// on it loses its link and reader. Leaving them to a
+	// watch would strand them: the events that would wake them --
 	// origin lease renewals, MxlFlow status writes -- stop precisely
 	// when the producer is in trouble.
 	f := newFanoutFixture(t,
@@ -384,26 +325,27 @@ func TestSource_ReaderRebuildReopensTheSourceForEveryAttachedMirror(t *testing.T
 	f.reconcile(t, "m2")
 	first := f.sharedFor("flow-1", fabrics.ProviderTCP)
 	require.NotNil(t, first)
+	oldLinks := []*sourceLink{f.entry("m1").link, f.entry("m2").link}
 
 	f.r.rebuildWedgedReader(context.Background(),
 		types.NamespacedName{Namespace: "ns1", Name: "m1"})
 
 	assert.Equal(t, int32(2), f.opener.opens.Load(),
-		"the wedged reader must be reopened exactly once for the whole flow")
-	assert.False(t, loopRunning(first), "the wedged transfer loop must be stopped")
+		"the wedged source must be reopened exactly once for the whole flow")
+	for _, l := range oldLinks {
+		assert.False(t, linkRunning(l), "the loops on the wedged source must be stopped")
+	}
 	second := f.sharedFor("flow-1", fabrics.ProviderTCP)
 	require.NotNil(t, second)
 	assert.NotSame(t, first, second)
-	assert.Len(t, second.attached(), 2,
-		"both mirrors must be re-added to the fresh initiator")
+	assert.Len(t, second.mirrors, 2, "both mirrors must be attached to the fresh source")
 	assert.Equal(t, []string{"info-b", "info-c", "info-b", "info-c"}, f.opener.addedTargets())
 }
 
 func TestSource_ReaderRebuildBudgetIsSpentPerSharedSource(t *testing.T) {
-	// The budget bounds reopens of a reader, and one reader now
-	// carries every mirror of the flow. Counting it per mirror would
-	// hand a flow mirrored to N nodes N times the cap on the one
-	// reader they share, which is the cap not applying at all.
+	// The budget bounds reopens of a source, and one source carries
+	// every mirror of the flow. Counting it per mirror would hand a
+	// flow mirrored to N nodes N times the cap.
 	f := newFanoutFixture(t,
 		fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderTCP),
 		fanoutMirror("m2", "flow-1", "node-c", "info-c", mxlv1alpha1.ProviderTCP),
@@ -414,7 +356,7 @@ func TestSource_ReaderRebuildBudgetIsSpentPerSharedSource(t *testing.T) {
 	skey := sourceKey{flowID: "flow-1", provider: fabrics.ProviderTCP}
 	require.Equal(t, uint32(1), f.r.bumpReaderRebuilds(f.entry("m1").sourceKey()))
 	require.Equal(t, uint32(2), f.r.bumpReaderRebuilds(f.entry("m2").sourceKey()),
-		"a reopen asked for by either mirror spends the same reader's budget")
+		"a reopen asked for by either mirror spends the same source's budget")
 
 	f.r.mu.Lock()
 	got := f.r.rebuilds[skey]
@@ -422,16 +364,14 @@ func TestSource_ReaderRebuildBudgetIsSpentPerSharedSource(t *testing.T) {
 	assert.Equal(t, uint32(2), got)
 }
 
-func TestSource_FailedAddTargetReleasesTheReaderItOpened(t *testing.T) {
-	// A source that opened a reader and then could not add its first
-	// target holds a flow open for a mirror that is transferring
-	// nothing, and libmxl reclaims a flow only once no handle denies
-	// it the lock.
+func TestSource_FailedAddTargetReleasesTheSourceItOpened(t *testing.T) {
+	// A source whose first mirror could not attach is dropped; attach
+	// closes the reader it opened for that mirror.
 	f := newFanoutFixture(t,
 		fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderTCP),
 	)
-	f.opener.attachFn = func(*sharedSource, string) (*fabrics.TargetInfo, error) {
-		return nil, fmt.Errorf("%w: connect refused", errAddTargetFailed)
+	f.opener.attachFn = func(*sharedSource, string) error {
+		return fmt.Errorf("%w: connect refused", errAddTargetFailed)
 	}
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
@@ -439,12 +379,10 @@ func TestSource_FailedAddTargetReleasesTheReaderItOpened(t *testing.T) {
 	require.NoError(t, err)
 	assert.Positive(t, res.RequeueAfter)
 	assert.Nil(t, f.sharedFor("flow-1", fabrics.ProviderTCP),
-		"a source with no target must not keep the flow's reader open")
+		"a source with no mirror must not be kept")
 }
 
 func TestSource_FailedAddTargetLeavesAnInUseSourceAlone(t *testing.T) {
-	// The same release must not reach a source another mirror is
-	// already transferring through.
 	f := newFanoutFixture(t,
 		fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderTCP),
 		fanoutMirror("m2", "flow-1", "node-c", "info-c", mxlv1alpha1.ProviderTCP),
@@ -453,58 +391,83 @@ func TestSource_FailedAddTargetLeavesAnInUseSourceAlone(t *testing.T) {
 	s := f.sharedFor("flow-1", fabrics.ProviderTCP)
 	require.NotNil(t, s)
 
-	f.opener.attachFn = func(*sharedSource, string) (*fabrics.TargetInfo, error) {
-		return nil, fmt.Errorf("%w: connect refused", errAddTargetFailed)
+	f.opener.attachFn = func(*sharedSource, string) error {
+		return fmt.Errorf("%w: connect refused", errAddTargetFailed)
 	}
 	f.reconcile(t, "m2")
 
 	assert.Same(t, s, f.sharedFor("flow-1", fabrics.ProviderTCP),
-		"one mirror's AddTarget failure must not close the reader another is using")
-	assert.True(t, loopRunning(s))
-	assert.Len(t, s.attached(), 1)
+		"one mirror's AddTarget failure must not tear down the source another is using")
+	assert.True(t, linkRunning(f.entry("m1").link))
+	assert.Len(t, s.mirrors, 1)
 }
 
 // A grain the transfer loop passes over without offering it is a hole on
-// every target, and is counted with why. Two paths jump: a head more
-// than maxMirrorLag ahead, as a producer catching up after a stall puts
-// it, resyncs to the tail; a grain the producer has already reused ages
-// out and the loop jumps to the head. Both stamped only a timestamp, so
-// the grains they dropped showed up in no counter.
+// the target, and is counted with why. A head more than maxMirrorLag
+// ahead, as a producer catching up after a stall puts it, resyncs to
+// the head; a grain the producer has already reused ages out and the
+// loop jumps to the head.
 func TestTransferLoop_CountsTheGrainsItPassesOver(t *testing.T) {
 	f := newFanoutFixture(t, fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderVerbs))
 	f.reconcile(t, "m1")
-	s := f.sharedFor("flow-1", fabrics.ProviderVerbs)
-	require.NotNil(t, s)
+	e := f.entry("m1")
+	require.NotNil(t, e)
 
 	// 1000 is where the loop tunes in. 1030 is a catch-up burst: the
-	// loop resyncs to 1027 and drops 1003..1027. At 1034, within
+	// loop resyncs to it and drops 1003..1029. At 1034, within
 	// maxMirrorLag, grain 1031 has aged out: the loop jumps to the head
 	// and drops 1031..1034.
-	heads := []uint64{1000, 1001, 1002, 1030, 1034}
-	var probes atomic.Int32
-	head := func() (uint64, error) {
-		n := int(probes.Add(1)) - 1
-		return heads[min(n, len(heads)-1)], nil
-	}
-	transfer := func(idx uint64, _ bool) (bool, error) {
+	h := &headScript{heads: []uint64{1000, 1001, 1002, 1030, 1034}}
+	transfer := func(idx uint64) (uint64, error) {
 		if idx == 1031 {
-			return false, errors.New(readerAgedOutMarker)
+			return 0, errors.New(readerAgedOutMarker)
 		}
-		return false, nil
+		return 0, nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go runTransferLoop(ctx, done, "flow-1", head, transfer, func() error { return nil }, time.Millisecond, s)
-	require.Eventually(t, func() bool { return probes.Load() > int32(len(heads)) }, time.Second, time.Millisecond)
-	cancel()
-	<-done
+	_, stop := runGrainLoop(h.probe, transfer, func() error { return nil }, time.Second, e)
+	require.Eventually(t, func() bool { return e.agedOutGrains.Load() > 0 }, time.Second, time.Millisecond)
+	stop()
 
 	col := &ThroughputCollector{NodeName: "n01", Source: f.r}
 	require.NoError(t, testutil.CollectAndCompare(col, strings.NewReader(`
-# HELP mxl_gateway_mirror_source_unsent_grains_total Grains the source half did not offer to the initiator, by reason: invalid (the producer committed a video grain invalid), resync (the loop fell more than a few grains behind the head and resumed near it) or aged_out (the producer had reused the slot). Each one is a grain no target receives. An invalid data grain is not counted here: its header is offered, and the target commits it invalid.
+# HELP mxl_gateway_mirror_source_unsent_grains_total Grains the source half did not offer to the initiator, by reason: invalid (the producer committed a video grain invalid), resync (the loop fell more than a few grains behind the head and resumed at it) or aged_out (the producer had reused the slot). Each one is a grain no target receives. An invalid data grain is not counted here: its header is offered, and the target commits it invalid.
 # TYPE mxl_gateway_mirror_source_unsent_grains_total counter
 mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-1",node="n01",peer_node="node-b",provider="verbs",reason="aged_out"} 4
 mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-1",node="n01",peer_node="node-b",provider="verbs",reason="invalid"} 0
-mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-1",node="n01",peer_node="node-b",provider="verbs",reason="resync"} 25
+mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-1",node="n01",peer_node="node-b",provider="verbs",reason="resync"} 27
 `), "mxl_gateway_mirror_source_unsent_grains_total"))
+}
+
+// Each mirror's sample batch is bounded by the sync hint its own target
+// published with targetInfo: one target holds entries of 240 samples,
+// another publishes none and holds libmxl's 10 ms default.
+func TestSource_SampleBatchFollowsEachTargetsPublishedHint(t *testing.T) {
+	small := fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderTCP)
+	small.Status.TargetMaxSyncBatchSizeHint = 240
+	f := newFanoutFixture(t, small, fanoutMirror("m2", "flow-1", "node-c", "info-c", mxlv1alpha1.ProviderTCP))
+	rate := mxl.Rational{Num: 48000, Den: 1}
+	f.opener.openFn = func(string, fabrics.Provider) (*sharedSource, error) {
+		return &sharedSource{
+			continuous: true,
+			cfg:        mxl.FlowConfig{Common: mxl.CommonFlowConfig{Format: mxl.FormatAudio, GrainRate: rate, MaxSyncBatchSizeHint: 960}},
+			interval:   grainInterval(rate),
+		}, nil
+	}
+	var mu sync.Mutex
+	batches := map[string]uint64{}
+	f.opener.loopFn = func(ctx context.Context, info string, e *sourceEntry) {
+		batch, _, _ := e.shared.sampleTiming(e.targetSyncHint)
+		mu.Lock()
+		batches[info] = batch
+		mu.Unlock()
+		<-ctx.Done()
+	}
+
+	f.reconcile(t, "m1")
+	f.reconcile(t, "m2")
+
+	require.Eventually(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(batches) == 2 }, time.Second, 10*time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, map[string]uint64{"info-b": 240, "info-c": 480}, batches)
 }

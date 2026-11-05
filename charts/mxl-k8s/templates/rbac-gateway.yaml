@@ -18,6 +18,10 @@ rules:
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxlflows, mxldomains]
     verbs: [get, list, watch]
+  # The gateway on a flow's origin node publishes its batch size hints.
+  - apiGroups: [mxl.qvest-digital.com]
+    resources: [mxlflows/status]
+    verbs: [patch]
   {{- if .Values.mxlfs.enabled }}
   - apiGroups: [mxl.qvest-digital.com]
     resources: [mxlflowredundancysets]

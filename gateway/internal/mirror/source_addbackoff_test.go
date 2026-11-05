@@ -12,8 +12,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/qvest-digital/go-mxl/fabrics"
-
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -36,8 +34,8 @@ func newAddBackoffFixture(t *testing.T, targetInfo string) *addBackoffFixture {
 		Build()
 
 	opener := &fakeOpener{
-		attachFn: func(*sharedSource, string) (*fabrics.TargetInfo, error) {
-			return nil, errors.Join(errAddTargetFailed, errors.New("connect: target offline"))
+		attachFn: func(*sharedSource, string) error {
+			return errors.Join(errAddTargetFailed, errors.New("connect: target offline"))
 		},
 	}
 	clock, advance := fixedClock(time.Now())
