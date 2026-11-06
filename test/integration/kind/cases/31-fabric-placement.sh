@@ -73,8 +73,13 @@ echo "   placed and bound on ${first_src} -> ${first_tgt}"
 [ "$(subnet_of "$src_node" "$first_src")" = "$(subnet_of "$tgt_node" "$first_tgt")" ] \
   || fail "the demo mirror pairs interfaces of two subnets"
 
-"${KUBECTL[@]}" -n "$NAMESPACE" get mxlflowmirrors -o wide | head -n1 | grep -q PLACEMENT \
-  || fail "kubectl get mxlflowmirrors shows no placement column"
+# Captured first: under pipefail, a reader closing the pipe early fails
+# kubectl with SIGPIPE.
+listing=$("${KUBECTL[@]}" -n "$NAMESPACE" get mxlflowmirrors -o wide)
+case "${listing%%$'\n'*}" in
+  *PLACEMENT*) ;;
+  *) fail "kubectl get mxlflowmirrors shows no placement column: ${listing%%$'\n'*}" ;;
+esac
 
 # Waited for, so the cases after this one find the demo's mirrors only.
 cleanup() {
