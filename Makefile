@@ -176,7 +176,7 @@ libmxl-monitoring:
 
 .PHONY: test-gateway
 test-gateway: libmxl-monitoring
-	CGO_LDFLAGS="-L$(LIBMXL_MONITORING_DIR)" $(MAKE) --no-print-directory test-one MODULE=gateway
+	CGO_LDFLAGS="$${CGO_LDFLAGS:+$$CGO_LDFLAGS }-L$(LIBMXL_MONITORING_DIR)" $(MAKE) --no-print-directory test-one MODULE=gateway
 
 .PHONY: test-all
 test-all: test test-gateway

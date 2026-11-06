@@ -5,12 +5,12 @@
 # The sources are the module directory gateway/go.mod pins, as the Go
 # module cache holds it, so the binding and the libraries are always the
 # same version. Needs what the go-mxl-builder image carries: the Go
-# toolchain, cmake, ninja, a C++20 compiler, libmxl under /opt/libmxl and
-# vcpkg for picojson.
+# toolchain, cmake, ninja, a C++20 compiler and libmxl under /opt/libmxl.
+# picojson comes from gateway/third_party.
 #
 # Usage: hack/build-libmxl-monitoring.sh [OUTPUT_DIR]
-#   OUTPUT_DIR defaults to bin/libmxl-monitoring. Point CGO_LDFLAGS at it:
-#   CGO_LDFLAGS="-L$OUTPUT_DIR"
+#   OUTPUT_DIR defaults to bin/libmxl-monitoring. Add it to CGO_LDFLAGS:
+#   CGO_LDFLAGS="$CGO_LDFLAGS -L$OUTPUT_DIR"
 #
 # Runs on bash 3.2.
 set -eu
@@ -34,24 +34,8 @@ if [ -f "$out/VERSION" ] && [ "$(cat "$out/VERSION")" = "$version" ] &&
 fi
 
 # picojson is header-only and the library's one build dependency besides
-# libmxl. vcpkg runs in classic mode from a directory without a manifest.
-picojson=""
-find_picojson() {
-  for d in "${VCPKG_ROOT:-/root/vcpkg}"/installed/*/include; do
-    if [ -f "$d/picojson/picojson.h" ]; then
-      picojson=$d
-      return 0
-    fi
-  done
-  return 1
-}
-if ! find_picojson; then
-  (cd / && "${VCPKG_ROOT:-/root/vcpkg}/vcpkg" install picojson >/dev/null)
-  find_picojson || {
-    echo "build-libmxl-monitoring: picojson not found after vcpkg install" >&2
-    exit 1
-  }
-fi
+# libmxl; it is vendored, so the build fetches nothing.
+picojson="$root/gateway/third_party/picojson"
 
 build=$(mktemp -d)
 trap 'rm -rf "$build"' EXIT
@@ -68,5 +52,6 @@ rm -f "$out/libmxl-monitoring.a" "$out/libmxl-monitoring-prometheus.a" "$out/LIC
 cp "$build/libmxl-monitoring.a" "$build/libmxl-monitoring-prometheus.a" "$src/LICENSE" "$out/"
 # The module cache is read-only, and so is the LICENSE copied from it.
 chmod u+w "$out/LICENSE"
+cp "$picojson/LICENSE" "$out/LICENSE.picojson"
 echo "$version" >"$out/VERSION"
 echo "libmxl-monitoring $version built in $out"

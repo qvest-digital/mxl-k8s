@@ -51,11 +51,13 @@ The gateway also links
 libraries at link time. `hack/build-libmxl-monitoring.sh` builds them
 from the module directory `gateway/go.mod` pins, so they always match
 the binding, into `bin/libmxl-monitoring` by default; it needs cmake,
-ninja, a C++20 compiler, libmxl's CMake package under `/opt/libmxl`
-and vcpkg for picojson, all of which the go-mxl builder image has. The
-Dockerfile, CI and `make test-gateway` run it and set `CGO_LDFLAGS`.
-The library's LICENSE ships in the gateway image under
-`/usr/share/licenses/libmxl-monitoring/`.
+ninja, a C++20 compiler and libmxl's CMake package under
+`/opt/libmxl`, all of which the go-mxl builder image has. picojson, the
+library's header-only dependency, is vendored under
+`gateway/third_party/picojson`, so the build fetches nothing. The
+Dockerfile, CI and `make test-gateway` run it and append to
+`CGO_LDFLAGS`. Both licenses ship in the gateway image under
+`/usr/share/licenses/`.
 
 ### On the host
 
@@ -68,7 +70,7 @@ export PKG_CONFIG_PATH=/opt/libmxl/lib/pkgconfig
 export LD_LIBRARY_PATH=/opt/libmxl/lib
 pkg-config --exists libmxl libmxl-fabrics && echo OK
 make libmxl-monitoring
-export CGO_LDFLAGS=-L$PWD/bin/libmxl-monitoring
+export CGO_LDFLAGS="${CGO_LDFLAGS:+$CGO_LDFLAGS }-L$PWD/bin/libmxl-monitoring"
 (cd gateway && go build ./... && go vet ./...)
 ```
 

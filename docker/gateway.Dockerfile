@@ -19,12 +19,14 @@ ENV GOWORK=off
 RUN git config --global --add safe.directory '*' && \
     go mod download && \
     ../hack/build-libmxl-monitoring.sh /opt/libmxl-monitoring && \
-    CGO_LDFLAGS=-L/opt/libmxl-monitoring go build -trimpath -ldflags="-s -w" -o /out/mxl-fabrics-gateway ./cmd/mxl-fabrics-gateway
+    CGO_LDFLAGS="${CGO_LDFLAGS:+$CGO_LDFLAGS }-L/opt/libmxl-monitoring" go build -trimpath -ldflags="-s -w" -o /out/mxl-fabrics-gateway ./cmd/mxl-fabrics-gateway
 
 FROM ghcr.io/qvest-digital/go-mxl-runtime:${GO_MXL_TAG}
 COPY --from=builder /out/mxl-fabrics-gateway /usr/local/bin/mxl-fabrics-gateway
-# libmxl-monitoring is linked statically (Apache-2.0).
+# libmxl-monitoring (Apache-2.0) is linked statically, with the picojson
+# (BSD-2-Clause) it is built with.
 COPY --from=builder /opt/libmxl-monitoring/LICENSE /usr/share/licenses/libmxl-monitoring/LICENSE
+COPY --from=builder /opt/libmxl-monitoring/LICENSE.picojson /usr/share/licenses/picojson/LICENSE
 # The runtime preempts a long-running goroutine by sending its thread
 # SIGURG. The gateway's long-running goroutines sit in blocking libfabric
 # reads, where the signal cuts epoll_wait short with EINTR and libfabric

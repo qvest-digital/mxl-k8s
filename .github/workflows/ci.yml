@@ -150,7 +150,7 @@ jobs:
         # gateway/go.mod pins, which its Go binding links.
         run: |
           hack/build-libmxl-monitoring.sh "$GITHUB_WORKSPACE/bin/libmxl-monitoring"
-          echo "CGO_LDFLAGS=-L$GITHUB_WORKSPACE/bin/libmxl-monitoring" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=${CGO_LDFLAGS:+$CGO_LDFLAGS }-L$GITHUB_WORKSPACE/bin/libmxl-monitoring" >> "$GITHUB_ENV"
 
       - name: gofmt
         run: |
@@ -357,7 +357,7 @@ jobs:
         # gateway/go.mod pins, which its Go binding links.
         run: |
           hack/build-libmxl-monitoring.sh "$GITHUB_WORKSPACE/bin/libmxl-monitoring"
-          echo "CGO_LDFLAGS=-L$GITHUB_WORKSPACE/bin/libmxl-monitoring" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=${CGO_LDFLAGS:+$CGO_LDFLAGS }-L$GITHUB_WORKSPACE/bin/libmxl-monitoring" >> "$GITHUB_ENV"
 
       - name: Run tests
         run: |
