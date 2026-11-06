@@ -63,12 +63,12 @@ func TestResolveInterfaceCarriesTheProviderAddressAndCaps(t *testing.T) {
 			Flags:          fabrics.InterfaceCapRemoteWrite,
 			MaxMessageSize: 1 << 20,
 		},
-		Address: fabrics.EndpointAddress{Node: "10.20.53.13"},
+		Address: fabrics.EndpointAddress{Node: "192.0.2.13"},
 	}}}
 
 	got, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderVerbs, "")
 	require.NoError(t, err)
-	assert.Equal(t, "10.20.53.13", got.Address.Node,
+	assert.Equal(t, "192.0.2.13", got.Address.Node,
 		"the address the setup binds to has to come from the provider")
 	assert.Equal(t, uint64(1<<20), got.Caps.MaxMessageSize,
 		"maxMessageSize is only knowable from enumeration")
@@ -118,13 +118,13 @@ func TestResolveInterfaceNarrowsToTheBindAddress(t *testing.T) {
 		{
 			Provider: fabrics.ProviderVerbs,
 			Caps:     fabrics.InterfaceCaps{Flags: fabrics.InterfaceCapRemoteWrite},
-			Address:  fabrics.EndpointAddress{Node: "10.20.53.13"},
+			Address:  fabrics.EndpointAddress{Node: "192.0.2.13"},
 		},
 	}}
 
-	got, err := resolveInterface(l, fabric.Selector{BindAddress: "10.20.53.13"}, fabrics.ProviderVerbs, "")
+	got, err := resolveInterface(l, fabric.Selector{BindAddress: "192.0.2.13"}, fabrics.ProviderVerbs, "")
 	require.NoError(t, err)
-	assert.Equal(t, "10.20.53.13", got.Address.Node)
+	assert.Equal(t, "192.0.2.13", got.Address.Node)
 	require.NotNil(t, l.got)
 	assert.Empty(t, l.got.Address.Node,
 		"the enumeration query must not narrow by address")
@@ -140,7 +140,7 @@ func TestResolveInterfaceBindsEFAUnderABindAddress(t *testing.T) {
 		Address:  fabrics.EndpointAddress{Node: "fe80::7a:ecff:fe8e:4f7"},
 	}}}
 
-	got, err := resolveInterface(l, fabric.Selector{BindAddress: "10.20.53.13"}, fabrics.ProviderEFA, "")
+	got, err := resolveInterface(l, fabric.Selector{BindAddress: "192.0.2.13"}, fabrics.ProviderEFA, "")
 	require.NoError(t, err)
 	assert.Equal(t, "fe80::7a:ecff:fe8e:4f7", got.Address.Node,
 		"the address a setup binds has to come from the provider")
@@ -199,14 +199,14 @@ func TestResolveInterfaceBindsOnlyInsideTheFabric(t *testing.T) {
 		{
 			Provider: fabrics.ProviderTCP,
 			Caps:     fabrics.InterfaceCaps{Flags: fabrics.InterfaceCapRemoteWrite},
-			Address:  fabrics.EndpointAddress{Node: "10.20.53.13"},
+			Address:  fabrics.EndpointAddress{Node: "192.0.2.13"},
 		},
 	}}
-	sel := fabric.Selector{CIDRs: []netip.Prefix{netip.MustParsePrefix("10.20.53.0/24")}}
+	sel := fabric.Selector{CIDRs: []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}}
 
 	got, err := resolveInterface(l, sel, fabrics.ProviderTCP, "")
 	require.NoError(t, err)
-	assert.Equal(t, "10.20.53.13", got.Address.Node)
+	assert.Equal(t, "192.0.2.13", got.Address.Node)
 }
 
 // A node whose fabric matches nothing must fail the setup with the
@@ -218,7 +218,7 @@ func TestResolveInterfaceFailsWhenTheFabricExcludesEverything(t *testing.T) {
 		Caps:     fabrics.InterfaceCaps{Flags: fabrics.InterfaceCapRemoteWrite},
 		Address:  fabrics.EndpointAddress{Node: "192.168.100.20"},
 	}}}
-	sel := fabric.Selector{CIDRs: []netip.Prefix{netip.MustParsePrefix("10.20.53.0/24")}}
+	sel := fabric.Selector{CIDRs: []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}}
 
 	_, err := resolveInterface(l, sel, fabrics.ProviderTCP, "")
 	require.Error(t, err)
