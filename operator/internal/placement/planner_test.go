@@ -326,3 +326,20 @@ func TestPlaceSkipsLinkLocalWhenARoutableAddressExists(t *testing.T) {
 	d = Place(NewLedger(only, nil), defaults, Request{SourceNode: "a", TargetNode: "b", Provider: tcp, Demand: gbit})
 	require.Equal(t, place("fe80::1", "fe80::2"), d.Placement, "link-local alone is still what the nodes offer")
 }
+
+// Ports in one subnet, each with its own address: every pair is within
+// the subnet, so pairing keeps them all and load alone spreads mirrors.
+func TestPlaceSpreadsPortsInOneSubnet(t *testing.T) {
+	const one = "192.0.2.0/24"
+	nodes := []Node{
+		node("a", iface("192.0.2.1", one, 25*gbit), iface("192.0.2.21", one, 25*gbit)),
+		node("b", iface("192.0.2.2", one, 25*gbit), iface("192.0.2.22", one, 25*gbit)),
+	}
+	l := NewLedger(nodes, nil)
+	req := Request{SourceNode: "a", TargetNode: "b", Provider: tcp, Demand: 3 * gbit}
+	first := Place(l, defaults, req)
+	require.Equal(t, place("192.0.2.1", "192.0.2.2"), first.Placement)
+	l.Charge(Placed{SourceNode: "a", TargetNode: "b", Provider: tcp, Placement: first.Placement, Demand: req.Demand})
+	second := Place(l, defaults, req)
+	require.Equal(t, place("192.0.2.21", "192.0.2.22"), second.Placement, "both of the first mirror's ports are avoided")
+}

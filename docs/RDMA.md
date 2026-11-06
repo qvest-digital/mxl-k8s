@@ -358,11 +358,33 @@ pair and the `Placed` reason; `-o wide` adds the bound pair.
 
 libmxl-fabrics binds a target or initiator to the address of the
 interface its setup is handed, so a mirror's endpoints bind the
-placed addresses. With the `tcp` provider the source address is
-bound but the egress interface still follows the host's routing
-table: two interfaces in one subnet need source-based routing on the
-host to leave on the one bound, two interfaces in separate subnets do
-not.
+placed addresses.
+
+### Several ports in one subnet
+
+The ports of a node can all sit in the fabric's one subnet, each with
+an address of its own, so every port reaches every other without a
+router. The host then has two connected routes for one prefix and
+several interfaces that could answer ARP for each address, and needs,
+per fabric port:
+
+| Setting | Value | Effect |
+| --- | --- | --- |
+| `net.ipv4.conf.<port>.arp_ignore` | 1 | A port answers ARP only for its own address, so peers learn each address on the port that holds it. |
+| `net.ipv4.conf.<port>.arp_announce` | 2 | ARP requests leaving a port carry that port's address. |
+| `net.ipv4.conf.<port>.rp_filter` | 2 (loose) or 0 | Strict filtering drops traffic arriving on one port from a source the routing table would reach through another, which in one subnet is the normal case. |
+| A policy rule per port address | `from <address> lookup <table>`, the table holding the subnet route on that port | A socket bound to a port's address leaves on that port rather than on the first matching connected route. |
+
+`verbs` and `efa` connections set up through RDMA CM are pinned to
+the bound port by the kernel: binding the source address records its
+interface, and the route lookup is restricted to it. `tcp` sockets are
+not, which is what the policy rules cover. The ARP settings apply to
+every provider.
+
+Ports in separate subnets need none of the policy rules, since each
+subnet is a connected route on its own port, but only reach the peers'
+ports in the same subnet. `--placement-pairing` keeps pairs within one
+subnet when the nodes have them.
 
 A node with one interface per provider, or one bound to
 `--bind-address`, has one candidate, and its mirrors bind it exactly
@@ -372,7 +394,7 @@ as without placement.
 
 Load is accounted per port: the device the provider names for an
 interface, or its address where it names none. Two addresses of one
-device, an IPv4 and an IPv6 address or one address per subnet on one
+device, an IPv4 and an IPv6 address or two addresses on one
 link, share that port's capacity. The device is named per provider
 (the netdev for `tcp`, the RDMA device for `verbs`), so mirrors of two
 providers on one NIC are accounted on two ports. Every port is planned
