@@ -79,6 +79,29 @@ into `$KIND_DIAG_DIR`:
 - `<component>.log` -- last 400 lines per control-plane component
 - `cases/<case>.log` -- raw stdout/stderr of each case
 
+A failing case is also snapshotted on its own, before the next case
+runs, into `cases/<case>/`. `fail` takes the snapshot before the
+case's `EXIT` trap removes its pods and objects; `run.sh` takes it
+after a case that exited non-zero without `fail`. Logs cover the case
+window only (`--since-time` at the case start):
+
+- `<pod>.log` -- operator, agent and gateway pods, all containers,
+  with timestamps
+- `<pod>.<container>.previous.log` -- the container a restart
+  replaced, for each container with a restart
+- `<pod>.log` -- every pod in the demo namespace that no DaemonSet
+  or ReplicaSet owns, which includes the pods the case created
+- `pods.txt` -- `kubectl get pods -o wide` in the demo namespace
+- `mxl-resources.yaml` -- MxlFlowMirrors, MxlFlows and MxlReceivers
+- `events.txt` -- events in all namespaces sorted by `lastTimestamp`
+- `domain-<node>.txt` -- `ls -li` of `/run/mxl/domain` and its
+  `*.mxl-flow` directories on each worker node, read through
+  `$CONTAINER_RUNTIME exec` (default `docker`)
+
+A pod the case itself deletes during its window, such as a gateway or
+agent pod replaced by a rollout the case triggers, has no log in the
+snapshot: only pods that exist when the snapshot runs are read.
+
 The `kind-integration` GitHub Actions job uploads the directory as
 an artifact named `kind-diagnostics-<run-id>` on failure.
 
