@@ -183,8 +183,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Only a mirror's first placement measures how long placement took
 	// from its creation; one placed again after its interface went away,
 	// or one created before the controller started, would measure the
-	// age of the mirror.
-	first := !placedBefore(&m) && !m.CreationTimestamp.Time.Before(r.started)
+	// age of the mirror. CreationTimestamp carries whole seconds from the
+	// apiserver's clock and started sub-second time from this process's
+	// clock, so the comparison runs at second resolution: a mirror created
+	// in the second of the first reconcile counts as new. Skew between the
+	// two clocks beyond that second moves the cut either way, and mirrors
+	// created while the cache synced before the first reconcile go
+	// untimed.
+	first := !placedBefore(&m) && !m.CreationTimestamp.Time.Before(r.started.Truncate(time.Second))
 	return r.commit(ctx, &m, d.Placement, request, d.Outcome, first)
 }
 
