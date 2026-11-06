@@ -327,6 +327,12 @@ type TargetReconciler struct {
 	// out.
 	Retire func(domain, id string)
 
+	// PlacementWait is how long a mirror with no placement waits for
+	// the operator to place it before its target binds the first
+	// interface, on a node advertising more than one for the provider.
+	// Zero does not wait.
+	PlacementWait time.Duration
+
 	// TeardownGrace bounds how long a teardown waits for the per-mirror
 	// goroutines it cancelled to return before giving up on releasing
 	// their libmxl handles. Defaults to defaultTeardownGrace.
@@ -335,7 +341,7 @@ type TargetReconciler struct {
 	// openFabricSideFn is overridable so tests exercise the recovery
 	// path without a real libmxl-fabrics. Production leaves it nil
 	// and the reconciler falls back to (*TargetReconciler).openFabricSide.
-	openFabricSideFn func(writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error)
+	openFabricSideFn func(writer *mxl.Writer, provider fabrics.Provider, want string) (*fabrics.Target, *fabrics.TargetInfo, string, error)
 
 	// recoverFn is the seam the stuck-handshake watchdog uses to
 	// spawn its recovery work. Production leaves it nil and the
@@ -384,6 +390,9 @@ type targetOpenInputs struct {
 	flowDef  string
 	hints    placeholder.Hints
 	provider fabrics.Provider
+	// iface is the address the mirror's placement names on this node,
+	// empty for an unplaced mirror.
+	iface string
 }
 
 // targetEntry holds the live libmxl handles for one target-side
@@ -406,6 +415,9 @@ type targetEntry struct {
 	info    *fabrics.TargetInfo
 	infoStr string
 
+	// boundInterface is the address the live fabric side is bound to,
+	// guarded like provider.
+	boundInterface string
 	// provider is the provider the live fabric side was opened with.
 	// A rebuild takes the one spec.provider names at the time and
 	// records it here once installed; followRepoint compares the spec
@@ -756,7 +768,11 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// been unopenable across the bounce reads as Materializing again
 	// and the escalation to Degraded restarts from zero. Matches the
 	// source side's seeding of status.attemptCount.
-	inputs := targetOpenInputs{flowDef: string(flow.Spec.Definition.Raw), hints: placeholder.HintsOf(&flow), provider: provider}
+	if res, wait := r.awaitPlacement(ctx, &mirror, provider); wait {
+		return res, nil
+	}
+	inputs := targetOpenInputs{flowDef: string(flow.Spec.Definition.Raw), hints: placeholder.HintsOf(&flow), provider: provider,
+		iface: placedInterface(mirror.Spec.Placement, true)}
 	r.mu.Lock()
 	r.attempts.seed(req.NamespacedName, uint32(mirror.Status.TargetAttemptCount))
 	remaining, gated := r.attempts.wait(req.NamespacedName, inputs, r.now())
@@ -793,7 +809,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	// Publish the descriptor before the phase: a Ready mirror whose
 	// targetInfo has not landed yet is one the source side cannot dial.
-	if err := r.applyTargetInfo(ctx, &mirror, entry.infoStr, entry.syncHint()); err != nil {
+	if err := r.applyTargetInfo(ctx, &mirror, entry.infoStr, entry.syncHint(), entry.boundInterface); err != nil {
 		r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Ref().Name()))
 		return ctrl.Result{}, fmt.Errorf("publish target info: %w", err)
 	}
@@ -819,6 +835,10 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 // It runs ahead of the Ready fast path, which a repointed mirror whose
 // grains keep flowing would otherwise always take.
 //
+// A placement naming another interface than the one the fabric side is
+// bound to is a fabric side on the wrong port, and goes through the
+// same rebuild onto the placed address.
+//
 // A new source node relabels the entry's counters and nothing else:
 // the target does not care which node dials it. A new provider is a
 // fabric side the new source cannot reach, so the entry goes through
@@ -838,7 +858,7 @@ func (r *TargetReconciler) followRepoint(ctx context.Context, key types.Namespac
 		r.mu.Unlock()
 		return ctrl.Result{}, false
 	}
-	oldSource, current := entry.peerNode, entry.provider
+	oldSource, current, bound := entry.peerNode, entry.provider, entry.boundInterface
 	moved := oldSource != mirror.Spec.SourceNode
 	if moved {
 		entry.peerNode = mirror.Spec.SourceNode
@@ -849,16 +869,66 @@ func (r *TargetReconciler) followRepoint(ctx context.Context, key types.Namespac
 	}
 
 	provider, err := providerForSetup(mirror)
-	if err != nil || provider == current {
+	want := placedInterface(mirror.Spec.Placement, true)
+	replaced := want != "" && !fabric.SameAddress(bound, want)
+	if err != nil || (provider == current && !replaced) {
 		return ctrl.Result{}, false
 	}
 	if !entry.recovering.CompareAndSwap(false, true) {
 		return ctrl.Result{RequeueAfter: providerRecheckInterval}, true
 	}
-	l.Info("mirror provider changed; rebuilding the target's fabric side",
-		"from", current.String(), "to", provider.String())
+	l.Info("mirror provider or placement changed; rebuilding the target's fabric side",
+		"from", current.String(), "to", provider.String(), "fromInterface", bound, "toInterface", want)
 	go r.dispatchRecovery(key)
 	return ctrl.Result{RequeueAfter: providerRecheckInterval}, true
+}
+
+// awaitPlacement holds the open of a mirror the operator has not
+// placed, so its target binds the interface placement chooses rather
+// than the first one enumerated. The operator places within its own
+// reconcile, so the wait ends on the placement's spec update; the
+// bound covers an operator that is down or slow, after which the
+// mirror is set up as an unplaced one is. A node advertising at most
+// one interface for the provider has nothing to choose and does not
+// wait, nor does a mirror the operator found no pair for. A mirror the
+// operator holds is not set up at all: it was held because no pair had
+// room for it.
+func (r *TargetReconciler) awaitPlacement(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, provider fabrics.Provider) (ctrl.Result, bool) {
+	if mirror.Spec.Placement != nil {
+		return ctrl.Result{}, false
+	}
+	if c := meta.FindStatusCondition(mirror.Status.Conditions, mxlv1alpha1.ConditionTypePlaced); c != nil && c.Status == metav1.ConditionFalse {
+		switch c.Reason {
+		case mxlv1alpha1.ReasonHeld:
+			r.surfaceTargetFailure(ctx, mirror, mxlv1alpha1.MxlFlowMirrorPending, mxlv1alpha1.ReasonHeld, c.Message)
+			return ctrl.Result{}, true
+		case mxlv1alpha1.ReasonNoInterface:
+			return ctrl.Result{}, false
+		}
+	}
+	if r.PlacementWait <= 0 || r.localInterfaces(ctx, provider) <= 1 {
+		return ctrl.Result{}, false
+	}
+	if remaining := mirror.CreationTimestamp.Add(r.PlacementWait).Sub(r.now()); remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, true
+	}
+	return ctrl.Result{}, false
+}
+
+// localInterfaces counts the interfaces this node's MxlNodeCapabilities
+// advertises for provider. An unreadable or missing record counts as
+// none, which does not hold anything up.
+func (r *TargetReconciler) localInterfaces(ctx context.Context, provider fabrics.Provider) int {
+	var caps mxlv1alpha1.MxlNodeCapabilities
+	if err := r.Get(ctx, types.NamespacedName{Name: r.NodeName}, &caps); err != nil {
+		return 0
+	}
+	for _, p := range caps.Status.Providers {
+		if mapProvider(p.Name) == provider {
+			return len(p.Interfaces)
+		}
+	}
+	return 0
 }
 
 // now reports the current time through the reconciler's clock seam.
@@ -926,7 +996,7 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain string, i
 			r.Filled(handles.DomainPath(), strings.TrimSuffix(filepath.Base(dir), ".mxl-flow"))
 		}
 	}
-	target, info, s, err := r.openFabricSideDispatch(handles, writer, provider)
+	target, info, s, bound, err := r.openFabricSideDispatch(handles, writer, provider, in.iface)
 	if err != nil {
 		_ = writer.Close()
 		return nil, err
@@ -940,6 +1010,8 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain string, i
 		handles:  handles,
 		provider: provider,
 		flow:     r.sharedFlowFor(handles, writer.Config().Common.ID),
+
+		boundInterface: bound,
 	}
 	r.startProgressLoop(entry, key, target, info, s)
 	return entry, nil
@@ -1190,32 +1262,32 @@ func (osReclaimFS) RemoveAll(path string) error { return os.RemoveAll(path) }
 // already-open mxl.Writer. Used both by initial openTarget and by
 // recoverFromFatalError when the fabric side died but the writer is
 // still good.
-func (r *TargetReconciler) openFabricSide(handles *instance.Handles, writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+func (r *TargetReconciler) openFabricSide(handles *instance.Handles, writer *mxl.Writer, provider fabrics.Provider, want string) (*fabrics.Target, *fabrics.TargetInfo, string, string, error) {
 	fabInst := handles.Fabrics()
 	if fabInst == nil {
-		return nil, nil, "", fmt.Errorf("fabrics instance closed")
+		return nil, nil, "", "", fmt.Errorf("fabrics instance closed")
 	}
 	target, err := fabInst.NewTarget()
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("NewTarget: %w", err)
+		return nil, nil, "", "", fmt.Errorf("NewTarget: %w", err)
 	}
-	iface, err := resolveInterface(fabInst, r.Selector, provider)
+	iface, err := resolveInterface(fabInst, r.Selector, provider, want)
 	if err != nil {
 		_ = target.Close()
-		return nil, nil, "", err
+		return nil, nil, "", "", err
 	}
 	info, err := target.Setup(targetConfig(iface, writer))
 	if err != nil {
 		_ = target.Close()
-		return nil, nil, "", fmt.Errorf("Target.Setup: %w", err)
+		return nil, nil, "", "", fmt.Errorf("Target.Setup: %w", err)
 	}
 	s, err := info.MarshalString()
 	if err != nil {
 		_ = info.Close()
 		_ = target.Close()
-		return nil, nil, "", fmt.Errorf("TargetInfo.MarshalString: %w", err)
+		return nil, nil, "", "", fmt.Errorf("TargetInfo.MarshalString: %w", err)
 	}
-	return target, info, s, nil
+	return target, info, s, iface.Address.Node, nil
 }
 
 // targetCQDepth is the completion queue depth of every target,
@@ -1243,11 +1315,12 @@ func targetConfig(iface fabrics.InterfaceConfig, writer *mxl.Writer) fabrics.Tar
 // production. The source reconciler routes the equivalent libmxl-
 // fabrics Initiator setup through the initiatorOpener interface
 // instead, but the seam serves the same purpose.
-func (r *TargetReconciler) openFabricSideDispatch(handles *instance.Handles, writer *mxl.Writer, provider fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+func (r *TargetReconciler) openFabricSideDispatch(handles *instance.Handles, writer *mxl.Writer, provider fabrics.Provider, want string) (*fabrics.Target, *fabrics.TargetInfo, string, string, error) {
 	if r.openFabricSideFn != nil {
-		return r.openFabricSideFn(writer, provider)
+		t, i, s, err := r.openFabricSideFn(writer, provider, want)
+		return t, i, s, want, err
 	}
-	return r.openFabricSide(handles, writer, provider)
+	return r.openFabricSide(handles, writer, provider, want)
 }
 
 // startProgressLoop publishes a freshly-opened fabric side on the
@@ -1943,7 +2016,7 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 		return
 	}
 	oldInfo, oldTarget := entry.info, entry.target
-	writer, handles, provider := entry.writer, entry.handles, entry.provider
+	writer, handles, provider, want := entry.writer, entry.handles, entry.provider, entry.boundInterface
 	entry.info, entry.target, entry.infoStr = nil, nil, ""
 	entry.lifecycle.Unlock()
 
@@ -1975,6 +2048,11 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 		if p, err := providerForSetup(mirror); err == nil {
 			provider = p
 		}
+		// The same for a placement moved onto another interface. An
+		// unplaced mirror keeps the interface it had.
+		if w := placedInterface(mirror.Spec.Placement, true); w != "" {
+			want = w
+		}
 		if mirror.Status.Phase != mxlv1alpha1.MxlFlowMirrorMaterializing {
 			if err := r.applyTargetStatus(ctx, mirror, mxlv1alpha1.MxlFlowMirrorMaterializing, nil, nil); err != nil && !apierrors.IsNotFound(err) {
 				l.Error(err, "mark Materializing during recovery")
@@ -1983,7 +2061,7 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 	}
 	entry.phaseMu.Unlock()
 
-	target, info, s, err := r.openFabricSideDispatch(handles, writer, provider)
+	target, info, s, bound, err := r.openFabricSideDispatch(handles, writer, provider, want)
 	if err != nil {
 		l.Error(err, "rebuild fabric side")
 		// Drop the entry so the next Reconcile rebuilds from scratch
@@ -2013,6 +2091,7 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 	r.mu.Lock()
 	entry.lifecycle.Lock()
 	entry.provider = provider
+	entry.boundInterface = bound
 	entry.lifecycle.Unlock()
 	r.mu.Unlock()
 
@@ -2033,7 +2112,7 @@ func (r *TargetReconciler) recoverFromFatalError(key types.NamespacedName) {
 	// nobody answers and its send queue never drains, so the publish
 	// is the rebuild's success criteria: on failure the entry drops
 	// and the next Reconcile rebuilds fabric side and publish together.
-	if err := r.applyTargetInfo(ctx, mirror, s, entry.syncHint()); err != nil {
+	if err := r.applyTargetInfo(ctx, mirror, s, entry.syncHint(), bound); err != nil {
 		l.Error(err, "publish rebuilt TargetInfo")
 		r.dropFailedEntry(key, entry)
 		return
@@ -2212,7 +2291,10 @@ func closeTargetHandles(e *targetEntry, disp flowDisposition, grace time.Duratio
 // its manager omits, but only that manager's claim: progress payloads
 // written under targetFieldOwner never mention targetInfo, so they
 // cannot release a claim they never held.
-func (r *TargetReconciler) applyTargetInfo(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, info string, syncHint uint32) error {
+//
+// targetInterface, the address the descriptor's endpoint is bound to,
+// goes in the same payload for the same reason.
+func (r *TargetReconciler) applyTargetInfo(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, info string, syncHint uint32, bound string) error {
 	patch := &unstructured.Unstructured{}
 	patch.SetGroupVersionKind(mxlv1alpha1.GroupVersion.WithKind("MxlFlowMirror"))
 	patch.SetNamespace(mirror.Namespace)
@@ -2220,6 +2302,9 @@ func (r *TargetReconciler) applyTargetInfo(ctx context.Context, mirror *mxlv1alp
 	status := map[string]any{"targetInfo": info}
 	if syncHint > 0 {
 		status["targetMaxSyncBatchSizeHint"] = int64(syncHint)
+	}
+	if bound != "" {
+		status["targetInterface"] = bound
 	}
 	if err := unstructured.SetNestedField(patch.Object, status, "status"); err != nil {
 		return fmt.Errorf("build targetInfo payload: %w", err)

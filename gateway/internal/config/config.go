@@ -14,6 +14,7 @@ import (
 
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/domaingc"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/ports"
 )
 
 // Config holds the gateway's runtime configuration.
@@ -55,6 +56,23 @@ type Config struct {
 	// FabricMinLinkSpeed rejects interfaces below this link speed in
 	// bits per second. Zero imposes no restriction.
 	FabricMinLinkSpeed uint64
+
+	// PortCapacities override the link speed mirror placement plans
+	// each fabric interface for.
+	PortCapacities []ports.CapacityRule
+
+	// Budgets are caps shared by the fabric interfaces of one device or
+	// of the host.
+	Budgets []ports.BudgetRule
+
+	// MaxUtilizationPercent is how much of a capacity placement may
+	// commit on this node. Zero leaves it to the operator.
+	MaxUtilizationPercent int32
+
+	// PlacementWait is how long the target side of a mirror with no
+	// placement waits for the operator to place it before binding the
+	// first interface, on a node offering more than one.
+	PlacementWait time.Duration
 
 	// Kubeconfig is an optional kubeconfig path; empty uses in-cluster.
 	Kubeconfig string
@@ -141,7 +159,8 @@ type Config struct {
 // FromFlags populates a Config from command-line flags.
 func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	c := &Config{}
-	var providers, fabricCIDRs, fabricDevices, fabricMinLinkSpeed string
+	var providers, fabricCIDRs, fabricDevices, fabricMinLinkSpeed, portCapacity, budgets string
+	var maxUtilization int
 	fs.StringVar(&c.NodeName, "node-name", os.Getenv("NODE_NAME"),
 		"Kubernetes node name (defaults to $NODE_NAME).")
 	fs.StringVar(&c.DomainPath, "domain-path", os.Getenv("MXL_DOMAIN"),
@@ -166,6 +185,21 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 			"(for example 25G). Empty imposes no floor. An interface whose provider reports no "+
 			"link speed is rejected when this is set, which includes most interfaces with no "+
 			"physical NIC behind them.")
+	fs.StringVar(&portCapacity, "fabric-port-capacity", "",
+		"Comma-separated <match>=<quantity> overrides of the capacity mirror placement plans a fabric "+
+			"interface for, in bits per second; match is a device name, an address or a CIDR, and the "+
+			"first match wins. Unmatched interfaces keep the link speed their provider reports.")
+	fs.StringVar(&budgets, "fabric-shared-budget", "",
+		"Comma-separated <scope>=<quantity>[:<mode>] caps shared by several fabric interfaces, in bits "+
+			"per second. Scope nic makes one per PCI device, host one over every interface; mode ingress "+
+			"(default) counts mirrors received, egress mirrors sent, combined both. Empty declares none.")
+	fs.IntVar(&maxUtilization, "fabric-max-utilization", 0,
+		"Percent of an interface's or budget's capacity mirror placement may commit on this node. "+
+			"Zero leaves it to the operator's --placement-max-utilization.")
+	fs.DurationVar(&c.PlacementWait, "placement-wait", 10*time.Second,
+		"How long the target side of a mirror the operator has not placed waits, on a node offering more "+
+			"than one fabric interface, before binding the first as an unplaced mirror does. The operator "+
+			"places within its reconcile; this covers an operator that is down or slow.")
 	fs.StringVar(&c.Kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"),
 		"Path to a kubeconfig file. Empty uses the in-cluster config.")
 	fs.StringVar(&c.ProbeAddr, "health-probe-bind-address", ":8081",
@@ -256,6 +290,17 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		c.FabricMinLinkSpeed = uint64(bits)
 	}
 
+	var err error
+	if c.PortCapacities, err = ports.ParseCapacities(portCapacity); err != nil {
+		return nil, fmt.Errorf("--fabric-port-capacity: %w", err)
+	}
+	if c.Budgets, err = ports.ParseBudgets(budgets); err != nil {
+		return nil, fmt.Errorf("--fabric-shared-budget: %w", err)
+	}
+	if maxUtilization < 0 || maxUtilization > 100 {
+		return nil, fmt.Errorf("--fabric-max-utilization must be 0..100, got %d", maxUtilization)
+	}
+	c.MaxUtilizationPercent = int32(maxUtilization)
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -300,6 +345,9 @@ func (c *Config) Validate() error {
 	}
 	if len(c.Providers) == 0 {
 		return fmt.Errorf("--providers must list at least one provider")
+	}
+	if c.PlacementWait < 0 {
+		return fmt.Errorf("--placement-wait must not be negative, got %v", c.PlacementWait)
 	}
 	if c.ProbePeriod < 0 {
 		return fmt.Errorf("--probe-period must not be negative, got %v", c.ProbePeriod)

@@ -83,7 +83,7 @@ func TestTarget_ProgressWritesCarryNoTargetInfo(t *testing.T) {
 		mxlv1alpha1.MxlFlowMirrorStatus{})
 	r, seen := newCapturingTarget(t, mirror)
 
-	require.NoError(t, r.applyTargetInfo(context.Background(), mirror, "info-1", 0))
+	require.NoError(t, r.applyTargetInfo(context.Background(), mirror, "info-1", 0, ""))
 	commit := time.Now()
 	require.NoError(t, r.applyTargetStatus(context.Background(), mirror,
 		mxlv1alpha1.MxlFlowMirrorReady, &commit, &metav1.Condition{
@@ -179,12 +179,27 @@ func TestTarget_TargetInfoCarriesTheWritersSyncHint(t *testing.T) {
 		mxlv1alpha1.MxlFlowMirrorStatus{})
 	r, seen := newCapturingTarget(t, mirror)
 
-	require.NoError(t, r.applyTargetInfo(context.Background(), mirror, "info-1", 960))
-	require.NoError(t, r.applyTargetInfo(context.Background(), mirror, "info-2", 0))
+	require.NoError(t, r.applyTargetInfo(context.Background(), mirror, "info-1", 960, ""))
+	require.NoError(t, r.applyTargetInfo(context.Background(), mirror, "info-2", 0, ""))
 
 	require.Len(t, *seen, 2)
 	assert.Equal(t, targetInfoFieldOwner, (*seen)[0].owner)
 	assert.Equal(t, "info-1", (*seen)[0].status["targetInfo"])
 	assert.EqualValues(t, 960, (*seen)[0].status["targetMaxSyncBatchSizeHint"])
 	assert.False(t, (*seen)[1].has("targetMaxSyncBatchSizeHint"))
+	assert.False(t, (*seen)[1].has("targetInterface"))
+}
+
+// The address the target endpoint is bound to rides with the
+// descriptor it is bound for.
+func TestTarget_TargetInfoCarriesTheBoundInterface(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1",
+		mxlv1alpha1.MxlFlowMirrorStatus{})
+	r, seen := newCapturingTarget(t, mirror)
+
+	require.NoError(t, r.applyTargetInfo(context.Background(), mirror, "info-1", 0, "192.0.2.129"))
+	require.Len(t, *seen, 1)
+	assert.Equal(t, targetInfoFieldOwner, (*seen)[0].owner)
+	assert.Equal(t, "192.0.2.129", (*seen)[0].status["targetInterface"])
 }

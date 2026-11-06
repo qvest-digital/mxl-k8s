@@ -226,3 +226,43 @@ func TestValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestFromFlags_PlacementSettings(t *testing.T) {
+	t.Setenv("NODE_NAME", "n1")
+	t.Setenv("MXL_DOMAIN", "/d")
+	t.Setenv("POD_IP", "")
+	t.Setenv("KUBECONFIG", "")
+
+	c, err := FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), nil)
+	require.NoError(t, err)
+	assert.Empty(t, c.PortCapacities)
+	assert.Empty(t, c.Budgets, "shared budgets are off unless configured")
+	assert.Zero(t, c.MaxUtilizationPercent)
+	assert.Equal(t, 10*time.Second, c.PlacementWait)
+
+	c, err = FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), []string{
+		"--fabric-port-capacity=192.0.2.0/25=25G,fab1=10G",
+		"--fabric-shared-budget=nic=40G,host=60G:combined",
+		"--fabric-max-utilization=70",
+		"--placement-wait=3s",
+	})
+	require.NoError(t, err)
+	require.Len(t, c.PortCapacities, 2)
+	assert.Equal(t, int64(25_000_000_000), c.PortCapacities[0].Bits)
+	require.Len(t, c.Budgets, 2)
+	assert.Equal(t, "ingress", string(c.Budgets[0].Mode))
+	assert.Equal(t, "combined", string(c.Budgets[1].Mode))
+	assert.Equal(t, int32(70), c.MaxUtilizationPercent)
+	assert.Equal(t, 3*time.Second, c.PlacementWait)
+
+	for flagName, arg := range map[string]string{
+		"--fabric-port-capacity":   "--fabric-port-capacity=fab0",
+		"--fabric-shared-budget":   "--fabric-shared-budget=rack=1G",
+		"--fabric-max-utilization": "--fabric-max-utilization=120",
+		"--placement-wait":         "--placement-wait=-1s",
+	} {
+		_, err := FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), []string{arg})
+		require.Error(t, err, arg)
+		assert.Contains(t, err.Error(), flagName)
+	}
+}

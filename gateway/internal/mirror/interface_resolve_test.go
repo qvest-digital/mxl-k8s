@@ -66,7 +66,7 @@ func TestResolveInterfaceCarriesTheProviderAddressAndCaps(t *testing.T) {
 		Address: fabrics.EndpointAddress{Node: "10.20.53.13"},
 	}}}
 
-	got, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderVerbs)
+	got, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderVerbs, "")
 	require.NoError(t, err)
 	assert.Equal(t, "10.20.53.13", got.Address.Node,
 		"the address the setup binds to has to come from the provider")
@@ -85,7 +85,7 @@ func TestResolveInterfaceLeavesServiceUnset(t *testing.T) {
 		Address:  fabrics.EndpointAddress{Node: "10.0.0.1", Service: "47001"},
 	}}}
 
-	got, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderTCP)
+	got, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderTCP, "")
 	require.NoError(t, err)
 	assert.Empty(t, got.Address.Service)
 }
@@ -96,7 +96,7 @@ func TestResolveInterfaceQueriesByProviderOnly(t *testing.T) {
 		Caps:     fabrics.InterfaceCaps{Flags: fabrics.InterfaceCapRemoteWrite},
 	}}}
 
-	_, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderVerbs)
+	_, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderVerbs, "")
 	require.NoError(t, err)
 	require.NotNil(t, l.got)
 	assert.Equal(t, fabrics.ProviderVerbs, l.got.Provider)
@@ -122,7 +122,7 @@ func TestResolveInterfaceNarrowsToTheBindAddress(t *testing.T) {
 		},
 	}}
 
-	got, err := resolveInterface(l, fabric.Selector{BindAddress: "10.20.53.13"}, fabrics.ProviderVerbs)
+	got, err := resolveInterface(l, fabric.Selector{BindAddress: "10.20.53.13"}, fabrics.ProviderVerbs, "")
 	require.NoError(t, err)
 	assert.Equal(t, "10.20.53.13", got.Address.Node)
 	require.NotNil(t, l.got)
@@ -140,7 +140,7 @@ func TestResolveInterfaceBindsEFAUnderABindAddress(t *testing.T) {
 		Address:  fabrics.EndpointAddress{Node: "fe80::7a:ecff:fe8e:4f7"},
 	}}}
 
-	got, err := resolveInterface(l, fabric.Selector{BindAddress: "10.20.53.13"}, fabrics.ProviderEFA)
+	got, err := resolveInterface(l, fabric.Selector{BindAddress: "10.20.53.13"}, fabrics.ProviderEFA, "")
 	require.NoError(t, err)
 	assert.Equal(t, "fe80::7a:ecff:fe8e:4f7", got.Address.Node,
 		"the address a setup binds has to come from the provider")
@@ -152,7 +152,7 @@ func TestResolveInterfacePrefersTheFasterProvider(t *testing.T) {
 		{Provider: fabrics.ProviderVerbs, Caps: fabrics.InterfaceCaps{Flags: fabrics.InterfaceCapRemoteWrite}},
 	}}
 
-	got, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderAny)
+	got, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderAny, "")
 	require.NoError(t, err)
 	assert.Equal(t, fabrics.ProviderVerbs, got.Provider)
 }
@@ -165,14 +165,14 @@ func TestResolveInterfaceRejectsWhenNothingCanTransfer(t *testing.T) {
 		Caps:     fabrics.InterfaceCaps{Flags: fabrics.InterfaceCapSendReceive},
 	}}}
 
-	_, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderVerbs)
+	_, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderVerbs, "")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errNoInterface)
 }
 
 func TestResolveInterfaceEmptyEnumeration(t *testing.T) {
 	l := &fakeLister{}
-	_, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderVerbs)
+	_, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderVerbs, "")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errNoInterface)
 }
@@ -180,7 +180,7 @@ func TestResolveInterfaceEmptyEnumeration(t *testing.T) {
 func TestResolveInterfacePropagatesQueryFailure(t *testing.T) {
 	sentinel := errors.New("boom")
 	l := &fakeLister{err: sentinel}
-	_, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderVerbs)
+	_, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderVerbs, "")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, sentinel)
 }
@@ -204,7 +204,7 @@ func TestResolveInterfaceBindsOnlyInsideTheFabric(t *testing.T) {
 	}}
 	sel := fabric.Selector{CIDRs: []netip.Prefix{netip.MustParsePrefix("10.20.53.0/24")}}
 
-	got, err := resolveInterface(l, sel, fabrics.ProviderTCP)
+	got, err := resolveInterface(l, sel, fabrics.ProviderTCP, "")
 	require.NoError(t, err)
 	assert.Equal(t, "10.20.53.13", got.Address.Node)
 }
@@ -220,9 +220,40 @@ func TestResolveInterfaceFailsWhenTheFabricExcludesEverything(t *testing.T) {
 	}}}
 	sel := fabric.Selector{CIDRs: []netip.Prefix{netip.MustParsePrefix("10.20.53.0/24")}}
 
-	_, err := resolveInterface(l, sel, fabrics.ProviderTCP)
+	_, err := resolveInterface(l, sel, fabrics.ProviderTCP, "")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errNoInterface)
 	assert.Contains(t, err.Error(), "outside the fabric CIDRs",
 		"the mirror condition is where an operator reads why a setup failed")
+}
+
+// A placed mirror binds the interface its placement names, not the
+// first one enumeration returns: binding the first is what put every
+// mirror of a node on one port.
+func TestResolveInterfaceBindsThePlacedAddress(t *testing.T) {
+	tcp := func(addr string) fabrics.InterfaceConfig {
+		return fabrics.InterfaceConfig{Provider: fabrics.ProviderTCP, Caps: fabrics.InterfaceCaps{Flags: fabrics.InterfaceCapRemoteWrite},
+			Address: fabrics.EndpointAddress{Node: addr, Service: "0"}}
+	}
+	l := &fakeLister{out: []fabrics.InterfaceConfig{tcp("192.0.2.1"), tcp("192.0.2.129")}}
+
+	got, err := resolveInterface(l, fabric.Selector{}, fabrics.ProviderTCP, "")
+	require.NoError(t, err)
+	assert.Equal(t, "192.0.2.1", got.Address.Node, "unplaced keeps libfabric's first")
+
+	got, err = resolveInterface(l, fabric.Selector{}, fabrics.ProviderTCP, "192.0.2.129")
+	require.NoError(t, err)
+	assert.Equal(t, "192.0.2.129", got.Address.Node)
+	assert.Empty(t, got.Address.Service)
+
+	got, err = resolveInterface(l, fabric.Selector{}, fabrics.ProviderTCP, "::ffff:192.0.2.129")
+	require.NoError(t, err)
+	assert.Equal(t, "192.0.2.129", got.Address.Node, "a mapped spelling names the same interface")
+
+	_, err = resolveInterface(l, fabric.Selector{}, fabrics.ProviderTCP, "192.0.2.200")
+	require.ErrorIs(t, err, errNoInterface, "an address the host does not offer is not silently replaced")
+
+	cidr := fabric.Selector{CIDRs: []netip.Prefix{netip.MustParsePrefix("192.0.2.0/25")}}
+	_, err = resolveInterface(l, cidr, fabrics.ProviderTCP, "192.0.2.129")
+	require.ErrorIs(t, err, errNoInterface, "a placement cannot bind an interface the selector excludes")
 }
