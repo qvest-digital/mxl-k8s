@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Assert the gateways record the demo's video mirror through
 # libmxl-monitoring on both nodes: the source gateway's handle counts
-# OK reads and delivered grains that grow, the target gateway's counts
-# OK writes, and both report the mirror under the same flow label,
-# <namespace>/<name>.
+# OK reads that grow, the target gateway's counts OK writes, and both
+# report the mirror under the same flow label, <namespace>/<name>.
 #
 # Numbered with the steady-state cases: from 50 on the suite reschedules
 # producers and evicts consumers, and the demo pods this addresses by
@@ -69,23 +68,19 @@ target_gw="$(daemonset_pod_on gateway "$reader_node")"
 flow="flow=\"${mirror}\""
 
 scrape "$source_gw" "$WORK_DIR/source-1"
-first="$(metric_value "$WORK_DIR/source-1" mxl_gateway_source_transfers_total "$flow" 'result="delivered"')"
-[ -n "$first" ] || fail "source gateway ${source_gw} has no delivered count for ${mirror}"
-reads="$(metric_value "$WORK_DIR/source-1" mxl_gateway_source_reads_total "$flow" 'result="ok"')"
-[ -n "$reads" ] && [ "${reads%.*}" -gt 0 ] || fail "source gateway ${source_gw} counted no OK read for ${mirror}"
+first="$(metric_value "$WORK_DIR/source-1" mxl_gateway_source_reads_total "$flow" 'result="ok"')"
+[ -n "$first" ] && [ "${first%.*}" -gt 0 ] || fail "source gateway ${source_gw} counted no OK read for ${mirror}"
 state="$(metric_value "$WORK_DIR/source-1" mxl_gateway_source_flow_state "$flow" 'state="open"')"
 [ "$state" = "1" ] || fail "source handle of ${mirror} is not open"
 
 sleep "$SAMPLE_WINDOW_SECS"
 scrape "$source_gw" "$WORK_DIR/source-2"
-second="$(metric_value "$WORK_DIR/source-2" mxl_gateway_source_transfers_total "$flow" 'result="delivered"')"
+second="$(metric_value "$WORK_DIR/source-2" mxl_gateway_source_reads_total "$flow" 'result="ok"')"
 [ "${second%.*}" -gt "${first%.*}" ] \
-  || fail "delivered grains of ${mirror} did not grow over ${SAMPLE_WINDOW_SECS}s (${first} -> ${second})"
-echo "  source: delivered ${first} -> ${second}"
+  || fail "OK reads of ${mirror} did not grow over ${SAMPLE_WINDOW_SECS}s (${first} -> ${second})"
+echo "  source: read ${first} -> ${second}"
 
 scrape "$target_gw" "$WORK_DIR/target"
 writes="$(metric_value "$WORK_DIR/target" mxl_gateway_target_writes_total "$flow" 'result="ok"')"
 [ -n "$writes" ] && [ "${writes%.*}" -gt 0 ] || fail "target gateway ${target_gw} counted no OK write for ${mirror}"
-gaps="$(metric_value "$WORK_DIR/target" mxl_gateway_target_gaps_total "$flow")"
-[ -n "$gaps" ] || fail "target gateway ${target_gw} exports no gap count for ${mirror}"
-echo "  target: ${writes} grains written, ${gaps} in gaps"
+echo "  target: ${writes} grains written"

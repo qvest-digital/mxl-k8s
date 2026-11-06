@@ -552,28 +552,31 @@ replication roles: one handle per mirror on the node that sources it
 `<namespace>/<name>`, the same on both nodes; it joins
 `mxl_operator_mirror_placement_info` through
 `label_join(..., "flow", "/", "namespace", "mirror")`. Units are grains
-for a discrete flow and samples for a continuous one.
+for a discrete flow and samples for a continuous one. The families,
+their labels and result values are the library's, with `node` added.
 
-Every unit the source meets ends in exactly one of:
+Every unit the source transfer loop meets is counted once:
 
-| Where | Series | Whose |
-| --- | --- | --- |
-| delivered within one grain or batch interval | `mxl_gateway_source_transfers_total{result="delivered"}` | - |
-| delivered after it | `mxl_gateway_source_transfers_total{result="late"}` | fabric (latency) |
-| passed over by a resync while complete | `mxl_gateway_source_transfers_total{result="dropped"}` | fabric or gateway |
-| outstanding when the target was lost, or not sent until a rebuilt loop resumed | `mxl_gateway_source_transfers_total{result="failed"}` | fabric |
-| reused before the loop read it | `mxl_gateway_source_skipped_total` | fabric or gateway |
-| invalid, incomplete or another index's grain in the ring | `mxl_gateway_source_reads_total{result=~"invalid\|incomplete\|missing"}` | the writer |
+| Series | Unit counted |
+| --- | --- |
+| `mxl_gateway_source_reads_total{result="ok"}` | read complete and offered to the target |
+| `mxl_gateway_source_reads_total{result=~"invalid\|incomplete\|missing"}` | the ring held it invalid, incomplete or not at all: the writer's |
+| `mxl_gateway_source_skipped_total` | jumped over to reach the head again, complete or already reused: never sent |
 
-libmxl's writer flags the grains it jumps over or leaves incomplete
-invalid, so a grain the writer never completed is never counted as
-delivered or as fabric loss. Fabric loss is `dropped + failed +
-skipped` over every unit the source held complete. On the target,
-`mxl_gateway_target_writes_total` counts commits,
-`mxl_gateway_target_invalid_input_total` arrivals committed invalid
-(`invalid` from the source, `missing` for a slot a later write
-overtook), and `mxl_gateway_target_gaps_total` the units no arrival
-filled below one that did, at most the ring per gap.
+`skipped` covers both the resync (the loop trailed the head by more
+than 4 grains) and a slot reused before the loop read it; a pass-over
+that met a reused slot also counts one `too_late` read. libmxl's writer
+flags the grains it jumps over or leaves incomplete invalid, and a
+grain passed over is classified by a non-blocking read of its slot, so
+a grain the writer never completed is never counted as skipped.
+
+On the target, `mxl_gateway_target_writes_total{result="ok"}` counts
+units committed complete, including an arrival a second mirror of the
+flow committed first, and `mxl_gateway_target_invalid_input_total`
+arrivals committed invalid (`invalid` from the source, `missing` for a
+slot a later write overtook). The dashboard's fabric loss is
+`skipped` plus source `ok` that never became target `ok`, over source
+`ok` plus `skipped`, compared per mirror over the same window.
 
 `mxl_gateway_source_reads_total{result="too_early"}` counts a grain the
 gateway still waited for a grace period (one grain, or one batch of
@@ -582,16 +585,16 @@ samples, plus 50 ms) after its media timestamp: the writer's lateness.
 `mxl_gateway_target_commit_seconds` are the library's latency
 histograms against media timestamps, so source and target compare
 directly. The library's other families (`flow_state`,
-`flow_delivering`, `open_failures_total`, `opens_total`,
-`lost_total`, `age_seconds`, `stalls_total`, `flow_info`) are exported
-as it renders them.
+`flow_delivering`, `open_failures_total`, `opens_total`, `lost_total`,
+`age_seconds`, `stalls_total`, `flow_info`) are exported as it renders
+them.
+
+What became of a transfer itself (completed in time, late, lost with
+its target) is not in the library's model; `mxl_gateway_mirror_transfers_total`
+above keeps counting it per batch.
 
 Series per mirror and role are fixed: 25 to 27 counters and gauges
-and one histogram of 20 series (17 bounds, +Inf, sum, count). The
-`mxl_gateway_mirror_*` families above remain;
-`mxl_gateway_mirror_source_unsent_grains_total` and
-`mxl_gateway_mirror_target_invalid_grains_total` count a subset of the
-same events without the source's state.
+and one histogram of 20 series (17 bounds, +Inf, sum, count).
 
 Utilization is the committed or measured rate over
 `capacityBitsPerSecond`, or over the plannable gauge.

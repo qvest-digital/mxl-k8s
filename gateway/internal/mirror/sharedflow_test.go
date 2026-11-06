@@ -364,24 +364,24 @@ func TestSharedFlow_SamplesClassifyOnlyRunsBehindTheHeadAsCommitted(t *testing.T
 	flow := &sharedFlow{}
 	tracker := &recordingCommitTracker{}
 
-	_, _, err := flow.commitSamples(first, 960, 480, nil)
+	_, err := flow.commitSamples(first, 960, 480, nil)
 	require.NoError(t, err)
 
-	_, _, err = flow.commitSamples(second, 960, 480, tracker)
+	_, err = flow.commitSamples(second, 960, 480, tracker)
 	require.ErrorIs(t, err, errSamplesAlreadyCommitted, "the sibling's run")
-	_, _, err = flow.commitSamples(second, 1200, 480, tracker)
+	_, err = flow.commitSamples(second, 1200, 480, tracker)
 	require.ErrorIs(t, err, errSamplesAlreadyCommitted, "a run overlapping the committed one")
 	assert.Equal(t, []uint64{960, 1200}, tracker.snapshot())
 
 	max, err := second.GetMaxWriteLengthSamples()
 	require.NoError(t, err)
 	tooLong := int(max) * 4
-	_, _, err = flow.commitSamples(second, 960+uint64(tooLong), tooLong, tracker)
+	_, err = flow.commitSamples(second, 960+uint64(tooLong), tooLong, tracker)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, errSamplesAlreadyCommitted)
 	assert.Equal(t, []uint64{960, 1200}, tracker.snapshot(), "a rejected run is not progress")
 
-	_, _, err = flow.commitSamples(second, 1440, 480, nil)
+	_, err = flow.commitSamples(second, 1440, 480, nil)
 	require.NoError(t, err, "the next run commits through the other writer")
 }
 
@@ -440,16 +440,16 @@ func TestSharedFlow_SamplesCommitAfterRewindOnAFreshWriter(t *testing.T) {
 
 	old, _, err := inst.NewWriter(sharedFlowAudioDef)
 	require.NoError(t, err)
-	_, _, err = flow.commitSamples(old, 1_000_000, 480, nil)
+	_, err = flow.commitSamples(old, 1_000_000, 480, nil)
 	require.NoError(t, err)
 	require.NoError(t, old.Close())
 
 	fresh, _, err := inst.NewWriter(sharedFlowAudioDef)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = fresh.Close() })
-	_, _, err = flow.commitSamples(fresh, 1440, 480, nil)
+	_, err = flow.commitSamples(fresh, 1440, 480, nil)
 	require.NoError(t, err)
-	_, _, err = flow.commitSamples(fresh, 1440, 480, nil)
+	_, err = flow.commitSamples(fresh, 1440, 480, nil)
 	require.ErrorIs(t, err, errSamplesAlreadyCommitted, "the head follows the rewind")
 }
 

@@ -291,14 +291,12 @@ func runTransferLoop(
 	// A loop rebuilt after its target was lost resumes at the head; the
 	// grains between the last one accounted for and it were never sent.
 	if from := tracker.accounted(); from > 0 && head0 > from {
-		accountPassedOver(rec, tracker.slot, from+1, head0+1, TransferFailed)
+		accountPassedOver(rec, tracker.slot, from+1, head0+1)
 	}
 	tracker.recordAccounted(head0)
 
-	// start is the slice the next batch of grain lastSent+1 starts at,
-	// and grainLate whether a batch of that grain already completed late.
+	// start is the slice the next batch of grain lastSent+1 starts at.
 	var start uint16
-	var grainLate bool
 	for ctx.Err() == nil {
 		head, err := probeRuntime()
 		if err != nil {
@@ -320,7 +318,7 @@ func runTransferLoop(
 					"lastSent", lastSent, "head", h)
 				tracker.recordAgedOut(time.Now())
 				tracker.recordPassedOver(unsentResync, uint64(h-next))
-				accountPassedOver(rec, tracker.slot, uint64(next), uint64(h), TransferDropped)
+				accountPassedOver(rec, tracker.slot, uint64(next), uint64(h))
 				tracker.recordAccounted(uint64(h - 1))
 			}
 			next = h
@@ -333,9 +331,9 @@ func runTransferLoop(
 			l.Info("reader aged out, skipping grains", "fromIndex", next, "toIndex", h)
 			tracker.recordAgedOut(time.Now())
 			tracker.recordPassedOver(unsentAgedOut, uint64(h-next+1))
-			accountPassedOver(rec, tracker.slot, uint64(next), uint64(h)+1, TransferDropped)
+			accountPassedOver(rec, tracker.slot, uint64(next), uint64(h)+1)
 			tracker.recordAccounted(uint64(h))
-			lastSent, start, grainLate = h, 0, false
+			lastSent, start = h, 0
 			continue
 		case errors.Is(err, errPost) && retryablePost(err):
 			// Nothing was posted. Progress is what moves a connecting
@@ -347,9 +345,6 @@ func runTransferLoop(
 			l.Error(err, "TransferGrain", "class", classifyFabricError(err).String(), "index", next)
 			tracker.recordPostFailed(err)
 			tracker.recordDropped(false)
-			if !step.invalid {
-				rec.Transfer(TransferFailed, uint64(next), 1)
-			}
 			tracker.recordAccounted(uint64(next))
 			return
 		case errors.Is(err, mxl.ErrTimeout):
@@ -383,26 +378,15 @@ func runTransferLoop(
 					tracker.recordTargetEvicted()
 				}
 				tracker.recordDropped(true)
-				if !step.invalid {
-					rec.Transfer(TransferFailed, uint64(next), 1)
-				}
 				tracker.recordAccounted(uint64(next))
 			}
 			return
 		}
 		tracker.recordCompleted(uint64(next), step.bytes, late, time.Now())
-		grainLate = grainLate || late
 		start = step.next
 		if done {
-			if !step.invalid {
-				result := TransferDelivered
-				if grainLate {
-					result = TransferLate
-				}
-				rec.Transfer(result, uint64(next), 1)
-			}
 			tracker.recordAccounted(uint64(next))
-			lastSent, grainLate = next, false
+			lastSent = next
 		}
 	}
 }
@@ -456,15 +440,12 @@ func runSampleTransferLoop(
 	rec := tracker.source()
 	// A loop rebuilt after its target was lost resumes at the head; the
 	// samples between the last ones accounted for and it were never
-	// sent: failed while still readable, aged out beyond that.
+	// sent.
 	if from := tracker.accounted(); from > 0 && head0 > from {
-		n := head0 - from
-		if n > maxReadable {
+		if head0-from > maxReadable {
 			rec.Read(mxl.ErrOutOfRangeLate, from+1, 1)
-			rec.Skipped(n - maxReadable)
-			n = maxReadable
 		}
-		rec.Transfer(TransferFailed, head0, n)
+		rec.Skipped(head0 - from)
 	}
 	tracker.recordAccounted(head0)
 
@@ -507,7 +488,6 @@ func runSampleTransferLoop(
 				"headIndex", end, "count", xferBatch)
 			tracker.recordPostFailed(err)
 			tracker.recordDropped(false)
-			rec.Transfer(TransferFailed, end, xferBatch)
 			tracker.recordAccounted(end)
 			return
 		}
@@ -522,17 +502,11 @@ func runSampleTransferLoop(
 					tracker.recordTargetEvicted()
 				}
 				tracker.recordDropped(true)
-				rec.Transfer(TransferFailed, end, xferBatch)
 				tracker.recordAccounted(end)
 			}
 			return
 		}
 		tracker.recordCompleted(end, bytes, late, time.Now())
-		result := TransferDelivered
-		if late {
-			result = TransferLate
-		}
-		rec.Transfer(result, end, xferBatch)
 		tracker.recordAccounted(end)
 		lastSent = end
 	}

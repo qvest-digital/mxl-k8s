@@ -1,22 +1,17 @@
 // Package replmon records the gateway's replication through
-// libmxl-monitoring (github.com/marquies/libmxl-monitoring), and the
-// copy outcomes that library does not model yet.
+// libmxl-monitoring (github.com/marquies/libmxl-monitoring).
 //
 // Every mirror has one handle per role it plays on this node: the
 // replication source where it reads the flow, the replication target
 // where it writes it. A handle is reported under the mirror's
 // "<namespace>/<name>", the same on both nodes, and points at the flow
 // it reads or writes. The library counts reads, writes, content issues,
-// skipped units and latency against the grains' media timestamps; this
-// package adds what became of each unit the source held complete
-// (delivered, late, dropped, failed) and the gaps the target's writer
-// was left with, under the names the library would give them.
+// skipped units and latency against the grains' media timestamps.
 package replmon
 
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -31,11 +26,6 @@ import (
 // into the delivering state, stalls and conditions. The library wants it
 // shorter than its one-second recover delay.
 const PollInterval = 500 * time.Millisecond
-
-// transferResults are the copy outcomes, in the order they are kept.
-var transferResults = [...]mirror.TransferResult{
-	mirror.TransferDelivered, mirror.TransferLate, mirror.TransferDropped, mirror.TransferFailed,
-}
 
 // Monitoring implements mirror.Recorders.
 type Monitoring struct {
@@ -90,10 +80,7 @@ func (h *handle) record(fn func(*mm.Flow)) {
 	}
 }
 
-type source struct {
-	handle
-	transfers [len(transferResults)]atomic.Uint64
-}
+type source struct{ handle }
 
 func (s *source) Read(err error, index, count uint64) {
 	s.record(func(f *mm.Flow) { f.RecordRead(err, index, count) })
@@ -107,19 +94,7 @@ func (s *source) Skipped(count uint64) {
 	s.record(func(f *mm.Flow) { f.RecordSkipped(count) })
 }
 
-func (s *source) Transfer(result mirror.TransferResult, _, count uint64) {
-	for i, r := range transferResults {
-		if r == result {
-			s.transfers[i].Add(count)
-			return
-		}
-	}
-}
-
-type target struct {
-	handle
-	gaps atomic.Uint64
-}
+type target struct{ handle }
 
 func (t *target) Write(err error, index, count uint64) {
 	t.record(func(f *mm.Flow) { f.RecordWrite(err, index, count) })
@@ -128,8 +103,6 @@ func (t *target) Write(err error, index, count uint64) {
 func (t *target) WriteContent(issue mirror.ContentIssue, index, count uint64) {
 	t.record(func(f *mm.Flow) { f.RecordWriteContent(content(issue), index, count) })
 }
-
-func (t *target) Gap(_, count uint64) { t.gaps.Add(count) }
 
 func content(issue mirror.ContentIssue) mm.Content {
 	switch issue {

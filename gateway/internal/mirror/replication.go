@@ -21,22 +21,6 @@ const (
 	ContentMissing
 )
 
-// TransferResult is what became of a unit the source held complete.
-type TransferResult string
-
-const (
-	// TransferDelivered completed within one grain or batch interval.
-	TransferDelivered TransferResult = "delivered"
-	// TransferLate completed after it.
-	TransferLate TransferResult = "late"
-	// TransferDropped was passed over by a resync while complete.
-	TransferDropped TransferResult = "dropped"
-	// TransferFailed was outstanding when the target was lost or its
-	// post was refused, or fell between the last unit accounted for and
-	// the first one a rebuilt transfer loop sends.
-	TransferFailed TransferResult = "failed"
-)
-
 // SourceRecorder receives what one mirror's source half observes. Its
 // calls come from the mirror's transfer loop only. Units are grains for
 // a discrete flow and samples for a continuous one.
@@ -46,11 +30,10 @@ type SourceRecorder interface {
 	Read(err error, index, count uint64)
 	// ReadContent counts units read that were not complete.
 	ReadContent(issue ContentIssue, index, count uint64)
-	// Skipped counts units jumped over after the ring overtook the loop.
+	// Skipped counts units the loop jumped over to reach the head
+	// again, complete or already reused: either way never sent, and not
+	// the writer's.
 	Skipped(count uint64)
-	// Transfer counts units the source held complete, by what became of
-	// them.
-	Transfer(result TransferResult, index, count uint64)
 }
 
 // TargetRecorder receives what one mirror's target half observes, from
@@ -61,9 +44,6 @@ type TargetRecorder interface {
 	Write(err error, index, count uint64)
 	// WriteContent counts arrivals committed invalid.
 	WriteContent(issue ContentIssue, index, count uint64)
-	// Gap counts units no arrival was committed for, below the one just
-	// committed: libmxl's writer marks them invalid.
-	Gap(index, count uint64)
 }
 
 // Recorders hands out the recorders of each mirror. A mirror keeps its
@@ -84,13 +64,11 @@ type noopSource struct{}
 func (noopSource) Read(error, uint64, uint64)               {}
 func (noopSource) ReadContent(ContentIssue, uint64, uint64) {}
 func (noopSource) Skipped(uint64)                           {}
-func (noopSource) Transfer(TransferResult, uint64, uint64)  {}
 
 type noopTarget struct{}
 
 func (noopTarget) Write(error, uint64, uint64)               {}
 func (noopTarget) WriteContent(ContentIssue, uint64, uint64) {}
-func (noopTarget) Gap(uint64, uint64)                        {}
 
 // slotState is what a passed-over slot of the source ring holds.
 type slotState int
@@ -123,11 +101,11 @@ func slotOf(g mxl.Grain, err error, idx uint64) slotState {
 // ones are counted as aged out without a read.
 const maxInspected = 4096
 
-// accountPassedOver records what became of the units [from, to) of a
-// discrete flow the loop did not send: a complete one as result, one
-// that was never complete at the source as content, one already
-// reused as skipped.
-func accountPassedOver(rec SourceRecorder, slot func(uint64) slotState, from, to uint64, result TransferResult) {
+// accountPassedOver records the units [from, to) of a discrete flow the
+// loop jumped over: one the source never held complete as content, the
+// writer's; one complete or already reused as skipped, never sent. A
+// pass-over that met a reused slot is also one too_late read.
+func accountPassedOver(rec SourceRecorder, slot func(uint64) slotState, from, to uint64) {
 	if to <= from {
 		return
 	}
@@ -140,9 +118,6 @@ func accountPassedOver(rec SourceRecorder, slot func(uint64) slotState, from, to
 		counts[slot(idx)]++
 	}
 	last := to - 1
-	if n := counts[slotComplete]; n > 0 {
-		rec.Transfer(result, last, n)
-	}
 	if n := counts[slotInvalid]; n > 0 {
 		rec.ReadContent(ContentInvalid, last, n)
 	}
@@ -152,8 +127,10 @@ func accountPassedOver(rec SourceRecorder, slot func(uint64) slotState, from, to
 	if n := counts[slotMissing]; n > 0 {
 		rec.ReadContent(ContentMissing, last, n)
 	}
-	if n := counts[slotTooLate]; n > 0 {
+	if counts[slotTooLate] > 0 {
 		rec.Read(mxl.ErrOutOfRangeLate, from, 1)
+	}
+	if n := counts[slotComplete] + counts[slotTooLate]; n > 0 {
 		rec.Skipped(n)
 	}
 }

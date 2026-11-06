@@ -12,9 +12,6 @@ import (
 // never feeds: the source's commit_seconds, which needs RecordCommit,
 // and the target's input_seconds, which needs RecordInput.
 //
-// transfers_total and gaps_total are the copy outcomes the library
-// does not model yet, under the names proposed for it.
-//
 // Series per mirror and role are fixed: one handle, label values from
 // fixed sets, histogram buckets from the library's fixed bounds.
 
@@ -83,7 +80,6 @@ type roleFamilies struct {
 	skipped, stalls, opens, lost  *prometheus.Desc
 	histogram                     *prometheus.Desc
 	histogramField                func(*mm.Snapshot) mm.Histogram
-	transfers, gaps               *prometheus.Desc
 }
 
 func desc(name, help string, labels ...string) *prometheus.Desc {
@@ -113,10 +109,6 @@ var sourceFamilies = roleFamilies{
 	age:            desc("mxl_gateway_source_age_seconds", "Wall clock minus the media timestamp of the last read."),
 	histogram:      desc("mxl_gateway_source_arrival_seconds", "Read time minus the media timestamp of what was read."),
 	histogramField: func(s *mm.Snapshot) mm.Histogram { return s.ArrivalLatency },
-	transfers: desc("mxl_gateway_source_transfers_total",
-		"Units the source held complete, by what became of them, in grains (discrete) or samples (continuous): "+
-			"delivered within one grain or batch interval, late (after it), dropped (passed over while complete) "+
-			"or failed (outstanding when the target was lost, or not sent until a rebuilt transfer loop resumed).", "result"),
 }
 
 var targetFamilies = roleFamilies{
@@ -133,9 +125,6 @@ var targetFamilies = roleFamilies{
 	age:            desc("mxl_gateway_target_age_seconds", "Wall clock minus the media timestamp of the last commit."),
 	histogram:      desc("mxl_gateway_target_commit_seconds", "Commit time minus the media timestamp of what was committed."),
 	histogramField: func(s *mm.Snapshot) mm.Histogram { return s.CommitLatency },
-	gaps: desc("mxl_gateway_target_gaps_total",
-		"Grains or samples no arrival was committed for, below one that was: the target's writer marks them invalid. "+
-			"At most the ring per gap."),
 }
 
 // Collector exports what Monitoring recorded.
@@ -151,7 +140,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 			r.opens, r.lost, r.histogram} {
 			ch <- d
 		}
-		for _, d := range []*prometheus.Desc{r.issues.desc, r.skipped, r.stalls, r.transfers, r.gaps} {
+		for _, d := range []*prometheus.Desc{r.issues.desc, r.skipped, r.stalls} {
 			if d != nil {
 				ch <- d
 			}
@@ -166,22 +155,13 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		c.M.log.Error(err, "snapshot libmxl-monitoring")
 		return
 	}
-	transfers, gaps := c.M.copyOutcomes()
 	for i := range snaps {
 		s := &snaps[i]
 		switch s.Role {
 		case mm.RoleReplicationSource:
 			c.collect(ch, sourceFamilies, s)
-			if t, ok := transfers[s.FlowID]; ok {
-				for j, r := range transferResults {
-					c.counter(ch, sourceFamilies.transfers, t[j], s.FlowID, string(r))
-				}
-			}
 		case mm.RoleReplicationTarget:
 			c.collect(ch, targetFamilies, s)
-			if g, ok := gaps[s.FlowID]; ok {
-				c.counter(ch, targetFamilies.gaps, g, s.FlowID)
-			}
 		}
 	}
 }
@@ -237,24 +217,4 @@ func (c *Collector) collect(ch chan<- prometheus.Metric, r roleFamilies, s *mm.S
 	// never below the last bound.
 	cumulative += h.Buckets[mm.LatencyBuckets-1]
 	ch <- prometheus.MustNewConstHistogram(r.histogram, cumulative, h.Sum.Seconds(), buckets, c.NodeName, flow)
-}
-
-// copyOutcomes returns the transfer counts per source handle and the
-// gaps per target handle, keyed by the handle's flow label.
-func (m *Monitoring) copyOutcomes() (map[string][len(transferResults)]uint64, map[string]uint64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	transfers := make(map[string][len(transferResults)]uint64, len(m.sources))
-	for k, s := range m.sources {
-		var t [len(transferResults)]uint64
-		for i := range t {
-			t[i] = s.transfers[i].Load()
-		}
-		transfers[id(k)] = t
-	}
-	gaps := make(map[string]uint64, len(m.targets))
-	for k, t := range m.targets {
-		gaps[id(k)] = t.gaps.Load()
-	}
-	return transfers, gaps
 }

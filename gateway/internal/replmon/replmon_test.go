@@ -107,23 +107,18 @@ func record(m *Monitoring) {
 	s.ReadContent(mirror.ContentMissing, now+3, 1)
 	s.Read(mxl.ErrOutOfRangeLate, now+4, 1)
 	s.Skipped(5)
-	s.Transfer(mirror.TransferDelivered, now, 7)
-	s.Transfer(mirror.TransferDropped, now, 2)
-	s.Transfer(mirror.TransferFailed, now, 1)
 
 	a := m.Source(m2, flowID, audio, 10*time.Millisecond)
 	a.Read(nil, mxl.CurrentIndex(audio.Common.GrainRate), 480)
-	a.Transfer(mirror.TransferLate, 0, 480)
 
 	tg := m.Target(m1, flowID, video)
 	tg.Write(nil, now, 1)
 	tg.WriteContent(mirror.ContentInvalid, now+1, 1)
 	tg.WriteContent(mirror.ContentMissing, now+2, 1)
-	tg.Gap(now+5, 4)
 }
 
-// The collector's series are the library's own, plus node, plus the
-// copy outcomes, without the two histograms the gateway never feeds.
+// The collector's series are the library's own, plus node, without the
+// two histograms the gateway never feeds.
 func TestCollectorMatchesTheLibrarysPrometheusText(t *testing.T) {
 	m := newMonitoring(t)
 	record(m)
@@ -155,27 +150,21 @@ func TestCollectorMatchesTheLibrarysPrometheusText(t *testing.T) {
 		}
 	}
 	got := samples(ours, map[string]bool{
-		"mxl_gateway_source_transfers_total": true,
-		"mxl_gateway_target_gaps_total":      true,
-		"mxl_gateway_source_age_seconds":     true,
-		"mxl_gateway_target_age_seconds":     true,
+		"mxl_gateway_source_age_seconds": true,
+		"mxl_gateway_target_age_seconds": true,
 	})
 	assert.Equal(t, want, got)
 }
 
-func TestCollectorExportsTheCopyOutcomes(t *testing.T) {
+func TestCollectorExportsWhatWasRecorded(t *testing.T) {
 	m := newMonitoring(t)
 	record(m)
 	got := samples(gather(t, &Collector{NodeName: "n1", M: m}), nil)
 
-	assert.Equal(t, 7.0, got["mxl_gateway_source_transfers_total{flow=ns/m1,result=delivered}"])
-	assert.Equal(t, 0.0, got["mxl_gateway_source_transfers_total{flow=ns/m1,result=late}"])
-	assert.Equal(t, 2.0, got["mxl_gateway_source_transfers_total{flow=ns/m1,result=dropped}"])
-	assert.Equal(t, 1.0, got["mxl_gateway_source_transfers_total{flow=ns/m1,result=failed}"])
-	assert.Equal(t, 480.0, got["mxl_gateway_source_transfers_total{flow=ns/m2,result=late}"], "in samples")
-	assert.Equal(t, 4.0, got["mxl_gateway_target_gaps_total{flow=ns/m1}"])
-
-	// What the library counted from the same calls.
+	for name := range got {
+		assert.NotContains(t, name, "transfers_total")
+		assert.NotContains(t, name, "gaps_total")
+	}
 	assert.Equal(t, 2.0, got["mxl_gateway_source_reads_total{flow=ns/m1,result=ok}"])
 	assert.Equal(t, 3.0, got["mxl_gateway_source_reads_total{flow=ns/m1,result=invalid}"])
 	assert.Equal(t, 1.0, got["mxl_gateway_source_reads_total{flow=ns/m1,result=missing}"])
@@ -187,6 +176,7 @@ func TestCollectorExportsTheCopyOutcomes(t *testing.T) {
 	assert.Equal(t, 1.0, got["mxl_gateway_source_flow_info{flow=ns/m1,media_type=video,unit=grains}"])
 	assert.Equal(t, 1.0, got["mxl_gateway_source_flow_info{flow=ns/m2,media_type=audio,unit=samples}"])
 	assert.Equal(t, 1.0, got["mxl_gateway_source_flow_state{flow=ns/m1,state=open}"])
+	assert.Equal(t, 480.0, got["mxl_gateway_source_reads_total{flow=ns/m2,result=ok}"], "in samples")
 }
 
 // A grain the gateway waits for at the head is not the writer's fault;
@@ -212,7 +202,6 @@ func TestReleaseRemovesTheMirror(t *testing.T) {
 	m.ReleaseSource(m1)
 	m.ReleaseTarget(m1)
 	s.Read(nil, 1, 1)
-	s.Transfer(mirror.TransferDelivered, 1, 1)
 	tg.Write(nil, 1, 1)
 	assert.Empty(t, gather(t, &Collector{NodeName: "n1", M: m}))
 

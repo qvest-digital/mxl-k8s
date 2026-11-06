@@ -1401,9 +1401,9 @@ func (r *TargetReconciler) startProgressLoop(
 		id := writer.Config().Common.ID
 		flowID := fmt.Sprintf("%x-%x-%x-%x-%x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16])
 		commitFn := func(head uint64, count int) error {
-			n, gap, err := flow.commitSamples(writer, head, count, entry)
+			n, err := flow.commitSamples(writer, head, count, entry)
 			entry.bytes.Add(n)
-			recordSampleCommit(rec, head, count, gap, err)
+			recordSampleCommit(rec, head, count, err)
 			if err == nil && r.SamplesCommitted != nil && entry.handles != nil {
 				r.SamplesCommitted(entry.handles.DomainPath(), flowID, head-uint64(count), head)
 			}
@@ -1679,19 +1679,15 @@ type grainCommit struct {
 	reason invalidReason
 	// done says the commit completed the grain.
 	done bool
-	// gap is the grains below this one no arrival was committed for,
-	// since the flow's last commit.
-	gap uint64
 }
 
-// recordGrainCommit tells rec what one commit of grain idx did.
+// recordGrainCommit tells rec what one commit of grain idx did. An
+// arrival a sibling mirror already committed arrived all the same, and
+// counts for this mirror too.
 func recordGrainCommit(rec TargetRecorder, idx uint64, c grainCommit, err error) {
-	if c.gap > 0 {
-		rec.Gap(idx-1, c.gap)
-	}
 	switch {
 	case errors.Is(err, errGrainAlreadyCommitted):
-		// A sibling mirror committed it; that one counts it.
+		rec.Write(nil, idx, 1)
 	case err != nil:
 		rec.Write(err, idx, 1)
 	case c.reason == invalidFromSource:
@@ -1705,16 +1701,12 @@ func recordGrainCommit(rec TargetRecorder, idx uint64, c grainCommit, err error)
 
 // recordSampleCommit tells rec what one commit of the count samples
 // ending at head did.
-func recordSampleCommit(rec TargetRecorder, head uint64, count int, gap uint64, err error) {
-	if gap > 0 {
-		rec.Gap(head-uint64(count), gap)
-	}
+func recordSampleCommit(rec TargetRecorder, head uint64, count int, err error) {
 	switch {
-	case errors.Is(err, errSamplesAlreadyCommitted):
-	case err != nil:
-		rec.Write(err, head, 1)
-	default:
+	case err == nil, errors.Is(err, errSamplesAlreadyCommitted):
 		rec.Write(nil, head, uint64(count))
+	default:
+		rec.Write(err, head, 1)
 	}
 }
 
