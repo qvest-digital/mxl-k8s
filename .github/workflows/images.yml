@@ -894,6 +894,13 @@ jobs:
               || (needs.merge.result == 'success' && needs.retag.result == 'success')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    # Two fabric interfaces per node is what exercises placement; one,
+    # bound to the pod IP, is the chart's default and the layout every
+    # single-port node runs.
+    strategy:
+      fail-fast: false
+      matrix:
+        fabric_ports: ["2", "1"]
     steps:
       - uses: actions/checkout@v7
 
@@ -933,6 +940,7 @@ jobs:
           # to absorb that without changing the script's defaults.
           MIRROR_TIMEOUT_SECS: 240
           ROLLOUT_TIMEOUT_SECS: 360
+          FABRIC_PORTS: ${{ matrix.fabric_ports }}
         run: |
           set -euo pipefail
           IMAGE_REGISTRY=$(echo "$IMAGE_REGISTRY_RAW" | tr '[:upper:]' '[:lower:]')
@@ -951,7 +959,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: kind-diagnostics-${{ github.run_id }}
+          name: kind-diagnostics-${{ github.run_id }}-ports-${{ matrix.fabric_ports }}
           path: ${{ runner.temp }}/kind-diagnostics
           if-no-files-found: ignore
           retention-days: 7

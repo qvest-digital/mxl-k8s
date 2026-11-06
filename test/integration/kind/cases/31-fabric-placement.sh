@@ -143,3 +143,21 @@ echo "   Ready over the second pair"
 "${KUBECTL[@]}" -n "$SECOND_NS" patch mxlflowmirror second --type=merge -p '{"spec":{"placement":null}}' >/dev/null
 pair=$(placed "$SECOND_NS" second) || fail "a cleared placement was not chosen again"
 echo "   placed again on ${pair}"
+
+# A placement set by hand onto the pair the demo mirror uses is kept, and
+# both gateways move the live mirror onto it: the target rebuilds its
+# fabric side on the new address, the source re-adds the new target.
+"${KUBECTL[@]}" -n "$SECOND_NS" patch mxlflowmirror second --type=merge \
+  -p "{\"spec\":{\"placement\":{\"sourceInterface\":\"${first_src}\",\"targetInterface\":\"${first_tgt}\"}}}" >/dev/null
+deadline=$(( $(date +%s) + MIRROR_TIMEOUT_SECS ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  bsrc=$(mirror_field "$SECOND_NS" second '{.status.sourceInterface}')
+  btgt=$(mirror_field "$SECOND_NS" second '{.status.targetInterface}')
+  phase=$(mirror_field "$SECOND_NS" second '{.status.phase}')
+  [ "$bsrc" = "$first_src" ] && [ "$btgt" = "$first_tgt" ] && [ "$phase" = "Ready" ] && break
+  sleep 2
+done
+if [ "$bsrc" != "$first_src" ] || [ "$btgt" != "$first_tgt" ] || [ "$phase" != "Ready" ]; then
+  fail "a hand-set placement was not followed: bound '${bsrc}->${btgt}', phase '${phase}'"
+fi
+echo "   rebound by hand onto ${first_src} -> ${first_tgt}, Ready"
