@@ -457,11 +457,33 @@ func TestReportsWhetherMemberPathsAreDisjoint(t *testing.T) {
 	cond = pathsDisjointOf(t, c)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, mxlv1alpha1.ReasonSharedSourceInterface, cond.Reason)
-	assert.Contains(t, cond.Message, "node-a at 192.0.2.1")
+	assert.Contains(t, cond.Message, "node-a at port 192.0.2.1")
 
 	placeMember(t, c, memberB, "192.0.2.1", "192.0.2.2")
 	reconcile(t, r)
 	cond = pathsDisjointOf(t, c)
 	assert.Equal(t, mxlv1alpha1.ReasonSharedTargetInterface, cond.Reason)
-	assert.Contains(t, cond.Message, "reader at 192.0.2.2")
+	assert.Contains(t, cond.Message, "reader at port 192.0.2.2")
+}
+
+// Two members arriving on two addresses of one port share that port:
+// placement accounts them on one link, so the set has to say so too.
+func TestPathsSharingAPortThroughTwoAddressesAreNotDisjoint(t *testing.T) {
+	port := func(addr, device string) mxlv1alpha1.MxlFabricInterface {
+		return mxlv1alpha1.MxlFabricInterface{Address: addr, Device: device}
+	}
+	readerCaps := &mxlv1alpha1.MxlNodeCapabilities{ObjectMeta: metav1.ObjectMeta{Name: "reader"},
+		Status: mxlv1alpha1.MxlNodeCapabilitiesStatus{Providers: []mxlv1alpha1.MxlFabricsProviderCapability{{
+			Name: mxlv1alpha1.ProviderTCP, Interfaces: []mxlv1alpha1.MxlFabricInterface{
+				port("192.0.2.2", "fab0"), port("192.0.2.130", "fab0")}}}}}
+	r, c := harness(t, newSet("reader"),
+		flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-b"), readerCaps)
+	reconcile(t, r)
+	placeMember(t, c, memberA, "192.0.2.1", "192.0.2.2")
+	placeMember(t, c, memberB, "192.0.2.129", "192.0.2.130")
+	reconcile(t, r)
+	cond := pathsDisjointOf(t, c)
+	require.NotNil(t, cond)
+	assert.Equal(t, mxlv1alpha1.ReasonSharedTargetInterface, cond.Reason)
+	assert.Contains(t, cond.Message, "port fab0")
 }

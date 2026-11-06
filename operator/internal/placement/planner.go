@@ -89,6 +89,12 @@ func Port(i v1alpha1.MxlFabricInterface) string {
 	return i.Address
 }
 
+// PortOf is the port, as Port names it, of the interface at address
+// that status lists under provider, or the address when it lists none.
+func PortOf(status v1alpha1.MxlNodeCapabilitiesStatus, provider v1alpha1.MxlFabricsProvider, address string) string {
+	return Node{Status: status}.port(provider, address)
+}
+
 // port is the port of the interface at address under provider, or the
 // address when the node does not list it.
 func (n Node) port(provider v1alpha1.MxlFabricsProvider, address string) string {

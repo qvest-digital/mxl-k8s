@@ -30,6 +30,7 @@ import (
 
 	"github.com/qvest-digital/mxl-k8s/api/selection"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
+	"github.com/qvest-digital/mxl-k8s/operator/internal/placement"
 )
 
 // Conditions and reasons on a set.
@@ -421,9 +422,10 @@ func (r *Reconciler) ensureMirrors(ctx context.Context, set *mxlv1alpha1.MxlFlow
 }
 
 // pathsDisjoint reports whether the member mirrors arriving on each
-// node in status.nodes were placed on separate interfaces, on the
-// receiving node and on every sending node. Two members sharing an
-// interface share its failure, and its receive buffer.
+// node in status.nodes were placed on separate ports, on the receiving
+// node and on every sending node. Two members sharing a port share its
+// failure, and its receive buffer. A port is what placement accounts
+// load on: two addresses of one device are one port.
 func (r *Reconciler) pathsDisjoint(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet) (metav1.Condition, error) {
 	var mirrors mxlv1alpha1.MxlFlowMirrorList
 	if err := r.List(ctx, &mirrors, client.InNamespace(r.Namespace)); err != nil {
@@ -434,7 +436,19 @@ func (r *Reconciler) pathsDisjoint(ctx context.Context, set *mxlv1alpha1.MxlFlow
 		byName[mirrors.Items[i].Name] = &mirrors.Items[i]
 	}
 	cond := metav1.Condition{Type: mxlv1alpha1.ConditionTypePathsDisjoint, Status: metav1.ConditionTrue,
-		Reason: mxlv1alpha1.ReasonDisjoint, Message: "No two member mirrors to a node share a fabric interface"}
+		Reason: mxlv1alpha1.ReasonDisjoint, Message: "No two member mirrors to a node share a fabric port"}
+	caps := map[string]mxlv1alpha1.MxlNodeCapabilitiesStatus{}
+	portOf := func(node string, provider mxlv1alpha1.MxlFabricsProvider, address string) string {
+		st, ok := caps[node]
+		if !ok {
+			var c mxlv1alpha1.MxlNodeCapabilities
+			if err := r.Get(ctx, types.NamespacedName{Name: node}, &c); err == nil {
+				st = c.Status
+			}
+			caps[node] = st
+		}
+		return placement.PortOf(st, provider, address)
+	}
 	var sharedSource string
 	unplaced := 0
 	for _, node := range set.Status.Nodes {
@@ -451,15 +465,16 @@ func (r *Reconciler) pathsDisjoint(ctx context.Context, set *mxlv1alpha1.MxlFlow
 				unplaced++
 				continue
 			}
-			if other, dup := targets[p.TargetInterface]; dup {
+			tport := portOf(node, m.Spec.Provider, p.TargetInterface)
+			if other, dup := targets[tport]; dup {
 				cond.Status, cond.Reason = metav1.ConditionFalse, mxlv1alpha1.ReasonSharedTargetInterface
-				cond.Message = fmt.Sprintf("Members %s and %s both arrive on %s at %s", other, ref.Name(), node, p.TargetInterface)
+				cond.Message = fmt.Sprintf("Members %s and %s both arrive on %s at port %s", other, ref.Name(), node, tport)
 				return cond, nil
 			}
-			targets[p.TargetInterface] = ref.Name()
-			key := [2]string{m.Spec.SourceNode, p.SourceInterface}
+			targets[tport] = ref.Name()
+			key := [2]string{m.Spec.SourceNode, portOf(m.Spec.SourceNode, m.Spec.Provider, p.SourceInterface)}
 			if other, dup := sources[key]; dup && sharedSource == "" {
-				sharedSource = fmt.Sprintf("Members %s and %s to %s both leave %s at %s", other, ref.Name(), node, key[0], key[1])
+				sharedSource = fmt.Sprintf("Members %s and %s to %s both leave %s at port %s", other, ref.Name(), node, key[0], key[1])
 			}
 			sources[key] = ref.Name()
 		}
