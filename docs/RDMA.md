@@ -424,7 +424,8 @@ interface reports `PathsDisjoint=False` naming it.
 A placement is not moved because load changed, and there is no
 automatic rebalance. A mirror is placed again only when one of its
 two interfaces is no longer advertised for its provider (link down,
-deselected, capability change), when its provider or source node
+deselected, capability change, as the gateway's next probe reports
+it; see `gateway.flags.probePeriod`), when its provider or source node
 changes to one the interfaces do not belong to, or when
 `spec.placement` is cleared by hand. A placement written by hand is
 kept while both addresses are advertised. Its gateways then rebuild
