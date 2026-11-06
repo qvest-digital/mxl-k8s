@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ func reconcilerNames(t *testing.T, mxlfs bool) []string {
 	})
 	require.NoError(t, err)
 	var names []string
-	for _, rc := range reconcilers(mgr, time.Minute, mxlfs, "ns") {
+	for _, rc := range reconcilers(mgr, time.Minute, mxlfs, "ns", placementFlags{}) {
 		names = append(names, rc.name)
 	}
 	return names
@@ -37,6 +38,7 @@ func TestReconcilers_RedundancySetsOnlyWithMxlfs(t *testing.T) {
 	assert.NotContains(t, reconcilerNames(t, false), "MxlFlowRedundancySet")
 	assert.Contains(t, reconcilerNames(t, true), "MxlFlowRedundancySet")
 	assert.Contains(t, reconcilerNames(t, false), "MxlFlowMirror")
+	assert.Contains(t, reconcilerNames(t, false), "Placement")
 }
 
 func TestRequireKind_NamesTheMissingCRD(t *testing.T) {
@@ -47,4 +49,39 @@ func TestRequireKind_NamesTheMissingCRD(t *testing.T) {
 	m := meta.NewDefaultRESTMapper(nil)
 	m.Add(mxlv1alpha1.GroupVersion.WithKind("MxlFlowRedundancySet"), meta.RESTScopeRoot)
 	require.NoError(t, requireKind(m, "MxlFlowRedundancySet"))
+}
+
+func TestPlacementFlags(t *testing.T) {
+	parse := func(args ...string) (placementFlags, error) {
+		var p placementFlags
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		p.bind(fs)
+		require.NoError(t, fs.Parse(args))
+		return p, p.validate()
+	}
+	p, err := parse()
+	require.NoError(t, err)
+	assert.Equal(t, int32(80), p.settings().MaxUtilizationPercent)
+	assert.Equal(t, "prefer-same-subnet", string(p.settings().Pairing))
+	assert.Equal(t, "place", string(p.settings().Overcommit))
+	assert.Equal(t, 5, p.overheadPercent)
+	assert.Equal(t, 5*time.Second, p.demandWait)
+	assert.Zero(t, p.provisional)
+
+	p, err = parse("--placement-provisional-demand=3G")
+	require.NoError(t, err)
+	assert.Equal(t, int64(3_000_000_000), p.provisional)
+
+	for _, bad := range [][]string{
+		{"--placement-max-utilization=0"},
+		{"--placement-max-utilization=101"},
+		{"--placement-provisional-demand=-1"},
+		{"--placement-provisional-demand=fast"},
+		{"--placement-pairing=nearest"},
+		{"--placement-overcommit=drop"},
+		{"--placement-demand-wait=-1s"},
+	} {
+		_, err := parse(bad...)
+		assert.Error(t, err, bad)
+	}
 }
