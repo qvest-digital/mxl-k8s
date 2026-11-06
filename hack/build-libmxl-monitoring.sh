@@ -64,6 +64,9 @@ cmake -S "$src" -B "$build" -G Ninja \
 cmake --build "$build" --target mxl-monitoring mxl-monitoring-prometheus >/dev/null
 
 mkdir -p "$out"
+rm -f "$out/libmxl-monitoring.a" "$out/libmxl-monitoring-prometheus.a" "$out/LICENSE"
 cp "$build/libmxl-monitoring.a" "$build/libmxl-monitoring-prometheus.a" "$src/LICENSE" "$out/"
+# The module cache is read-only, and so is the LICENSE copied from it.
+chmod u+w "$out/LICENSE"
 echo "$version" >"$out/VERSION"
 echo "libmxl-monitoring $version built in $out"
