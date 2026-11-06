@@ -581,11 +581,11 @@ flow committed first, and `mxl_gateway_target_invalid_input_total`
 arrivals committed invalid (`invalid` from the source, `missing` for a
 slot a later write overtook).
 
-The fabric dashboard's copy loss is, per mirror over one window, the
-skipped units plus the source's OK reads its target never committed
-complete, over the source's OK reads plus skipped units. It counts what
-the fabric and both gateways lost together; the existing series do not
-separate the two.
+These series give no copy-loss figure. The units skipped after a
+too-late read span whatever the ring held, grains the writer jumped
+over included; a commit failure, a target that restarted and a source
+that restarted each leave a source read without a target write, or no
+count at all.
 
 `mxl_gateway_source_reads_total{result="too_early"}` counts a grain the
 gateway still waited for a grace period (one grain, or one batch of
