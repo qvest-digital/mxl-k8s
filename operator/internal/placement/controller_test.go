@@ -2,6 +2,7 @@ package placement
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -9,6 +10,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -133,6 +136,44 @@ func TestReconcileObservesPlacementOnlyOfMirrorsCreatedSinceStart(t *testing.T) 
 	now = start.Add(2 * time.Second)
 	require.NotNil(t, reconcileAndGet(2).Spec.Placement)
 	require.Equal(t, before+1, placementSamples(t), "a mirror created since the start adds one sample")
+}
+
+// A write to the mirror between the read and the placement patch, such
+// as a gateway's status update, fails the patch's optimistic lock. That
+// is a retry, not a reconciler error, and leaves nothing behind that
+// claims the mirror was placed.
+func TestReconcileRequeuesQuietlyOnConflict(t *testing.T) {
+	start := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	now := start
+	conflicts := 1
+	c := fakeMirrors(t, interceptor.Funcs{Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+		if _, ok := obj.(*mxlv1alpha1.MxlFlowMirror); ok && conflicts > 0 {
+			conflicts--
+			return apierrors.NewConflict(mxlv1alpha1.GroupVersion.WithResource("mxlflowmirrors").GroupResource(), obj.GetName(),
+				errors.New("the object has been modified"))
+		}
+		return cl.Patch(ctx, obj, patch, opts...)
+	}}, mirrorCreatedAt(1, start))
+	r := &Reconciler{Client: c, Settings: defaults, DemandWait: time.Second, now: func() time.Time { return now }}
+	key := types.NamespacedName{Namespace: "ns", Name: flowID(1)}
+	before := placementSamples(t)
+
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.Positive(t, res.RequeueAfter, "a conflict is retried")
+	var m mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &m))
+	require.Nil(t, m.Spec.Placement)
+	require.Nil(t, meta.FindStatusCondition(m.Status.Conditions, mxlv1alpha1.ConditionTypePlaced))
+	require.Empty(t, r.written, "a placement that was not written is not remembered")
+	require.Equal(t, before, placementSamples(t))
+
+	now = start.Add(time.Second)
+	_, err = r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.NoError(t, c.Get(context.Background(), key, &m))
+	require.NotNil(t, m.Spec.Placement)
+	require.Equal(t, before+1, placementSamples(t))
 }
 
 // The gateway rewrites lastSeen on every resync and the agents rewrite
