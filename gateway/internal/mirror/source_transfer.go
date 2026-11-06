@@ -312,7 +312,6 @@ func runTransferLoop(
 					"lastSent", lastSent, "head", h)
 				tracker.recordAgedOut(time.Now())
 				tracker.recordPassedOver(unsentResync, uint64(h-next))
-				rec.Skipped(uint64(h - next))
 			}
 			next = h
 		}
@@ -324,7 +323,9 @@ func runTransferLoop(
 			l.Info("reader aged out, skipping grains", "fromIndex", next, "toIndex", h)
 			tracker.recordAgedOut(time.Now())
 			tracker.recordPassedOver(unsentAgedOut, uint64(h-next+1))
-			rec.Read(mxl.ErrOutOfRangeLate, uint64(next), 1)
+			// The read came back too late, and the loop jumps to the
+			// head over what the ring overtook.
+			rec.Read(err, uint64(next), 1)
 			rec.Skipped(uint64(h - next + 1))
 			lastSent, start = h, 0
 			continue
@@ -351,18 +352,20 @@ func runTransferLoop(
 			wait(ctx, poll)
 			continue
 		}
+		posted := time.Now()
+		late, err := awaitTransfer(ctx, makeProgress, pollProgress, posted, interval)
+		// The read that completed the grain is recorded once its
+		// transfer is no longer outstanding, so nothing runs between the
+		// post and the first progress call; its arrival latency includes
+		// the transfer.
 		done := step.next == 0
 		if done {
-			// The read that completes the grain is the one its arrival
-			// is measured at.
 			if step.invalid {
 				rec.ReadContent(ContentInvalid, uint64(next), 1)
 			} else {
 				rec.Read(nil, uint64(next), 1)
 			}
 		}
-		posted := time.Now()
-		late, err := awaitTransfer(ctx, makeProgress, pollProgress, posted, interval)
 		if err != nil {
 			if ctx.Err() == nil {
 				l.Info("lost the mirror target", "index", next, "error", err.Error())
@@ -449,8 +452,6 @@ func runSampleTransferLoop(
 				"fromIndex", lastSent+1, "toIndex", head)
 			tracker.recordAgedOut(time.Now())
 			tracker.recordSkipped(head - agedOut - lastSent)
-			rec.Read(mxl.ErrOutOfRangeLate, lastSent+1, 1)
-			rec.Skipped(head - agedOut - lastSent)
 			lastSent = head - agedOut
 		}
 
@@ -469,10 +470,11 @@ func runSampleTransferLoop(
 			tracker.recordDropped(false)
 			return
 		}
-		rec.Read(nil, end, xferBatch)
-
 		posted := time.Now()
 		late, err := awaitTransfer(ctx, makeProgress, pollProgress, posted, interval)
+		// Recorded once the transfer is no longer outstanding; the
+		// batch's arrival latency includes the transfer.
+		rec.Read(nil, end, xferBatch)
 		if err != nil {
 			if ctx.Err() == nil {
 				l.Info("lost the mirror target", "headIndex", end, "error", err.Error())

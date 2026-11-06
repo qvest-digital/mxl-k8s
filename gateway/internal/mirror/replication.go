@@ -30,8 +30,8 @@ type SourceRecorder interface {
 	Read(err error, index, count uint64)
 	// ReadContent counts units read that were not complete.
 	ReadContent(issue ContentIssue, index, count uint64)
-	// Skipped counts units the loop jumped over to reach the head
-	// again; it does not read them, so they are not told apart.
+	// Skipped counts units the loop jumped over to reach the head again
+	// after a read came back too late: the ring had overtaken them.
 	Skipped(count uint64)
 }
 

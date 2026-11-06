@@ -2,7 +2,9 @@ package mirror
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,10 +66,9 @@ func (r *recordingSource) sums() (reads map[string]uint64, content map[ContentIs
 
 func (rt *recordingTracker) source() SourceRecorder { return &rt.rec }
 
-// A resync and an aged-out reader both jump to the head without
-// reading what they pass over: the units are skipped, and the aged-out
-// one is also a too_late read.
-func TestResyncAndAgedOutAreSkipped(t *testing.T) {
+// A resync jumps to the head without a read that came back too late,
+// so the library records nothing for the grains it passes over.
+func TestResyncRecordsNothingForTheGrainsItPassesOver(t *testing.T) {
 	h := &headScript{heads: []uint64{10, 11, 20}}
 	link := &fakeLink{t: t}
 	tr := &recordingTracker{}
@@ -77,8 +78,41 @@ func TestResyncAndAgedOutAreSkipped(t *testing.T) {
 
 	reads, content, skipped := tr.rec.sums()
 	assert.Empty(t, content)
-	assert.Equal(t, uint64(8), skipped, "12-19")
+	assert.Zero(t, skipped)
 	assert.Equal(t, uint64(2), reads["ok"], "11 and 20")
+	assert.NotContains(t, reads, mxl.ErrOutOfRangeLate.Error())
+}
+
+// A read that comes back too late is recorded with its own error, and
+// the grains the loop then jumps over to the head are skipped.
+func TestAgedOutReadIsTooLateAndSkips(t *testing.T) {
+	h := &headScript{heads: []uint64{10, 14}}
+	link := &fakeLink{t: t}
+	tooLate := fmt.Errorf("GetGrainSlice(11): %w", mxl.ErrOutOfRangeLate)
+	var once atomic.Bool
+	transfer := func(idx uint64, start uint16) (grainStep, error) {
+		if idx > 14 {
+			time.Sleep(time.Millisecond)
+			return grainStep{}, mxl.ErrTimeout
+		}
+		if once.CompareAndSwap(false, true) {
+			return grainStep{}, tooLate
+		}
+		_, err := link.transferGrain(idx)
+		return grainStep{bytes: 1}, err
+	}
+	tr := &recordingTracker{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go runTransferLoop(ctx, done, "f", h.probe, transfer, link.makeProgress, link.makeProgress,
+		time.Millisecond, time.Hour, tr)
+	require.Eventually(t, func() bool { _, _, sk := tr.rec.sums(); return sk > 0 }, time.Second, time.Millisecond)
+	cancel()
+	<-done
+
+	reads, _, skipped := tr.rec.sums()
+	assert.Equal(t, uint64(4), skipped, "11-14")
+	assert.Equal(t, uint64(1), reads[tooLate.Error()])
 }
 
 // A grain counts as read once, with the read that completes it; one
@@ -117,21 +151,21 @@ func TestReadIsCountedPerGrain(t *testing.T) {
 	assert.Equal(t, uint64(2), reads["ok"], "11 and 13, once each")
 }
 
-// A sample batch counts its samples; samples left behind by the
-// readable window are skipped.
+// A sample batch counts its samples. Samples the loop leaves behind
+// the readable window were never read, so the library records nothing
+// for them.
 func TestSampleLoopAccountsInSamples(t *testing.T) {
 	h := &headScript{heads: []uint64{0, 480, 10000}}
 	link := &fakeSampleLink{t: t}
 	tr := &recordingTracker{}
 	_, stop := runSampleLoop(h.probe, link.transferSamples, link.makeProgress, 480, 2000, time.Hour, tr)
-	require.Eventually(t, func() bool { _, _, sk := tr.rec.sums(); return sk > 0 }, time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { r, _, _ := tr.rec.sums(); return r["ok"] >= 3*480 }, time.Second, time.Millisecond)
 	stop()
 
 	reads, _, skipped := tr.rec.sums()
-	// 480 went; at head 10000 the oldest readable sample is 10000-1520.
-	assert.Equal(t, uint64(10000-(2000-480)-480), skipped)
+	assert.Zero(t, skipped)
 	assert.Zero(t, reads["ok"]%480)
-	assert.GreaterOrEqual(t, reads["ok"], uint64(3*480))
+	assert.Len(t, reads, 1, "only OK reads")
 }
 
 // recordingTarget is a TargetRecorder that sums what it is told.
