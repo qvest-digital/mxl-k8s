@@ -927,3 +927,30 @@ func TestRefresh_PublishesWhatPlacementPlansAgainst(t *testing.T) {
 	}}, got.Status.Budgets)
 	assert.Equal(t, int32(70), got.Status.MaxUtilizationPercent)
 }
+
+// Metrics read what the probe published from another goroutine; they
+// get a copy, so the status update decoding into the probe's slices
+// cannot change what a scrape reads.
+func TestPublished_ReturnsACopyOfTheLastProbe(t *testing.T) {
+	p := &Publisher{
+		Client:    newClient(t, existingCR()).Build(),
+		NodeName:  "n1",
+		Providers: []fabrics.Provider{fabrics.ProviderAny},
+		Lister:    &fakeLister{out: []fabrics.InterfaceConfig{iface(fabrics.ProviderTCP, "192.0.2.13", "eth0")}},
+	}
+	_, ok := p.Published()
+	require.False(t, ok, "nothing before the first probe")
+
+	require.NoError(t, p.Refresh(context.Background()))
+	got, ok := p.Published()
+	require.True(t, ok)
+	tcp := providerByName(got.Providers, mxlv1alpha1.ProviderTCP)
+	require.NotNil(t, tcp)
+	require.Len(t, tcp.Interfaces, 1)
+	assert.Equal(t, "eth0", tcp.Interfaces[0].Device)
+
+	p.cached[0].Interfaces = nil
+	again, _ := p.Published()
+	assert.Equal(t, got, again)
+	assert.NotEmpty(t, providerByName(again.Providers, mxlv1alpha1.ProviderTCP).Interfaces)
+}
