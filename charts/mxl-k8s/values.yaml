@@ -238,6 +238,50 @@ operator:
     # requestor pod has gone.
     gcGracePeriod: 5m
     # @schema
+    # type: integer
+    # minimum: 1
+    # maximum: 100
+    # @schema
+    # -- Percent of a fabric interface's or shared budget's capacity
+    # mirror placement may commit, on nodes whose gateway sets no
+    # gateway.flags.fabricMaxUtilization. Grains leave as line-rate
+    # bursts, so a receiver overflows before its average load reaches
+    # the link speed.
+    placementMaxUtilization: 80
+    # @schema
+    # type: integer
+    # minimum: 0
+    # maximum: 100
+    # @schema
+    # -- Percent added to a flow's published payload rate for protocol
+    # framing when it is charged to an interface.
+    placementProtocolOverhead: 5
+    # -- Rate in bits per second charged for a flow that has not
+    # published its payload rate within placementDemandWait, as a
+    # quantity. "0" places such mirrors by mirror count alone.
+    placementProvisionalDemand: "0"
+    # @schema
+    # pattern: ^[0-9]+(ns|us|ms|s|m|h)$
+    # @schema
+    # -- How long after its creation a mirror waits for its flow's
+    # payload rate before it is placed on the provisional demand.
+    placementDemandWait: 5s
+    # @schema
+    # enum: ["prefer-same-subnet", "same-subnet", "any"]
+    # @schema
+    # -- How a source interface is paired with a target interface.
+    # prefer-same-subnet keeps pairs whose addresses share a subnet when
+    # any does; same-subnet keeps only those; any keeps every pair.
+    placementPairing: prefer-same-subnet
+    # @schema
+    # enum: ["place", "hold"]
+    # @schema
+    # -- What happens to a mirror no interface pair has room for. place
+    # puts it on the pair with the most headroom left and reports it
+    # Overcommitted; hold leaves it unplaced and unset up, and reports
+    # it Held.
+    placementOvercommit: place
+    # @schema
     # enum: ["debug", "info", "warn", "error"]
     # @schema
     zapLogLevel: info
@@ -627,6 +671,37 @@ gateway:
     # rejected when this is set, which includes interfaces with no
     # physical NIC behind them.
     fabricMinLinkSpeed: ""
+    # -- Capacity overrides for mirror placement, each
+    # `<match>=<quantity>` in bits per second, where match is a device
+    # name, an address or a CIDR and the first match wins. An
+    # interface no entry matches is planned at the link speed its
+    # provider reports; one reporting none is never counted full.
+    fabricPortCapacity: []
+    # -- Caps several fabric interfaces share, each
+    # `<scope>=<quantity>[:<mode>]` in bits per second. Scope `nic`
+    # makes one cap per PCI device over its functions, `host` one over
+    # every interface of the node. Mode `ingress` (the default) counts
+    # mirrors received, `egress` mirrors sent, `combined` both against
+    # one cap. Empty declares none.
+    fabricSharedBudget: []
+    # @schema
+    # type: integer
+    # minimum: 0
+    # maximum: 100
+    # @schema
+    # -- Percent of an interface's or budget's capacity placement may
+    # commit on this gateway's nodes. 0 leaves it to
+    # operator.flags.placementMaxUtilization.
+    fabricMaxUtilization: 0
+    # @schema
+    # pattern: ^[0-9]+(ns|us|ms|s|m|h)$
+    # @schema
+    # -- How long the target side of a mirror the operator has not
+    # placed waits before binding the first interface, on a node
+    # offering more than one. The operator places within its own
+    # reconcile, so a running operator adds no delay; this bounds the
+    # wait when it is down or slow.
+    placementWait: 10s
     # -- How often the gateway refreshes MxlNodeCapabilities. Every
     # pass reads each RDMA port state out of sysfs; on irdma that
     # read takes the kernel global rtnl lock, so this is also how

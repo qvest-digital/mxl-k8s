@@ -1632,11 +1632,35 @@
               "required": [],
               "title": "fabricDevice"
             },
+            "fabricMaxUtilization": {
+              "default": 0,
+              "description": "Percent of an interface's or budget's capacity placement may commit on this gateway's nodes. 0 leaves it to operator.flags.placementMaxUtilization.",
+              "maximum": 100,
+              "minimum": 0,
+              "title": "fabricMaxUtilization",
+              "type": "integer"
+            },
             "fabricMinLinkSpeed": {
               "default": "",
               "description": "Minimum link speed a fabric interface must report, as a quantity in bits per second (for example 25G). Empty imposes no floor. An interface whose provider reports no link speed is rejected when this is set, which includes interfaces with no physical NIC behind them.",
               "required": [],
               "title": "fabricMinLinkSpeed"
+            },
+            "fabricPortCapacity": {
+              "description": "Capacity overrides for mirror placement, each `\u003cmatch\u003e=\u003cquantity\u003e` in bits per second, where match is a device name, an address or a CIDR and the first match wins. An interface no entry matches is planned at the link speed its provider reports; one reporting none is never counted full.",
+              "items": {
+                "required": []
+              },
+              "required": [],
+              "title": "fabricPortCapacity"
+            },
+            "fabricSharedBudget": {
+              "description": "Caps several fabric interfaces share, each `\u003cscope\u003e=\u003cquantity\u003e[:\u003cmode\u003e]` in bits per second. Scope `nic` makes one cap per PCI device over its functions, `host` one over every interface of the node. Mode `ingress` (the default) counts mirrors received, `egress` mirrors sent, `combined` both against one cap. Empty declares none.",
+              "items": {
+                "required": []
+              },
+              "required": [],
+              "title": "fabricSharedBudget"
             },
             "healthProbeBindAddress": {
               "default": ":8081",
@@ -1663,6 +1687,13 @@
               "pattern": "^:[0-9]+$|^[0-9.]+:[0-9]+$",
               "required": [],
               "title": "metricsBindAddress"
+            },
+            "placementWait": {
+              "default": "10s",
+              "description": "How long the target side of a mirror the operator has not placed waits before binding the first interface, on a node offering more than one. The operator places within its own reconcile, so a running operator adds no delay; this bounds the wait when it is down or slow.",
+              "pattern": "^[0-9]+(ns|us|ms|s|m|h)$",
+              "required": [],
+              "title": "placementWait"
             },
             "pprofBindAddress": {
               "default": "",
@@ -2658,6 +2689,56 @@
               "pattern": "^:[0-9]+$|^[0-9.]+:[0-9]+$",
               "required": [],
               "title": "metricsBindAddress"
+            },
+            "placementDemandWait": {
+              "default": "5s",
+              "description": "How long after its creation a mirror waits for its flow's payload rate before it is placed on the provisional demand.",
+              "pattern": "^[0-9]+(ns|us|ms|s|m|h)$",
+              "required": [],
+              "title": "placementDemandWait"
+            },
+            "placementMaxUtilization": {
+              "default": 80,
+              "description": "Percent of a fabric interface's or shared budget's capacity mirror placement may commit, on nodes whose gateway sets no gateway.flags.fabricMaxUtilization. Grains leave as line-rate bursts, so a receiver overflows before its average load reaches the link speed.",
+              "maximum": 100,
+              "minimum": 1,
+              "title": "placementMaxUtilization",
+              "type": "integer"
+            },
+            "placementOvercommit": {
+              "default": "place",
+              "description": "What happens to a mirror no interface pair has room for. place puts it on the pair with the most headroom left and reports it Overcommitted; hold leaves it unplaced and unset up, and reports it Held.",
+              "enum": [
+                "place",
+                "hold"
+              ],
+              "required": [],
+              "title": "placementOvercommit"
+            },
+            "placementPairing": {
+              "default": "prefer-same-subnet",
+              "description": "How a source interface is paired with a target interface. prefer-same-subnet keeps pairs whose addresses share a subnet when any does; same-subnet keeps only those; any keeps every pair.",
+              "enum": [
+                "prefer-same-subnet",
+                "same-subnet",
+                "any"
+              ],
+              "required": [],
+              "title": "placementPairing"
+            },
+            "placementProtocolOverhead": {
+              "default": 5,
+              "description": "Percent added to a flow's published payload rate for protocol framing when it is charged to an interface.",
+              "maximum": 100,
+              "minimum": 0,
+              "title": "placementProtocolOverhead",
+              "type": "integer"
+            },
+            "placementProvisionalDemand": {
+              "default": "0",
+              "description": "Rate in bits per second charged for a flow that has not published its payload rate within placementDemandWait, as a quantity. \"0\" places such mirrors by mirror count alone.",
+              "required": [],
+              "title": "placementProvisionalDemand"
             },
             "zapDevel": {
               "default": false,
