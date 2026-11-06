@@ -126,6 +126,10 @@ type SourceReconciler struct {
 	// publisher applies the same one.
 	Selector fabric.Selector
 
+	// Recorders receives what each mirror's transfer loop observes. Nil
+	// records nothing.
+	Recorders Recorders
+
 	// Domains holds the long-lived mxl + fabrics instances, one per
 	// MxlDomain a mirror reads from.
 	Domains *instance.Set
@@ -152,6 +156,11 @@ type SourceReconciler struct {
 	ReaderStallAfter time.Duration
 
 	opener initiatorOpener
+
+	// accounted is, per mirror, the last index its recorder accounted
+	// for, carried from an entry closed for a rebuild to the next one.
+	// Written under mu.
+	accounted map[types.NamespacedName]uint64
 
 	// rebuildFn is the seam the reader-stall watchdog uses to spawn
 	// its reopen. Production leaves it nil and the flusher invokes
@@ -293,6 +302,12 @@ type linkTracker struct {
 
 func (t linkTracker) recordTargetEvicted() { t.link.evicted.Store(true) }
 
+// slot reads slot idx of the link's reader without waiting.
+func (t linkTracker) slot(idx uint64) slotState {
+	g, err := t.link.reader.GetGrainSliceNonBlocking(idx, mxl.GrainValidSlicesAny)
+	return slotOf(g, err, idx)
+}
+
 // stop cancels the loop and waits for it to return. Idempotent.
 func (l *sourceLink) stop() {
 	if l.cancel != nil {
@@ -333,6 +348,11 @@ type sourceEntry struct {
 	// re-opened the FlowWriter) and re-add it against the fresh address
 	// before the source's writes keep getting refused.
 	infoStr string
+
+	// rec is the mirror's source recorder, set by attach and kept across
+	// its links; accountedIdx the last index recorded through it.
+	rec          SourceRecorder
+	accountedIdx atomic.Uint64
 
 	// peerNode labels this mirror's byte counter, and is what keeps the
 	// label set unique when one node mirrors the same flow to several
@@ -526,6 +546,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// to, and would hold a later return here to its backoff.
 		r.closeEntry(req.NamespacedName)
 		r.clearRedials(req.NamespacedName)
+		r.retire(req.NamespacedName)
 		return r.reapOrphanedFinalizer(ctx, &mirror)
 	}
 
@@ -535,6 +556,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		r.closeEntry(req.NamespacedName)
 		r.clearRedials(req.NamespacedName)
+		r.retire(req.NamespacedName)
 		controllerutil.RemoveFinalizer(&mirror, SourceFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
 			if apierrors.IsConflict(err) {
@@ -758,6 +780,17 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if mirror.Status.LastSentAt != nil {
 		t := mirror.Status.LastSentAt.Time
 		entry.lastSentAt.Store(&t)
+	}
+
+	r.mu.Lock()
+	entry.accountedIdx.Store(r.accounted[req.NamespacedName])
+	r.mu.Unlock()
+	if r.Recorders != nil {
+		span := shared.interval
+		if shared.continuous {
+			_, span, _ = shared.sampleTiming(entry.targetSyncHint)
+		}
+		entry.rec = r.Recorders.Source(req.NamespacedName, shared.key.flowID, shared.cfg, span)
 	}
 
 	link, err := r.opener.attach(shared, mirror.Status.TargetInfo, entry)
@@ -1275,6 +1308,15 @@ type progressTracker interface {
 	recordAgedOut(at time.Time)
 	recordSkipped(samples uint64)
 	recordPassedOver(reason unsentReason, grains uint64)
+
+	// source is the mirror's source recorder, never nil.
+	source() SourceRecorder
+	// slot classifies a slot of the source ring without waiting.
+	slot(idx uint64) slotState
+	// accounted is the last index whose units were recorded, kept
+	// across the loops of one mirror, zero before the first.
+	accounted() uint64
+	recordAccounted(idx uint64)
 }
 
 // unsentReason says why the grain transfer loop did not offer a grain.
@@ -1299,6 +1341,20 @@ func (e *sourceEntry) recordCompleted(idx, bytes uint64, late bool, at time.Time
 		e.late.Add(1)
 	}
 }
+
+func (e *sourceEntry) source() SourceRecorder {
+	if e.rec == nil {
+		return noopSource{}
+	}
+	return e.rec
+}
+
+// slot is linkTracker's to answer from the link's reader; an entry on
+// its own reads nothing and takes every slot as complete.
+func (e *sourceEntry) slot(uint64) slotState { return slotComplete }
+
+func (e *sourceEntry) accounted() uint64          { return e.accountedIdx.Load() }
+func (e *sourceEntry) recordAccounted(idx uint64) { e.accountedIdx.Store(idx) }
 
 // recordTargetEvicted is the link's to act on; see linkTracker.
 func (e *sourceEntry) recordTargetEvicted() {}
@@ -1364,6 +1420,12 @@ func (r *SourceReconciler) closeEntry(key types.NamespacedName) {
 	r.mu.Lock()
 	entry := r.sources[key]
 	delete(r.sources, key)
+	if entry != nil {
+		if r.accounted == nil {
+			r.accounted = map[types.NamespacedName]uint64{}
+		}
+		r.accounted[key] = entry.accountedIdx.Load()
+	}
 	if entry != nil && entry.shared != nil {
 		s := entry.shared
 		if s.detach(key) && r.shared[s.key] == s {
@@ -1698,6 +1760,17 @@ func (r *SourceReconciler) takeRedial(key types.NamespacedName) (time.Duration, 
 	d.notBefore = now.Add(backoffFor(d.count))
 	r.redials[key] = d
 	return 0, d.count
+}
+
+// retire forgets a mirror that is gone: what its recorder accounted for,
+// and the recorder.
+func (r *SourceReconciler) retire(key types.NamespacedName) {
+	r.mu.Lock()
+	delete(r.accounted, key)
+	r.mu.Unlock()
+	if r.Recorders != nil {
+		r.Recorders.ReleaseSource(key)
+	}
 }
 
 func (r *SourceReconciler) clearRedials(key types.NamespacedName) {

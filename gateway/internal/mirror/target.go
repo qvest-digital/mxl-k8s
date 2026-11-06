@@ -248,6 +248,10 @@ type TargetReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// Recorders receives what each mirror's progress loop observes. Nil
+	// records nothing.
+	Recorders Recorders
+
 	// APIReader is an uncached reader for the Node lookup that gates
 	// orphaned-finalizer reaping. Nil falls back to Client.
 	APIReader client.Reader
@@ -651,6 +655,9 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	// Other-node mirrors are not ours.
 	if mirror.Spec.TargetNode != r.NodeName {
+		if r.Recorders != nil {
+			r.Recorders.ReleaseTarget(req.NamespacedName)
+		}
 		return r.reapOrphanedFinalizer(ctx, &mirror)
 	}
 
@@ -675,6 +682,9 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		if r.Unfilled != nil && domain != "" {
 			r.Unfilled(domain, mirror.Spec.FlowID)
+		}
+		if r.Recorders != nil {
+			r.Recorders.ReleaseTarget(req.NamespacedName)
 		}
 		controllerutil.RemoveFinalizer(&mirror, TargetFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
@@ -1369,6 +1379,12 @@ func (r *TargetReconciler) startProgressLoop(
 	flow := entry.flow
 	entry.lifecycle.Unlock()
 
+	var rec TargetRecorder = noopTarget{}
+	if r.Recorders != nil {
+		id := writer.Config().Common.ID
+		rec = r.Recorders.Target(key, fmt.Sprintf("%x-%x-%x-%x-%x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16]), writer.Config())
+	}
+
 	onFatal := func() {
 		// Detach the recovery work from the goroutine that's exiting
 		// so the recovery's wait-for-done doesn't deadlock on its own
@@ -1383,8 +1399,9 @@ func (r *TargetReconciler) startProgressLoop(
 		id := writer.Config().Common.ID
 		flowID := fmt.Sprintf("%x-%x-%x-%x-%x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16])
 		commitFn := func(head uint64, count int) error {
-			n, err := flow.commitSamples(writer, head, count, entry)
+			n, gap, err := flow.commitSamples(writer, head, count, entry)
 			entry.bytes.Add(n)
+			recordSampleCommit(rec, head, count, gap, err)
 			if err == nil && r.SamplesCommitted != nil && entry.handles != nil {
 				r.SamplesCommitted(entry.handles.DomainPath(), flowID, head-uint64(count), head)
 			}
@@ -1394,9 +1411,10 @@ func (r *TargetReconciler) startProgressLoop(
 	} else {
 		readFn := func() (uint64, error) { return target.ReadGrain(targetReadTimeout) }
 		commitFn := func(idx uint64) error {
-			n, reason, err := flow.commitGrain(writer, idx, entry)
-			entry.bytes.Add(n)
-			entry.recordInvalid(reason)
+			c, err := flow.commitGrain(writer, idx, entry)
+			entry.bytes.Add(c.bytes)
+			entry.recordInvalid(c.reason)
+			recordGrainCommit(rec, idx, c, err)
 			return err
 		}
 		go runTargetProgressLoop(loopCtx, done, readFn, commitFn, onFatal, entry)
@@ -1601,10 +1619,10 @@ const (
 // producer that commits partial grains with a sync hint below the
 // grain's slices is sent in more than one batch, so only its grains are
 // exposed.
-func commitArrivedGrain(writer *mxl.Writer, idx uint64, open *partialGrain) (uint64, invalidReason, error) {
+func commitArrivedGrain(writer *mxl.Writer, idx uint64, open *partialGrain) (grainCommit, error) {
 	hdr, err := writer.GrainInfo(idx)
 	if err != nil {
-		return 0, "", fmt.Errorf("GrainInfo(%d): %w", idx, err)
+		return grainCommit{}, fmt.Errorf("GrainInfo(%d): %w", idx, err)
 	}
 	var reason invalidReason
 	switch {
@@ -1617,9 +1635,9 @@ func commitArrivedGrain(writer *mxl.Writer, idx uint64, open *partialGrain) (uin
 	ga, err := writer.OpenGrain(idx)
 	if err != nil {
 		if errors.Is(err, mxl.ErrInvalidArg) {
-			return 0, "", fmt.Errorf("OpenGrain(%d): %w: %w", idx, errGrainAlreadyCommitted, err)
+			return grainCommit{}, fmt.Errorf("OpenGrain(%d): %w: %w", idx, errGrainAlreadyCommitted, err)
 		}
-		return 0, "", fmt.Errorf("OpenGrain(%d): %w", idx, err)
+		return grainCommit{}, fmt.Errorf("OpenGrain(%d): %w", idx, err)
 	}
 	valid, flags := hdr.ValidSlices, uint32(0)
 	switch {
@@ -1634,19 +1652,68 @@ func commitArrivedGrain(writer *mxl.Writer, idx uint64, open *partialGrain) (uin
 		flags = mxl.GrainFlagInvalid
 	}
 	if err := ga.Commit(valid, flags); err != nil {
-		return 0, "", fmt.Errorf("Commit(%d): %w", idx, err)
+		return grainCommit{}, fmt.Errorf("Commit(%d): %w", idx, err)
 	}
 	if !data && valid < ga.TotalSlices {
 		if open != nil {
 			*open = partialGrain{idx: idx, valid: valid}
 		}
 		// The grain's payload is counted once, with its last batch.
-		return 0, reason, nil
+		return grainCommit{reason: reason}, nil
 	}
 	if open != nil {
 		*open = partialGrain{}
 	}
-	return uint64(ga.GrainSize), reason, nil
+	return grainCommit{bytes: uint64(ga.GrainSize), reason: reason, done: true}, nil
+}
+
+// grainCommit is what one commit of an arrived grain did.
+type grainCommit struct {
+	// bytes is the grain's payload, counted with the commit that
+	// completes it.
+	bytes uint64
+	// reason says why the grain was committed invalid, empty for a
+	// valid one.
+	reason invalidReason
+	// done says the commit completed the grain.
+	done bool
+	// gap is the grains below this one no arrival was committed for,
+	// since the flow's last commit.
+	gap uint64
+}
+
+// recordGrainCommit tells rec what one commit of grain idx did.
+func recordGrainCommit(rec TargetRecorder, idx uint64, c grainCommit, err error) {
+	if c.gap > 0 {
+		rec.Gap(idx-1, c.gap)
+	}
+	switch {
+	case errors.Is(err, errGrainAlreadyCommitted):
+		// A sibling mirror committed it; that one counts it.
+	case err != nil:
+		rec.Write(err, idx, 1)
+	case c.reason == invalidFromSource:
+		rec.WriteContent(ContentInvalid, idx, 1)
+	case c.reason == invalidIndexMismatch:
+		rec.WriteContent(ContentMissing, idx, 1)
+	case c.done:
+		rec.Write(nil, idx, 1)
+	}
+}
+
+// recordSampleCommit tells rec what one commit of the count samples
+// ending at head did.
+func recordSampleCommit(rec TargetRecorder, head uint64, count int, gap uint64, err error) {
+	if gap > 0 {
+		rec.Gap(head-uint64(count), gap)
+	}
+	switch {
+	case errors.Is(err, errSamplesAlreadyCommitted):
+	case err != nil:
+		rec.Write(err, head, 1)
+	default:
+		rec.Write(nil, head, uint64(count))
+	}
 }
 
 // partialGrain is a video grain a flow's writer holds open and the

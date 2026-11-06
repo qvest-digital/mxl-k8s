@@ -108,7 +108,13 @@ func (f *fakeLink) snapshot() (posted []uint64, progress int) {
 
 // recordingTracker captures what a transfer loop reports.
 type recordingTracker struct {
-	mu        sync.Mutex
+	mu sync.Mutex
+	// rec receives the recorder calls; slots answers slot, everything
+	// not in it complete; acct is accounted.
+	rec   recordingSource
+	slots map[uint64]slotState
+	acct  uint64
+
 	completed []uint64
 	bytes     uint64
 	late      int
@@ -235,13 +241,13 @@ func readable(probe RuntimeProbe, transfer wholeGrain) (RuntimeProbe, TransferFu
 		}
 		return h, err
 	}
-	return p, func(idx uint64, _ uint16) (uint16, uint64, error) {
+	return p, func(idx uint64, _ uint16) (grainStep, error) {
 		if idx > head.Load() {
 			time.Sleep(time.Millisecond)
-			return 0, 0, mxl.ErrTimeout
+			return grainStep{}, mxl.ErrTimeout
 		}
 		bytes, err := transfer(idx)
-		return 0, bytes, err
+		return grainStep{bytes: bytes}, err
 	}
 }
 
@@ -470,21 +476,21 @@ func TestRunTransferLoop_SendsAGrainInSliceBatches(t *testing.T) {
 	link := &fakeLink{t: t, notReady: 1}
 	var mu sync.Mutex
 	var starts []uint16
-	transfer := func(idx uint64, start uint16) (uint16, uint64, error) {
+	transfer := func(idx uint64, start uint16) (grainStep, error) {
 		mu.Lock()
 		starts = append(starts, start)
 		mu.Unlock()
 		if idx > 12 {
 			time.Sleep(time.Millisecond)
-			return 0, 0, mxl.ErrTimeout
+			return grainStep{}, mxl.ErrTimeout
 		}
 		if _, err := link.transferGrain(idx); err != nil {
-			return start, 0, err
+			return grainStep{next: start}, err
 		}
 		if start < 540 {
-			return start + 270, 270, nil
+			return grainStep{next: start + 270, bytes: 270}, nil
 		}
-		return 0, 540, nil
+		return grainStep{bytes: 540}, nil
 	}
 	tr := &recordingTracker{}
 	ctx, cancel := context.WithCancel(context.Background())

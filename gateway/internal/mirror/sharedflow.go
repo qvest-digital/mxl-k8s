@@ -35,6 +35,29 @@ type sharedFlow struct {
 	haveHead bool
 	// open is the grain the writer holds open; see commitArrivedGrain.
 	open partialGrain
+	// last is the highest grain index, or sample head, committed;
+	// haveLast is false until one is. A commit above last+1, or a sample
+	// run starting past last, leaves a gap no arrival filled.
+	last     uint64
+	haveLast bool
+}
+
+// gapBelow returns the units between the last commit and the one now
+// committed from first on, at most ring (the units the flow's ring
+// holds, which bounds what libmxl's writer marks), and moves last to
+// end. Units below the last commit fill nothing new and open no gap.
+func (f *sharedFlow) gapBelow(first, end, ring uint64) uint64 {
+	var gap uint64
+	if f.haveLast && first > f.last+1 {
+		gap = first - f.last - 1
+		if ring > 0 {
+			gap = min(gap, ring)
+		}
+	}
+	if !f.haveLast || end > f.last {
+		f.last, f.haveLast = end, true
+	}
+	return gap
 }
 
 // sharedFlowKey names one flow in one libmxl instance: the scope libmxl
@@ -57,19 +80,20 @@ func (r *TargetReconciler) sharedFlowFor(handles *instance.Handles, flowID [16]b
 // tracker against the flow's last commit, when that is fresh: the grain
 // arrived, and a mirror that always loses the commit to its sibling
 // would otherwise read as receiving nothing and be rebuilt.
-func (f *sharedFlow) commitGrain(writer *mxl.Writer, idx uint64, tracker commitTracker) (uint64, invalidReason, error) {
+func (f *sharedFlow) commitGrain(writer *mxl.Writer, idx uint64, tracker commitTracker) (grainCommit, error) {
 	f.mu.Lock()
-	n, reason, err := commitArrivedGrain(writer, idx, &f.open)
+	c, err := commitArrivedGrain(writer, idx, &f.open)
 	now := time.Now()
 	if err == nil {
 		f.lastCommitAt = now
+		c.gap = f.gapBelow(idx, idx, uint64(writer.Config().Discrete.GrainCount))
 	}
 	last := f.lastCommitAt
 	f.mu.Unlock()
 	if errors.Is(err, errGrainAlreadyCommitted) {
 		f.recordSibling(tracker, idx, last, now)
 	}
-	return n, reason, err
+	return c, err
 }
 
 // commitSamples commits an arrived sample run. A run libmxl rejects
@@ -79,7 +103,7 @@ func (f *sharedFlow) commitGrain(writer *mxl.Writer, idx uint64, tracker commitT
 // records a grain. libmxl stays the authority on rejection: the tracked
 // head only labels one, because it outlives the writer, and a writer
 // reopened after the source rewound accepts what it would refuse.
-func (f *sharedFlow) commitSamples(writer *mxl.Writer, head uint64, count int, tracker commitTracker) (uint64, error) {
+func (f *sharedFlow) commitSamples(writer *mxl.Writer, head uint64, count int, tracker commitTracker) (uint64, uint64, error) {
 	f.mu.Lock()
 	n, err := commitArrivedSamples(writer, head, count)
 	now := time.Now()
@@ -87,17 +111,18 @@ func (f *sharedFlow) commitSamples(writer *mxl.Writer, head uint64, count int, t
 		f.lastCommitAt = now
 		f.lastHead = head
 		f.haveHead = true
+		gap := f.gapBelow(head-uint64(count)+1, head, uint64(writer.Config().Continuous.BufferLength))
 		f.mu.Unlock()
-		return n, nil
+		return n, gap, nil
 	}
 	behind := f.haveHead && (head <= f.lastHead || head-uint64(count) < f.lastHead)
 	last := f.lastCommitAt
 	f.mu.Unlock()
 	if !errors.Is(err, mxl.ErrInvalidArg) || !behind {
-		return 0, err
+		return 0, 0, err
 	}
 	f.recordSibling(tracker, head, last, now)
-	return 0, fmt.Errorf("%w: %w", errSamplesAlreadyCommitted, err)
+	return 0, 0, fmt.Errorf("%w: %w", errSamplesAlreadyCommitted, err)
 }
 
 func (f *sharedFlow) recordSibling(tracker commitTracker, idx uint64, last, now time.Time) {
