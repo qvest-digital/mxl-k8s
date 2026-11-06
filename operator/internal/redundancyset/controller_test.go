@@ -416,3 +416,52 @@ func TestDropsANodeThatIsGone(t *testing.T) {
 		assert.NotContains(t, key, "->gone")
 	}
 }
+
+func pathsDisjointOf(t *testing.T, c client.Client) *metav1.Condition {
+	t.Helper()
+	var got mxlv1alpha1.MxlFlowRedundancySet
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "programme"}, &got))
+	return meta.FindStatusCondition(got.Status.Conditions, mxlv1alpha1.ConditionTypePathsDisjoint)
+}
+
+func placeMember(t *testing.T, c client.Client, member, src, tgt string) {
+	t.Helper()
+	var m mxlv1alpha1.MxlFlowMirror
+	key := types.NamespacedName{Namespace: ns, Name: mxlv1alpha1.MirrorNameFor(mxlv1alpha1.FlowRef{ID: member}, "reader")}
+	require.NoError(t, c.Get(context.Background(), key, &m))
+	m.Spec.Placement = &mxlv1alpha1.MxlFlowMirrorPlacement{SourceInterface: src, TargetInterface: tgt}
+	require.NoError(t, c.Update(context.Background(), &m))
+}
+
+// Two members that share an interface share its failure; the set says
+// which, the receiving side first because that is where grains are lost.
+func TestReportsWhetherMemberPathsAreDisjoint(t *testing.T) {
+	r, c := harness(t, newSet("reader"),
+		flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-a"))
+
+	reconcile(t, r)
+	cond := pathsDisjointOf(t, c)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionUnknown, cond.Status, "nothing placed yet")
+	assert.Equal(t, mxlv1alpha1.ReasonUnplaced, cond.Reason)
+
+	placeMember(t, c, memberA, "192.0.2.1", "192.0.2.2")
+	placeMember(t, c, memberB, "192.0.2.129", "192.0.2.130")
+	reconcile(t, r)
+	cond = pathsDisjointOf(t, c)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, mxlv1alpha1.ReasonDisjoint, cond.Reason)
+
+	placeMember(t, c, memberB, "192.0.2.1", "192.0.2.130")
+	reconcile(t, r)
+	cond = pathsDisjointOf(t, c)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, mxlv1alpha1.ReasonSharedSourceInterface, cond.Reason)
+	assert.Contains(t, cond.Message, "node-a at 192.0.2.1")
+
+	placeMember(t, c, memberB, "192.0.2.1", "192.0.2.2")
+	reconcile(t, r)
+	cond = pathsDisjointOf(t, c)
+	assert.Equal(t, mxlv1alpha1.ReasonSharedTargetInterface, cond.Reason)
+	assert.Contains(t, cond.Message, "reader at 192.0.2.2")
+}
