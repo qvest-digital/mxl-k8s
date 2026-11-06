@@ -372,7 +372,7 @@ per fabric port:
 | --- | --- | --- |
 | `net.ipv4.conf.<port>.arp_ignore` | 1 | A port answers ARP only for its own address, so peers learn each address on the port that holds it. |
 | `net.ipv4.conf.<port>.arp_announce` | 2 | ARP requests leaving a port carry that port's address. |
-| `net.ipv4.conf.<port>.rp_filter` | 2 (loose) or 0 | Strict filtering drops traffic arriving on one port from a source the routing table would reach through another, which in one subnet is the normal case. |
+| `net.ipv4.conf.<port>.rp_filter` | 2, or 0 on the port and on `all` | The kernel applies the larger of `conf/all` and the port's value, so 0 on the port alone leaves a strict `all` in force. Strict (1) drops a packet whose source the routing table would reach through another port, which in one subnet is the normal case: both ports hold a connected route to it and only one is preferred. Loose (2) drops only a source with no route at all. |
 | A policy rule per port address | `from <address> lookup <table>`, the table holding the subnet route on that port | A socket bound to a port's address leaves on that port rather than on the first matching connected route. |
 
 `verbs` and `efa` connections set up through RDMA CM are pinned to
