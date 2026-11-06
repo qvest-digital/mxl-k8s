@@ -762,7 +762,7 @@ func TestTarget_RecoverFromFatalErrorClearsRecoveringOnRebuildFailure(t *testing
 		Scheme:   scheme,
 		NodeName: "node-a",
 		targets:  map[types.NamespacedName]*targetEntry{key: entry},
-		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider, string) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
 			return nil, nil, "", rebuildErr
 		},
 	}
@@ -819,7 +819,7 @@ func TestTarget_RecoverFromFatalErrorCancelsRunningProgressLoop(t *testing.T) {
 		Scheme:   scheme,
 		NodeName: "node-a",
 		targets:  map[types.NamespacedName]*targetEntry{key: entry},
-		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider, string) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
 			return nil, nil, "", rebuildErr
 		},
 	}
@@ -1614,7 +1614,7 @@ func TestTarget_RecoveryCapsFatalDrivenRebuilds(t *testing.T) {
 		TeardownGrace: 2 * time.Second,
 		targets:       map[types.NamespacedName]*targetEntry{key: entry},
 		attempts:      attemptTable[targetOpenInputs]{},
-		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider, string) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
 			rebuilt <- struct{}{}
 			return &fabrics.Target{}, nil, "info-2", nil
 		},
@@ -1703,7 +1703,7 @@ func TestTarget_RecoveryDropsEntryWhenTargetInfoPublishFails(t *testing.T) {
 		TeardownGrace: 2 * time.Second,
 		targets:       map[types.NamespacedName]*targetEntry{key: entry},
 		attempts:      attemptTable[targetOpenInputs]{},
-		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider, string) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
 			return &fabrics.Target{}, nil, "info-2", nil
 		},
 	}

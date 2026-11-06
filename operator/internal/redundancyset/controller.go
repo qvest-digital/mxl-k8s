@@ -30,6 +30,7 @@ import (
 
 	"github.com/qvest-digital/mxl-k8s/api/selection"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
+	"github.com/qvest-digital/mxl-k8s/operator/internal/placement"
 )
 
 // Conditions and reasons on a set.
@@ -122,10 +123,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			return ctrl.Result{}, err
 		}
 	}
+	disjoint, err := r.pathsDisjoint(ctx, &set)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	valid.ObservedGeneration, ready.ObservedGeneration, served.ObservedGeneration = set.Generation, set.Generation, set.Generation
+	disjoint.ObservedGeneration = set.Generation
 	changed := meta.SetStatusCondition(&set.Status.Conditions, valid)
 	changed = meta.SetStatusCondition(&set.Status.Conditions, ready) || changed
 	changed = meta.SetStatusCondition(&set.Status.Conditions, served) || changed
+	changed = meta.SetStatusCondition(&set.Status.Conditions, disjoint) || changed
 	if changed || set.Status.ObservedGeneration != set.Generation || pruned {
 		set.Status.ObservedGeneration = set.Generation
 		if err := r.Status().Update(ctx, &set); err != nil {
@@ -412,6 +419,74 @@ func (r *Reconciler) ensureMirrors(ctx context.Context, set *mxlv1alpha1.MxlFlow
 		}
 	}
 	return nil
+}
+
+// pathsDisjoint reports whether the member mirrors arriving on each
+// node in status.nodes were placed on separate ports, on the receiving
+// node and on every sending node. Two members sharing a port share its
+// failure, and its receive buffer. A port is what placement accounts
+// load on: two addresses of one device are one port.
+func (r *Reconciler) pathsDisjoint(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet) (metav1.Condition, error) {
+	var mirrors mxlv1alpha1.MxlFlowMirrorList
+	if err := r.List(ctx, &mirrors, client.InNamespace(r.Namespace)); err != nil {
+		return metav1.Condition{}, fmt.Errorf("list member mirrors: %w", err)
+	}
+	byName := make(map[string]*mxlv1alpha1.MxlFlowMirror, len(mirrors.Items))
+	for i := range mirrors.Items {
+		byName[mirrors.Items[i].Name] = &mirrors.Items[i]
+	}
+	cond := metav1.Condition{Type: mxlv1alpha1.ConditionTypePathsDisjoint, Status: metav1.ConditionTrue,
+		Reason: mxlv1alpha1.ReasonDisjoint, Message: "No two member mirrors to a node share a fabric port"}
+	caps := map[string]mxlv1alpha1.MxlNodeCapabilitiesStatus{}
+	portOf := func(node string, provider mxlv1alpha1.MxlFabricsProvider, address string) string {
+		st, ok := caps[node]
+		if !ok {
+			var c mxlv1alpha1.MxlNodeCapabilities
+			if err := r.Get(ctx, types.NamespacedName{Name: node}, &c); err == nil {
+				st = c.Status
+			}
+			caps[node] = st
+		}
+		return placement.PortOf(st, provider, address)
+	}
+	var sharedSource string
+	unplaced := 0
+	for _, node := range set.Status.Nodes {
+		targets := map[string]string{}
+		sources := map[[2]string]string{}
+		for _, mem := range set.Spec.Members {
+			ref := mxlv1alpha1.FlowRef{Domain: mem.Domain, ID: mem.FlowID}
+			m, ok := byName[mxlv1alpha1.MirrorNameFor(ref, node)]
+			if !ok || !m.DeletionTimestamp.IsZero() {
+				continue // produced on this node, or not mirrored yet
+			}
+			p := m.Spec.Placement
+			if p == nil {
+				unplaced++
+				continue
+			}
+			tport := portOf(node, m.Spec.Provider, p.TargetInterface)
+			if other, dup := targets[tport]; dup {
+				cond.Status, cond.Reason = metav1.ConditionFalse, mxlv1alpha1.ReasonSharedTargetInterface
+				cond.Message = fmt.Sprintf("Members %s and %s both arrive on %s at port %s", other, ref.Name(), node, tport)
+				return cond, nil
+			}
+			targets[tport] = ref.Name()
+			key := [2]string{m.Spec.SourceNode, portOf(m.Spec.SourceNode, m.Spec.Provider, p.SourceInterface)}
+			if other, dup := sources[key]; dup && sharedSource == "" {
+				sharedSource = fmt.Sprintf("Members %s and %s to %s both leave %s at port %s", other, ref.Name(), node, key[0], key[1])
+			}
+			sources[key] = ref.Name()
+		}
+	}
+	switch {
+	case sharedSource != "":
+		cond.Status, cond.Reason, cond.Message = metav1.ConditionFalse, mxlv1alpha1.ReasonSharedSourceInterface, sharedSource
+	case unplaced > 0:
+		cond.Status, cond.Reason = metav1.ConditionUnknown, mxlv1alpha1.ReasonUnplaced
+		cond.Message = fmt.Sprintf("%d member mirror(s) not placed yet", unplaced)
+	}
+	return cond, nil
 }
 
 func (r *Reconciler) freshness(ctx context.Context) mxlv1alpha1.LeaseFreshness {

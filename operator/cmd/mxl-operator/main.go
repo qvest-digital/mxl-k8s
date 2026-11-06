@@ -24,6 +24,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/operator/internal/leasegc"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/mirror"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/nodecaps"
+	"github.com/qvest-digital/mxl-k8s/operator/internal/placement"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/receiver"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/redundancyset"
 )
@@ -46,6 +47,7 @@ func main() {
 		gcGrace     time.Duration
 		setMirrorNS string
 		mxlfs       bool
+		place       placementFlags
 	)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080",
 		"The address the metric endpoint binds to.")
@@ -65,9 +67,15 @@ func main() {
 		"Namespace for the member mirrors of MxlFlowRedundancySets. Empty is the "+
 			"operator's own namespace.")
 
+	place.bind(flag.CommandLine)
+
 	zapOpts := zap.Options{Development: false}
 	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
+	if err := place.validate(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -88,7 +96,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	for _, rc := range reconcilers(mgr, gcGrace, mxlfs, setMirrorNS) {
+	for _, rc := range reconcilers(mgr, gcGrace, mxlfs, setMirrorNS, place) {
 		if err := rc.setup(mgr); err != nil {
 			setupLog.Error(err, "failed to set up reconciler", "kind", rc.name)
 			os.Exit(1)
@@ -118,7 +126,7 @@ type reconciler struct {
 
 // reconcilers are the controllers the operator runs. MxlFlowRedundancySet
 // is among them only with mxlfs.
-func reconcilers(mgr ctrl.Manager, gcGrace time.Duration, mxlfs bool, setMirrorNS string) []reconciler {
+func reconcilers(mgr ctrl.Manager, gcGrace time.Duration, mxlfs bool, setMirrorNS string, place placementFlags) []reconciler {
 	rs := []reconciler{
 		{"MxlDomain", (&domain.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
 		{"MxlFlow", (&flow.Reconciler{
@@ -154,6 +162,14 @@ func reconcilers(mgr ctrl.Manager, gcGrace time.Duration, mxlfs bool, setMirrorN
 			Recorder: mgr.GetEventRecorderFor("mxlnodecapabilities-controller"),
 		}).SetupWithManager},
 	}
+	rs = append(rs, reconciler{"Placement", (&placement.Reconciler{
+		Client:            mgr.GetClient(),
+		Settings:          place.settings(),
+		OverheadPercent:   int32(place.overheadPercent),
+		ProvisionalDemand: place.provisional,
+		DemandWait:        place.demandWait,
+		RedundancySets:    mxlfs,
+	}).SetupWithManager})
 	if mxlfs {
 		rs = append(rs, reconciler{"MxlFlowRedundancySet", (&redundancyset.Reconciler{
 			Client:           mgr.GetClient(),

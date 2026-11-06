@@ -344,6 +344,149 @@ A node that ends up advertising nothing logs the count of excluded
 interfaces and the first exclusion with its reason; the full list
 appears with `gateway.flags.zapLogLevel: debug`.
 
+## Placing mirrors on fabric interfaces
+
+A node whose selection keeps more than one interface for a provider
+carries every one of them as a port of its own: with `bindAddress:
+""` and the fabric scoped by `fabricCidr` or `fabricDevice`, each
+selected interface is advertised, and the operator chooses for every
+mirror the interface its source leaves on and the one its target
+arrives on. The choice is `spec.placement` on the MxlFlowMirror, and
+what the two gateways bound is `status.sourceInterface` and
+`status.targetInterface`. `kubectl get mxlflowmirrors` shows the
+pair and the `Placed` reason; `-o wide` adds the bound pair.
+
+libmxl-fabrics binds a target or initiator to the address of the
+interface its setup is handed, so a mirror's endpoints bind the
+placed addresses.
+
+### Several ports in one subnet
+
+The ports of a node can all sit in the fabric's one subnet, each with
+an address of its own, so every port reaches every other without a
+router. The host then has two connected routes for one prefix and
+several interfaces that could answer ARP for each address, and needs,
+per fabric port:
+
+| Setting | Value | Effect |
+| --- | --- | --- |
+| `net.ipv4.conf.<port>.arp_ignore` | 1 | A port answers ARP only for its own address, so peers learn each address on the port that holds it. |
+| `net.ipv4.conf.<port>.arp_announce` | 2 | ARP requests leaving a port carry that port's address. |
+| `net.ipv4.conf.<port>.rp_filter` | 2, or 0 on the port and on `all` | The kernel applies the larger of `conf/all` and the port's value, so 0 on the port alone leaves a strict `all` in force. Strict (1) drops a packet whose source the routing table would reach through another port, which in one subnet is the normal case: both ports hold a connected route to it and only one is preferred. Loose (2) drops only a source with no route at all. |
+| A policy rule per port address | `from <address> lookup <table>`, the table holding the subnet route on that port | A socket bound to a port's address leaves on that port rather than on the first matching connected route. |
+
+`verbs` and `efa` connections set up through RDMA CM are pinned to
+the bound port by the kernel: binding the source address records its
+interface, and the route lookup is restricted to it. `tcp` sockets are
+not, which is what the policy rules cover. The ARP settings apply to
+every provider.
+
+Ports in separate subnets need none of the policy rules, since each
+subnet is a connected route on its own port, but only reach the peers'
+ports in the same subnet. `--placement-pairing` keeps pairs within one
+subnet when the nodes have them.
+
+A node with one interface per provider, or one bound to
+`--bind-address`, has one candidate, and its mirrors bind it exactly
+as without placement.
+
+### What is planned against
+
+Load is accounted per port: the device the provider names for an
+interface, or its address where it names none. Two addresses of one
+device, an IPv4 and an IPv6 address or two addresses on one
+link, share that port's capacity. The device is named per provider
+(the netdev for `tcp`, the RDMA device for `verbs`), so mirrors of two
+providers on one NIC are accounted on two ports. Every port is planned
+at a capacity per direction, sending and receiving counted separately:
+
+| Source | Chart value | Meaning |
+| --- | --- | --- |
+| Provider link speed | - | Default capacity. An interface reporting none is never counted full. |
+| `--fabric-port-capacity` | `gateway.flags.fabricPortCapacity` | `<match>=<quantity>` overrides, match a device name, an address or a CIDR; first match wins. |
+| `--fabric-shared-budget` | `gateway.flags.fabricSharedBudget` | `<scope>=<quantity>[:<mode>]` caps shared by several interfaces. Scope `nic` makes one per PCI device over its functions, `host` one over every interface. Mode `ingress` (default) counts mirrors received, `egress` mirrors sent, `combined` both against one cap. Off unless set. |
+| `--fabric-max-utilization` | `gateway.flags.fabricMaxUtilization` | Percent of a capacity this node class may commit; 0 uses the operator's. |
+| `--placement-max-utilization` | `operator.flags.placementMaxUtilization` | Default percent, 80. |
+
+Grains leave as whole-grain bursts at line rate, so a receiver can
+overflow while its average load is below the link speed; the
+utilization ceiling is the headroom kept for that.
+
+A mirror is charged its flow's `status.bitsPerSecond`, which the
+gateway on the flow's origin node reads off libmxl (grain size times
+grain rate, or sample width times channels times sample rate), plus
+`--placement-protocol-overhead` percent (default 5). A flow that has
+not published a rate within `--placement-demand-wait` (default 5s) of
+the mirror's creation is charged `--placement-provisional-demand`
+(default 0, placing by mirror count alone), and charged its real rate
+once it publishes one. `MxlNodeCapabilities` shows each interface's
+`capacityBitsPerSecond`, `subnet`, `budgets` and `numaNode`, and the
+node's `budgets`.
+
+A data flow's grain size is the maximum its definition declares, so its
+rate is an upper bound on what it carries.
+
+### How a pair is chosen
+
+Candidates are every pair of a source interface and a target
+interface for the mirror's provider whose links are not down. With
+`--placement-pairing=prefer-same-subnet` (default) only pairs within
+one subnet are kept when any exists; `same-subnet` keeps only those,
+`any` keeps every pair. Link-local addresses are left out whenever
+the node offers another: every node's link-local addresses share one
+prefix and would otherwise read as a subnet of their own. Among them:
+
+1. a pair with room for the demand on both interfaces and every
+   budget they draw on beats one without;
+2. for a member of an MxlFlowRedundancySet, a pair sharing no
+   port with the set's other members arriving on the same node
+   beats one sharing only a sending port, which beats one
+   sharing a receiving port;
+3. then the most headroom left on the tighter side, the least load,
+   the fewest mirrors and the lowest addresses.
+
+A mirror no pair has room for is placed and reported `Overcommitted`
+with `--placement-overcommit=place` (default), on the pair the same
+order picks among the pairs without room: disjointness from its
+redundancy siblings first, then the most headroom, which is negative.
+With `hold` it is left unplaced, not set up, and reported `Held`. A set
+whose members share a port reports `PathsDisjoint=False` naming it.
+
+### When a placement changes
+
+A placement is not moved because load changed, and there is no
+automatic rebalance. A mirror is placed again only when one of its
+two interfaces is no longer advertised for its provider (link down,
+deselected, capability change, as the gateway's next probe reports
+it; see `gateway.flags.probePeriod`), when its provider or source node
+changes to one the interfaces do not belong to, or when
+`spec.placement` is cleared by hand. A placement written by hand is
+kept while both addresses are advertised. Its gateways then rebuild
+the side whose interface changed.
+
+The operator places a mirror within its own reconcile, before the
+target side opens. A target gateway on a node offering more than one
+interface waits up to `gateway.flags.placementWait` (default 10s)
+after the mirror's creation for a placement, and then binds the first
+interface as an unplaced mirror does; that bound only matters when
+the operator is down or slow. A mirror its gateways bound before
+placement existed keeps the interfaces it is bound to.
+
+### Metrics
+
+| Metric | Labels | From |
+| --- | --- | --- |
+| `mxl_operator_mirror_placement_seconds` | | operator: time from a mirror's creation to its placement |
+| `mxl_operator_port_committed_bits_per_second` | `node`, `port`, `direction` | operator: demand placed |
+| `mxl_operator_port_mirrors` | `node`, `port`, `direction` | operator: mirrors placed |
+| `mxl_operator_port_plannable_bits_per_second` | `node`, `port` | operator: capacity times utilization |
+| `mxl_gateway_interface_transmitted_bytes_total` | `node`, `interface` | gateway: bytes its live mirrors sent |
+| `mxl_gateway_interface_received_bytes_total` | `node`, `interface` | gateway: bytes its live mirrors committed |
+| `mxl_gateway_interface_mirrors` | `node`, `interface`, `direction` | gateway: mirrors bound |
+
+Utilization is the committed or measured rate over
+`capacityBitsPerSecond`, or over the plannable gauge.
+
 ## Clusters whose nodes differ
 
 Everything above assumes every node can do the same thing. When they

@@ -285,3 +285,25 @@ tests:
           content:
             name: FI_VERBS_TX_IOV_LIMIT
             value: "32"
+
+  - it: renders the placement wait by default
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --placement-wait=10s
+
+  - it: placement settings render as comma-joined flags
+    set:
+      gateway.flags.fabricPortCapacity: [192.0.2.0/25=25G, 192.0.2.128/25=25G]
+      gateway.flags.fabricSharedBudget: [nic=40G, host=60G:combined]
+      gateway.flags.fabricMaxUtilization: 70
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --fabric-port-capacity=192.0.2.0/25=25G,192.0.2.128/25=25G
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --fabric-shared-budget=nic=40G,host=60G:combined
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --fabric-max-utilization=70

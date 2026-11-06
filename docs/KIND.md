@@ -240,8 +240,10 @@ The same suite drives the `kind-integration` GitHub Actions job in
 `.github/workflows/images.yml`. On a same-repo pull request it runs
 when the diff rebuilds any image, and when the diff changes what the
 cluster runs without rebuilding one -- the chart, the CRDs, the RBAC,
-the demo manifests, the harness. Those two cases differ in what the
-cluster is built from:
+the demo manifests, the harness. It runs twice, with two fabric
+interfaces per node (`FABRIC_PORTS=2`, the `make kind-up` default) and
+with one bound to the pod IP (`FABRIC_PORTS=1`, the chart's default).
+Those two cases differ in what the cluster is built from:
 
 - An image was rebuilt: the job pulls that build from GHCR at
   `BUILD=pr-<num>-<sha>`, with the components the diff did not touch

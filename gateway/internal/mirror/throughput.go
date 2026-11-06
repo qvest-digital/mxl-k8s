@@ -13,6 +13,9 @@ type Throughput struct {
 	PeerNode string
 	Provider string
 	Bytes    uint64
+	// Interface is the local fabric address the mirror is bound to,
+	// empty while it is bound to none.
+	Interface string
 
 	// SkippedSamples is meaningful on the source half of a continuous
 	// flow only, and is zero everywhere else.
@@ -91,6 +94,24 @@ var (
 			"invalid.",
 		append(append([]string{}, transferLabels...), "reason"), nil)
 
+	descInterfaceTransmitted = prometheus.NewDesc(
+		"mxl_gateway_interface_transmitted_bytes_total",
+		"Payload bytes of completed transfers of the live mirrors this node sources through a fabric interface. "+
+			"A mirror set up again starts its own count afresh, so the sum can step down when one is.",
+		[]string{"node", "interface"}, nil)
+
+	descInterfaceReceived = prometheus.NewDesc(
+		"mxl_gateway_interface_received_bytes_total",
+		"Payload bytes committed by the live mirrors this node targets through a fabric interface. A mirror set "+
+			"up again starts its own count afresh, so the sum can step down when one is.",
+		[]string{"node", "interface"}, nil)
+
+	descInterfaceMirrors = prometheus.NewDesc(
+		"mxl_gateway_interface_mirrors",
+		"Live mirrors bound to a fabric interface of this node, by direction: egress for the ones it sources, "+
+			"ingress for the ones it targets.",
+		[]string{"node", "interface", "direction"}, nil)
+
 	descTargetInvalid = prometheus.NewDesc(
 		"mxl_gateway_mirror_target_invalid_grains_total",
 		"Arrived grains the target half committed invalid: flagged invalid at the source (invalid_from_source), or "+
@@ -126,6 +147,9 @@ func (c *ThroughputCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descTransfers
 	ch <- descLagGrains
 	ch <- descLagSamples
+	ch <- descInterfaceTransmitted
+	ch <- descInterfaceReceived
+	ch <- descInterfaceMirrors
 }
 
 // Collect folds the live entries onto their label set before emitting.
@@ -159,6 +183,27 @@ func (c *ThroughputCollector) Collect(ch chan<- prometheus.Metric) {
 	emit(descSourceUnsent, c.Source, func(t Throughput) uint64 { return t.AgedOutGrains }, string(unsentAgedOut))
 	emit(descTargetInvalid, c.Target, func(t Throughput) uint64 { return t.InvalidFromSource }, string(invalidFromSource))
 	emit(descTargetInvalid, c.Target, func(t Throughput) uint64 { return t.IndexMismatch }, string(invalidIndexMismatch))
+
+	perInterface := func(desc *prometheus.Desc, src ThroughputSource, direction string) {
+		if src == nil {
+			return
+		}
+		bytes, mirrors := map[string]uint64{}, map[string]int{}
+		for _, t := range src.Throughput() {
+			if t.Interface == "" {
+				continue
+			}
+			bytes[t.Interface] += t.Bytes
+			mirrors[t.Interface]++
+		}
+		for iface, n := range bytes {
+			ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue, float64(n), c.NodeName, iface)
+			ch <- prometheus.MustNewConstMetric(descInterfaceMirrors, prometheus.GaugeValue,
+				float64(mirrors[iface]), c.NodeName, iface, direction)
+		}
+	}
+	perInterface(descInterfaceTransmitted, c.Source, "egress")
+	perInterface(descInterfaceReceived, c.Target, "ingress")
 
 	if c.Source != nil {
 		// Two mirrors of one flow to one peer are two targets; their
@@ -212,6 +257,8 @@ func (r *SourceReconciler) Throughput() []Throughput {
 			Provider: e.provider().String(),
 			Bytes:    e.bytes.Load(),
 
+			Interface: e.boundInterface,
+
 			SkippedSamples: e.skipped.Load(),
 			ResyncGrains:   e.resyncGrains.Load(),
 			AgedOutGrains:  e.agedOutGrains.Load(),
@@ -234,6 +281,8 @@ func (r *TargetReconciler) Throughput() []Throughput {
 			PeerNode: e.peerNode,
 			Provider: e.provider.String(),
 			Bytes:    e.bytes.Load(),
+
+			Interface: e.boundInterface,
 
 			InvalidFromSource: e.invalidFromSource.Load(),
 			IndexMismatch:     e.indexMismatch.Load(),

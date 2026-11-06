@@ -24,6 +24,7 @@ package mirror
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -103,12 +104,25 @@ var errNoInterface = errors.New("no usable fabric interface")
 // one of several NICs would hand a setup whichever address the
 // enumeration happened to return first, including loopback, an ST 2110
 // essence NIC, or the management port.
-func resolveInterface(fi interfaceLister, sel fabric.Selector, provider fabrics.Provider) (fabrics.InterfaceConfig, error) {
+//
+// want is the address the mirror's placement names for this side.
+// Empty takes the first interface as above; set, only the interface at
+// that address is taken, and the Selector still applies to it, so a
+// placement can never bind an interface the node did not advertise.
+// Setup binds the address of the interface it is handed: libmxl-fabrics
+// asks libfabric for that address as the endpoint's source.
+func resolveInterface(fi interfaceLister, sel fabric.Selector, provider fabrics.Provider, want string) (fabrics.InterfaceConfig, error) {
 	found, err := fi.Interfaces(&fabrics.InterfaceConfig{Provider: provider})
 	if err != nil {
 		return fabrics.InterfaceConfig{}, fmt.Errorf("query fabric interfaces: %w", err)
 	}
 	ifaces, rejected := sel.Select(found)
+	if want != "" {
+		ifaces = slices.DeleteFunc(ifaces, func(i fabrics.InterfaceConfig) bool { return !fabric.SameAddress(i.Address.Node, want) })
+		if len(ifaces) == 0 {
+			return fabrics.InterfaceConfig{}, fmt.Errorf("%w for provider %s at placed address %s", errNoInterface, provider, want)
+		}
+	}
 
 	// Remote write is the only transfer mode libmxl-fabrics implements,
 	// and a setup that cannot do it is refused further down anyway.
@@ -119,6 +133,19 @@ func resolveInterface(fi interfaceLister, sel fabric.Selector, provider fabrics.
 	}
 	iface.Address.Service = ""
 	return iface, nil
+}
+
+// placedInterface is the address placement names for one side of a
+// mirror, empty when the mirror is not placed.
+func placedInterface(p *mxlv1alpha1.MxlFlowMirrorPlacement, target bool) string {
+	switch {
+	case p == nil:
+		return ""
+	case target:
+		return p.TargetInterface
+	default:
+		return p.SourceInterface
+	}
 }
 
 // firstRejection renders one excluded interface for the error a failed

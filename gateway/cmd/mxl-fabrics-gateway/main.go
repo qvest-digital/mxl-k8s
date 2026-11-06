@@ -161,6 +161,7 @@ func run(args []string) error {
 		Domains:       domains,
 		DomainPath:    cfg.DomainPath,
 		DegradedAfter: cfg.DegradedAfter,
+		PlacementWait: cfg.PlacementWait,
 		Recorder:      mgr.GetEventRecorderFor("mxl-target-gateway"),
 	}
 	if err := targetReconciler.SetupWithManager(mgr); err != nil {
@@ -231,6 +232,10 @@ func run(args []string) error {
 			HostDevices:        rdma.Inventory{},
 			HostDeviceObserver: enumerationGate,
 			ProbePeriod:        cfg.ProbePeriod,
+			Capacities:         cfg.PortCapacities,
+			Budgets:            cfg.Budgets,
+
+			MaxUtilizationPercent: cfg.MaxUtilizationPercent,
 		}
 		if err := pub.EnsureExists(ctx); err != nil {
 			return err

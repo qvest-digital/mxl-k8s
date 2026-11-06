@@ -718,6 +718,9 @@ func (f *fakeOpener) attach(s *sharedSource, targetInfoStr string, e *sourceEntr
 			return nil, err
 		}
 	}
+	// The production opener binds the placed address, or the first
+	// interface when there is none; the fake has only the former.
+	e.boundInterface = e.wantInterface
 	link := &sourceLink{}
 	if f.loopFn != nil {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -1292,6 +1295,26 @@ func TestPublishSourceProgress_IncludesLastSentAt(t *testing.T) {
 	assert.True(t, got.Status.LastSentAt.Time.Equal(sent),
 		"the stamped timestamp must round-trip: target-side recovery "+
 			"compares it against lastCommitAt to decide whether to rebuild")
+}
+
+// The interface an initiator is bound to is published with its
+// progress, so the pair a mirror actually uses reads off the object
+// next to the pair placement chose.
+func TestPublishSourceProgress_ReportsTheBoundInterface(t *testing.T) {
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirrorWithFinalizer(key.Name, key.Namespace, "node-a", "flow-1", "info-1")).Build()
+	r := &SourceReconciler{Client: c, Scheme: scheme, NodeName: "node-a"}
+
+	require.NoError(t, r.publishSourceProgress(context.Background(), key, sourceProgressState{
+		status: metav1.ConditionTrue, reason: mxlv1alpha1.ReasonHandshakeComplete, boundInterface: "192.0.2.129",
+	}))
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &got))
+	assert.Equal(t, "192.0.2.129", got.Status.SourceInterface)
+	assert.False(t, sourceStateEqual(sourceProgressState{boundInterface: "192.0.2.1"}, sourceProgressState{boundInterface: "192.0.2.129"}),
+		"a rebound initiator is published even when its condition reads the same")
 }
 
 func TestSourceStateEqual_DereferencesLastSentAtPointers(t *testing.T) {

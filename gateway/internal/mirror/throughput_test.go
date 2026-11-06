@@ -227,3 +227,40 @@ func TestThroughputCollectorReportsTransferCounts(t *testing.T) {
 	_, idleLag := values["mxl_gateway_mirror_completion_lag_grains/flow-i"]
 	assert.False(t, idleLag, "no lag before the first completion")
 }
+
+// Per-interface sums are what show whether placement spread a node's
+// mirrors over its ports. A mirror not bound yet is left out rather
+// than reported under an empty interface.
+func TestThroughputCollectorReportsPerInterface(t *testing.T) {
+	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
+	for i, e := range []struct {
+		iface string
+		bytes uint64
+	}{{"192.0.2.1", 100}, {"192.0.2.1", 50}, {"192.0.2.129", 70}, {"", 999}} {
+		s := &sourceEntry{shared: testShared("flow-a", fabrics.ProviderTCP), peerNode: "n02", boundInterface: e.iface}
+		s.bytes.Store(e.bytes)
+		src.sources[types.NamespacedName{Namespace: "p", Name: string(rune('a' + i))}] = s
+	}
+	tgt := &TargetReconciler{targets: map[types.NamespacedName]*targetEntry{}}
+	got := &targetEntry{flowID: "flow-b", peerNode: "n03", provider: fabrics.ProviderTCP, boundInterface: "192.0.2.129"}
+	got.bytes.Store(4096)
+	tgt.targets[types.NamespacedName{Namespace: "p", Name: "b"}] = got
+
+	c := &ThroughputCollector{NodeName: "n01", Source: src, Target: tgt}
+	expected := `
+# HELP mxl_gateway_interface_mirrors Live mirrors bound to a fabric interface of this node, by direction: egress for the ones it sources, ingress for the ones it targets.
+# TYPE mxl_gateway_interface_mirrors gauge
+mxl_gateway_interface_mirrors{direction="egress",interface="192.0.2.1",node="n01"} 2
+mxl_gateway_interface_mirrors{direction="egress",interface="192.0.2.129",node="n01"} 1
+mxl_gateway_interface_mirrors{direction="ingress",interface="192.0.2.129",node="n01"} 1
+# HELP mxl_gateway_interface_received_bytes_total Payload bytes committed by the live mirrors this node targets through a fabric interface. A mirror set up again starts its own count afresh, so the sum can step down when one is.
+# TYPE mxl_gateway_interface_received_bytes_total counter
+mxl_gateway_interface_received_bytes_total{interface="192.0.2.129",node="n01"} 4096
+# HELP mxl_gateway_interface_transmitted_bytes_total Payload bytes of completed transfers of the live mirrors this node sources through a fabric interface. A mirror set up again starts its own count afresh, so the sum can step down when one is.
+# TYPE mxl_gateway_interface_transmitted_bytes_total counter
+mxl_gateway_interface_transmitted_bytes_total{interface="192.0.2.1",node="n01"} 150
+mxl_gateway_interface_transmitted_bytes_total{interface="192.0.2.129",node="n01"} 70
+`
+	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(expected),
+		"mxl_gateway_interface_mirrors", "mxl_gateway_interface_received_bytes_total", "mxl_gateway_interface_transmitted_bytes_total"))
+}

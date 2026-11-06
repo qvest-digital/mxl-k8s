@@ -311,6 +311,11 @@ type sourceEntry struct {
 	// the shared source needs it to find its way back to r.sources.
 	key types.NamespacedName
 
+	// wantInterface is the address the mirror's placement names on
+	// this node, empty for an unplaced mirror, and boundInterface the
+	// one its initiator was set up on.
+	wantInterface, boundInterface string
+
 	// shared is the (flow, provider) source this mirror reads from.
 	shared *sharedSource
 
@@ -604,6 +609,17 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		r.closeEntry(req.NamespacedName)
 		existing = nil
 	}
+	// The placement named another interface than the one the initiator
+	// is bound to: placed after an unplaced setup, or placed again
+	// because the bound one went away. An initiator's endpoint is bound
+	// once, so the mirror moves to a fresh one.
+	want := placedInterface(mirror.Spec.Placement, false)
+	if existing != nil && want != "" && !fabric.SameAddress(existing.boundInterface, want) {
+		l.Info("mirror placement moved, moving to a fresh initiator",
+			"from", existing.boundInterface, "to", want)
+		r.closeEntry(req.NamespacedName)
+		existing = nil
+	}
 
 	r.mu.Lock()
 	shared := r.shared[skey]
@@ -729,6 +745,8 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		shared:   shared,
 		infoStr:  mirror.Status.TargetInfo,
 		peerNode: mirror.Spec.TargetNode,
+		// wantInterface is read by attach.
+		wantInterface: want,
 		// Published with TargetInfo, so it describes the same target.
 		targetSyncHint: uint32(mirror.Status.TargetMaxSyncBatchSizeHint),
 		openedAt:       time.Now(),
@@ -779,6 +797,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		"flowID", mirror.Spec.FlowID,
 		"targetNode", mirror.Spec.TargetNode,
 		"provider", provider.String(),
+		"interface", entry.boundInterface,
 		"targets", targets,
 		"took", time.Since(started).String()}, sw.stages...)...)
 	return ctrl.Result{}, nil
@@ -1070,10 +1089,11 @@ func (o *libmxlOpener) attach(s *sharedSource, targetInfoStr string, e *sourceEn
 	if mxlInst == nil {
 		return nil, fmt.Errorf("mxl instance closed")
 	}
-	iface, err := resolveInterface(fabInst, o.Selector, s.key.provider)
+	iface, err := resolveInterface(fabInst, o.Selector, s.key.provider, e.wantInterface)
 	if err != nil {
 		return nil, err
 	}
+	e.boundInterface = iface.Address.Node
 	reader, err := mxlInst.NewReader(s.key.flowID)
 	if err != nil {
 		return nil, fmt.Errorf("NewReader: %w", err)
@@ -1451,6 +1471,9 @@ type sourceProgressState struct {
 	// sending but target is wedged" from "source is idle". Unset
 	// before the first transfer.
 	lastSentAt *time.Time
+	// boundInterface is the address the initiator is bound to, empty
+	// when no initiator is.
+	boundInterface string
 }
 
 // publishSourceProgress writes a single SourceProgress condition
@@ -1497,6 +1520,10 @@ func (r *SourceReconciler) publishSourceProgress(ctx context.Context, key types.
 		// publish would let the apiserver strip it and break the
 		// target-side stuck-handshake discriminator.
 		status["lastSentAt"] = state.lastSentAt.UTC().Format(time.RFC3339)
+	}
+	if state.boundInterface != "" {
+		// Omitted when no initiator is bound, which releases the field.
+		status["sourceInterface"] = state.boundInterface
 	}
 	if err := unstructured.SetNestedField(patch.Object, status, "status"); err != nil {
 		return fmt.Errorf("build SSA payload: %w", err)
@@ -1563,6 +1590,7 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 			r.clearRedials(key)
 		}
 		state := observedState(entry, r.readerStallAfter())
+		state.boundInterface = entry.boundInterface
 
 		// A reader that has stopped feeding the fabric is the one wedge
 		// neither side of the mirror resolves on its own. The target's
@@ -1837,7 +1865,7 @@ func (r *SourceReconciler) readerStallAfter() time.Duration {
 // mirror into a permanent etcd write stream.
 func sourceStateEqual(a, b sourceProgressState) bool {
 	if a.status != b.status || a.reason != b.reason ||
-		a.message != b.message || a.attempts != b.attempts {
+		a.message != b.message || a.attempts != b.attempts || a.boundInterface != b.boundInterface {
 		return false
 	}
 	if (a.lastSentAt == nil) != (b.lastSentAt == nil) {

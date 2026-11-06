@@ -159,11 +159,27 @@ collect_diagnostics() {
       mxldomains,mxlflows,mxlflowmirrors,mxlreceivers,mxlnodecapabilities \
       -o yaml \
       > "$KIND_DIAG_DIR/mxl-resources.yaml" 2>&1 || true
-  for app in mxl-k8s-operator mxl-k8s-agent mxl-k8s-gateway mxl-k8s-exporter; do
+  for app in mxl-k8s-agent mxl-k8s-exporter; do
     "${KUBECTL[@]}" -n "$NAMESPACE" logs \
         -l "app.kubernetes.io/name=${app}" \
         --all-containers --prefix --tail=400 \
         > "$KIND_DIAG_DIR/${app}.log"       2>&1 || true
+  done
+  # The operator and gateways in full, and per pod the container a
+  # restart replaced: a case failing mid-suite is otherwise past the
+  # tail, or in a log the restart discarded.
+  local pod
+  for app in mxl-k8s-operator mxl-k8s-gateway; do
+    "${KUBECTL[@]}" -n "$NAMESPACE" logs \
+        -l "app.kubernetes.io/name=${app}" \
+        --all-containers --prefix --tail=-1 \
+        > "$KIND_DIAG_DIR/${app}.log"       2>&1 || true
+    for pod in $("${KUBECTL[@]}" -n "$NAMESPACE" get pods \
+                   -l "app.kubernetes.io/name=${app}" -o name 2>/dev/null); do
+      "${KUBECTL[@]}" -n "$NAMESPACE" logs "$pod" \
+          --all-containers --prefix --previous \
+          > "$KIND_DIAG_DIR/${app}-${pod#pod/}.previous.log" 2>&1 || true
+    done
   done
   for pod in mxl-tcp-demo-writer mxl-tcp-demo-reader \
              mxl-tcp-demo-audio-writer mxl-tcp-demo-audio-reader; do

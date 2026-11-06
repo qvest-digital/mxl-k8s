@@ -470,3 +470,40 @@ func TestSource_SampleBatchFollowsEachTargetsPublishedHint(t *testing.T) {
 	defer mu.Unlock()
 	assert.Equal(t, map[string]uint64{"info-b": 240, "info-c": 480}, batches)
 }
+
+// An initiator binds its interface once, at setup. A mirror the
+// operator placed, or placed again, on another interface than the one
+// its initiator is bound to moves to a fresh initiator bound to it; the
+// other mirrors of the flow keep theirs.
+func TestSource_PlacementMoveRebindsOnlyThatMirror(t *testing.T) {
+	f := newFanoutFixture(t,
+		fanoutMirror("m1", "flow-1", "node-b", "info-b", mxlv1alpha1.ProviderTCP),
+		fanoutMirror("m2", "flow-1", "node-c", "info-c", mxlv1alpha1.ProviderTCP),
+	)
+	t.Cleanup(f.closeAll)
+	f.reconcile(t, "m1")
+	f.reconcile(t, "m2")
+	require.Equal(t, int32(2), f.opener.attaches.Load())
+	other := f.entry("m2").link
+
+	setPlacement := func(src string) {
+		var m mxlv1alpha1.MxlFlowMirror
+		require.NoError(t, f.c.Get(context.Background(), types.NamespacedName{Namespace: "ns1", Name: "m1"}, &m))
+		m.Spec.Placement = &mxlv1alpha1.MxlFlowMirrorPlacement{SourceInterface: src, TargetInterface: "192.0.2.2"}
+		require.NoError(t, f.c.Update(context.Background(), &m))
+	}
+
+	setPlacement("192.0.2.129")
+	f.reconcile(t, "m1")
+	assert.Equal(t, int32(3), f.opener.attaches.Load(), "the placed mirror is set up again")
+	assert.Equal(t, "192.0.2.129", f.entry("m1").boundInterface)
+	assert.Equal(t, int32(1), f.opener.opens.Load(), "the flow's source is not reopened")
+	assert.Same(t, other, f.entry("m2").link, "the other mirror of the flow keeps its initiator")
+
+	f.reconcile(t, "m1")
+	assert.Equal(t, int32(3), f.opener.attaches.Load(), "a placement the initiator is bound to changes nothing")
+
+	setPlacement("::ffff:192.0.2.129")
+	f.reconcile(t, "m1")
+	assert.Equal(t, int32(3), f.opener.attaches.Load(), "another spelling of the bound address is the same interface")
+}

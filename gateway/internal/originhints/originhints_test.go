@@ -46,6 +46,11 @@ func produce(t *testing.T, options string) *handles {
 	w, _, err := inst.NewWriterOpts(audioDef, options)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = w.Close() })
+	// A producer that has started: one batch committed, so the flow's
+	// sample layout can be read.
+	a, err := w.OpenSamples(1000, 48)
+	require.NoError(t, err)
+	require.NoError(t, a.Commit())
 	return &handles{dir: dir, inst: inst}
 }
 
@@ -68,7 +73,7 @@ func newPublisher(t *testing.T, h *handles, origin string, appeared *metav1.Time
 		NodeName: "node-a",
 		Domain:   func(context.Context, string) (placeholder.Handles, error) { return h, nil },
 	}
-	p.config = func(inst *mxl.Instance, id string) (mxl.FlowConfig, error) {
+	p.config = func(inst *mxl.Instance, id string) (facts, error) {
 		reads++
 		return readConfig(inst, id)
 	}
@@ -132,4 +137,74 @@ func TestReadsTheFlowOncePerOriginCopy(t *testing.T) {
 	require.NoError(t, p.Client.Status().Update(context.Background(), &f))
 	reconcileFlow(t, p)
 	assert.Equal(t, 2, *reads)
+}
+
+// Placement charges a mirror the flow's payload rate: 48 kHz, two
+// channels of 32-bit samples.
+func TestPublishesThePayloadRateOfAnAudioFlow(t *testing.T) {
+	h := produce(t, "")
+	p, _ := newPublisher(t, h, "node-a", at(1))
+
+	st := reconcileFlow(t, p)
+
+	assert.EqualValues(t, 48000*2*32, st.BitsPerSecond)
+}
+
+const videoDef = `{"description":"origin rate test","format":"urn:x-nmos:format:video",
+"label":"origin rate test","id":"` + flowID + `","tags":{"urn:x-nmos:tag:grouphint/v1.0":["origin rate test:Video"]},
+"media_type":"video/v210","grain_rate":{"numerator":50,"denominator":1},
+"frame_width":1920,"frame_height":1080,"interlace_mode":"progressive","colorspace":"BT709",
+"components":[{"name":"Y","width":1920,"height":1080,"bit_depth":10},
+{"name":"Cb","width":960,"height":1080,"bit_depth":10},{"name":"Cr","width":960,"height":1080,"bit_depth":10}],
+"parents":[]}`
+
+// A discrete flow is charged its grain size, as libmxl sized it from
+// the definition, times its grain rate.
+func TestPublishesThePayloadRateOfAVideoFlow(t *testing.T) {
+	dir := t.TempDir()
+	inst, err := mxl.NewInstance(dir, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = inst.Close() })
+	w, _, err := inst.NewWriterOpts(videoDef, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = w.Close() })
+	g, err := w.OpenGrain(5)
+	require.NoError(t, err)
+	require.NoError(t, g.Commit(mxl.GrainValidSlicesAll, 0))
+	p, _ := newPublisher(t, &handles{dir: dir, inst: inst}, "node-a", at(1))
+
+	st := reconcileFlow(t, p)
+
+	// v210 packs six pixels into 16 bytes and pads each line to 128
+	// bytes: 1920 pixels take 5120 bytes a line.
+	assert.EqualValues(t, int64(5120*1080)*8*50, st.BitsPerSecond)
+}
+
+// A flow nothing has been written to yet has no readable layout. Its
+// hints are published and its rate is read again shortly, rather than
+// the copy being marked read.
+func TestRetriesTheRateOfAFlowNotWrittenYet(t *testing.T) {
+	dir := t.TempDir()
+	inst, err := mxl.NewInstance(dir, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = inst.Close() })
+	w, _, err := inst.NewWriterOpts(audioDef, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = w.Close() })
+	p, reads := newPublisher(t, &handles{dir: dir, inst: inst}, "node-a", at(1))
+
+	res, err := p.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: flowID}})
+	require.NoError(t, err)
+	assert.Equal(t, rateRetry, res.RequeueAfter)
+	var f mxlv1alpha1.MxlFlow
+	require.NoError(t, p.Client.Get(context.Background(), types.NamespacedName{Name: flowID}, &f))
+	assert.EqualValues(t, 480, f.Status.MaxSyncBatchSizeHint)
+	assert.Zero(t, f.Status.BitsPerSecond)
+
+	a, err := w.OpenSamples(1000, 48)
+	require.NoError(t, err)
+	require.NoError(t, a.Commit())
+	st := reconcileFlow(t, p)
+	assert.Equal(t, 2, *reads)
+	assert.EqualValues(t, 48000*2*32, st.BitsPerSecond)
 }

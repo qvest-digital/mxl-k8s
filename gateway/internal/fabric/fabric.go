@@ -146,10 +146,10 @@ func ipAddressed(provider fabrics.Provider) bool {
 	return provider == fabrics.ProviderTCP || provider == fabrics.ProviderVerbs
 }
 
-// sameAddress compares two textual addresses by value where both are
+// SameAddress compares two textual addresses by value where both are
 // IP addresses, so an interface enumerated as "::ffff:10.0.0.1" and a
 // bind address given as "10.0.0.1" are one address.
-func sameAddress(a, b string) bool {
+func SameAddress(a, b string) bool {
 	x, errA := netip.ParseAddr(a)
 	y, errB := netip.ParseAddr(b)
 	if errA != nil || errB != nil {
@@ -227,7 +227,7 @@ func (s Selector) Select(ifaces []fabrics.InterfaceConfig) ([]fabrics.InterfaceC
 
 // rejectAddress applies the rules that read the interface address.
 func (s Selector) rejectAddress(provider fabrics.Provider, node string) (string, bool) {
-	if s.BindAddress != "" && ipAddressed(provider) && !sameAddress(node, s.BindAddress) {
+	if s.BindAddress != "" && ipAddressed(provider) && !SameAddress(node, s.BindAddress) {
 		return "address is not the one this gateway binds", false
 	}
 	addr, err := netip.ParseAddr(node)

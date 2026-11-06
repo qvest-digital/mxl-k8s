@@ -152,7 +152,7 @@ func TestTarget_DeletionDuringRecoveryDoesNotDeadlockOrLeaveALoop(t *testing.T) 
 		TeardownGrace: 2 * time.Second,
 		targets:       map[types.NamespacedName]*targetEntry{key: entry},
 		attempts:      attemptTable[targetOpenInputs]{},
-		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider, string) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
 			close(rebuilding)
 			<-releaseRebuild
 			// A zero-value Target stands for the handles a rebuild

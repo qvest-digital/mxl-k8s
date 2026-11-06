@@ -64,7 +64,7 @@ func newRepointFixture(t *testing.T, sourceNode string, provider mxlv1alpha1.Mxl
 		TeardownGrace: 2 * time.Second,
 		targets:       map[types.NamespacedName]*targetEntry{key: entry},
 		attempts:      attemptTable[targetOpenInputs]{},
-		openFabricSideFn: func(_ *mxl.Writer, p fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+		openFabricSideFn: func(_ *mxl.Writer, p fabrics.Provider, _ string) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
 			f.rebuilds <- p
 			// Refused, so the rebuild ends without a progress loop to
 			// drive: what is under test is the provider it was asked
@@ -215,7 +215,7 @@ func TestReconcile_RepointedProviderSettlesAfterTheRebuild(t *testing.T) {
 		callsMu sync.Mutex
 		calls   int
 	)
-	f.r.openFabricSideFn = func(_ *mxl.Writer, p fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+	f.r.openFabricSideFn = func(_ *mxl.Writer, p fabrics.Provider, _ string) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
 		f.rebuilds <- p
 		callsMu.Lock()
 		calls++
