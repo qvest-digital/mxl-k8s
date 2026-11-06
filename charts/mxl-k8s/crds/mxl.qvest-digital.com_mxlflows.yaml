@@ -83,6 +83,17 @@ spec:
           status:
             description: MxlFlowStatus reports where the flow is materialized.
             properties:
+              bitsPerSecond:
+                description: |-
+                  BitsPerSecond is the flow's payload rate as libmxl reports the
+                  flow on its origin node: grain size times grain rate for a
+                  discrete flow, bytes per sample across all channels times sample
+                  rate for a continuous one. The gateway on the origin node
+                  publishes it; unset until it has read the flow, and for formats
+                  without a fixed payload rate. Mirror placement charges it.
+                format: int64
+                minimum: 0
+                type: integer
               conditions:
                 description: Conditions describes the current state of the flow.
                 items:
