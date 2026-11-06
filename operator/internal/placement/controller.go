@@ -67,6 +67,10 @@ type Reconciler struct {
 	RedundancySets bool
 
 	now func() time.Time
+	// started is when the first reconcile ran. A mirror created before
+	// it is not timed: its first placement measures how long the
+	// controller was not running, not how long placement took.
+	started time.Time
 
 	gauges gauges
 
@@ -96,6 +100,9 @@ func (r *Reconciler) clock() time.Time {
 
 // Reconcile places one mirror, or confirms the placement it has.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	if r.started.IsZero() {
+		r.started = r.clock()
+	}
 	var m mxlv1alpha1.MxlFlowMirror
 	if err := r.Get(ctx, req.NamespacedName, &m); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -171,9 +178,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			fmt.Sprintf("No interface pair has room for %d bit/s", request.Demand), 0)
 	}
 	// Only a mirror's first placement measures how long placement took
-	// from its creation; one placed again after its interface went away
-	// would measure the age of the mirror.
-	first := !placedBefore(&m)
+	// from its creation; one placed again after its interface went away,
+	// or one created before the controller started, would measure the
+	// age of the mirror.
+	first := !placedBefore(&m) && !m.CreationTimestamp.Time.Before(r.started)
 	return ctrl.Result{}, r.commit(ctx, &m, d.Placement, request, d.Outcome, first)
 }
 
