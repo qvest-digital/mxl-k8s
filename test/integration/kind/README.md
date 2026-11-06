@@ -96,6 +96,10 @@ window only (`--since-time` at the case start):
   `*.mxl-flow` directories on each worker node, read through
   `$CONTAINER_RUNTIME exec` (default `docker`)
 
+A pod the case itself deletes during its window, such as a gateway or
+agent pod replaced by a rollout the case triggers, has no log in the
+snapshot: only pods that exist when the snapshot runs are read.
+
 The `kind-integration` GitHub Actions job uploads the directory as
 an artifact named `kind-diagnostics-<run-id>` on failure.
 
