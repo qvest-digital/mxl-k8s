@@ -2,7 +2,8 @@
 # run.sh -- KIND integration suite runner. Sources lib.sh, iterates
 # cases/*.sh in lexicographic order, prints a pass/fail summary, and
 # exits non-zero if any case failed. Per-case stdout/stderr land
-# under $KIND_DIAG_DIR/cases/; cluster-level diagnostics under
+# under $KIND_DIAG_DIR/cases/, and a failing case's snapshot under
+# $KIND_DIAG_DIR/cases/<case>/; cluster-level diagnostics under
 # $KIND_DIAG_DIR/ are collected once at the end on any failure.
 
 set -uo pipefail
@@ -47,12 +48,20 @@ for case_path in "${cases[@]}"; do
   case_name="$(basename "$case_path" .sh)"
   case_log="${KIND_DIAG_DIR}/cases/${case_name}.log"
   log "case: ${case_name}"
+  # The snapshot directory of an earlier run would carry its marker.
+  rm -rf "${KIND_DIAG_DIR}/cases/${case_name}"
   start=$(date +%s)
-  if bash "$case_path" > "$case_log" 2>&1; then
+  case_start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if KIND_CASE_NAME="$case_name" KIND_CASE_START="$case_start" \
+      bash "$case_path" > "$case_log" 2>&1; then
     label=PASS
+    # A fail in a subshell the case tolerated leaves a snapshot behind.
+    rm -rf "${KIND_DIAG_DIR}/cases/${case_name}"
   else
     label=FAIL
     any_failed=1
+    # No-op when the case's fail already took the snapshot.
+    snapshot_case "$case_name" "$case_start" 2>> "$case_log"
   fi
   end=$(date +%s)
   secs=$(( end - start ))
