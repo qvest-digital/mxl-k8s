@@ -2717,7 +2717,7 @@
             },
             "placementPairing": {
               "default": "prefer-same-subnet",
-              "description": "How a source interface is paired with a target interface. prefer-same-subnet keeps pairs whose addresses share a subnet when any does; same-subnet keeps only those; any keeps every pair.",
+              "description": "How a source interface is paired with a target interface. prefer-same-subnet keeps pairs whose addresses share a subnet when any does; same-subnet keeps only those; any keeps every pair. With every fabric port in one subnet all pairs qualify and the setting changes nothing; it matters where ports sit in separate subnets.",
               "enum": [
                 "prefer-same-subnet",
                 "same-subnet",

@@ -36,7 +36,8 @@ func (p *placementFlags) bind(fs *flag.FlagSet) {
 		"How long after its creation a mirror waits for its flow's payload rate before it is placed "+
 			"on the provisional demand.")
 	fs.StringVar(&p.pairing, "placement-pairing", string(placement.PairingPreferSameSubnet),
-		"How a source interface pairs with a target interface: prefer-same-subnet, same-subnet or any.")
+		"How a source interface pairs with a target interface: prefer-same-subnet, same-subnet or any. "+
+			"With every fabric port in one subnet all pairs qualify; it matters where ports sit in separate subnets.")
 	fs.StringVar(&p.overcommit, "placement-overcommit", string(placement.OvercommitPlace),
 		"What happens to a mirror no interface pair has room for: place puts it on the pair with the "+
 			"most headroom and reports Overcommitted, hold leaves it unplaced and reports Held.")
