@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.1.0-rc.46](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.45...v1.1.0-rc.46) (2026-11-06)
+
+
+### Features
+
+* **chart:** ship an MXL Fabric dashboard ([#426](https://github.com/qvest-digital/mxl-k8s/issues/426)) ([4518468](https://github.com/qvest-digital/mxl-k8s/commit/45184688785312167b686df73a09673f2a0822ff))
+* **gateway:** export fabric ports, links and link counters ([#426](https://github.com/qvest-digital/mxl-k8s/issues/426)) ([4518468](https://github.com/qvest-digital/mxl-k8s/commit/45184688785312167b686df73a09673f2a0822ff))
+* **operator:** export placement policy, budgets and mirror state ([#426](https://github.com/qvest-digital/mxl-k8s/issues/426)) ([4518468](https://github.com/qvest-digital/mxl-k8s/commit/45184688785312167b686df73a09673f2a0822ff))
+
+
+### Bug Fixes
+
+* **operator:** retry a placement patch that lost to a concurrent write ([#427](https://github.com/qvest-digital/mxl-k8s/issues/427)) ([3c142dd](https://github.com/qvest-digital/mxl-k8s/commit/3c142dd4c0394678619df3848e6d172f18ec8651))
+* **operator:** time only mirrors created since the placement start ([#427](https://github.com/qvest-digital/mxl-k8s/issues/427)) ([3c142dd](https://github.com/qvest-digital/mxl-k8s/commit/3c142dd4c0394678619df3848e6d172f18ec8651))
+
 ## [1.1.0-rc.45](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.44...v1.1.0-rc.45) (2026-11-06)
 
 

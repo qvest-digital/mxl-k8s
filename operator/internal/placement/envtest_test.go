@@ -178,7 +178,13 @@ func TestControllerHoldPolicy(t *testing.T) {
 }
 
 func TestControllerWaitsForDemandThenPlacesProvisionally(t *testing.T) {
-	h := start(t, defaultReconciler())
+	// The wait runs from CreationTimestamp, which has whole seconds, so
+	// a one-second wait can be over before the first reconcile sees the
+	// mirror. Five seconds leaves at least four for AwaitingDemand to be
+	// observed and still places well inside placed()'s 15 s.
+	r := defaultReconciler()
+	r.DemandWait = 5 * time.Second
+	h := start(t, r)
 	h.caps("src", twoRails(1)...)
 	h.caps("tgt", twoRails(2)...)
 	h.flow(1, 0)
