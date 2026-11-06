@@ -28,7 +28,7 @@ if [ -z "$src" ]; then
 fi
 
 if [ -f "$out/VERSION" ] && [ "$(cat "$out/VERSION")" = "$version" ] &&
-  [ -f "$out/libmxl-monitoring.a" ] && [ -f "$out/libmxl-monitoring-prometheus.a" ]; then
+  [ -f "$out/libmxl-monitoring.a" ] && [ -f "$out/libmxl-monitoring-prometheus.a" ] && [ -f "$out/LICENSE.picojson" ]; then
   echo "libmxl-monitoring $version already built in $out"
   exit 0
 fi

@@ -3457,7 +3457,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(increase(mxl_gateway_target_writes_total{result=~\"other_error|permission_error|out_of_space\"}[$__range])) or vector(0))",
+          "expr": "(sum(increase(mxl_gateway_target_writes_total{node=~\"$node\",result=~\"other_error|permission_error|out_of_space\"}[$__range])) or vector(0))",
           "legendFormat": "",
           "instant": true,
           "range": false

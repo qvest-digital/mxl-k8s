@@ -563,7 +563,7 @@ defines them:
 | `mxl_gateway_source_reads_total{result="ok"}` | read complete and offered to the target, recorded once its transfer is no longer outstanding |
 | `mxl_gateway_source_reads_total{result="invalid"}` | read flagged invalid: the writer left it incomplete or jumped over it, and only its header is sent |
 | `mxl_gateway_source_reads_total{result="too_late"}` | a read that came back too late: the ring had overtaken the loop |
-| `mxl_gateway_source_skipped_total` | units the loop then jumped over to reach the head |
+| `mxl_gateway_source_skipped_total` | units jumped over after a read that came back too late; resync jumps are not in it |
 | `mxl_gateway_source_reads_total{result="too_early"}` | a grain still not there a grace period after its media timestamp |
 
 The loop reads only the grains it sends. A resync, where it trails the
