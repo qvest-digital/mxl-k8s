@@ -312,3 +312,29 @@ func TestControllerRedundancyMembersDisjoint(t *testing.T) {
 	require.NotEqual(t, one.Spec.Placement.SourceInterface, two.Spec.Placement.SourceInterface)
 	require.NotEqual(t, one.Spec.Placement.TargetInterface, two.Spec.Placement.TargetInterface)
 }
+
+// A mirror that waited for its flow's rate is not a mirror from before
+// placement: the gateways that bound it in the meantime gave up waiting
+// for a placement and took the first interface. Adopting what they bound
+// would leave every such mirror on that interface, reported as Placed.
+func TestControllerDoesNotAdoptAMirrorBoundWhileAwaitingDemand(t *testing.T) {
+	r := defaultReconciler()
+	r.DemandWait = 4 * time.Second
+	h := start(t, r)
+	h.caps("src", twoRails(1)...)
+	h.caps("tgt", twoRails(2)...)
+	h.flow(1, 0)
+	// Rail A carries a mirror already, so placement puts this one on
+	// rail B; the gateways bound rail A, the first interface.
+	h.flow(2, 5*gbit)
+	h.placed(h.mirror(2, "src", "tgt"), mxlv1alpha1.ReasonPlaced)
+
+	name := h.mirror(1, "src", "tgt")
+	m := h.placed(name, mxlv1alpha1.ReasonAwaitingDemand)
+	m.Status.SourceInterface, m.Status.TargetInterface = "192.0.2.1", "192.0.2.2"
+	require.NoError(t, h.c.Status().Update(h.ctx, m))
+
+	m = h.placed(name, mxlv1alpha1.ReasonPlaced)
+	require.Equal(t, mxlv1alpha1.MxlFlowMirrorPlacement{SourceInterface: "192.0.2.129", TargetInterface: "192.0.2.130"}, *m.Spec.Placement,
+		"placed on the idle rail, not left where the gateways first bound it")
+}

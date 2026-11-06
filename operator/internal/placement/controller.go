@@ -6,16 +6,20 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -63,6 +67,8 @@ type Reconciler struct {
 	RedundancySets bool
 
 	now func() time.Time
+
+	gauges gauges
 
 	mu sync.Mutex
 	// written holds the placements this controller wrote, until the
@@ -132,13 +138,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// A mirror from before placement existed, which its gateways have
-	// already bound, keeps the interfaces they bound.
-	if m.Spec.Placement == nil {
+	// already bound, keeps the interfaces they bound. Only one that never
+	// carried a Placed condition is such a mirror: one that waited for its
+	// demand, or found no pair, was bound by a gateway that gave up
+	// waiting for placement and took the first interface, which is the
+	// choice placement exists to replace.
+	if m.Spec.Placement == nil && meta.FindStatusCondition(m.Status.Conditions, mxlv1alpha1.ConditionTypePlaced) == nil {
 		bound := &mxlv1alpha1.MxlFlowMirrorPlacement{SourceInterface: m.Status.SourceInterface, TargetInterface: m.Status.TargetInterface}
 		if valid(bound) {
 			demand, _ := r.demand(ctx, &m)
 			request.Demand = demand
-			return ctrl.Result{}, r.commit(ctx, &m, *bound, request, outcomeFor(Check(ledger, r.Settings, request, *bound)))
+			return ctrl.Result{}, r.commit(ctx, &m, *bound, request, outcomeFor(Check(ledger, r.Settings, request, *bound)), false)
 		}
 	}
 
@@ -160,7 +170,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{RequeueAfter: unplacedRetry}, r.condition(ctx, &m, false, mxlv1alpha1.ReasonHeld,
 			fmt.Sprintf("No interface pair has room for %d bit/s", request.Demand), 0)
 	}
-	return ctrl.Result{}, r.commit(ctx, &m, d.Placement, request, d.Outcome)
+	// Only a mirror's first placement measures how long placement took
+	// from its creation; one placed again after its interface went away
+	// would measure the age of the mirror.
+	first := !placedBefore(&m)
+	return ctrl.Result{}, r.commit(ctx, &m, d.Placement, request, d.Outcome, first)
+}
+
+// placedBefore reports whether m ever carried a placement: its Placed
+// condition read True at some point, which is the only state that
+// condition leaves behind.
+func placedBefore(m *mxlv1alpha1.MxlFlowMirror) bool {
+	c := meta.FindStatusCondition(m.Status.Conditions, mxlv1alpha1.ConditionTypePlaced)
+	return c != nil && c.Status == metav1.ConditionTrue
 }
 
 func outcomeFor(headroom int64) Outcome {
@@ -186,7 +208,7 @@ func (r *Reconciler) confirm(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, 
 }
 
 // commit writes a placement and its condition.
-func (r *Reconciler) commit(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, p mxlv1alpha1.MxlFlowMirrorPlacement, req Request, outcome Outcome) error {
+func (r *Reconciler) commit(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, p mxlv1alpha1.MxlFlowMirrorPlacement, req Request, outcome Outcome, observe bool) error {
 	patch := client.MergeFromWithOptions(m.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	m.Spec.Placement = &p
 	if err := r.Patch(ctx, m, patch); err != nil {
@@ -194,7 +216,9 @@ func (r *Reconciler) commit(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, p
 	}
 	r.remember(client.ObjectKeyFromObject(m), Placed{SourceNode: m.Spec.SourceNode, TargetNode: m.Spec.TargetNode,
 		Provider: m.Spec.Provider, Placement: p, Demand: req.Demand})
-	placementSeconds.Observe(r.clock().Sub(m.CreationTimestamp.Time).Seconds())
+	if observe {
+		placementSeconds.Observe(r.clock().Sub(m.CreationTimestamp.Time).Seconds())
+	}
 	log.FromContext(ctx).Info("placed mirror",
 		"flowID", m.Spec.FlowID, "sourceNode", m.Spec.SourceNode, "targetNode", m.Spec.TargetNode,
 		"sourceInterface", p.SourceInterface, "targetInterface", p.TargetInterface,
@@ -314,14 +338,16 @@ func (r *Reconciler) siblings(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror)
 	if len(others) == 0 {
 		return nil, nil
 	}
-	var mirrors mxlv1alpha1.MxlFlowMirrorList
-	if err := r.List(ctx, &mirrors); err != nil {
-		return nil, fmt.Errorf("list mirrors: %w", err)
-	}
 	var out []mxlv1alpha1.MxlFlowMirror
-	for _, o := range mirrors.Items {
-		if _, ok := others[o.Ref()]; ok && o.Spec.TargetNode == m.Spec.TargetNode && o.DeletionTimestamp.IsZero() {
-			out = append(out, o)
+	for ref := range others {
+		var mirrors mxlv1alpha1.MxlFlowMirrorList
+		if err := r.List(ctx, &mirrors, client.MatchingFields{flowIndex: ref.Name()}, client.UnsafeDisableDeepCopy); err != nil {
+			return nil, fmt.Errorf("list mirrors of %s: %w", ref.Name(), err)
+		}
+		for _, o := range mirrors.Items {
+			if o.Spec.TargetNode == m.Spec.TargetNode && o.DeletionTimestamp.IsZero() {
+				out = append(out, o)
+			}
 		}
 	}
 	return out, nil
@@ -347,7 +373,10 @@ func (r *Reconciler) nodes(ctx context.Context) (map[string]Node, error) {
 // ledger charges every placed mirror but self.
 func (r *Reconciler) ledger(ctx context.Context, nodes map[string]Node, self types.NamespacedName) (*Ledger, error) {
 	var mirrors mxlv1alpha1.MxlFlowMirrorList
-	if err := r.List(ctx, &mirrors); err != nil {
+	// Every mirror is read and none is written, and each carries its
+	// target's whole descriptor in status, so the cache's objects are read
+	// in place rather than copied once per reconcile.
+	if err := r.List(ctx, &mirrors, client.UnsafeDisableDeepCopy); err != nil {
 		return nil, fmt.Errorf("list mirrors: %w", err)
 	}
 	list := make([]Node, 0, len(nodes))
@@ -375,7 +404,7 @@ func (r *Reconciler) ledger(ctx context.Context, nodes map[string]Node, self typ
 	}
 	r.prune(seen)
 	l := NewLedger(list, placed)
-	publish(l, nodes, r.Settings)
+	r.gauges.publish(l, nodes, r.Settings)
 	return l, nil
 }
 
@@ -437,27 +466,89 @@ func (r *Reconciler) prune(seen map[types.NamespacedName]struct{}) {
 // releases mirrors waiting for it; a redundancy set changing its
 // members changes whom a member mirror avoids.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	idx := mgr.GetFieldIndexer()
+	for name, extract := range map[string]func(*mxlv1alpha1.MxlFlowMirror) string{
+		sourceNodeIndex: func(m *mxlv1alpha1.MxlFlowMirror) string { return m.Spec.SourceNode },
+		targetNodeIndex: func(m *mxlv1alpha1.MxlFlowMirror) string { return m.Spec.TargetNode },
+		flowIndex:       func(m *mxlv1alpha1.MxlFlowMirror) string { return m.Ref().Name() },
+	} {
+		if err := idx.IndexField(context.Background(), &mxlv1alpha1.MxlFlowMirror{}, name, func(o client.Object) []string {
+			m, ok := o.(*mxlv1alpha1.MxlFlowMirror)
+			if !ok || extract(m) == "" {
+				return nil
+			}
+			return []string{extract(m)}
+		}); err != nil {
+			return fmt.Errorf("index MxlFlowMirror by %s: %w", name, err)
+		}
+	}
 	b := ctrl.NewControllerManagedBy(mgr).
 		Named("placement").
 		For(&mxlv1alpha1.MxlFlowMirror{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
-		Watches(&mxlv1alpha1.MxlNodeCapabilities{}, handler.EnqueueRequestsFromMapFunc(r.capsToMirrors)).
-		Watches(&mxlv1alpha1.MxlFlow{}, handler.EnqueueRequestsFromMapFunc(r.flowToMirrors))
+		Watches(&mxlv1alpha1.MxlNodeCapabilities{}, handler.EnqueueRequestsFromMapFunc(r.capsToMirrors),
+			builder.WithPredicates(placementInputsChanged())).
+		Watches(&mxlv1alpha1.MxlFlow{}, handler.EnqueueRequestsFromMapFunc(r.flowToMirrors),
+			builder.WithPredicates(flowRateChanged()))
 	if r.RedundancySets {
-		b = b.Watches(&mxlv1alpha1.MxlFlowRedundancySet{}, handler.EnqueueRequestsFromMapFunc(r.setToMirrors))
+		b = b.Watches(&mxlv1alpha1.MxlFlowRedundancySet{}, handler.EnqueueRequestsFromMapFunc(r.setToMirrors),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}))
 	}
 	return b.Complete(r)
 }
 
-func (r *Reconciler) matching(ctx context.Context, keep func(*mxlv1alpha1.MxlFlowMirror) bool) []reconcile.Request {
+// Field indexes over MxlFlowMirror the watch handlers look mirrors up by.
+const (
+	sourceNodeIndex = "placement.spec.sourceNode"
+	targetNodeIndex = "placement.spec.targetNode"
+	flowIndex       = "placement.flow"
+)
+
+// placementInputsChanged passes a capabilities update only when what
+// placement reads of it changed. The gateway rewrites lastSeen on every
+// resync, which would otherwise reconcile every mirror of the node each
+// time.
+func placementInputsChanged() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			o, ok1 := e.ObjectOld.(*mxlv1alpha1.MxlNodeCapabilities)
+			n, ok2 := e.ObjectNew.(*mxlv1alpha1.MxlNodeCapabilities)
+			if !ok1 || !ok2 {
+				return true
+			}
+			return !equality.Semantic.DeepEqual(o.Status.Providers, n.Status.Providers) ||
+				!equality.Semantic.DeepEqual(o.Status.Budgets, n.Status.Budgets) ||
+				o.Status.MaxUtilizationPercent != n.Status.MaxUtilizationPercent
+		},
+	}
+}
+
+// flowRateChanged passes a flow update only when its published rate
+// changed. The agents rewrite every flow's locations on each rescan.
+func flowRateChanged() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			o, ok1 := e.ObjectOld.(*mxlv1alpha1.MxlFlow)
+			n, ok2 := e.ObjectNew.(*mxlv1alpha1.MxlFlow)
+			if !ok1 || !ok2 {
+				return true
+			}
+			return o.Status.BitsPerSecond != n.Status.BitsPerSecond
+		},
+	}
+}
+
+// matching enqueues the mirrors the index field holds value for that
+// keep accepts.
+func (r *Reconciler) matching(ctx context.Context, field, value string, keep func(*mxlv1alpha1.MxlFlowMirror) bool) []reconcile.Request {
 	var mirrors mxlv1alpha1.MxlFlowMirrorList
-	if err := r.List(ctx, &mirrors); err != nil {
+	if err := r.List(ctx, &mirrors, client.MatchingFields{field: value}, client.UnsafeDisableDeepCopy); err != nil {
 		log.FromContext(ctx).Error(err, "list MxlFlowMirrors for a watch event")
 		return nil
 	}
 	var out []reconcile.Request
 	for i := range mirrors.Items {
-		if keep(&mirrors.Items[i]) {
+		if keep == nil || keep(&mirrors.Items[i]) {
 			out = append(out, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&mirrors.Items[i])})
 		}
 	}
@@ -473,9 +564,7 @@ func (r *Reconciler) capsToMirrors(ctx context.Context, obj client.Object) []rec
 	if name == "" {
 		name = c.Name
 	}
-	return r.matching(ctx, func(m *mxlv1alpha1.MxlFlowMirror) bool {
-		return m.Spec.SourceNode == name || m.Spec.TargetNode == name
-	})
+	return append(r.matching(ctx, sourceNodeIndex, name, nil), r.matching(ctx, targetNodeIndex, name, nil)...)
 }
 
 func (r *Reconciler) flowToMirrors(ctx context.Context, obj client.Object) []reconcile.Request {
@@ -483,8 +572,8 @@ func (r *Reconciler) flowToMirrors(ctx context.Context, obj client.Object) []rec
 	if !ok {
 		return nil
 	}
-	return r.matching(ctx, func(m *mxlv1alpha1.MxlFlowMirror) bool {
-		return m.Ref() == f.Ref() && (m.Spec.Placement == nil ||
+	return r.matching(ctx, flowIndex, f.Ref().Name(), func(m *mxlv1alpha1.MxlFlowMirror) bool {
+		return (m.Spec.Placement == nil ||
 			(f.Status.BitsPerSecond > 0 && m.Status.DemandBitsPerSecond != Demand(f.Status.BitsPerSecond, r.OverheadPercent, 0)))
 	})
 }
@@ -494,12 +583,9 @@ func (r *Reconciler) setToMirrors(ctx context.Context, obj client.Object) []reco
 	if !ok {
 		return nil
 	}
-	members := map[mxlv1alpha1.FlowRef]struct{}{}
+	var out []reconcile.Request
 	for _, mem := range s.Spec.Members {
-		members[mxlv1alpha1.FlowRef{Domain: mem.Domain, ID: mem.FlowID}] = struct{}{}
+		out = append(out, r.matching(ctx, flowIndex, mxlv1alpha1.FlowRef{Domain: mem.Domain, ID: mem.FlowID}.Name(), nil)...)
 	}
-	return r.matching(ctx, func(m *mxlv1alpha1.MxlFlowMirror) bool {
-		_, ok := members[m.Ref()]
-		return ok
-	})
+	return out
 }
