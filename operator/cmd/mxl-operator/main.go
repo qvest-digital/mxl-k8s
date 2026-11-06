@@ -15,6 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -102,6 +103,17 @@ func main() {
 			os.Exit(1)
 		}
 	}
+
+	metrics.Registry.MustRegister(&placement.StatusCollector{
+		Reader:            mgr.GetCache(),
+		Elected:           mgr.Elected(),
+		Log:               ctrl.Log.WithName("placement-metrics"),
+		Settings:          place.settings(),
+		OverheadPercent:   int32(place.overheadPercent),
+		ProvisionalDemand: place.provisional,
+		DemandWait:        place.demandWait,
+		RedundancySets:    mxlfs,
+	})
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "failed to register healthz check")

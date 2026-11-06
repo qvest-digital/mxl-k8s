@@ -201,6 +201,13 @@ func (l *Ledger) Ingress(node, port string) (int64, int) {
 	return v.bits, v.mirrors
 }
 
+// BudgetLoad reports the committed rate leaving and arriving through
+// the interfaces that draw on one of a node's budgets.
+func (l *Ledger) BudgetLoad(node, budget string) (egress, ingress int64) {
+	k := budgetKey{node, budget}
+	return l.budgetEgress[k], l.budgetIngress[k]
+}
+
 // budgetsOf returns the budgets the node reports for the interface at
 // address.
 func (l *Ledger) budgetsOf(node, address string) []v1alpha1.MxlFabricBudget {
