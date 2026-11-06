@@ -516,8 +516,12 @@ A port is what placement accounts load on: the device the provider
 names, or the address. A link is the physical port under it: the
 netdev, or the RDMA device where there is none. The tcp and verbs ports
 of one NIC are two ports on one link. Only interfaces backed by a
-device are links; a bridge or veth has its info series with an empty
-`link` and no counters.
+device are links; a bridge, bond or veth has its info series with an
+empty `link` and no counters. An RDMA device over a bond (RoCE link
+aggregation) is the exception: its port names the bond as its netdev,
+so the link is the bond, with the RDMA device's counters and the bond's
+netdev statistics but no `mac` source, since a bond reports no MAC
+statistics. The member ports are not exported.
 
 A link's bytes are exported per `source`, because no one kernel
 interface counts the same traffic on every driver:
@@ -525,7 +529,7 @@ interface counts the same traffic on every driver:
 | `source` | Kernel interface | Counts |
 | --- | --- | --- |
 | `mac` | ethtool netlink standard statistics, group `eth-mac` (`OctetsReceivedOK`, `OctetsTransmittedOK`) | Everything the MAC sent or received: the wire |
-| `rdma` | `/sys/class/infiniband/<dev>/ports/<n>/counters/port_{rcv,xmit}_data` times 4, or the device's `hw_counters/{rx,tx}_bytes` where it has no port counters | RDMA traffic only |
+| `rdma` | `/sys/class/infiniband/<dev>/ports/<n>/counters/port_{rcv,xmit}_data` times 4, or the port's `hw_counters/{rx,tx}_bytes` where the driver has no port counters | RDMA traffic only |
 | `netdev` | `/sys/class/net/<if>/statistics/{rx,tx}_bytes` | The kernel network stack's traffic; on some drivers RDMA traffic too, on others not |
 
 A source the kernel or driver does not report is absent, never zero.

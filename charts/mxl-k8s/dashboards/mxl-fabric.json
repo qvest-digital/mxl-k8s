@@ -3272,7 +3272,7 @@
       "id": 46,
       "type": "timeseries",
       "title": "Delivered vs demand per mirror",
-      "description": "Payload committed on the target per mirror over the demand placement charged it. Demand includes the protocol overhead, and a data flow's rate is an upper bound, so a fully delivered flow reads somewhat below 100%.",
+      "description": "Payload committed on the target per mirror over the demand placement charged it. Demand includes the protocol overhead, and a data flow's rate is an upper bound, so a fully delivered flow reads somewhat below 100%. Mirrors of one flow between the same two nodes are summed on both sides.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -3346,7 +3346,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(8 * sum by (domain, flow_id, source_node, target_node) (label_replace(label_replace(rate(mxl_gateway_mirror_received_bytes_total{node=~\"$node\"}[$__rate_interval]), \"target_node\", \"$1\", \"node\", \"(.*)\"), \"source_node\", \"$1\", \"peer_node\", \"(.*)\"))) / on(domain, flow_id, source_node, target_node) (max by (domain, flow_id, source_node, target_node) (mxl_operator_mirror_demand_bits_per_second{target_node=~\"$node\",flow_id=~\"$flow\"}))",
+          "expr": "(8 * sum by (domain, flow_id, source_node, target_node) (label_replace(label_replace(rate(mxl_gateway_mirror_received_bytes_total{node=~\"$node\"}[$__rate_interval]), \"target_node\", \"$1\", \"node\", \"(.*)\"), \"source_node\", \"$1\", \"peer_node\", \"(.*)\"))) / on(domain, flow_id, source_node, target_node) (sum by (domain, flow_id, source_node, target_node) (mxl_operator_mirror_demand_bits_per_second{target_node=~\"$node\",flow_id=~\"$flow\"}))",
           "legendFormat": "{{flow_id}} {{source_node}} -> {{target_node}}",
           "range": true
         }
@@ -3433,7 +3433,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "8 * sum by (domain, flow_id, source_node, target_node) (label_replace(label_replace(rate(mxl_gateway_mirror_received_bytes_total{node=~\"$node\"}[$__rate_interval]), \"target_node\", \"$1\", \"node\", \"(.*)\"), \"source_node\", \"$1\", \"peer_node\", \"(.*)\")) and on(domain, flow_id, source_node, target_node) (max by (domain, flow_id, source_node, target_node) (mxl_operator_mirror_demand_bits_per_second{target_node=~\"$node\",flow_id=~\"$flow\"}))",
+          "expr": "8 * sum by (domain, flow_id, source_node, target_node) (label_replace(label_replace(rate(mxl_gateway_mirror_received_bytes_total{node=~\"$node\"}[$__rate_interval]), \"target_node\", \"$1\", \"node\", \"(.*)\"), \"source_node\", \"$1\", \"peer_node\", \"(.*)\")) and on(domain, flow_id, source_node, target_node) (sum by (domain, flow_id, source_node, target_node) (mxl_operator_mirror_demand_bits_per_second{target_node=~\"$node\",flow_id=~\"$flow\"}))",
           "legendFormat": "{{flow_id}} {{source_node}} -> {{target_node}}",
           "range": true
         },
@@ -3443,7 +3443,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max by (domain, flow_id, source_node, target_node) (mxl_operator_mirror_demand_bits_per_second{target_node=~\"$node\",flow_id=~\"$flow\"})",
+          "expr": "sum by (domain, flow_id, source_node, target_node) (mxl_operator_mirror_demand_bits_per_second{target_node=~\"$node\",flow_id=~\"$flow\"})",
           "legendFormat": "{{flow_id}} {{source_node}} -> {{target_node}} demand",
           "range": true
         }
