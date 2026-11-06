@@ -31,8 +31,7 @@ type SourceRecorder interface {
 	// ReadContent counts units read that were not complete.
 	ReadContent(issue ContentIssue, index, count uint64)
 	// Skipped counts units the loop jumped over to reach the head
-	// again, complete or already reused: either way never sent, and not
-	// the writer's.
+	// again; it does not read them, so they are not told apart.
 	Skipped(count uint64)
 }
 
@@ -69,68 +68,3 @@ type noopTarget struct{}
 
 func (noopTarget) Write(error, uint64, uint64)               {}
 func (noopTarget) WriteContent(ContentIssue, uint64, uint64) {}
-
-// slotState is what a passed-over slot of the source ring holds.
-type slotState int
-
-const (
-	slotComplete slotState = iota
-	slotInvalid
-	slotIncomplete
-	slotMissing
-	slotTooLate
-)
-
-// slotOf classifies slot idx from a non-blocking read of it.
-func slotOf(g mxl.Grain, err error, idx uint64) slotState {
-	switch {
-	case err != nil:
-		// Below the head a slot is readable unless it has been reused.
-		return slotTooLate
-	case g.Index != idx:
-		return slotMissing
-	case g.Invalid():
-		return slotInvalid
-	case g.ValidSlices < g.TotalSlices:
-		return slotIncomplete
-	}
-	return slotComplete
-}
-
-// maxInspected bounds the slots one pass-over reads one by one; older
-// ones are counted as aged out without a read.
-const maxInspected = 4096
-
-// accountPassedOver records the units [from, to) of a discrete flow the
-// loop jumped over: one the source never held complete as content, the
-// writer's; one complete or already reused as skipped, never sent. A
-// pass-over that met a reused slot is also one too_late read.
-func accountPassedOver(rec SourceRecorder, slot func(uint64) slotState, from, to uint64) {
-	if to <= from {
-		return
-	}
-	var counts [slotTooLate + 1]uint64
-	if to-from > maxInspected {
-		counts[slotTooLate] = to - from - maxInspected
-		from = to - maxInspected
-	}
-	for idx := from; idx < to; idx++ {
-		counts[slot(idx)]++
-	}
-	last := to - 1
-	if n := counts[slotInvalid]; n > 0 {
-		rec.ReadContent(ContentInvalid, last, n)
-	}
-	if n := counts[slotIncomplete]; n > 0 {
-		rec.ReadContent(ContentIncomplete, last, n)
-	}
-	if n := counts[slotMissing]; n > 0 {
-		rec.ReadContent(ContentMissing, last, n)
-	}
-	if counts[slotTooLate] > 0 {
-		rec.Read(mxl.ErrOutOfRangeLate, from, 1)
-	}
-	if n := counts[slotComplete] + counts[slotTooLate]; n > 0 {
-		rec.Skipped(n)
-	}
-}

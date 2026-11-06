@@ -109,11 +109,8 @@ func (f *fakeLink) snapshot() (posted []uint64, progress int) {
 // recordingTracker captures what a transfer loop reports.
 type recordingTracker struct {
 	mu sync.Mutex
-	// rec receives the recorder calls; slots answers slot, everything
-	// not in it complete; acct is accounted.
-	rec   recordingSource
-	slots map[uint64]slotState
-	acct  uint64
+	// rec receives the recorder calls.
+	rec recordingSource
 
 	completed []uint64
 	bytes     uint64

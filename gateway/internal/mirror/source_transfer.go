@@ -288,12 +288,6 @@ func runTransferLoop(
 	tracker.recordHead(head0, time.Now())
 
 	rec := tracker.source()
-	// A loop rebuilt after its target was lost resumes at the head; the
-	// grains between the last one accounted for and it were never sent.
-	if from := tracker.accounted(); from > 0 && head0 > from {
-		accountPassedOver(rec, tracker.slot, from+1, head0+1)
-	}
-	tracker.recordAccounted(head0)
 
 	// start is the slice the next batch of grain lastSent+1 starts at.
 	var start uint16
@@ -318,8 +312,7 @@ func runTransferLoop(
 					"lastSent", lastSent, "head", h)
 				tracker.recordAgedOut(time.Now())
 				tracker.recordPassedOver(unsentResync, uint64(h-next))
-				accountPassedOver(rec, tracker.slot, uint64(next), uint64(h))
-				tracker.recordAccounted(uint64(h - 1))
+				rec.Skipped(uint64(h - next))
 			}
 			next = h
 		}
@@ -331,8 +324,8 @@ func runTransferLoop(
 			l.Info("reader aged out, skipping grains", "fromIndex", next, "toIndex", h)
 			tracker.recordAgedOut(time.Now())
 			tracker.recordPassedOver(unsentAgedOut, uint64(h-next+1))
-			accountPassedOver(rec, tracker.slot, uint64(next), uint64(h)+1)
-			tracker.recordAccounted(uint64(h))
+			rec.Read(mxl.ErrOutOfRangeLate, uint64(next), 1)
+			rec.Skipped(uint64(h - next + 1))
 			lastSent, start = h, 0
 			continue
 		case errors.Is(err, errPost) && retryablePost(err):
@@ -345,7 +338,6 @@ func runTransferLoop(
 			l.Error(err, "TransferGrain", "class", classifyFabricError(err).String(), "index", next)
 			tracker.recordPostFailed(err)
 			tracker.recordDropped(false)
-			tracker.recordAccounted(uint64(next))
 			return
 		case errors.Is(err, mxl.ErrTimeout):
 			// Not written yet; the read already waited for it. A grain
@@ -378,14 +370,12 @@ func runTransferLoop(
 					tracker.recordTargetEvicted()
 				}
 				tracker.recordDropped(true)
-				tracker.recordAccounted(uint64(next))
 			}
 			return
 		}
 		tracker.recordCompleted(uint64(next), step.bytes, late, time.Now())
 		start = step.next
 		if done {
-			tracker.recordAccounted(uint64(next))
 			lastSent = next
 		}
 	}
@@ -438,16 +428,6 @@ func runSampleTransferLoop(
 	tracker.recordHead(head0, time.Now())
 
 	rec := tracker.source()
-	// A loop rebuilt after its target was lost resumes at the head; the
-	// samples between the last ones accounted for and it were never
-	// sent.
-	if from := tracker.accounted(); from > 0 && head0 > from {
-		if head0-from > maxReadable {
-			rec.Read(mxl.ErrOutOfRangeLate, from+1, 1)
-		}
-		rec.Skipped(head0 - from)
-	}
-	tracker.recordAccounted(head0)
 
 	for ctx.Err() == nil {
 		head, err := probeRuntime()
@@ -472,7 +452,6 @@ func runSampleTransferLoop(
 			rec.Read(mxl.ErrOutOfRangeLate, lastSent+1, 1)
 			rec.Skipped(head - agedOut - lastSent)
 			lastSent = head - agedOut
-			tracker.recordAccounted(lastSent)
 		}
 
 		end := lastSent + xferBatch
@@ -488,7 +467,6 @@ func runSampleTransferLoop(
 				"headIndex", end, "count", xferBatch)
 			tracker.recordPostFailed(err)
 			tracker.recordDropped(false)
-			tracker.recordAccounted(end)
 			return
 		}
 		rec.Read(nil, end, xferBatch)
@@ -502,12 +480,10 @@ func runSampleTransferLoop(
 					tracker.recordTargetEvicted()
 				}
 				tracker.recordDropped(true)
-				tracker.recordAccounted(end)
 			}
 			return
 		}
 		tracker.recordCompleted(end, bytes, late, time.Now())
-		tracker.recordAccounted(end)
 		lastSent = end
 	}
 }

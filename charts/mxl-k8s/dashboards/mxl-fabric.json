@@ -3180,7 +3180,7 @@
     {
       "id": 44,
       "type": "row",
-      "title": "Loss attribution",
+      "title": "Replication",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -3193,8 +3193,8 @@
     {
       "id": 45,
       "type": "stat",
-      "title": "Fabric loss",
-      "description": "Units a mirror's source jumped over (complete or already reused), plus units it read complete that its target never committed complete, over the units it read complete or jumped over. Counts from the source and the target node are compared over the same window, so a short window shows the units in flight at its edges. Units the writer never completed are not in it.",
+      "title": "Read invalid at the source",
+      "description": "Units the gateway read that the ring held invalid or incomplete, over the units it read: grains the writer did not complete. Grains inside a jump to the head are not read and not in this.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -3254,7 +3254,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum((sum by (flow) (increase(mxl_gateway_source_skipped_total{node=~\"$node\"}[$__range]))) + on(flow) (clamp_min(sum by (flow) (increase(mxl_gateway_source_reads_total{node=~\"$node\",result=\"ok\"}[$__range])) - on(flow) (sum by (flow) (increase(mxl_gateway_target_writes_total{result=\"ok\"}[$__range]))), 0))) / sum((sum by (flow) (increase(mxl_gateway_source_reads_total{node=~\"$node\",result=\"ok\"}[$__range]))) + on(flow) (sum by (flow) (increase(mxl_gateway_source_skipped_total{node=~\"$node\"}[$__range]))))",
+          "expr": "(sum(increase(mxl_gateway_source_reads_total{node=~\"$node\",result=~\"invalid|incomplete|missing\"}[$__range])) or vector(0)) / (sum(increase(mxl_gateway_source_reads_total{node=~\"$node\",result=~\"ok|invalid|incomplete|missing\"}[$__range])) or vector(0))",
           "legendFormat": "",
           "instant": true,
           "range": false
@@ -3264,8 +3264,8 @@
     {
       "id": 46,
       "type": "stat",
-      "title": "Not complete at the source",
-      "description": "Units the source ring held invalid, incomplete or not at all when the gateway read them: the writer's loss, over every unit the source met.",
+      "title": "Skipped at the source",
+      "description": "Skipped units over the units read or skipped, in the range. Skipped units were jumped over to reach the head again: the loop trailed the head, or the slot was reused before it was read. The gateway does not read them, so a resync over grains the writer skipped counts here too.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -3325,7 +3325,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(increase(mxl_gateway_source_reads_total{node=~\"$node\",result=~\"invalid|incomplete|missing\"}[$__range])) or vector(0)) / ((sum(increase(mxl_gateway_source_reads_total{node=~\"$node\",result=~\"ok|invalid|incomplete|missing\"}[$__range])) or vector(0)) + (sum(increase(mxl_gateway_source_skipped_total{node=~\"$node\"}[$__range])) or vector(0)))",
+          "expr": "(sum(increase(mxl_gateway_source_skipped_total{node=~\"$node\"}[$__range])) or vector(0)) / ((sum(increase(mxl_gateway_source_skipped_total{node=~\"$node\"}[$__range])) or vector(0)) + (sum(increase(mxl_gateway_source_reads_total{node=~\"$node\",result=~\"ok|invalid|incomplete|missing\"}[$__range])) or vector(0)))",
           "legendFormat": "",
           "instant": true,
           "range": false
@@ -3467,8 +3467,8 @@
     {
       "id": 49,
       "type": "timeseries",
-      "title": "Fabric loss per path",
-      "description": "Units a mirror's source jumped over (complete or already reused), plus units it read complete that its target never committed complete, over the units it read complete or jumped over. Counts from the source and the target node are compared over the same window, so a short window shows the units in flight at its edges. Units the writer never completed are not in it. Per source and target node over 5 minutes; needs the operator's metrics for the path.",
+      "title": "Source units by outcome",
+      "description": "What the mirrors' source handles counted per second: read complete, read invalid, and skipped. Skipped units were jumped over to reach the head again: the loop trailed the head, or the slot was reused before it was read. The gateway does not read them, so a resync over grains the writer skipped counts here too.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -3477,86 +3477,6 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 108
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 10,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            },
-            "thresholdsStyle": {
-              "mode": "dashed"
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "transparent",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 0.01
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (source_node, target_node) (((sum by (flow) (increase(mxl_gateway_source_skipped_total{node=~\"$node\"}[5m]))) + on(flow) (clamp_min(sum by (flow) (increase(mxl_gateway_source_reads_total{node=~\"$node\",result=\"ok\"}[5m])) - on(flow) (sum by (flow) (increase(mxl_gateway_target_writes_total{result=\"ok\"}[5m]))), 0))) * on(flow) group_left(source_node, target_node) max by (flow, source_node, target_node) (label_join(mxl_operator_mirror_placement_info, \"flow\", \"/\", \"namespace\", \"mirror\"))) / sum by (source_node, target_node) (((sum by (flow) (increase(mxl_gateway_source_reads_total{node=~\"$node\",result=\"ok\"}[5m]))) + on(flow) (sum by (flow) (increase(mxl_gateway_source_skipped_total{node=~\"$node\"}[5m])))) * on(flow) group_left(source_node, target_node) max by (flow, source_node, target_node) (label_join(mxl_operator_mirror_placement_info, \"flow\", \"/\", \"namespace\", \"mirror\")))",
-          "legendFormat": "{{source_node}} -> {{target_node}}",
-          "range": true
-        }
-      ]
-    },
-    {
-      "id": 50,
-      "type": "timeseries",
-      "title": "Source units by outcome",
-      "description": "What the mirrors' source handles counted per second: read complete (ok), jumped over (skipped), and not complete at the source.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
         "y": 108
       },
       "fieldConfig": {
@@ -3612,148 +3532,24 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
+          "expr": "sum by (result) (rate(mxl_gateway_source_reads_total{node=~\"$node\",result=~\"invalid|incomplete|missing\"}[$__rate_interval]))",
+          "legendFormat": "read {{result}}",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
           "expr": "sum(rate(mxl_gateway_source_skipped_total{node=~\"$node\"}[$__rate_interval]))",
           "legendFormat": "skipped",
           "range": true
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (result) (rate(mxl_gateway_source_reads_total{node=~\"$node\",result=~\"invalid|incomplete|missing\"}[$__rate_interval]))",
-          "legendFormat": "not complete at the source: {{result}}",
-          "range": true
         }
       ]
     },
     {
-      "id": 51,
-      "type": "table",
-      "title": "Loss per mirror",
-      "description": "Units per mirror over the time range. flow is the mirror, as <namespace>/<name>; read and skipped come from its source node, written from its target node.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 116
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm",
-        "footer": {
-          "show": false
-        },
-        "sortBy": [
-          {
-            "displayName": "skipped",
-            "desc": true
-          }
-        ]
-      },
-      "transformations": [
-        {
-          "id": "merge",
-          "options": {}
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true
-            },
-            "renameByName": {
-              "Value #A": "read complete",
-              "Value #B": "skipped",
-              "Value #C": "not complete at source",
-              "Value #D": "written complete",
-              "Value #E": "written invalid"
-            }
-          }
-        }
-      ],
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (flow) (increase(mxl_gateway_source_reads_total{node=~\"$node\",result=\"ok\"}[$__range]))",
-          "legendFormat": "",
-          "instant": true,
-          "range": false,
-          "format": "table"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (flow) (increase(mxl_gateway_source_skipped_total{node=~\"$node\"}[$__range]))",
-          "legendFormat": "",
-          "instant": true,
-          "range": false,
-          "format": "table"
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (flow) (increase(mxl_gateway_source_reads_total{node=~\"$node\",result=~\"invalid|incomplete|missing\"}[$__range]))",
-          "legendFormat": "",
-          "instant": true,
-          "range": false,
-          "format": "table"
-        },
-        {
-          "refId": "D",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (flow) (increase(mxl_gateway_target_writes_total{result=\"ok\"}[$__range]))",
-          "legendFormat": "",
-          "instant": true,
-          "range": false,
-          "format": "table"
-        },
-        {
-          "refId": "E",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (flow) (increase(mxl_gateway_target_invalid_input_total[$__range]))",
-          "legendFormat": "",
-          "instant": true,
-          "range": false,
-          "format": "table"
-        }
-      ]
-    },
-    {
-      "id": 52,
+      "id": 50,
       "type": "timeseries",
       "title": "Target writes",
       "description": "Commits on the target per second by result, and arrivals committed invalid by issue: invalid from the source, missing where a later write overtook the slot.",
@@ -3764,8 +3560,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 124
+        "x": 12,
+        "y": 108
       },
       "fieldConfig": {
         "defaults": {
@@ -3827,7 +3623,131 @@
       ]
     },
     {
-      "id": 53,
+      "id": 51,
+      "type": "table",
+      "title": "Units per mirror",
+      "description": "Units per mirror over the time range. flow is the mirror, as <namespace>/<name>; read and skipped come from its source node, written from its target node. Skipped units were jumped over to reach the head again: the loop trailed the head, or the slot was reused before it was read. The gateway does not read them, so a resync over grains the writer skipped counts here too.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 116
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "skipped",
+            "desc": true
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "Value #A": "read complete",
+              "Value #B": "read invalid",
+              "Value #C": "skipped",
+              "Value #D": "written complete",
+              "Value #E": "written invalid"
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (flow) (increase(mxl_gateway_source_reads_total{node=~\"$node\",result=\"ok\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (flow) (increase(mxl_gateway_source_reads_total{node=~\"$node\",result=~\"invalid|incomplete|missing\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (flow) (increase(mxl_gateway_source_skipped_total{node=~\"$node\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (flow) (increase(mxl_gateway_target_writes_total{result=\"ok\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (flow) (increase(mxl_gateway_target_invalid_input_total[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 52,
       "type": "timeseries",
       "title": "Source arrival and target commit latency (p95)",
       "description": "95th percentile of when the gateway read a unit at the source, and committed it at the target, after its media timestamp. The difference is what the fabric and the target add.",
@@ -3838,7 +3758,7 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
+        "x": 0,
         "y": 124
       },
       "fieldConfig": {
@@ -3901,7 +3821,7 @@
       ]
     },
     {
-      "id": 54,
+      "id": 53,
       "type": "timeseries",
       "title": "Writer late at the source per mirror",
       "description": "Grains the gateway still waited for a grace period after their media timestamp, per mirror: the writer's lateness, not the fabric's.",
@@ -3910,10 +3830,10 @@
         "uid": "prometheus"
       },
       "gridPos": {
-        "h": 7,
-        "w": 24,
-        "x": 0,
-        "y": 132
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -3965,7 +3885,7 @@
       ]
     },
     {
-      "id": 55,
+      "id": 54,
       "type": "row",
       "title": "Mirrors",
       "collapsed": false,
@@ -3973,12 +3893,12 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 139
+        "y": 132
       },
       "panels": []
     },
     {
-      "id": 56,
+      "id": 55,
       "type": "table",
       "title": "Mirror placement",
       "description": "Every mirror with its ports, Placed reason and phase. Ports are named as on the port panels. The flow id links to the flow dashboard.",
@@ -3990,7 +3910,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 140
+        "y": 133
       },
       "fieldConfig": {
         "defaults": {
@@ -4056,7 +3976,7 @@
       ]
     },
     {
-      "id": 57,
+      "id": 56,
       "type": "timeseries",
       "title": "Delivered vs demand per mirror",
       "description": "Payload committed on the target per mirror over the demand placement charged it. Demand includes the protocol overhead, and a data flow's rate is an upper bound, so a fully delivered flow reads somewhat below 100%. Mirrors of one flow between the same two nodes are summed on both sides.",
@@ -4068,7 +3988,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 148
+        "y": 141
       },
       "fieldConfig": {
         "defaults": {
@@ -4140,7 +4060,7 @@
       ]
     },
     {
-      "id": 58,
+      "id": 57,
       "type": "timeseries",
       "title": "Delivered per mirror",
       "description": "Payload committed on the target per mirror (solid) and the demand charged (dashed).",
@@ -4152,7 +4072,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 148
+        "y": 141
       },
       "fieldConfig": {
         "defaults": {
@@ -4237,7 +4157,7 @@
       ]
     },
     {
-      "id": 59,
+      "id": 58,
       "type": "timeseries",
       "title": "Late and lost transfers",
       "description": "Transfers per second that completed after their grain or batch interval (late) or were outstanding when a target was given up (lost), per mirror source.",
@@ -4249,7 +4169,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 156
+        "y": 149
       },
       "fieldConfig": {
         "defaults": {
@@ -4301,7 +4221,7 @@
       ]
     },
     {
-      "id": 60,
+      "id": 59,
       "type": "timeseries",
       "title": "Completion lag",
       "description": "Grains between the source head and the last grain completed to the target, per mirror.",
@@ -4313,7 +4233,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 156
+        "y": 149
       },
       "fieldConfig": {
         "defaults": {
@@ -4365,7 +4285,7 @@
       ]
     },
     {
-      "id": 61,
+      "id": 60,
       "type": "row",
       "title": "Redundancy sets",
       "collapsed": false,
@@ -4373,12 +4293,12 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 164
+        "y": 157
       },
       "panels": []
     },
     {
-      "id": 62,
+      "id": 61,
       "type": "table",
       "title": "Path disjointness",
       "description": "Whether the member mirrors of each MxlFlowRedundancySet arriving on one node use separate fabric ports, with the reason the operator gives.",
@@ -4390,7 +4310,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 165
+        "y": 158
       },
       "fieldConfig": {
         "defaults": {
@@ -4473,7 +4393,7 @@
       ]
     },
     {
-      "id": 63,
+      "id": 62,
       "type": "state-timeline",
       "title": "Disjointness over time",
       "description": "Path disjointness per redundancy set.",
@@ -4485,7 +4405,7 @@
         "h": 8,
         "w": 16,
         "x": 8,
-        "y": 165
+        "y": 158
       },
       "fieldConfig": {
         "defaults": {
@@ -4552,7 +4472,7 @@
       ]
     },
     {
-      "id": 64,
+      "id": 63,
       "type": "row",
       "title": "Placement",
       "collapsed": false,
@@ -4560,12 +4480,12 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 173
+        "y": 166
       },
       "panels": []
     },
     {
-      "id": 65,
+      "id": 64,
       "type": "timeseries",
       "title": "Placement latency",
       "description": "Time from a mirror's creation to its first placement, by percentile.",
@@ -4577,7 +4497,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 174
+        "y": 167
       },
       "fieldConfig": {
         "defaults": {
@@ -4649,7 +4569,7 @@
       ]
     },
     {
-      "id": 66,
+      "id": 65,
       "type": "timeseries",
       "title": "Placements",
       "description": "First placements per minute.",
@@ -4661,7 +4581,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 174
+        "y": 167
       },
       "fieldConfig": {
         "defaults": {
@@ -4713,7 +4633,7 @@
       ]
     },
     {
-      "id": 67,
+      "id": 66,
       "type": "timeseries",
       "title": "Mirrors by Placed reason",
       "description": "MxlFlowMirrors by the reason of their Placed condition.",
@@ -4725,7 +4645,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 174
+        "y": 167
       },
       "fieldConfig": {
         "defaults": {
@@ -4777,7 +4697,7 @@
       ]
     },
     {
-      "id": 68,
+      "id": 67,
       "type": "timeseries",
       "title": "Mirrors by phase",
       "description": "MxlFlowMirrors by phase.",
@@ -4789,7 +4709,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 182
+        "y": 175
       },
       "fieldConfig": {
         "defaults": {

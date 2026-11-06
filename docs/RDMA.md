@@ -555,28 +555,25 @@ replication roles: one handle per mirror on the node that sources it
 for a discrete flow and samples for a continuous one. The families,
 their labels and result values are the library's, with `node` added.
 
-Every unit the source transfer loop meets is counted once:
+What the source transfer loop counts:
 
 | Series | Unit counted |
 | --- | --- |
 | `mxl_gateway_source_reads_total{result="ok"}` | read complete and offered to the target |
-| `mxl_gateway_source_reads_total{result=~"invalid\|incomplete\|missing"}` | the ring held it invalid, incomplete or not at all: the writer's |
-| `mxl_gateway_source_skipped_total` | jumped over to reach the head again, complete or already reused: never sent |
+| `mxl_gateway_source_reads_total{result="invalid"}` | read flagged invalid: the writer left it incomplete or jumped over it, and only its header is sent |
+| `mxl_gateway_source_skipped_total` | jumped over to reach the head again: the loop trailed the head by more than 4 grains, or the slot was reused before it was read |
+| `mxl_gateway_source_reads_total{result="too_late"}` | one per jump over a reused slot |
 
-`skipped` covers both the resync (the loop trailed the head by more
-than 4 grains) and a slot reused before the loop read it; a pass-over
-that met a reused slot also counts one `too_late` read. libmxl's writer
-flags the grains it jumps over or leaves incomplete invalid, and a
-grain passed over is classified by a non-blocking read of its slot, so
-a grain the writer never completed is never counted as skipped.
+The loop does not read the grains it jumps over, so `skipped` also
+holds grains the writer itself skipped when the jump came from a
+resync. Fabric loss can therefore not be separated from the writer's
+with these series, and the dashboard shows none.
 
 On the target, `mxl_gateway_target_writes_total{result="ok"}` counts
 units committed complete, including an arrival a second mirror of the
 flow committed first, and `mxl_gateway_target_invalid_input_total`
 arrivals committed invalid (`invalid` from the source, `missing` for a
-slot a later write overtook). The dashboard's fabric loss is
-`skipped` plus source `ok` that never became target `ok`, over source
-`ok` plus `skipped`, compared per mirror over the same window.
+slot a later write overtook).
 
 `mxl_gateway_source_reads_total{result="too_early"}` counts a grain the
 gateway still waited for a grace period (one grain, or one batch of
