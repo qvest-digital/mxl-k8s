@@ -2,6 +2,7 @@ package placement
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -9,6 +10,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -76,6 +79,101 @@ func TestReconcileCountsItsOwnWritesTheCacheHasNotShown(t *testing.T) {
 	require.Equal(t, "192.0.2.1", first.SourceInterface)
 	require.NotEqual(t, first.SourceInterface, second.SourceInterface, "the second mirror takes the rail the first one was just written to")
 	require.NotEqual(t, first.TargetInterface, second.TargetInterface)
+}
+
+// placementSamples is the number of observations placementSeconds holds.
+func placementSamples(t *testing.T) uint64 {
+	t.Helper()
+	var d dto.Metric
+	require.NoError(t, placementSeconds.Write(&d))
+	return d.GetHistogram().GetSampleCount()
+}
+
+// fakeMirrors builds a client holding two nodes with one rail each, a
+// flow publishing its rate for each mirror, and the mirrors.
+func fakeMirrors(t *testing.T, funcs interceptor.Funcs, mirrors ...*mxlv1alpha1.MxlFlowMirror) client.WithWatch {
+	t.Helper()
+	s := runtime.NewScheme()
+	utilruntime.Must(mxlv1alpha1.AddToScheme(s))
+	objs := []client.Object{capsObj("src", twoRails(1)...), capsObj("tgt", twoRails(2)...)}
+	for _, m := range mirrors {
+		objs = append(objs, &mxlv1alpha1.MxlFlow{ObjectMeta: metav1.ObjectMeta{Name: m.Spec.FlowID},
+			Spec:   mxlv1alpha1.MxlFlowSpec{ID: m.Spec.FlowID, Definition: runtime.RawExtension{Raw: []byte(`{}`)}},
+			Status: mxlv1alpha1.MxlFlowStatus{BitsPerSecond: gbit}}, m)
+	}
+	return fake.NewClientBuilder().WithScheme(s).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}, &mxlv1alpha1.MxlNodeCapabilities{}, &mxlv1alpha1.MxlFlow{}).
+		WithObjects(objs...).WithInterceptorFuncs(funcs).Build()
+}
+
+func mirrorCreatedAt(n int, at time.Time) *mxlv1alpha1.MxlFlowMirror {
+	return &mxlv1alpha1.MxlFlowMirror{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: flowID(n), CreationTimestamp: metav1.NewTime(at)},
+		Spec: mxlv1alpha1.MxlFlowMirrorSpec{FlowID: flowID(n), SourceNode: "src", TargetNode: "tgt", Provider: tcp}}
+}
+
+// A mirror that existed before the controller started, and is placed
+// for the first time once it runs, did not wait on placement for its
+// whole age; only a mirror created since the start measures placement
+// latency.
+func TestReconcileObservesPlacementOnlyOfMirrorsCreatedSinceStart(t *testing.T) {
+	start := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	now := start
+	c := fakeMirrors(t, interceptor.Funcs{}, mirrorCreatedAt(1, start.Add(-time.Hour)), mirrorCreatedAt(2, start.Add(time.Second)))
+	r := &Reconciler{Client: c, Settings: defaults, DemandWait: time.Second, now: func() time.Time { return now }}
+	reconcileAndGet := func(n int) *mxlv1alpha1.MxlFlowMirror {
+		key := types.NamespacedName{Namespace: "ns", Name: flowID(n)}
+		_, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+		require.NoError(t, err)
+		var m mxlv1alpha1.MxlFlowMirror
+		require.NoError(t, c.Get(context.Background(), key, &m))
+		return &m
+	}
+
+	before := placementSamples(t)
+	require.NotNil(t, reconcileAndGet(1).Spec.Placement)
+	require.Equal(t, before, placementSamples(t), "a mirror older than the controller adds no sample")
+
+	now = start.Add(2 * time.Second)
+	require.NotNil(t, reconcileAndGet(2).Spec.Placement)
+	require.Equal(t, before+1, placementSamples(t), "a mirror created since the start adds one sample")
+}
+
+// A write to the mirror between the read and the placement patch, such
+// as a gateway's status update, fails the patch's optimistic lock. That
+// is a retry, not a reconciler error, and leaves nothing behind that
+// claims the mirror was placed.
+func TestReconcileRequeuesQuietlyOnConflict(t *testing.T) {
+	start := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	now := start
+	conflicts := 1
+	c := fakeMirrors(t, interceptor.Funcs{Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+		if _, ok := obj.(*mxlv1alpha1.MxlFlowMirror); ok && conflicts > 0 {
+			conflicts--
+			return apierrors.NewConflict(mxlv1alpha1.GroupVersion.WithResource("mxlflowmirrors").GroupResource(), obj.GetName(),
+				errors.New("the object has been modified"))
+		}
+		return cl.Patch(ctx, obj, patch, opts...)
+	}}, mirrorCreatedAt(1, start))
+	r := &Reconciler{Client: c, Settings: defaults, DemandWait: time.Second, now: func() time.Time { return now }}
+	key := types.NamespacedName{Namespace: "ns", Name: flowID(1)}
+	before := placementSamples(t)
+
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.Positive(t, res.RequeueAfter, "a conflict is retried")
+	var m mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &m))
+	require.Nil(t, m.Spec.Placement)
+	require.Nil(t, meta.FindStatusCondition(m.Status.Conditions, mxlv1alpha1.ConditionTypePlaced))
+	require.Empty(t, r.written, "a placement that was not written is not remembered")
+	require.Equal(t, before, placementSamples(t))
+
+	now = start.Add(time.Second)
+	_, err = r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.NoError(t, c.Get(context.Background(), key, &m))
+	require.NotNil(t, m.Spec.Placement)
+	require.Equal(t, before+1, placementSamples(t))
 }
 
 // The gateway rewrites lastSeen on every resync and the agents rewrite

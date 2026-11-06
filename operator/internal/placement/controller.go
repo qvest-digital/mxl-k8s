@@ -44,6 +44,9 @@ const (
 	// overlayTTL bounds how long a placement this controller wrote is
 	// trusted over a cache that has not shown it yet.
 	overlayTTL = 30 * time.Second
+	// conflictRetry is how soon a placement whose patch lost to a
+	// concurrent write to the mirror is tried again.
+	conflictRetry = 100 * time.Millisecond
 )
 
 // Reconciler places MxlFlowMirrors on fabric interface pairs.
@@ -67,6 +70,10 @@ type Reconciler struct {
 	RedundancySets bool
 
 	now func() time.Time
+	// started is when the first reconcile ran. A mirror created before
+	// it is not timed: its first placement measures how long the
+	// controller was not running, not how long placement took.
+	started time.Time
 
 	gauges gauges
 
@@ -96,6 +103,9 @@ func (r *Reconciler) clock() time.Time {
 
 // Reconcile places one mirror, or confirms the placement it has.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	if r.started.IsZero() {
+		r.started = r.clock()
+	}
 	var m mxlv1alpha1.MxlFlowMirror
 	if err := r.Get(ctx, req.NamespacedName, &m); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -148,7 +158,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if valid(bound) {
 			demand, _ := r.demand(ctx, &m)
 			request.Demand = demand
-			return ctrl.Result{}, r.commit(ctx, &m, *bound, request, outcomeFor(Check(ledger, r.Settings, request, *bound)), false)
+			return r.commit(ctx, &m, *bound, request, outcomeFor(Check(ledger, r.Settings, request, *bound)), false)
 		}
 	}
 
@@ -171,10 +181,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			fmt.Sprintf("No interface pair has room for %d bit/s", request.Demand), 0)
 	}
 	// Only a mirror's first placement measures how long placement took
-	// from its creation; one placed again after its interface went away
-	// would measure the age of the mirror.
-	first := !placedBefore(&m)
-	return ctrl.Result{}, r.commit(ctx, &m, d.Placement, request, d.Outcome, first)
+	// from its creation; one placed again after its interface went away,
+	// or one created before the controller started, would measure the
+	// age of the mirror. CreationTimestamp carries whole seconds from the
+	// apiserver's clock and started sub-second time from this process's
+	// clock, so the comparison runs at second resolution: a mirror created
+	// in the second of the first reconcile counts as new. Skew between the
+	// two clocks beyond that second moves the cut either way, and mirrors
+	// created while the cache synced before the first reconcile go
+	// untimed.
+	first := !placedBefore(&m) && !m.CreationTimestamp.Time.Before(r.started.Truncate(time.Second))
+	return r.commit(ctx, &m, d.Placement, request, d.Outcome, first)
 }
 
 // placedBefore reports whether m ever carried a placement: its Placed
@@ -208,11 +225,20 @@ func (r *Reconciler) confirm(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, 
 }
 
 // commit writes a placement and its condition.
-func (r *Reconciler) commit(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, p mxlv1alpha1.MxlFlowMirrorPlacement, req Request, outcome Outcome, observe bool) error {
+//
+// The patch carries the resourceVersion it was decided on, so a
+// placement set by someone else in between is not overwritten. A write
+// that bumped the version without touching the placement, such as a
+// gateway's status update, fails it as well; that is retried shortly
+// rather than reported as an error.
+func (r *Reconciler) commit(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, p mxlv1alpha1.MxlFlowMirrorPlacement, req Request, outcome Outcome, observe bool) (ctrl.Result, error) {
 	patch := client.MergeFromWithOptions(m.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	m.Spec.Placement = &p
 	if err := r.Patch(ctx, m, patch); err != nil {
-		return client.IgnoreNotFound(err)
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{RequeueAfter: conflictRetry}, nil
+		}
+		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	r.remember(client.ObjectKeyFromObject(m), Placed{SourceNode: m.Spec.SourceNode, TargetNode: m.Spec.TargetNode,
 		Provider: m.Spec.Provider, Placement: p, Demand: req.Demand})
@@ -223,7 +249,7 @@ func (r *Reconciler) commit(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, p
 		"flowID", m.Spec.FlowID, "sourceNode", m.Spec.SourceNode, "targetNode", m.Spec.TargetNode,
 		"sourceInterface", p.SourceInterface, "targetInterface", p.TargetInterface,
 		"demand", req.Demand, "outcome", outcome)
-	return r.condition(ctx, m, true, string(outcome), message(outcome, p, req.Demand), req.Demand)
+	return ctrl.Result{}, r.condition(ctx, m, true, string(outcome), message(outcome, p, req.Demand), req.Demand)
 }
 
 func message(o Outcome, p mxlv1alpha1.MxlFlowMirrorPlacement, demand int64) string {
