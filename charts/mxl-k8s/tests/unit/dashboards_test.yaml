@@ -34,6 +34,9 @@ tests:
     set:
       dashboards.enabled: true
       dashboards.datasourceUid: my-prom
+    documentSelector:
+      path: metadata.name
+      value: mxl-k8s-dashboard-mxl-flow-metrics
     asserts:
       - matchRegex:
           path: data["mxl-flow-metrics.json"]
@@ -47,7 +50,42 @@ tests:
   - it: keeps grafana legend formats intact
     set:
       dashboards.enabled: true
+    documentSelector:
+      path: metadata.name
+      value: mxl-k8s-dashboard-mxl-flow-metrics
     asserts:
       - matchRegex:
           path: data["mxl-flow-metrics.json"]
           pattern: '\{\{node\}\}'
+
+  # Every JSON under dashboards/ ships as its own ConfigMap.
+  - it: ships the flow and the fabric dashboard
+    set:
+      dashboards.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: metadata.name
+          value: mxl-k8s-dashboard-mxl-fabric
+        documentSelector:
+          path: metadata.name
+          value: mxl-k8s-dashboard-mxl-fabric
+
+  - it: rewrites the datasource uid in the fabric dashboard and keeps its legends
+    set:
+      dashboards.enabled: true
+      dashboards.datasourceUid: my-prom
+    documentSelector:
+      path: metadata.name
+      value: mxl-k8s-dashboard-mxl-fabric
+    asserts:
+      - matchRegex:
+          path: data["mxl-fabric.json"]
+          pattern: '"uid": "my-prom"'
+      - notMatchRegex:
+          path: data["mxl-fabric.json"]
+          pattern: '"uid": "prometheus"'
+      - matchRegex:
+          path: data["mxl-fabric.json"]
+          pattern: '\{\{node\}\} \{\{link\}\}'

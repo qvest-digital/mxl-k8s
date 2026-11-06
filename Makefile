@@ -259,6 +259,7 @@ kind-status:
 kind-grafana:
 	@echo "Grafana on http://$(KIND_GRAFANA_HOST):$(KIND_GRAFANA_PORT)  (admin / admin)"
 	@echo "Flow dashboard: http://$(KIND_GRAFANA_HOST):$(KIND_GRAFANA_PORT)/d/mxl-flow-metrics"
+	@echo "Fabric dashboard: http://$(KIND_GRAFANA_HOST):$(KIND_GRAFANA_PORT)/d/mxl-fabric"
 	@test "$(KIND_GRAFANA_ADDRESS)" = "127.0.0.1" || \
 	    echo "Bound on $(KIND_GRAFANA_ADDRESS): reachable from other hosts, with the default admin password. KIND_GRAFANA_ADDRESS=127.0.0.1 keeps it local."
 	kubectl --context kind-$(KIND_CLUSTER) -n monitoring port-forward \

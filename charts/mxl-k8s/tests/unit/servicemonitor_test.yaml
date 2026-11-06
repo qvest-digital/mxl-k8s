@@ -30,3 +30,20 @@ tests:
       - equal:
           path: metadata.labels.release
           value: prometheus-stack
+
+  - it: gateway series carry the variant of their pod
+    set:
+      gateway.metrics.serviceMonitor.enabled: true
+      gateway.metrics.serviceMonitor.relabelings:
+        - targetLabel: cluster
+          replacement: c1
+    template: templates/servicemonitor-gateway.yaml
+    asserts:
+      - equal:
+          path: spec.endpoints[0].relabelings[0]
+          value:
+            sourceLabels: [__meta_kubernetes_pod_label_mxl_qvest_digital_com_gateway_variant]
+            targetLabel: variant
+      - equal:
+          path: spec.endpoints[0].relabelings[1].targetLabel
+          value: cluster

@@ -4,7 +4,7 @@
   },
   "editable": false,
   "graphTooltip": 1,
-  "links": [],
+  "links": [{"type": "dashboards", "tags": ["mxl"], "title": "MXL dashboards", "asDropdown": false, "keepTime": true, "includeVars": false, "targetBlank": false, "icon": "external link"}],
   "title": "MXL Flow Metrics",
   "uid": "mxl-flow-metrics",
   "tags": [
