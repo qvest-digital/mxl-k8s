@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -128,6 +129,28 @@ type Publisher struct {
 	lastProbe time.Time
 	cached    []mxlv1alpha1.MxlFabricsProviderCapability
 	budgets   []mxlv1alpha1.MxlFabricBudget
+
+	// published is a copy of what the last probe produced, for readers
+	// outside that goroutine.
+	publishedMu sync.Mutex
+	published   *Published
+}
+
+// Published is what a probe produced for the node's status.
+type Published struct {
+	Providers []mxlv1alpha1.MxlFabricsProviderCapability
+	Budgets   []mxlv1alpha1.MxlFabricBudget
+}
+
+// Published returns what the last probe produced, and false before the
+// first.
+func (p *Publisher) Published() (Published, bool) {
+	p.publishedMu.Lock()
+	defer p.publishedMu.Unlock()
+	if p.published == nil {
+		return Published{}, false
+	}
+	return *p.published, true
 }
 
 // Name is the metadata.name used for the gateway's
@@ -473,6 +496,16 @@ func (p *Publisher) probe(ctx context.Context) ([]mxlv1alpha1.MxlFabricsProvider
 
 	p.cached = out
 	p.lastProbe = time.Now()
+	// Copied: the status update decodes its response into the slices it
+	// was handed.
+	pub := &Published{Budgets: make([]mxlv1alpha1.MxlFabricBudget, len(p.budgets))}
+	copy(pub.Budgets, p.budgets)
+	for _, c := range out {
+		pub.Providers = append(pub.Providers, *c.DeepCopy())
+	}
+	p.publishedMu.Lock()
+	p.published = pub
+	p.publishedMu.Unlock()
 	return out, nil
 }
 

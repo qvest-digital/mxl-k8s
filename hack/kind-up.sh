@@ -267,6 +267,11 @@ if [ "$MONITORING" = "1" ]; then
     --set gateway.metrics.serviceMonitor.enabled=true
     --set gateway.metrics.serviceMonitor.interval=15s
     --set "gateway.metrics.serviceMonitor.labels.release=${MONITORING_RELEASE}"
+    # The operator carries the placement and mirror state the fabric
+    # dashboard's planning panels read.
+    --set operator.metrics.serviceMonitor.enabled=true
+    --set operator.metrics.serviceMonitor.interval=15s
+    --set "operator.metrics.serviceMonitor.labels.release=${MONITORING_RELEASE}"
     --set dashboards.enabled=true
     --set "dashboards.namespace=${MONITORING_NAMESPACE}"
   )

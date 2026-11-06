@@ -36,6 +36,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/mirror"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/originhints"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/placeholder"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/portmetrics"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/rdma"
 )
 
@@ -220,23 +221,42 @@ func run(args []string) error {
 	// MxlNodeCapabilities publisher runs as a Manager Runnable so it
 	// joins the leader-election / shutdown lifecycle and only fires
 	// once the cache has synced.
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		pub := &capabilities.Publisher{
-			Client:             mgr.GetClient(),
-			APIReader:          mgr.GetAPIReader(),
-			Recorder:           mgr.GetEventRecorderFor("mxl-node-capabilities"),
-			NodeName:           cfg.NodeName,
-			Providers:          cfg.Providers,
-			Lister:             handles.Fabrics(),
-			Selector:           selector,
-			HostDevices:        rdma.Inventory{},
-			HostDeviceObserver: enumerationGate,
-			ProbePeriod:        cfg.ProbePeriod,
-			Capacities:         cfg.PortCapacities,
-			Budgets:            cfg.Budgets,
+	pub := &capabilities.Publisher{
+		Client:             mgr.GetClient(),
+		APIReader:          mgr.GetAPIReader(),
+		Recorder:           mgr.GetEventRecorderFor("mxl-node-capabilities"),
+		NodeName:           cfg.NodeName,
+		Providers:          cfg.Providers,
+		Lister:             handles.Fabrics(),
+		Selector:           selector,
+		HostDevices:        rdma.Inventory{},
+		HostDeviceObserver: enumerationGate,
+		ProbePeriod:        cfg.ProbePeriod,
+		Capacities:         cfg.PortCapacities,
+		Budgets:            cfg.Budgets,
 
-			MaxUtilizationPercent: cfg.MaxUtilizationPercent,
-		}
+		MaxUtilizationPercent: cfg.MaxUtilizationPercent,
+	}
+
+	// The fabric ports the publisher last probed, the links under them
+	// and their kernel counters, read on scrape. The ethtool connection
+	// opens on the first scrape; a kernel or driver without those
+	// statistics leaves their series out.
+	ethtool := &portmetrics.Netlink{}
+	defer func() { _ = ethtool.Close() }()
+	metrics.Registry.MustRegister(&portmetrics.Collector{
+		NodeName: cfg.NodeName,
+		Snapshot: func() (portmetrics.Snapshot, bool) {
+			p, ok := pub.Published()
+			return portmetrics.Snapshot{Providers: p.Providers, Budgets: p.Budgets,
+				MaxUtilizationPercent: cfg.MaxUtilizationPercent}, ok
+		},
+		Sysfs:   portmetrics.Sysfs{NetdevOf: portmetrics.NetdevByAddress},
+		Ethtool: ethtool,
+		Log:     ctrl.Log.WithName("portmetrics"),
+	})
+
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		if err := pub.EnsureExists(ctx); err != nil {
 			return err
 		}

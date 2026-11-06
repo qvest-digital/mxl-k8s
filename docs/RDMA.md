@@ -474,15 +474,73 @@ placement existed keeps the interfaces it is bound to.
 
 ### Metrics
 
-| Metric | Labels | From |
+Series per metric are bounded as the last column says: N is the nodes
+reporting capabilities, P the ports a node reports, L the links under
+them, B a node's shared budgets, M the MxlFlowMirrors, S the
+MxlFlowRedundancySets.
+
+Operator, placement as committed (the leader's replica only):
+
+| Metric | Labels | Series |
 | --- | --- | --- |
-| `mxl_operator_mirror_placement_seconds` | | operator: time from a mirror's creation to its placement |
-| `mxl_operator_port_committed_bits_per_second` | `node`, `port`, `direction` | operator: demand placed |
-| `mxl_operator_port_mirrors` | `node`, `port`, `direction` | operator: mirrors placed |
-| `mxl_operator_port_plannable_bits_per_second` | `node`, `port` | operator: capacity times utilization |
-| `mxl_gateway_interface_transmitted_bytes_total` | `node`, `interface` | gateway: bytes its live mirrors sent |
-| `mxl_gateway_interface_received_bytes_total` | `node`, `interface` | gateway: bytes its live mirrors committed |
-| `mxl_gateway_interface_mirrors` | `node`, `interface`, `direction` | gateway: mirrors bound |
+| `mxl_operator_port_committed_bits_per_second` | `node`, `port`, `direction` | N x P x 2 |
+| `mxl_operator_port_mirrors` | `node`, `port`, `direction` | N x P x 2 |
+| `mxl_operator_port_capacity_bits_per_second` | `node`, `port` | N x P; absent while capacity is unknown |
+| `mxl_operator_port_plannable_bits_per_second` | `node`, `port` | N x P; capacity times the node's ceiling |
+| `mxl_operator_node_max_utilization_ratio` | `node` | N; the node's own ceiling, or the operator's |
+| `mxl_operator_budget_capacity_bits_per_second`, `_plannable_bits_per_second` | `node`, `budget`, `scope`, `mode` | N x B |
+| `mxl_operator_budget_committed_bits_per_second` | `node`, `budget`, `scope`, `mode`, `direction` | N x B x 2 |
+| `mxl_operator_placement_max_utilization_ratio`, `_protocol_overhead_ratio`, `_provisional_demand_bits_per_second`, `_demand_wait_seconds` | | 1 each; the operator's flags |
+| `mxl_operator_placement_policy_info` | `overcommit`, `pairing` | 1 |
+| `mxl_operator_mirrors` | `phase`, `placement` | phases x Placed reasons; `None` where a mirror has neither yet |
+| `mxl_operator_mirror_demand_bits_per_second` | `namespace`, `mirror`, `domain`, `flow_id`, `source_node`, `target_node`, `provider` | M |
+| `mxl_operator_mirror_placement_info` | the above, `source_port`, `target_port`, `placement`, `phase` | M |
+| `mxl_operator_redundancyset_paths_disjoint` | `redundancyset`, `reason` | S |
+| `mxl_operator_mirror_placement_seconds` | | histogram: time from a mirror's creation to its first placement |
+
+Gateway, per node:
+
+| Metric | Labels | Series |
+| --- | --- | --- |
+| `mxl_gateway_fabric_port_info` | `node`, `provider`, `port`, `address`, `link`, `netdev`, `rdma_device`, `rdma_port`, `pci_address`, `numa_node` | one per published interface |
+| `mxl_gateway_fabric_max_utilization_ratio` | `node` | 1; absent when the gateway leaves it to the operator |
+| `mxl_gateway_fabric_budget_bits_per_second` | `node`, `budget`, `scope`, `mode` | B |
+| `mxl_gateway_link_received_bytes_total`, `_transmitted_bytes_total` | `node`, `link`, `source` | L x 3 |
+| `mxl_gateway_link_up`, `mxl_gateway_link_speed_bits_per_second`, `mxl_gateway_link_carrier_changes_total`, `mxl_gateway_link_xmit_wait_total` | `node`, `link` | L |
+| `mxl_gateway_link_errors_total` | `node`, `link`, `source`, `counter` | L x 15 |
+| `mxl_gateway_link_pause_frames_total` | `node`, `link`, `direction` | L x 2 |
+| `mxl_gateway_interface_transmitted_bytes_total`, `_received_bytes_total` | `node`, `interface` | addresses; bytes the live mirrors moved |
+| `mxl_gateway_interface_mirrors` | `node`, `interface`, `direction` | addresses x 2; mirrors bound |
+
+A port is what placement accounts load on: the device the provider
+names, or the address. A link is the physical port under it: the
+netdev, or the RDMA device where there is none. The tcp and verbs ports
+of one NIC are two ports on one link. Only interfaces backed by a
+device are links; a bridge, bond or veth has its info series with an
+empty `link` and no counters. An RDMA device over a bond (RoCE link
+aggregation) is the exception: its port names the bond as its netdev,
+so the link is the bond, with the RDMA device's counters and the bond's
+netdev statistics but no `mac` source, since a bond reports no MAC
+statistics. The member ports are not exported.
+
+A link's bytes are exported per `source`, because no one kernel
+interface counts the same traffic on every driver:
+
+| `source` | Kernel interface | Counts |
+| --- | --- | --- |
+| `mac` | ethtool netlink standard statistics, group `eth-mac` (`OctetsReceivedOK`, `OctetsTransmittedOK`) | Everything the MAC sent or received: the wire |
+| `rdma` | `/sys/class/infiniband/<dev>/ports/<n>/counters/port_{rcv,xmit}_data` times 4, or the port's `hw_counters/{rx,tx}_bytes` where the driver has no port counters | RDMA traffic only |
+| `netdev` | `/sys/class/net/<if>/statistics/{rx,tx}_bytes` | The kernel network stack's traffic; on some drivers RDMA traffic too, on others not |
+
+A source the kernel or driver does not report is absent, never zero.
+The dashboard reads `mac` where a link has it and otherwise the larger
+of `rdma` and `netdev`, a lower bound on the wire. `errors` are the
+netdev drop and error statistics, the RDMA port error counters
+(`port_rcv_errors`, `port_xmit_discards`, `symbol_error`,
+`link_downed`, ...) and the MAC's `FrameCheckSequenceErrors`. Pause
+frames are 802.3x pause only; per-priority flow control is not in the
+standard statistics. With a `gateway.variants` entry, the chart's
+ServiceMonitor labels every gateway series with `variant`.
 
 Utilization is the committed or measured rate over
 `capacityBitsPerSecond`, or over the plannable gauge.
