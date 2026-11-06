@@ -1382,7 +1382,9 @@ func (r *TargetReconciler) startProgressLoop(
 	var rec TargetRecorder = noopTarget{}
 	if r.Recorders != nil {
 		id := writer.Config().Common.ID
-		rec = r.Recorders.Target(key, fmt.Sprintf("%x-%x-%x-%x-%x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16]), writer.Config())
+		if t := r.Recorders.Target(key, fmt.Sprintf("%x-%x-%x-%x-%x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16]), writer.Config()); t != nil {
+			rec = t
+		}
 	}
 
 	onFatal := func() {

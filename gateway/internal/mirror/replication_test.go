@@ -100,7 +100,6 @@ func (rt *recordingTracker) recordAccounted(idx uint64) {
 	rt.acct = idx
 }
 
-
 // A resync passes over grains for two reasons that look alike in its
 // count: the loop fell behind (the grain was complete, a fabric-side
 // loss) or the writer jumped over them (libmxl flags them invalid, the

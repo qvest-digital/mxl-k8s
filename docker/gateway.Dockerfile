@@ -11,14 +11,20 @@ FROM ghcr.io/qvest-digital/go-mxl-builder:${GO_MXL_TAG} AS builder
 WORKDIR /workspace
 COPY api/ api/
 COPY gateway/ gateway/
+COPY hack/build-libmxl-monitoring.sh hack/
 WORKDIR /workspace/gateway
 ENV GOWORK=off
+# libmxl-monitoring's static libraries are built from the module
+# directory gateway/go.mod pins, so they match its Go binding.
 RUN git config --global --add safe.directory '*' && \
     go mod download && \
-    go build -trimpath -ldflags="-s -w" -o /out/mxl-fabrics-gateway ./cmd/mxl-fabrics-gateway
+    ../hack/build-libmxl-monitoring.sh /opt/libmxl-monitoring && \
+    CGO_LDFLAGS=-L/opt/libmxl-monitoring go build -trimpath -ldflags="-s -w" -o /out/mxl-fabrics-gateway ./cmd/mxl-fabrics-gateway
 
 FROM ghcr.io/qvest-digital/go-mxl-runtime:${GO_MXL_TAG}
 COPY --from=builder /out/mxl-fabrics-gateway /usr/local/bin/mxl-fabrics-gateway
+# libmxl-monitoring is linked statically (Apache-2.0).
+COPY --from=builder /opt/libmxl-monitoring/LICENSE /usr/share/licenses/libmxl-monitoring/LICENSE
 # The runtime preempts a long-running goroutine by sending its thread
 # SIGURG. The gateway's long-running goroutines sit in blocking libfabric
 # reads, where the signal cuts epoll_wait short with EINTR and libfabric

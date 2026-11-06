@@ -38,6 +38,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/placeholder"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/portmetrics"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/rdma"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/replmon"
 )
 
 var (
@@ -154,6 +155,17 @@ func run(args []string) error {
 	// the publisher advertises, and nothing else.
 	selector := cfg.Selector()
 
+	// Every mirror's reads, writes and copy outcomes, recorded through
+	// libmxl-monitoring and served beside controller-runtime's metrics.
+	replication, err := replmon.New(ctrl.Log.WithName("replmon"))
+	if err != nil {
+		return fmt.Errorf("libmxl-monitoring: %w", err)
+	}
+	metrics.Registry.MustRegister(&replmon.Collector{NodeName: cfg.NodeName, M: replication})
+	if err := mgr.Add(manager.RunnableFunc(replication.Run)); err != nil {
+		return fmt.Errorf("register libmxl-monitoring poller: %w", err)
+	}
+
 	targetReconciler := &mirror.TargetReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
@@ -164,6 +176,7 @@ func run(args []string) error {
 		DegradedAfter: cfg.DegradedAfter,
 		PlacementWait: cfg.PlacementWait,
 		Recorder:      mgr.GetEventRecorderFor("mxl-target-gateway"),
+		Recorders:     replication,
 	}
 	if err := targetReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup target reconciler: %w", err)
@@ -187,6 +200,7 @@ func run(args []string) error {
 		Domains:          domains,
 		ReaderStallAfter: cfg.ReaderStallAfter,
 		Recorder:         mgr.GetEventRecorderFor("mxl-source-gateway"),
+		Recorders:        replication,
 	}
 	if err := sourceReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup source reconciler: %w", err)
