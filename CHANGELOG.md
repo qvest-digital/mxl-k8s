@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.0-rc.45](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.44...v1.1.0-rc.45) (2026-11-06)
+
+
+### Features
+
+* **api:** describe fabric ports, flow rates and mirror placement ([#423](https://github.com/qvest-digital/mxl-k8s/issues/423)) ([f7ff416](https://github.com/qvest-digital/mxl-k8s/commit/f7ff41606c18eaf738e6fb4b0e58aedf65aa6ae0))
+* **chart:** expose fabric placement settings ([#424](https://github.com/qvest-digital/mxl-k8s/issues/424)) ([ff1ffa8](https://github.com/qvest-digital/mxl-k8s/commit/ff1ffa8dbc8564127ad9cc983069cd7dd7e75631))
+* **gateway:** bind each mirror to its placed fabric interface ([#424](https://github.com/qvest-digital/mxl-k8s/issues/424)) ([ff1ffa8](https://github.com/qvest-digital/mxl-k8s/commit/ff1ffa8dbc8564127ad9cc983069cd7dd7e75631))
+* **operator:** place each mirror on a fabric interface pair ([#424](https://github.com/qvest-digital/mxl-k8s/issues/424)) ([ff1ffa8](https://github.com/qvest-digital/mxl-k8s/commit/ff1ffa8dbc8564127ad9cc983069cd7dd7e75631))
+* **operator:** report whether redundancy members share an interface ([#424](https://github.com/qvest-digital/mxl-k8s/issues/424)) ([ff1ffa8](https://github.com/qvest-digital/mxl-k8s/commit/ff1ffa8dbc8564127ad9cc983069cd7dd7e75631))
+
 ## [1.1.0-rc.44](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.43...v1.1.0-rc.44) (2026-11-05)
 
 
