@@ -122,7 +122,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return p != nil && src.Has(m.Spec.Provider, p.SourceInterface) && tgt.Has(m.Spec.Provider, p.TargetInterface)
 	}
 
-	request, err := r.request(ctx, &m)
+	request, err := r.request(ctx, &m, nodes)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -192,7 +192,8 @@ func (r *Reconciler) commit(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, p
 	if err := r.Patch(ctx, m, patch); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	r.remember(client.ObjectKeyFromObject(m), Placed{SourceNode: m.Spec.SourceNode, TargetNode: m.Spec.TargetNode, Placement: p, Demand: req.Demand})
+	r.remember(client.ObjectKeyFromObject(m), Placed{SourceNode: m.Spec.SourceNode, TargetNode: m.Spec.TargetNode,
+		Provider: m.Spec.Provider, Placement: p, Demand: req.Demand})
 	placementSeconds.Observe(r.clock().Sub(m.CreationTimestamp.Time).Seconds())
 	log.FromContext(ctx).Info("placed mirror",
 		"flowID", m.Spec.FlowID, "sourceNode", m.Spec.SourceNode, "targetNode", m.Spec.TargetNode,
@@ -262,7 +263,7 @@ func (r *Reconciler) demand(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) (
 
 // request builds the planner's request for m, with the interfaces its
 // redundancy siblings use to the same node as the ones to avoid.
-func (r *Reconciler) request(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) (Request, error) {
+func (r *Reconciler) request(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, nodes map[string]Node) (Request, error) {
 	req := Request{SourceNode: m.Spec.SourceNode, TargetNode: m.Spec.TargetNode, Provider: m.Spec.Provider}
 	if !r.RedundancySets {
 		return req, nil
@@ -276,9 +277,9 @@ func (r *Reconciler) request(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) 
 		if p == nil {
 			continue
 		}
-		req.AvoidTarget = append(req.AvoidTarget, p.TargetInterface)
+		req.AvoidTarget = append(req.AvoidTarget, nodes[m.Spec.TargetNode].port(s.Spec.Provider, p.TargetInterface))
 		if s.Spec.SourceNode == m.Spec.SourceNode {
-			req.AvoidSource = append(req.AvoidSource, p.SourceInterface)
+			req.AvoidSource = append(req.AvoidSource, nodes[m.Spec.SourceNode].port(s.Spec.Provider, p.SourceInterface))
 		}
 	}
 	return req, nil
@@ -370,7 +371,7 @@ func (r *Reconciler) ledger(ctx context.Context, nodes map[string]Node, self typ
 			continue
 		}
 		placed = append(placed, Placed{SourceNode: o.Spec.SourceNode, TargetNode: o.Spec.TargetNode,
-			Placement: *o.Spec.Placement, Demand: o.Status.DemandBitsPerSecond})
+			Provider: o.Spec.Provider, Placement: *o.Spec.Placement, Demand: o.Status.DemandBitsPerSecond})
 	}
 	r.prune(seen)
 	l := NewLedger(list, placed)

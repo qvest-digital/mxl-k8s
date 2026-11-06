@@ -14,17 +14,17 @@ var (
 		Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 300},
 	})
 	committedBits = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "mxl_operator_interface_committed_bits_per_second",
-		Help: "Demand of the mirrors placed on a fabric interface, per direction.",
-	}, []string{"node", "interface", "direction"})
+		Name: "mxl_operator_port_committed_bits_per_second",
+		Help: "Demand of the mirrors placed on a fabric port, per direction. A port is the device the provider names, or the address where it names none.",
+	}, []string{"node", "port", "direction"})
 	committedMirrors = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "mxl_operator_interface_mirrors",
-		Help: "Mirrors placed on a fabric interface, per direction.",
-	}, []string{"node", "interface", "direction"})
+		Name: "mxl_operator_port_mirrors",
+		Help: "Mirrors placed on a fabric port, per direction.",
+	}, []string{"node", "port", "direction"})
 	plannableBits = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "mxl_operator_interface_plannable_bits_per_second",
-		Help: "Capacity times maximum utilization of a fabric interface; absent when its capacity is unknown.",
-	}, []string{"node", "interface"})
+		Name: "mxl_operator_port_plannable_bits_per_second",
+		Help: "Capacity times maximum utilization of a fabric port; absent when its capacity is unknown.",
+	}, []string{"node", "port"})
 )
 
 func init() {
@@ -40,18 +40,19 @@ func publish(l *Ledger, nodes map[string]Node, s Settings) {
 		seen := map[string]struct{}{}
 		for _, p := range n.Status.Providers {
 			for _, i := range p.Interfaces {
-				if _, dup := seen[i.Address]; dup {
+				port := Port(i)
+				if _, dup := seen[port]; dup {
 					continue
 				}
-				seen[i.Address] = struct{}{}
-				eg, egN := l.Egress(name, i.Address)
-				in, inN := l.Ingress(name, i.Address)
-				committedBits.WithLabelValues(name, i.Address, "egress").Set(float64(eg))
-				committedBits.WithLabelValues(name, i.Address, "ingress").Set(float64(in))
-				committedMirrors.WithLabelValues(name, i.Address, "egress").Set(float64(egN))
-				committedMirrors.WithLabelValues(name, i.Address, "ingress").Set(float64(inN))
+				seen[port] = struct{}{}
+				eg, egN := l.Egress(name, port)
+				in, inN := l.Ingress(name, port)
+				committedBits.WithLabelValues(name, port, "egress").Set(float64(eg))
+				committedBits.WithLabelValues(name, port, "ingress").Set(float64(in))
+				committedMirrors.WithLabelValues(name, port, "egress").Set(float64(egN))
+				committedMirrors.WithLabelValues(name, port, "ingress").Set(float64(inN))
 				if i.CapacityBitsPerSecond > 0 {
-					plannableBits.WithLabelValues(name, i.Address).Set(float64(plannable(i.CapacityBitsPerSecond, n.utilization(s.MaxUtilizationPercent))))
+					plannableBits.WithLabelValues(name, port).Set(float64(plannable(i.CapacityBitsPerSecond, n.utilization(s.MaxUtilizationPercent))))
 				}
 			}
 		}

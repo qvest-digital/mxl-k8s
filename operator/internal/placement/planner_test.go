@@ -271,3 +271,58 @@ func TestHas(t *testing.T) {
 	require.False(t, n.Has(tcp, "192.0.2.9"))
 	require.False(t, n.Has(v1alpha1.ProviderVerbs, "192.0.2.1"))
 }
+
+func dev(i v1alpha1.MxlFabricInterface, device string) v1alpha1.MxlFabricInterface {
+	i.Device = device
+	return i
+}
+
+// One port holding an address on each rail is one link: what leaves on
+// one address is load on the other. Counted per address, it would read
+// as two idle ports.
+func TestPlaceChargesAddressesOfOneDeviceToOnePort(t *testing.T) {
+	nodes := []Node{
+		node("big", dev(iface("192.0.2.1", railA, 10*gbit), "port0"), dev(iface("192.0.2.129", railB, 10*gbit), "port0")),
+		twoPort("b", "192.0.2.2", "192.0.2.130", 10*gbit),
+	}
+	l := NewLedger(nodes, []Placed{{SourceNode: "big", TargetNode: "b", Provider: tcp, Placement: place("192.0.2.1", "192.0.2.2"), Demand: 5 * gbit}})
+	d := Place(l, defaults, Request{SourceNode: "big", TargetNode: "b", Provider: tcp, Demand: 5 * gbit})
+	require.Equal(t, OutcomeOvercommitted, d.Outcome, "10G over one 10G port is past 80%% whichever address it leaves on")
+	require.Equal(t, place("192.0.2.129", "192.0.2.130"), d.Placement, "the target side still has an idle port")
+
+	eg, n := l.Egress("big", "port0")
+	require.Equal(t, 5*gbit, eg)
+	require.Equal(t, 1, n)
+}
+
+// A redundancy sibling on one rail address of a port shares that port
+// with a member on the other rail address.
+func TestPlaceAntiAffinityByPort(t *testing.T) {
+	nodes := []Node{
+		node("big", dev(iface("192.0.2.1", railA, 100*gbit), "port0"), dev(iface("192.0.2.129", railB, 100*gbit), "port0")),
+		twoPort("b", "192.0.2.2", "192.0.2.130", 25*gbit),
+	}
+	d := Place(NewLedger(nodes, nil), defaults, Request{SourceNode: "big", TargetNode: "b", Provider: tcp, Demand: gbit,
+		AvoidSource: []string{"port0"}, AvoidTarget: []string{"192.0.2.2"}})
+	require.True(t, d.SharesSource, "both rail addresses of the source are one port")
+	require.False(t, d.SharesTarget)
+	require.Equal(t, "192.0.2.130", d.Placement.TargetInterface)
+}
+
+// Every node's IPv6 link-local addresses share fe80::/64, so pairing by
+// subnet would read them as a rail of their own and send the second
+// mirror over them.
+func TestPlaceSkipsLinkLocalWhenARoutableAddressExists(t *testing.T) {
+	ll := func(a string) v1alpha1.MxlFabricInterface { return iface(a, "fe80::/64", 10*gbit) }
+	nodes := []Node{
+		node("a", iface("192.0.2.1", railA, 10*gbit), ll("fe80::1")),
+		node("b", iface("192.0.2.2", railA, 10*gbit), ll("fe80::2")),
+	}
+	l := NewLedger(nodes, []Placed{{SourceNode: "a", TargetNode: "b", Provider: tcp, Placement: place("192.0.2.1", "192.0.2.2"), Demand: 5 * gbit}})
+	d := Place(l, defaults, Request{SourceNode: "a", TargetNode: "b", Provider: tcp, Demand: gbit})
+	require.Equal(t, place("192.0.2.1", "192.0.2.2"), d.Placement)
+
+	only := []Node{node("a", ll("fe80::1")), node("b", ll("fe80::2"))}
+	d = Place(NewLedger(only, nil), defaults, Request{SourceNode: "a", TargetNode: "b", Provider: tcp, Demand: gbit})
+	require.Equal(t, place("fe80::1", "fe80::2"), d.Placement, "link-local alone is still what the nodes offer")
+}

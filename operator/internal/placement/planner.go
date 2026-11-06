@@ -11,6 +11,7 @@ package placement
 import (
 	"cmp"
 	"math"
+	"net/netip"
 	"slices"
 
 	"github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -77,6 +78,33 @@ func (n Node) Interfaces(provider v1alpha1.MxlFabricsProvider) []v1alpha1.MxlFab
 	return nil
 }
 
+// Port is the physical port an interface is: its device as the provider
+// names it, or its address when the provider names none. Two addresses
+// of one device -- an IPv4 and an IPv6 address, or one address per rail
+// on one port -- share the one link, so load is accounted per port.
+func Port(i v1alpha1.MxlFabricInterface) string {
+	if i.Device != "" {
+		return i.Device
+	}
+	return i.Address
+}
+
+// port is the port of the interface at address under provider, or the
+// address when the node does not list it.
+func (n Node) port(provider v1alpha1.MxlFabricsProvider, address string) string {
+	for _, p := range n.Status.Providers {
+		if p.Name != provider {
+			continue
+		}
+		for _, i := range p.Interfaces {
+			if i.Address == address {
+				return Port(i)
+			}
+		}
+	}
+	return address
+}
+
 // Has reports whether address is an interface the node offers
 // provider that can carry a mirror.
 func (n Node) Has(provider v1alpha1.MxlFabricsProvider, address string) bool {
@@ -95,6 +123,7 @@ func (n Node) utilization(def int32) int64 {
 // Placed is a mirror whose placement counts against its interfaces.
 type Placed struct {
 	SourceNode, TargetNode string
+	Provider               v1alpha1.MxlFabricsProvider
 	Placement              v1alpha1.MxlFlowMirrorPlacement
 	Demand                 int64
 }
@@ -108,7 +137,7 @@ type Ledger struct {
 	nodes           map[string]Node
 }
 
-type portKey struct{ node, address string }
+type portKey struct{ node, port string }
 
 type budgetKey struct{ node, name string }
 
@@ -138,8 +167,8 @@ func NewLedger(nodes []Node, placed []Placed) *Ledger {
 
 // Charge adds one placed mirror to the ledger.
 func (l *Ledger) Charge(p Placed) {
-	src := portKey{p.SourceNode, p.Placement.SourceInterface}
-	tgt := portKey{p.TargetNode, p.Placement.TargetInterface}
+	src := portKey{p.SourceNode, l.nodes[p.SourceNode].port(p.Provider, p.Placement.SourceInterface)}
+	tgt := portKey{p.TargetNode, l.nodes[p.TargetNode].port(p.Provider, p.Placement.TargetInterface)}
 	e := l.egress[src]
 	l.egress[src] = load{e.bits + p.Demand, e.mirrors + 1}
 	i := l.ingress[tgt]
@@ -152,17 +181,17 @@ func (l *Ledger) Charge(p Placed) {
 	}
 }
 
-// Egress and Ingress report the committed rate and mirror count on one
-// interface.
-func (l *Ledger) Egress(node, address string) (int64, int) {
-	v := l.egress[portKey{node, address}]
+// Egress reports the committed rate and mirror count leaving one port,
+// as Port names it.
+func (l *Ledger) Egress(node, port string) (int64, int) {
+	v := l.egress[portKey{node, port}]
 	return v.bits, v.mirrors
 }
 
 // Ingress reports the committed rate and mirror count arriving on one
-// interface.
-func (l *Ledger) Ingress(node, address string) (int64, int) {
-	v := l.ingress[portKey{node, address}]
+// port.
+func (l *Ledger) Ingress(node, port string) (int64, int) {
+	v := l.ingress[portKey{node, port}]
 	return v.bits, v.mirrors
 }
 
@@ -195,8 +224,9 @@ type Request struct {
 	SourceNode, TargetNode string
 	Provider               v1alpha1.MxlFabricsProvider
 	Demand                 int64
-	// AvoidSource and AvoidTarget are interfaces the mirror's
-	// redundancy siblings already use on its source and target node.
+	// AvoidSource and AvoidTarget are ports, as Port names them, the
+	// mirror's redundancy siblings already use on its source and target
+	// node.
 	AvoidSource, AvoidTarget []string
 }
 
@@ -266,7 +296,7 @@ func (c candidate) disjointRank() int {
 func Place(l *Ledger, s Settings, req Request) Decision {
 	src := l.nodes[req.SourceNode]
 	tgt := l.nodes[req.TargetNode]
-	srcIfs, tgtIfs := src.Interfaces(req.Provider), tgt.Interfaces(req.Provider)
+	srcIfs, tgtIfs := routable(src.Interfaces(req.Provider)), routable(tgt.Interfaces(req.Provider))
 	if len(srcIfs) == 0 || len(tgtIfs) == 0 {
 		return Decision{Outcome: OutcomeNoInterface}
 	}
@@ -347,15 +377,15 @@ func Check(l *Ledger, s Settings, req Request, p v1alpha1.MxlFlowMirrorPlacement
 }
 
 func (l *Ledger) score(s Settings, srcNode, tgtNode Node, a, b v1alpha1.MxlFabricInterface, req Request) candidate {
-	eg, egN := l.Egress(srcNode.Name, a.Address)
-	in, inN := l.Ingress(tgtNode.Name, b.Address)
+	eg, egN := l.Egress(srcNode.Name, Port(a))
+	in, inN := l.Ingress(tgtNode.Name, Port(b))
 	c := candidate{
 		src: a, tgt: b,
 		headroom:     math.MaxInt64,
 		load:         eg + in,
 		mirrors:      egN + inN,
-		sharesSource: slices.Contains(req.AvoidSource, a.Address),
-		sharesTarget: slices.Contains(req.AvoidTarget, b.Address),
+		sharesSource: slices.Contains(req.AvoidSource, Port(a)),
+		sharesTarget: slices.Contains(req.AvoidTarget, Port(b)),
 	}
 	room := func(capacity int64, util int64, used int64) {
 		if capacity <= 0 {
@@ -386,6 +416,21 @@ func (l *Ledger) score(s Settings, srcNode, tgtNode Node, a, b v1alpha1.MxlFabri
 		}
 	}
 	return c
+}
+
+// routable drops link-local addresses when any other remains. Every
+// node's link-local addresses share one prefix, so pairing by subnet
+// would read them as one network, and an address valid only on its own
+// link carries no route between rails.
+func routable(ifs []v1alpha1.MxlFabricInterface) []v1alpha1.MxlFabricInterface {
+	out := slices.DeleteFunc(slices.Clone(ifs), func(i v1alpha1.MxlFabricInterface) bool {
+		a, err := netip.ParseAddr(i.Address)
+		return err == nil && (a.IsLinkLocalUnicast() || a.Unmap().IsLinkLocalUnicast())
+	})
+	if len(out) == 0 {
+		return ifs
+	}
+	return out
 }
 
 // plannable is the share of capacity placement may commit.

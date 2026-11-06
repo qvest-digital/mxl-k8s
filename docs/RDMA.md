@@ -370,8 +370,11 @@ as without placement.
 
 ### What is planned against
 
-Every interface is planned at a capacity per direction, sending and
-receiving counted separately:
+Load is accounted per port: the device the provider names for an
+interface, or its address where it names none. Two addresses of one
+device, an IPv4 and an IPv6 address or one address per subnet on one
+link, share that port's capacity. Every port is planned at a capacity
+per direction, sending and receiving counted separately:
 
 | Source | Chart value | Meaning |
 | --- | --- | --- |
@@ -402,7 +405,9 @@ Candidates are every pair of a source interface and a target
 interface for the mirror's provider whose links are not down. With
 `--placement-pairing=prefer-same-subnet` (default) only pairs within
 one subnet are kept when any exists; `same-subnet` keeps only those,
-`any` keeps every pair. Among them:
+`any` keeps every pair. Link-local addresses are left out whenever
+the node offers another: every node's link-local addresses share one
+prefix and would otherwise read as a subnet of their own. Among them:
 
 1. a pair with room for the demand on both interfaces and every
    budget they draw on beats one without;
@@ -444,9 +449,9 @@ placement existed keeps the interfaces it is bound to.
 | Metric | Labels | From |
 | --- | --- | --- |
 | `mxl_operator_mirror_placement_seconds` | | operator: time from a mirror's creation to its placement |
-| `mxl_operator_interface_committed_bits_per_second` | `node`, `interface`, `direction` | operator: demand placed |
-| `mxl_operator_interface_mirrors` | `node`, `interface`, `direction` | operator: mirrors placed |
-| `mxl_operator_interface_plannable_bits_per_second` | `node`, `interface` | operator: capacity times utilization |
+| `mxl_operator_port_committed_bits_per_second` | `node`, `port`, `direction` | operator: demand placed |
+| `mxl_operator_port_mirrors` | `node`, `port`, `direction` | operator: mirrors placed |
+| `mxl_operator_port_plannable_bits_per_second` | `node`, `port` | operator: capacity times utilization |
 | `mxl_gateway_interface_transmitted_bytes_total` | `node`, `interface` | gateway: bytes its live mirrors sent |
 | `mxl_gateway_interface_received_bytes_total` | `node`, `interface` | gateway: bytes its live mirrors committed |
 | `mxl_gateway_interface_mirrors` | `node`, `interface`, `direction` | gateway: mirrors bound |
