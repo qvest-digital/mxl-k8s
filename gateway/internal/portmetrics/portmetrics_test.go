@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/mdlayher/genetlink"
@@ -285,6 +286,38 @@ func (s *countSink) Error(error, string, ...any)    { *s.n++ }
 func (s *countSink) WithValues(...any) logr.LogSink { return s }
 func (s *countSink) WithName(string) logr.LogSink   { return s }
 
+// The kernel's numbering of the ethtool netlink interface, written out
+// rather than taken from the code under test or x/sys, so a wrong
+// attribute number in either fails here. From
+// include/uapi/linux/ethtool_netlink_generated.h, ethtool_netlink.h and
+// ethtool.h.
+const (
+	uapiMsgPauseGet       = 21 // ETHTOOL_MSG_PAUSE_GET
+	uapiMsgStatsGet       = 32 // ETHTOOL_MSG_STATS_GET
+	uapiHeaderDevName     = 2  // ETHTOOL_A_HEADER_DEV_NAME
+	uapiHeaderFlags       = 3  // ETHTOOL_A_HEADER_FLAGS
+	uapiFlagStats         = 4  // ETHTOOL_FLAG_STATS
+	uapiBitsetValue       = 4  // ETHTOOL_A_BITSET_VALUE
+	uapiPauseHeader       = 1  // ETHTOOL_A_PAUSE_HEADER
+	uapiPauseStats        = 5  // ETHTOOL_A_PAUSE_STATS
+	uapiPauseStatRxFrames = 3  // ETHTOOL_A_PAUSE_STAT_RX_FRAMES
+	uapiStatsHeader       = 2  // ETHTOOL_A_STATS_HEADER
+	uapiStatsGroups       = 3  // ETHTOOL_A_STATS_GROUPS
+	uapiStatsGrp          = 4  // ETHTOOL_A_STATS_GRP
+	uapiStatsGrpID        = 2  // ETHTOOL_A_STATS_GRP_ID
+	uapiStatsGrpStat      = 4  // ETHTOOL_A_STATS_GRP_STAT
+	uapiStatsEthMAC       = 1  // ETHTOOL_STATS_ETH_MAC
+	uapiEthMACFCSErr      = 4  // ETHTOOL_A_STATS_ETH_MAC_6_FCS_ERR
+	uapiEthMACTxBytes     = 6  // ETHTOOL_A_STATS_ETH_MAC_8_TX_BYTES
+	uapiEthMACRxBytes     = 12 // ETHTOOL_A_STATS_ETH_MAC_14_RX_BYTES
+)
+
+// genltestConn is a genltest connection, which has no socket deadline
+// to set.
+type genltestConn struct{ *genetlink.Conn }
+
+func (genltestConn) SetDeadline(time.Time) error { return nil }
+
 // The netlink client asks for the eth-mac group of one netdev and reads
 // the octet and FCS counters out of the group nest; pause statistics
 // are requested with the stats flag.
@@ -298,9 +331,9 @@ func TestNetlinkDecodesStandardStatistics(t *testing.T) {
 		var dev string
 		var flags uint32
 		var groups []byte
-		headerType := uint16(ethtoolAStatsHeader)
-		if greq.Header.Command == unix.ETHTOOL_MSG_PAUSE_GET {
-			headerType = unix.ETHTOOL_A_PAUSE_HEADER
+		headerType := uint16(uapiStatsHeader)
+		if greq.Header.Command == uapiMsgPauseGet {
+			headerType = uapiPauseHeader
 		}
 		for ad.Next() {
 			switch {
@@ -308,18 +341,18 @@ func TestNetlinkDecodesStandardStatistics(t *testing.T) {
 				ad.Nested(func(hd *netlink.AttributeDecoder) error {
 					for hd.Next() {
 						switch hd.Type() {
-						case unix.ETHTOOL_A_HEADER_DEV_NAME:
+						case uapiHeaderDevName:
 							dev = hd.String()
-						case unix.ETHTOOL_A_HEADER_FLAGS:
+						case uapiHeaderFlags:
 							flags = hd.Uint32()
 						}
 					}
 					return nil
 				})
-			case greq.Header.Command == unix.ETHTOOL_MSG_STATS_GET && ad.Type() == ethtoolAStatsGroups:
+			case greq.Header.Command == uapiMsgStatsGet && ad.Type() == uapiStatsGroups:
 				ad.Nested(func(bd *netlink.AttributeDecoder) error {
 					for bd.Next() {
-						if bd.Type() == unix.ETHTOOL_A_BITSET_VALUE {
+						if bd.Type() == uapiBitsetValue {
 							groups = bd.Bytes()
 						}
 					}
@@ -332,22 +365,22 @@ func TestNetlinkDecodesStandardStatistics(t *testing.T) {
 
 		ae := netlink.NewAttributeEncoder()
 		switch greq.Header.Command {
-		case unix.ETHTOOL_MSG_STATS_GET:
-			require.Equal(t, nlenc32(1<<ethtoolStatsEthMAC), groups)
-			ae.Nested(ethtoolAStatsGrp, func(g *netlink.AttributeEncoder) error {
-				g.Uint32(ethtoolAStatsGrpID, ethtoolStatsEthMAC)
-				for id, v := range map[uint16]uint64{ethMACRxOctets: 1000, ethMACTxOctets: 2000, ethMACFCSErr: 3} {
-					g.Nested(ethtoolAStatsGrpStat, func(s *netlink.AttributeEncoder) error {
+		case uapiMsgStatsGet:
+			require.Equal(t, []byte{1 << uapiStatsEthMAC, 0, 0, 0}, groups, "a host-order (little-endian here) u32 word with the eth-mac bit")
+			ae.Nested(uapiStatsGrp, func(g *netlink.AttributeEncoder) error {
+				g.Uint32(uapiStatsGrpID, uapiStatsEthMAC)
+				for id, v := range map[uint16]uint64{uapiEthMACRxBytes: 1000, uapiEthMACTxBytes: 2000, uapiEthMACFCSErr: 3} {
+					g.Nested(uapiStatsGrpStat, func(s *netlink.AttributeEncoder) error {
 						s.Uint64(id, v)
 						return nil
 					})
 				}
 				return nil
 			})
-		case unix.ETHTOOL_MSG_PAUSE_GET:
-			require.Equal(t, uint32(unix.ETHTOOL_FLAG_STATS), flags)
-			ae.Nested(unix.ETHTOOL_A_PAUSE_STATS, func(s *netlink.AttributeEncoder) error {
-				s.Uint64(unix.ETHTOOL_A_PAUSE_STAT_RX_FRAMES, 7)
+		case uapiMsgPauseGet:
+			require.Equal(t, uint32(uapiFlagStats), flags)
+			ae.Nested(uapiPauseStats, func(s *netlink.AttributeEncoder) error {
+				s.Uint64(uapiPauseStatRxFrames, 7)
 				return nil
 			})
 		}
@@ -355,7 +388,7 @@ func TestNetlinkDecodesStandardStatistics(t *testing.T) {
 		require.NoError(t, err)
 		return []genetlink.Message{{Data: b}}, nil
 	}))
-	n := &Netlink{Dial: func() (*genetlink.Conn, error) { return conn, nil }}
+	n := &Netlink{Dial: func() (Conn, error) { return genltestConn{conn}, nil }}
 	defer n.Close()
 
 	mac, err := n.MACStats("eth1")
@@ -366,7 +399,7 @@ func TestNetlinkDecodesStandardStatistics(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, PauseStats{Rx: 7, HaveRx: true}, p)
 	sort.Slice(commands, func(i, j int) bool { return commands[i] < commands[j] })
-	require.Equal(t, []uint8{unix.ETHTOOL_MSG_PAUSE_GET, unix.ETHTOOL_MSG_STATS_GET}, commands)
+	require.Equal(t, []uint8{uapiMsgPauseGet, uapiMsgStatsGet}, commands)
 }
 
 // An error from the kernel, an unsupported command on an old kernel
@@ -376,8 +409,90 @@ func TestNetlinkReturnsKernelErrors(t *testing.T) {
 	conn := genltest.Dial(genltest.ServeFamily(family, func(genetlink.Message, netlink.Message) ([]genetlink.Message, error) {
 		return nil, genltest.Error(int(unix.EOPNOTSUPP))
 	}))
-	n := &Netlink{Dial: func() (*genetlink.Conn, error) { return conn, nil }}
+	n := &Netlink{Dial: func() (Conn, error) { return genltestConn{conn}, nil }}
 	defer n.Close()
 	_, err := n.MACStats("eth1")
+	require.ErrorIs(t, err, unix.EOPNOTSUPP)
+}
+
+// stuckConn answers the family lookup and then never answers a request:
+// Execute returns only when the deadline set on it passes, as a socket
+// read does.
+type stuckConn struct {
+	deadline time.Time
+	closed   bool
+}
+
+func (c *stuckConn) GetFamily(string) (genetlink.Family, error) {
+	return genetlink.Family{ID: 42, Version: 1, Name: unix.ETHTOOL_GENL_NAME}, nil
+}
+
+func (c *stuckConn) Execute(genetlink.Message, uint16, netlink.HeaderFlags) ([]genetlink.Message, error) {
+	if c.deadline.IsZero() {
+		return nil, errors.New("request sent without a deadline")
+	}
+	time.Sleep(time.Until(c.deadline))
+	return nil, &netlink.OpError{Op: "receive", Err: os.ErrDeadlineExceeded}
+}
+
+func (c *stuckConn) SetDeadline(t time.Time) error { c.deadline = t; return nil }
+func (c *stuckConn) Close() error                  { c.closed = true; return nil }
+
+// A kernel that does not answer, a driver holding the RTNL lock say,
+// costs one request its deadline. The connection is dropped so its late
+// reply is never read, and later requests fail at once for the backoff
+// rather than each waiting out a deadline of its own.
+func TestNetlinkTimesOutDropsTheConnectionAndBacksOff(t *testing.T) {
+	var conns []*stuckConn
+	n := &Netlink{Timeout: 50 * time.Millisecond, Backoff: time.Hour, Dial: func() (Conn, error) {
+		c := &stuckConn{}
+		conns = append(conns, c)
+		return c, nil
+	}}
+	start := time.Now()
+	_, err := n.MACStats("eth1")
+	require.ErrorIs(t, err, os.ErrDeadlineExceeded)
+	require.Less(t, time.Since(start), 2*time.Second)
+	require.Len(t, conns, 1)
+	require.True(t, conns[0].closed, "the connection is dropped after the timeout")
+
+	start = time.Now()
+	_, err = n.PauseStats("eth1")
 	require.Error(t, err)
+	require.Less(t, time.Since(start), 10*time.Millisecond, "fails fast during the backoff")
+	require.Len(t, conns, 1, "nothing is dialled during the backoff")
+}
+
+// An error reply drops the connection too; the next request dials a
+// fresh one.
+func TestNetlinkRedialsAfterAnError(t *testing.T) {
+	family := genetlink.Family{ID: 42, Version: 1, Name: unix.ETHTOOL_GENL_NAME}
+	dials := 0
+	n := &Netlink{Dial: func() (Conn, error) {
+		dials++
+		return genltestConn{genltest.Dial(genltest.ServeFamily(family, func(genetlink.Message, netlink.Message) ([]genetlink.Message, error) {
+			return nil, genltest.Error(int(unix.EOPNOTSUPP))
+		}))}, nil
+	}}
+	defer n.Close()
+	for range 2 {
+		_, err := n.PauseStats("eth1")
+		require.ErrorIs(t, err, unix.EOPNOTSUPP)
+	}
+	require.Equal(t, 2, dials)
+}
+
+// A driver that answers it does not support a kind is asked once.
+func TestCollectorStopsAskingForWhatTheDriverDoesNotSupport(t *testing.T) {
+	f := newFakeSys(t)
+	f.netdev("eth1", 100, 200)
+	snap := Snapshot{Providers: []mxlv1alpha1.MxlFabricsProviderCapability{{Name: mxlv1alpha1.ProviderTCP,
+		Interfaces: []mxlv1alpha1.MxlFabricInterface{{Address: "192.0.2.10", Device: "eth1"}}}}}
+	eth := &fakeEthtool{err: &netlink.OpError{Op: "receive", Err: unix.EOPNOTSUPP}}
+	c := &Collector{NodeName: "n", Snapshot: func() (Snapshot, bool) { return snap, true },
+		Sysfs: Sysfs{Root: f.root}, Ethtool: eth, Log: logr.Discard()}
+	for range 3 {
+		gather(t, c)
+	}
+	require.Equal(t, 1, eth.macCalls)
 }

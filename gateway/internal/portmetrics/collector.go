@@ -21,11 +21,13 @@
 package portmetrics
 
 import (
+	"errors"
 	"strconv"
 	"sync"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/sys/unix"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -103,6 +105,7 @@ type Collector struct {
 
 	mu     sync.Mutex
 	logged map[string]struct{}
+	skip   map[string]struct{}
 }
 
 // Describe implements prometheus.Collector.
@@ -209,26 +212,53 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 // ethtool adds what the ethtool standard statistics report for netdev
 // to k. A failure leaves them out and is logged once per netdev and
 // kind, so a kernel or driver without them costs a line, not a line per
-// scrape.
+// scrape. A netdev whose driver answers that it does not support a
+// kind is not asked for it again: every failed request drops the
+// netlink connection, and the answer does not change.
 func (c *Collector) ethtool(netdev string, k *Counters) {
-	if mac, err := c.Ethtool.MACStats(netdev); err != nil {
-		c.once("mac/"+netdev, err, "ethtool MAC statistics unavailable; mac bytes not exported", "netdev", netdev)
-	} else {
-		if mac.HaveOctetsReceived {
-			k.RxBytes[SourceMAC] = mac.OctetsReceived
-		}
-		if mac.HaveOctetsTransmitted {
-			k.TxBytes[SourceMAC] = mac.OctetsTransmitted
-		}
-		if mac.HaveFCSErr {
-			k.Errors[[2]string{SourceMAC, "FrameCheckSequenceErrors"}] = mac.FCSErrors
+	if key := "mac/" + netdev; !c.unsupported(key) {
+		if mac, err := c.Ethtool.MACStats(netdev); err != nil {
+			c.failed(key, err, "ethtool MAC statistics unavailable; mac bytes not exported", "netdev", netdev)
+		} else {
+			if mac.HaveOctetsReceived {
+				k.RxBytes[SourceMAC] = mac.OctetsReceived
+			}
+			if mac.HaveOctetsTransmitted {
+				k.TxBytes[SourceMAC] = mac.OctetsTransmitted
+			}
+			if mac.HaveFCSErr {
+				k.Errors[[2]string{SourceMAC, "FrameCheckSequenceErrors"}] = mac.FCSErrors
+			}
 		}
 	}
-	if p, err := c.Ethtool.PauseStats(netdev); err != nil {
-		c.once("pause/"+netdev, err, "ethtool pause statistics unavailable; pause frames not exported", "netdev", netdev)
-	} else {
-		k.pause = p
+	if key := "pause/" + netdev; !c.unsupported(key) {
+		if p, err := c.Ethtool.PauseStats(netdev); err != nil {
+			c.failed(key, err, "ethtool pause statistics unavailable; pause frames not exported", "netdev", netdev)
+		} else {
+			k.pause = p
+		}
 	}
+}
+
+func (c *Collector) unsupported(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.skip[key]
+	return ok
+}
+
+// failed logs err once per key, and stops asking for key when the
+// kernel answered that the driver does not support it.
+func (c *Collector) failed(key string, err error, msg string, kv ...any) {
+	if errors.Is(err, unix.EOPNOTSUPP) {
+		c.mu.Lock()
+		if c.skip == nil {
+			c.skip = map[string]struct{}{}
+		}
+		c.skip[key] = struct{}{}
+		c.mu.Unlock()
+	}
+	c.once(key, err, msg, kv...)
 }
 
 func (c *Collector) once(key string, err error, msg string, kv ...any) {

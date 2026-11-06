@@ -1,8 +1,11 @@
 package portmetrics
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"sync"
+	"time"
 
 	"github.com/mdlayher/genetlink"
 	"github.com/mdlayher/netlink"
@@ -48,15 +51,43 @@ const (
 	ethMACRxOctets = 12
 )
 
+// Conn is the part of a generic netlink connection Netlink uses;
+// *genetlink.Conn implements it.
+type Conn interface {
+	GetFamily(name string) (genetlink.Family, error)
+	Execute(m genetlink.Message, family uint16, flags netlink.HeaderFlags) ([]genetlink.Message, error)
+	SetDeadline(t time.Time) error
+	Close() error
+}
+
+// Defaults for Netlink's bounds.
+const (
+	DefaultNetlinkTimeout = 2 * time.Second
+	DefaultNetlinkBackoff = time.Minute
+)
+
 // Netlink reads standard statistics over the ethtool generic netlink
-// family. It opens one connection, on first use.
+// family, on one connection opened on first use.
+//
+// The kernel answers ethtool requests under the RTNL lock, so a driver
+// holding that lock delays the reply. Every request has a deadline, and
+// a request that times out stops the next ones for Backoff: scrapes are
+// serialized on the connection, and each would otherwise wait out its
+// own deadline. Any failed request drops the connection, so a reply
+// arriving late is never read as the answer to a later request.
 type Netlink struct {
 	// Dial opens the connection; nil dials the kernel.
-	Dial func() (*genetlink.Conn, error)
+	Dial func() (Conn, error)
+	// Timeout bounds one request; zero is DefaultNetlinkTimeout.
+	Timeout time.Duration
+	// Backoff is how long requests fail fast after one timed out; zero
+	// is DefaultNetlinkBackoff.
+	Backoff time.Duration
 
-	mu     sync.Mutex
-	conn   *genetlink.Conn
-	family genetlink.Family
+	mu        sync.Mutex
+	conn      Conn
+	family    genetlink.Family
+	pausedTil time.Time
 }
 
 func (n *Netlink) open() error {
@@ -65,11 +96,15 @@ func (n *Netlink) open() error {
 	}
 	dial := n.Dial
 	if dial == nil {
-		dial = func() (*genetlink.Conn, error) { return genetlink.Dial(nil) }
+		dial = func() (Conn, error) { return genetlink.Dial(nil) }
 	}
 	c, err := dial()
 	if err != nil {
 		return fmt.Errorf("dial generic netlink: %w", err)
+	}
+	if err := c.SetDeadline(time.Now().Add(n.timeout())); err != nil {
+		_ = c.Close()
+		return fmt.Errorf("set netlink deadline: %w", err)
 	}
 	f, err := c.GetFamily(unix.ETHTOOL_GENL_NAME)
 	if err != nil {
@@ -78,6 +113,21 @@ func (n *Netlink) open() error {
 	}
 	n.conn, n.family = c, f
 	return nil
+}
+
+func (n *Netlink) timeout() time.Duration {
+	if n.Timeout > 0 {
+		return n.Timeout
+	}
+	return DefaultNetlinkTimeout
+}
+
+// drop closes the connection after a failed request.
+func (n *Netlink) drop() {
+	if n.conn != nil {
+		_ = n.conn.Close()
+		n.conn = nil
+	}
 }
 
 // Close closes the connection.
@@ -95,8 +145,8 @@ func (n *Netlink) Close() error {
 func (n *Netlink) get(cmd uint8, encode func(*netlink.AttributeEncoder)) ([]genetlink.Message, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if err := n.open(); err != nil {
-		return nil, err
+	if now := time.Now(); now.Before(n.pausedTil) {
+		return nil, fmt.Errorf("ethtool netlink paused until %s after a request timed out", n.pausedTil.Format(time.RFC3339))
 	}
 	ae := netlink.NewAttributeEncoder()
 	encode(ae)
@@ -104,14 +154,32 @@ func (n *Netlink) get(cmd uint8, encode func(*netlink.AttributeEncoder)) ([]gene
 	if err != nil {
 		return nil, err
 	}
-	msgs, err := n.conn.Execute(genetlink.Message{
-		Header: genetlink.Header{Command: cmd, Version: n.family.Version},
-		Data:   body,
-	}, n.family.ID, netlink.Request)
+	msgs, err := n.execute(cmd, body)
 	if err != nil {
+		n.drop()
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			backoff := n.Backoff
+			if backoff <= 0 {
+				backoff = DefaultNetlinkBackoff
+			}
+			n.pausedTil = time.Now().Add(backoff)
+		}
 		return nil, err
 	}
 	return msgs, nil
+}
+
+func (n *Netlink) execute(cmd uint8, body []byte) ([]genetlink.Message, error) {
+	if err := n.open(); err != nil {
+		return nil, err
+	}
+	if err := n.conn.SetDeadline(time.Now().Add(n.timeout())); err != nil {
+		return nil, fmt.Errorf("set netlink deadline: %w", err)
+	}
+	return n.conn.Execute(genetlink.Message{
+		Header: genetlink.Header{Command: cmd, Version: n.family.Version},
+		Data:   body,
+	}, n.family.ID, netlink.Request)
 }
 
 func header(netdev string, flags uint32) func(*netlink.AttributeEncoder) {
