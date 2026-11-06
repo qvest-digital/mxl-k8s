@@ -2,6 +2,7 @@ package portmetrics
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -495,4 +496,58 @@ func TestCollectorStopsAskingForWhatTheDriverDoesNotSupport(t *testing.T) {
 		gather(t, c)
 	}
 	require.Equal(t, 1, eth.macCalls)
+}
+
+// deadlineConn answers every request, but only one sent under a live
+// deadline: a deadline left from the dial or an earlier request has
+// passed by the time a later request is sent.
+type deadlineConn struct {
+	deadline time.Time
+	requests int
+}
+
+func (c *deadlineConn) live(op string) error {
+	if c.deadline.IsZero() {
+		return fmt.Errorf("%s sent without a deadline", op)
+	}
+	if !time.Now().Before(c.deadline) {
+		return fmt.Errorf("%s sent under a deadline that passed at %s", op, c.deadline.Format(time.RFC3339Nano))
+	}
+	return nil
+}
+
+func (c *deadlineConn) GetFamily(string) (genetlink.Family, error) {
+	if err := c.live("family lookup"); err != nil {
+		return genetlink.Family{}, err
+	}
+	return genetlink.Family{ID: 42, Version: 1, Name: unix.ETHTOOL_GENL_NAME}, nil
+}
+
+func (c *deadlineConn) Execute(genetlink.Message, uint16, netlink.HeaderFlags) ([]genetlink.Message, error) {
+	if err := c.live("request"); err != nil {
+		return nil, err
+	}
+	c.requests++
+	return nil, nil
+}
+
+func (c *deadlineConn) SetDeadline(t time.Time) error { c.deadline = t; return nil }
+func (c *deadlineConn) Close() error                  { return nil }
+
+// The family lookup and every request get a deadline of their own, set
+// when each is sent, not one inherited from the dial or the previous
+// request.
+func TestNetlinkSetsADeadlinePerRequest(t *testing.T) {
+	const timeout = 30 * time.Millisecond
+	conn := &deadlineConn{}
+	dials := 0
+	n := &Netlink{Timeout: timeout, Dial: func() (Conn, error) { dials++; return conn, nil }}
+
+	_, err := n.MACStats("eth1")
+	require.NoError(t, err)
+	time.Sleep(3 * timeout)
+	_, err = n.PauseStats("eth1")
+	require.NoError(t, err, "the second request needs a fresh deadline")
+	require.Equal(t, 2, conn.requests)
+	require.Equal(t, 1, dials, "both requests ran on one connection")
 }
