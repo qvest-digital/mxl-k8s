@@ -373,8 +373,10 @@ as without placement.
 Load is accounted per port: the device the provider names for an
 interface, or its address where it names none. Two addresses of one
 device, an IPv4 and an IPv6 address or one address per subnet on one
-link, share that port's capacity. Every port is planned at a capacity
-per direction, sending and receiving counted separately:
+link, share that port's capacity. The device is named per provider
+(the netdev for `tcp`, the RDMA device for `verbs`), so mirrors of two
+providers on one NIC are accounted on two ports. Every port is planned
+at a capacity per direction, sending and receiving counted separately:
 
 | Source | Chart value | Meaning |
 | --- | --- | --- |
@@ -399,6 +401,9 @@ once it publishes one. `MxlNodeCapabilities` shows each interface's
 `capacityBitsPerSecond`, `subnet`, `budgets` and `numaNode`, and the
 node's `budgets`.
 
+A data flow's grain size is the maximum its definition declares, so its
+rate is an upper bound on what it carries.
+
 ### How a pair is chosen
 
 Candidates are every pair of a source interface and a target
@@ -412,17 +417,18 @@ prefix and would otherwise read as a subnet of their own. Among them:
 1. a pair with room for the demand on both interfaces and every
    budget they draw on beats one without;
 2. for a member of an MxlFlowRedundancySet, a pair sharing no
-   interface with the set's other members arriving on the same node
-   beats one sharing only a sending interface, which beats one
-   sharing a receiving interface;
+   port with the set's other members arriving on the same node
+   beats one sharing only a sending port, which beats one
+   sharing a receiving port;
 3. then the most headroom left on the tighter side, the least load,
    the fewest mirrors and the lowest addresses.
 
-A mirror no pair has room for is placed on the pair with the most
-headroom and reported `Overcommitted` with
-`--placement-overcommit=place` (default), or left unplaced, not set
-up and reported `Held` with `hold`. A set whose members share an
-interface reports `PathsDisjoint=False` naming it.
+A mirror no pair has room for is placed and reported `Overcommitted`
+with `--placement-overcommit=place` (default), on the pair the same
+order picks among the pairs without room: disjointness from its
+redundancy siblings first, then the most headroom, which is negative.
+With `hold` it is left unplaced, not set up, and reported `Held`. A set
+whose members share a port reports `PathsDisjoint=False` naming it.
 
 ### When a placement changes
 
