@@ -57,9 +57,9 @@ func (r *TargetReconciler) sharedFlowFor(handles *instance.Handles, flowID [16]b
 // tracker against the flow's last commit, when that is fresh: the grain
 // arrived, and a mirror that always loses the commit to its sibling
 // would otherwise read as receiving nothing and be rebuilt.
-func (f *sharedFlow) commitGrain(writer *mxl.Writer, idx uint64, tracker commitTracker) (uint64, invalidReason, error) {
+func (f *sharedFlow) commitGrain(writer *mxl.Writer, idx uint64, tracker commitTracker) (grainCommit, error) {
 	f.mu.Lock()
-	n, reason, err := commitArrivedGrain(writer, idx, &f.open)
+	c, err := commitArrivedGrain(writer, idx, &f.open)
 	now := time.Now()
 	if err == nil {
 		f.lastCommitAt = now
@@ -69,7 +69,7 @@ func (f *sharedFlow) commitGrain(writer *mxl.Writer, idx uint64, tracker commitT
 	if errors.Is(err, errGrainAlreadyCommitted) {
 		f.recordSibling(tracker, idx, last, now)
 	}
-	return n, reason, err
+	return c, err
 }
 
 // commitSamples commits an arrived sample run. A run libmxl rejects

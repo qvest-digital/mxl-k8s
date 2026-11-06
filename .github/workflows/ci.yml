@@ -56,7 +56,7 @@ jobs:
             api:       ['api/**', 'go.work*']
             operator:  ['operator/**', 'api/**', 'go.work*']
             agent:     ['agent/**', 'api/**', 'go.work*']
-            gateway:   ['gateway/**', 'api/**', 'go.work*']
+            gateway:   ['gateway/**', 'api/**', 'go.work*', 'hack/build-libmxl-monitoring.sh']
             exporter:  ['exporter/**', 'api/**', 'go.work*']
             generated: ['api/**', 'operator/**', 'Makefile']
             pure_go:   ['api/**', 'operator/**', 'agent/**', 'go.work*']
@@ -144,6 +144,13 @@ jobs:
 
       - name: Mark workspace as a safe git directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build libmxl-monitoring
+        # The static libraries of the libmxl-monitoring version
+        # gateway/go.mod pins, which its Go binding links.
+        run: |
+          hack/build-libmxl-monitoring.sh "$GITHUB_WORKSPACE/bin/libmxl-monitoring"
+          echo "CGO_LDFLAGS=${CGO_LDFLAGS:+$CGO_LDFLAGS }-L$GITHUB_WORKSPACE/bin/libmxl-monitoring" >> "$GITHUB_ENV"
 
       - name: gofmt
         run: |
@@ -344,6 +351,13 @@ jobs:
 
       - name: Mark workspace as a safe git directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build libmxl-monitoring
+        # The static libraries of the libmxl-monitoring version
+        # gateway/go.mod pins, which its Go binding links.
+        run: |
+          hack/build-libmxl-monitoring.sh "$GITHUB_WORKSPACE/bin/libmxl-monitoring"
+          echo "CGO_LDFLAGS=${CGO_LDFLAGS:+$CGO_LDFLAGS }-L$GITHUB_WORKSPACE/bin/libmxl-monitoring" >> "$GITHUB_ENV"
 
       - name: Run tests
         run: |

@@ -43,16 +43,34 @@ container images in `ci.yml` and the `go-mxl` require in
 `go-mxl-pins` CI job fails when they do not. `hack/flow-probe.sh`
 reads its tag from `docker/gateway.Dockerfile`.
 
+### libmxl-monitoring
+
+The gateway also links
+[libmxl-monitoring](https://github.com/marquies/libmxl-monitoring)
+(Apache-2.0) through its Go binding, which needs the library's static
+libraries at link time. `hack/build-libmxl-monitoring.sh` builds them
+from the module directory `gateway/go.mod` pins, so they always match
+the binding, into `bin/libmxl-monitoring` by default; it needs cmake,
+ninja, a C++20 compiler and libmxl's CMake package under
+`/opt/libmxl`, all of which the go-mxl builder image has. picojson, the
+library's header-only dependency, is vendored under
+`gateway/third_party/picojson`, so the build fetches nothing. The
+Dockerfile, CI and `make test-gateway` run it and append to
+`CGO_LDFLAGS`. Both licenses ship in the gateway image under
+`/usr/share/licenses/`.
+
 ### On the host
 
 Install libmxl + libmxl-fabrics by following
 [go-mxl's README](https://github.com/qvest-digital/go-mxl), then point
-pkg-config at them and build:
+pkg-config at them, build libmxl-monitoring and build:
 
 ```sh
 export PKG_CONFIG_PATH=/opt/libmxl/lib/pkgconfig
 export LD_LIBRARY_PATH=/opt/libmxl/lib
 pkg-config --exists libmxl libmxl-fabrics && echo OK
+make libmxl-monitoring
+export CGO_LDFLAGS="${CGO_LDFLAGS:+$CGO_LDFLAGS }-L$PWD/bin/libmxl-monitoring"
 (cd gateway && go build ./... && go vet ./...)
 ```
 

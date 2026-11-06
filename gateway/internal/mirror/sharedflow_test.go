@@ -76,15 +76,15 @@ func TestCommitArrivedGrain_SecondWriterOfSameFlowSeesAlreadyCommitted(t *testin
 	first, second := twoWriters(t, sharedFlowVideoDef)
 
 	const idx = 1000
-	_, _, err := commitArrivedGrain(first, idx, nil)
+	_, err := commitArrivedGrain(first, idx, nil)
 	require.NoError(t, err)
 
-	_, _, err = commitArrivedGrain(second, idx, nil)
+	_, err = commitArrivedGrain(second, idx, nil)
 	require.ErrorIs(t, err, errGrainAlreadyCommitted)
 
-	_, _, err = commitArrivedGrain(second, idx+1, nil)
+	_, err = commitArrivedGrain(second, idx+1, nil)
 	require.NoError(t, err, "the next grain commits through the other writer")
-	_, _, err = commitArrivedGrain(first, idx+1, nil)
+	_, err = commitArrivedGrain(first, idx+1, nil)
 	require.ErrorIs(t, err, errGrainAlreadyCommitted)
 }
 
@@ -112,7 +112,7 @@ func TestCommitArrivedGrain_DataGrainKeepsItsLength(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, ga.Commit(64, 0))
 
-	_, _, err = commitArrivedGrain(w, idx, nil)
+	_, err = commitArrivedGrain(w, idx, nil)
 	require.NoError(t, err)
 
 	g, err := w.GrainInfo(idx)
@@ -179,7 +179,7 @@ func TestEmptyDataGrainIsMirroredEmpty(t *testing.T) {
 
 	// What the initiator's header-only write leaves in the target's
 	// slot is the same header, as in the test above.
-	_, _, err = commitArrivedGrain(w, idx, nil)
+	_, err = commitArrivedGrain(w, idx, nil)
 	require.NoError(t, err)
 	got, err := w.GrainInfo(idx)
 	require.NoError(t, err)
@@ -217,7 +217,8 @@ func TestCommitArrivedGrain_SliceBatchesCommitAsTheyLand(t *testing.T) {
 	require.NoError(t, ga.Cancel())
 
 	land(270)
-	n, reason, err := commitArrivedGrain(target, idx, nil)
+	c, err := commitArrivedGrain(target, idx, nil)
+	n, reason := c.bytes, c.reason
 	require.NoError(t, err)
 	assert.Empty(t, reason)
 	assert.Zero(t, n, "the payload is counted with the last batch")
@@ -226,14 +227,15 @@ func TestCommitArrivedGrain_SliceBatchesCommitAsTheyLand(t *testing.T) {
 	assert.Equal(t, uint16(270), g.ValidSlices, "the first batch is readable as it landed")
 
 	land(total)
-	n, _, err = commitArrivedGrain(target, idx, nil)
+	c, err = commitArrivedGrain(target, idx, nil)
+	n = c.bytes
 	require.NoError(t, err, "a grain the target has not completed is reopened for its next batch")
 	assert.Positive(t, n)
 	g, err = target.GrainInfo(idx)
 	require.NoError(t, err)
 	assert.True(t, g.Complete(), "the last batch completes the grain")
 
-	_, _, err = commitArrivedGrain(target, idx, nil)
+	_, err = commitArrivedGrain(target, idx, nil)
 	require.ErrorIs(t, err, errGrainAlreadyCommitted, "a completed grain is not reopened")
 }
 
@@ -263,10 +265,10 @@ func TestSharedFlow_ASiblingsEarlierBatchDoesNotLowerAnOpenGrain(t *testing.T) {
 	}
 
 	land(540)
-	_, _, err := flow.commitGrain(target, idx, nil)
+	_, err := flow.commitGrain(target, idx, nil)
 	require.NoError(t, err)
 	land(270) // the sibling's first batch, late
-	_, _, err = flow.commitGrain(target, idx, nil)
+	_, err = flow.commitGrain(target, idx, nil)
 	require.NoError(t, err)
 
 	g, err := target.GrainInfo(idx)
@@ -290,7 +292,7 @@ func TestSharedFlow_ConcurrentWritersOnlyEverSeeAlreadyCommitted(t *testing.T) {
 		go func(w *mxl.Writer) {
 			defer wg.Done()
 			for idx := uint64(1); idx <= grains; idx++ {
-				if _, _, err := flow.commitGrain(w, idx, nil); err != nil && !errors.Is(err, errGrainAlreadyCommitted) {
+				if _, err := flow.commitGrain(w, idx, nil); err != nil && !errors.Is(err, errGrainAlreadyCommitted) {
 					unexpected.CompareAndSwap(nil, err)
 				}
 			}
@@ -324,11 +326,11 @@ func TestSharedFlow_GrainASiblingJustCommittedCountsAsArrival(t *testing.T) {
 	flow := &sharedFlow{}
 	tracker := &recordingCommitTracker{}
 
-	_, _, err := flow.commitGrain(first, 10, nil)
+	_, err := flow.commitGrain(first, 10, nil)
 	require.NoError(t, err)
 	committedAt := flow.lastCommitAt
 
-	_, _, err = flow.commitGrain(second, 10, tracker)
+	_, err = flow.commitGrain(second, 10, tracker)
 	require.ErrorIs(t, err, errGrainAlreadyCommitted)
 	assert.Equal(t, []uint64{10}, tracker.snapshot())
 	assert.Equal(t, committedAt, flow.lastCommitAt, "a duplicate does not advance the flow")
@@ -343,11 +345,11 @@ func TestSharedFlow_StaleAlreadyCommittedArrivalIsNotProgress(t *testing.T) {
 	flow := &sharedFlow{}
 	tracker := &recordingCommitTracker{}
 
-	_, _, err := flow.commitGrain(first, 10, nil)
+	_, err := flow.commitGrain(first, 10, nil)
 	require.NoError(t, err)
 	flow.lastCommitAt = time.Now().Add(-2 * siblingCommitFreshness)
 
-	_, _, err = flow.commitGrain(second, 10, tracker)
+	_, err = flow.commitGrain(second, 10, tracker)
 	require.ErrorIs(t, err, errGrainAlreadyCommitted)
 	assert.Empty(t, tracker.snapshot())
 }
@@ -477,10 +479,10 @@ func TestCommitArrivedGrain_AnIndexNotSentIsFlaggedInvalid(t *testing.T) {
 		require.NoError(t, ga.Commit(ga.TotalSlices, 0))
 	}
 	land(1000)
-	_, _, err := commitArrivedGrain(target, 1000, nil)
+	_, err := commitArrivedGrain(target, 1000, nil)
 	require.NoError(t, err)
 	land(1002)
-	_, _, err = commitArrivedGrain(target, 1002, nil)
+	_, err = commitArrivedGrain(target, 1002, nil)
 	require.NoError(t, err)
 
 	g, err := target.GrainInfo(1001)

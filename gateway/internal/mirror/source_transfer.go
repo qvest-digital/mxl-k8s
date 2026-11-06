@@ -77,28 +77,28 @@ func newGrainTransfer(src grainSource, dst grainSender, data bool, perSlice uint
 		}
 		return uint64(end-start) * perSlice, nil
 	}
-	return func(idx uint64, start uint16) (uint16, uint64, error) {
+	return func(idx uint64, start uint16) (grainStep, error) {
 		grain, err := readForTransfer(src, idx, data, batchEnd(start, batch))
 		if err != nil {
-			return start, 0, err
+			return grainStep{next: start}, err
 		}
 		switch {
 		case grain.Invalid():
 			// Its slot holds no picture, so only the header goes, which
 			// the target commits invalid.
 			bytes, err := post(idx, 0, 0)
-			return 0, bytes, err
+			return grainStep{bytes: bytes, invalid: true}, err
 		case data:
 			// A data grain's valid slices are its length.
 			bytes, err := post(idx, 0, grain.ValidSlices)
-			return 0, bytes, err
+			return grainStep{bytes: bytes}, err
 		}
 		end := max(grain.ValidSlices, start)
 		bytes, err := post(idx, start, end)
 		if err != nil || end >= grain.TotalSlices {
-			return 0, bytes, err
+			return grainStep{bytes: bytes}, err
 		}
-		return end, bytes, nil
+		return grainStep{next: end, bytes: bytes}, nil
 	}
 }
 
@@ -287,6 +287,8 @@ func runTransferLoop(
 	lastSent := int64(head0)
 	tracker.recordHead(head0, time.Now())
 
+	rec := tracker.source()
+
 	// start is the slice the next batch of grain lastSent+1 starts at.
 	var start uint16
 	for ctx.Err() == nil {
@@ -314,13 +316,17 @@ func runTransferLoop(
 			next = h
 		}
 
-		nextStart, bytes, err := transferGrain(uint64(next), start)
+		step, err := transferGrain(uint64(next), start)
 		switch {
 		case err == nil:
 		case isReaderAgedOut(err):
 			l.Info("reader aged out, skipping grains", "fromIndex", next, "toIndex", h)
 			tracker.recordAgedOut(time.Now())
 			tracker.recordPassedOver(unsentAgedOut, uint64(h-next+1))
+			// The read came back too late, and the loop jumps to the
+			// head over what the ring overtook.
+			rec.Read(err, uint64(next), 1)
+			rec.Skipped(uint64(h - next + 1))
 			lastSent, start = h, 0
 			continue
 		case errors.Is(err, errPost) && retryablePost(err):
@@ -335,15 +341,31 @@ func runTransferLoop(
 			tracker.recordDropped(false)
 			return
 		case errors.Is(err, mxl.ErrTimeout):
-			// Not written yet; the read already waited for it.
+			// Not written yet; the read already waited for it. A grain
+			// still missing a grace period past its time is the
+			// writer's.
+			rec.Read(err, uint64(next), 1)
 			continue
 		default:
 			l.V(2).Info("grain not transferable yet", "index", next, "head", h, "error", err.Error())
+			rec.Read(err, uint64(next), 1)
 			wait(ctx, poll)
 			continue
 		}
 		posted := time.Now()
 		late, err := awaitTransfer(ctx, makeProgress, pollProgress, posted, interval)
+		// The read that completed the grain is recorded once its
+		// transfer is no longer outstanding, so nothing runs between the
+		// post and the first progress call; its arrival latency includes
+		// the transfer.
+		done := step.next == 0
+		if done {
+			if step.invalid {
+				rec.ReadContent(ContentInvalid, uint64(next), 1)
+			} else {
+				rec.Read(nil, uint64(next), 1)
+			}
+		}
 		if err != nil {
 			if ctx.Err() == nil {
 				l.Info("lost the mirror target", "index", next, "error", err.Error())
@@ -354,9 +376,9 @@ func runTransferLoop(
 			}
 			return
 		}
-		tracker.recordCompleted(uint64(next), bytes, late, time.Now())
-		start = nextStart
-		if start == 0 {
+		tracker.recordCompleted(uint64(next), step.bytes, late, time.Now())
+		start = step.next
+		if done {
 			lastSent = next
 		}
 	}
@@ -408,6 +430,8 @@ func runSampleTransferLoop(
 	lastSent := head0
 	tracker.recordHead(head0, time.Now())
 
+	rec := tracker.source()
+
 	for ctx.Err() == nil {
 		head, err := probeRuntime()
 		if err != nil {
@@ -446,9 +470,11 @@ func runSampleTransferLoop(
 			tracker.recordDropped(false)
 			return
 		}
-
 		posted := time.Now()
 		late, err := awaitTransfer(ctx, makeProgress, pollProgress, posted, interval)
+		// Recorded once the transfer is no longer outstanding; the
+		// batch's arrival latency includes the transfer.
+		rec.Read(nil, end, xferBatch)
 		if err != nil {
 			if ctx.Err() == nil {
 				l.Info("lost the mirror target", "headIndex", end, "error", err.Error())

@@ -112,11 +112,12 @@ func TestGrainTransfer_InvalidGrainGoesAsItsHeader(t *testing.T) {
 			dst := &recordingSender{}
 			transfer := newGrainTransfer(flaggedSource{1001: tc.g}, dst, tc.data, 1, 0)
 
-			next, bytes, err := transfer(1001, 0)
+			step, err := transfer(1001, 0)
 
 			require.NoError(t, err)
-			assert.Zero(t, next, "the header completes the grain")
-			assert.Zero(t, bytes, "an invalid grain carries no payload")
+			assert.Zero(t, step.next, "the header completes the grain")
+			assert.Zero(t, step.bytes, "an invalid grain carries no payload")
+			assert.True(t, step.invalid, "the loop counts it as not complete at the source")
 			assert.Equal(t, [][3]uint64{{1001, 0, 0}}, dst.calls)
 		})
 	}
@@ -126,18 +127,19 @@ func TestGrainTransfer_InvalidGrainGoesAsItsHeader(t *testing.T) {
 func TestGrainTransfer_SendsTheGrainsSlices(t *testing.T) {
 	video := flaggedSource{7: {Index: 7, TotalSlices: 1080, ValidSlices: 1080}}
 	dst := &recordingSender{}
-	next, bytes, err := newGrainTransfer(video, dst, false, 5120, 0)(7, 0)
+	step, err := newGrainTransfer(video, dst, false, 5120, 0)(7, 0)
 	require.NoError(t, err)
-	assert.Zero(t, next)
-	assert.Equal(t, uint64(1080*5120), bytes)
+	assert.Zero(t, step.next)
+	assert.Equal(t, uint64(1080*5120), step.bytes)
+	assert.False(t, step.invalid)
 	assert.Equal(t, [][3]uint64{{7, 0, 1080}}, dst.calls)
 
 	data := flaggedSource{7: {Index: 7, TotalSlices: 4096, ValidSlices: 64}}
 	dst = &recordingSender{}
-	next, bytes, err = newGrainTransfer(data, dst, true, 1, 270)(7, 0)
+	step, err = newGrainTransfer(data, dst, true, 1, 270)(7, 0)
 	require.NoError(t, err)
-	assert.Zero(t, next, "a data grain goes in one transfer")
-	assert.Equal(t, uint64(64), bytes)
+	assert.Zero(t, step.next, "a data grain goes in one transfer")
+	assert.Equal(t, uint64(64), step.bytes)
 	assert.Equal(t, [][3]uint64{{7, 0, 64}}, dst.calls)
 }
 
@@ -167,10 +169,10 @@ func TestGrainTransfer_SendsSliceBatchesAsTheyBecomeValid(t *testing.T) {
 	var start uint16
 	var total uint64
 	for i := 0; i < 4; i++ {
-		next, bytes, err := transfer(7, start)
+		step, err := transfer(7, start)
 		require.NoError(t, err)
-		total += bytes
-		start = next
+		total += step.bytes
+		start = step.next
 		if start == 0 {
 			break
 		}
@@ -185,11 +187,11 @@ func TestGrainTransfer_SendsSliceBatchesAsTheyBecomeValid(t *testing.T) {
 // A failed post is told apart from a grain the reader cannot hand out.
 func TestGrainTransfer_WrapsAFailedPost(t *testing.T) {
 	src := flaggedSource{7: {Index: 7, TotalSlices: 1080, ValidSlices: 1080}}
-	_, _, err := newGrainTransfer(src, &recordingSender{err: fabrics.ErrNotReady}, false, 1, 0)(7, 0)
+	_, err := newGrainTransfer(src, &recordingSender{err: fabrics.ErrNotReady}, false, 1, 0)(7, 0)
 	require.ErrorIs(t, err, errPost)
 	require.ErrorIs(t, err, fabrics.ErrNotReady)
 
-	_, _, err = newGrainTransfer(src, &recordingSender{}, false, 1, 0)(8, 0)
+	_, err = newGrainTransfer(src, &recordingSender{}, false, 1, 0)(8, 0)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, errPost)
 }

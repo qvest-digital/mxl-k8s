@@ -542,6 +542,69 @@ frames are 802.3x pause only; per-priority flow control is not in the
 standard statistics. With a `gateway.variants` entry, the chart's
 ServiceMonitor labels every gateway series with `variant`.
 
+#### Replication: where each unit ends
+
+The gateway records every mirror through
+[libmxl-monitoring](https://github.com/marquies/libmxl-monitoring)'s
+replication roles: one handle per mirror on the node that sources it
+(`mxl_gateway_source_*`) and one on the node that targets it
+(`mxl_gateway_target_*`). The `flow` label is the mirror,
+`<namespace>/<name>`, the same on both nodes; it joins
+`mxl_operator_mirror_placement_info` through
+`label_join(..., "flow", "/", "namespace", "mirror")`. Units are grains
+for a discrete flow and samples for a continuous one. The families,
+their labels and result values are the library's, with `node` added.
+
+What the source transfer loop counts, with the library's outcomes as it
+defines them:
+
+| Series | Unit counted |
+| --- | --- |
+| `mxl_gateway_source_reads_total{result="ok"}` | read complete and offered to the target, recorded once its transfer is no longer outstanding |
+| `mxl_gateway_source_reads_total{result="invalid"}` | read flagged invalid: the writer left it incomplete or jumped over it, and only its header is sent |
+| `mxl_gateway_source_reads_total{result="too_late"}` | a read that came back too late: the ring had overtaken the loop |
+| `mxl_gateway_source_skipped_total` | units jumped over after a read that came back too late; resync jumps are not in it |
+| `mxl_gateway_source_reads_total{result="too_early"}` | a grain still not there a grace period after its media timestamp |
+
+The loop reads only the grains it sends. A resync, where it trails the
+head by more than 4 grains and jumps to it, reads nothing and records
+nothing here; `mxl_gateway_mirror_source_unsent_grains_total{reason="resync"}`
+counts those grains. For the grains a loop jumps over, a grain the
+writer never completed is not told apart from one the copy lost.
+Samples of a continuous flow are read by libmxl-fabrics inside the
+transfer, so their source handle counts OK reads only. A unit's
+arrival latency includes its transfer.
+
+On the target, `mxl_gateway_target_writes_total{result="ok"}` counts
+units committed complete, including an arrival a second mirror of the
+flow committed first, and `mxl_gateway_target_invalid_input_total`
+arrivals committed invalid (`invalid` from the source, `missing` for a
+slot a later write overtook).
+
+These series give no copy-loss figure. The units skipped after a
+too-late read span whatever the ring held, grains the writer jumped
+over included; a commit failure, a target that restarted and a source
+that restarted each leave a source read without a target write, or no
+count at all.
+
+`mxl_gateway_source_reads_total{result="too_early"}` counts a grain the
+gateway still waited for a grace period (one grain, or one batch of
+samples, plus 50 ms) after its media timestamp: the writer's lateness.
+`mxl_gateway_source_arrival_seconds` and
+`mxl_gateway_target_commit_seconds` are the library's latency
+histograms against media timestamps, so source and target compare
+directly. The library's other families (`flow_state`,
+`flow_delivering`, `open_failures_total`, `opens_total`, `lost_total`,
+`age_seconds`, `stalls_total`, `flow_info`) are exported as it renders
+them.
+
+What became of a transfer itself (completed in time, late, lost with
+its target) is not in the library's model; `mxl_gateway_mirror_transfers_total`
+above keeps counting it per batch.
+
+Series per mirror and role are fixed: 25 to 27 counters and gauges
+and one histogram of 20 series (17 bounds, +Inf, sum, count).
+
 Utilization is the committed or measured rate over
 `capacityBitsPerSecond`, or over the plannable gauge.
 

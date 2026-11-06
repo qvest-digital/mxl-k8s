@@ -126,6 +126,10 @@ type SourceReconciler struct {
 	// publisher applies the same one.
 	Selector fabric.Selector
 
+	// Recorders receives what each mirror's transfer loop observes. Nil
+	// records nothing.
+	Recorders Recorders
+
 	// Domains holds the long-lived mxl + fabrics instances, one per
 	// MxlDomain a mirror reads from.
 	Domains *instance.Set
@@ -334,6 +338,10 @@ type sourceEntry struct {
 	// before the source's writes keep getting refused.
 	infoStr string
 
+	// rec is the mirror's source recorder, set before attach and kept
+	// across its links.
+	rec SourceRecorder
+
 	// peerNode labels this mirror's byte counter, and is what keeps the
 	// label set unique when one node mirrors the same flow to several
 	// targets. Immutable for the life of the entry, so the collector
@@ -526,6 +534,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// to, and would hold a later return here to its backoff.
 		r.closeEntry(req.NamespacedName)
 		r.clearRedials(req.NamespacedName)
+		r.retire(req.NamespacedName)
 		return r.reapOrphanedFinalizer(ctx, &mirror)
 	}
 
@@ -535,6 +544,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		r.closeEntry(req.NamespacedName)
 		r.clearRedials(req.NamespacedName)
+		r.retire(req.NamespacedName)
 		controllerutil.RemoveFinalizer(&mirror, SourceFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
 			if apierrors.IsConflict(err) {
@@ -758,6 +768,14 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if mirror.Status.LastSentAt != nil {
 		t := mirror.Status.LastSentAt.Time
 		entry.lastSentAt.Store(&t)
+	}
+
+	if r.Recorders != nil {
+		span := shared.interval
+		if shared.continuous {
+			_, span, _ = shared.sampleTiming(entry.targetSyncHint)
+		}
+		entry.rec = r.Recorders.Source(req.NamespacedName, shared.key.flowID, shared.cfg, span)
 	}
 
 	link, err := r.opener.attach(shared, mirror.Status.TargetInfo, entry)
@@ -1275,6 +1293,9 @@ type progressTracker interface {
 	recordAgedOut(at time.Time)
 	recordSkipped(samples uint64)
 	recordPassedOver(reason unsentReason, grains uint64)
+
+	// source is the mirror's source recorder, never nil.
+	source() SourceRecorder
 }
 
 // unsentReason says why the grain transfer loop did not offer a grain.
@@ -1298,6 +1319,13 @@ func (e *sourceEntry) recordCompleted(idx, bytes uint64, late bool, at time.Time
 	if late {
 		e.late.Add(1)
 	}
+}
+
+func (e *sourceEntry) source() SourceRecorder {
+	if e.rec == nil {
+		return noopSource{}
+	}
+	return e.rec
 }
 
 // recordTargetEvicted is the link's to act on; see linkTracker.
@@ -1698,6 +1726,13 @@ func (r *SourceReconciler) takeRedial(key types.NamespacedName) (time.Duration, 
 	d.notBefore = now.Add(backoffFor(d.count))
 	r.redials[key] = d
 	return 0, d.count
+}
+
+// retire releases the recorder of a mirror that is gone.
+func (r *SourceReconciler) retire(key types.NamespacedName) {
+	if r.Recorders != nil {
+		r.Recorders.ReleaseSource(key)
+	}
 }
 
 func (r *SourceReconciler) clearRedials(key types.NamespacedName) {

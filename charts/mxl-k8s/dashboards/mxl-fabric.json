@@ -3180,7 +3180,7 @@
     {
       "id": 44,
       "type": "row",
-      "title": "Mirrors",
+      "title": "Replication",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -3192,6 +3192,713 @@
     },
     {
       "id": 45,
+      "type": "stat",
+      "title": "Read invalid at the source",
+      "description": "Units the gateway read that the ring held invalid or incomplete, over the units it read: grains the writer did not complete. Grains inside a jump to the head are not read and not in this.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 104
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.001
+              },
+              {
+                "color": "red",
+                "value": 0.01
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 3
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum(increase(mxl_gateway_source_reads_total{node=~\"$node\",result=~\"invalid|incomplete|missing\"}[$__range])) or vector(0)) / (sum(increase(mxl_gateway_source_reads_total{node=~\"$node\",result=~\"ok|invalid|incomplete|missing\"}[$__range])) or vector(0))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 46,
+      "type": "stat",
+      "title": "Skipped at the source",
+      "description": "Skipped units over the units read or skipped, in the range. Skipped units are the ones the ring overtook after a read came back too late. A resync, where the loop jumps to the head while it trails by more than 4 grains, reads nothing and is not counted here; mxl_gateway_mirror_source_unsent_grains_total{reason=\"resync\"} counts it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 104
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.001
+              },
+              {
+                "color": "red",
+                "value": 0.01
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 3
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum(increase(mxl_gateway_source_skipped_total{node=~\"$node\"}[$__range])) or vector(0)) / ((sum(increase(mxl_gateway_source_skipped_total{node=~\"$node\"}[$__range])) or vector(0)) + (sum(increase(mxl_gateway_source_reads_total{node=~\"$node\",result=~\"ok|invalid|incomplete|missing\"}[$__range])) or vector(0)))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "type": "stat",
+      "title": "Writer late at the source",
+      "description": "Grains the gateway still waited for a grace period (one grain, or one batch of samples, plus 50 ms) after their media timestamp, in the range: the writer's lateness.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 104
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum(increase(mxl_gateway_source_reads_total{node=~\"$node\",result=\"too_early\"}[$__range])) or vector(0))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 48,
+      "type": "stat",
+      "title": "Target commit failures",
+      "description": "Commits on the target that failed, in the range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 104
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum(increase(mxl_gateway_target_writes_total{node=~\"$node\",result=~\"other_error|permission_error|out_of_space\"}[$__range])) or vector(0))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 49,
+      "type": "timeseries",
+      "title": "Source units by outcome",
+      "description": "What the mirrors' source handles counted per second: read complete, read invalid, and skipped. Skipped units are the ones the ring overtook after a read came back too late. A resync, where the loop jumps to the head while it trails by more than 4 grains, reads nothing and is not counted here; mxl_gateway_mirror_source_unsent_grains_total{reason=\"resync\"} counts it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 108
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(mxl_gateway_source_reads_total{node=~\"$node\",result=\"ok\"}[$__rate_interval]))",
+          "legendFormat": "read complete",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (result) (rate(mxl_gateway_source_reads_total{node=~\"$node\",result=~\"invalid|incomplete|missing\"}[$__rate_interval]))",
+          "legendFormat": "read {{result}}",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(mxl_gateway_source_skipped_total{node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "skipped",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 50,
+      "type": "timeseries",
+      "title": "Target writes",
+      "description": "Commits on the target per second by result, and arrivals committed invalid by issue: invalid from the source, missing where a later write overtook the slot.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 108
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (node, result) (rate(mxl_gateway_target_writes_total{node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "{{node}} {{result}}",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (node, issue) (rate(mxl_gateway_target_invalid_input_total{node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "{{node}} invalid: {{issue}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 51,
+      "type": "table",
+      "title": "Units per mirror",
+      "description": "Units per mirror over the time range. flow is the mirror, as <namespace>/<name>; read and skipped come from its source node, written from its target node. A mirror is listed when its source or its target node is selected. Skipped units are the ones the ring overtook after a read came back too late. A resync, where the loop jumps to the head while it trails by more than 4 grains, reads nothing and is not counted here; mxl_gateway_mirror_source_unsent_grains_total{reason=\"resync\"} counts it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 116
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "skipped",
+            "desc": true
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "Value #A": "read complete",
+              "Value #B": "read invalid",
+              "Value #C": "skipped",
+              "Value #D": "written complete",
+              "Value #E": "written invalid"
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (flow) (increase(mxl_gateway_source_reads_total{result=\"ok\"}[$__range])) and on(flow) (group by (flow) (mxl_gateway_source_reads_total{node=~\"$node\"}) or group by (flow) (mxl_gateway_target_writes_total{node=~\"$node\"}))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (flow) (increase(mxl_gateway_source_reads_total{result=~\"invalid|incomplete|missing\"}[$__range])) and on(flow) (group by (flow) (mxl_gateway_source_reads_total{node=~\"$node\"}) or group by (flow) (mxl_gateway_target_writes_total{node=~\"$node\"}))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (flow) (increase(mxl_gateway_source_skipped_total{}[$__range])) and on(flow) (group by (flow) (mxl_gateway_source_reads_total{node=~\"$node\"}) or group by (flow) (mxl_gateway_target_writes_total{node=~\"$node\"}))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (flow) (increase(mxl_gateway_target_writes_total{result=\"ok\"}[$__range])) and on(flow) (group by (flow) (mxl_gateway_source_reads_total{node=~\"$node\"}) or group by (flow) (mxl_gateway_target_writes_total{node=~\"$node\"}))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (flow) (increase(mxl_gateway_target_invalid_input_total{}[$__range])) and on(flow) (group by (flow) (mxl_gateway_source_reads_total{node=~\"$node\"}) or group by (flow) (mxl_gateway_target_writes_total{node=~\"$node\"}))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "Source arrival and target commit latency (p95)",
+      "description": "95th percentile of when the gateway read a unit at the source, and committed it at the target, after its media timestamp. The difference is what the fabric and the target add.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 124
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, node) (rate(mxl_gateway_source_arrival_seconds_bucket{node=~\"$node\"}[$__rate_interval])))",
+          "legendFormat": "{{node}} source arrival",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, node) (rate(mxl_gateway_target_commit_seconds_bucket{node=~\"$node\"}[$__rate_interval])))",
+          "legendFormat": "{{node}} target commit",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "Writer late at the source per mirror",
+      "description": "Grains the gateway still waited for a grace period after their media timestamp, per mirror: the writer's lateness, not the fabric's.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 124
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (node, flow) (rate(mxl_gateway_source_reads_total{node=~\"$node\",result=\"too_early\"}[$__rate_interval]))",
+          "legendFormat": "{{node}} {{flow}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 54,
+      "type": "row",
+      "title": "Mirrors",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 132
+      },
+      "panels": []
+    },
+    {
+      "id": 55,
       "type": "table",
       "title": "Mirror placement",
       "description": "Every mirror with its ports, Placed reason and phase. Ports are named as on the port panels. The flow id links to the flow dashboard.",
@@ -3203,7 +3910,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 104
+        "y": 133
       },
       "fieldConfig": {
         "defaults": {
@@ -3269,7 +3976,7 @@
       ]
     },
     {
-      "id": 46,
+      "id": 56,
       "type": "timeseries",
       "title": "Delivered vs demand per mirror",
       "description": "Payload committed on the target per mirror over the demand placement charged it. Demand includes the protocol overhead, and a data flow's rate is an upper bound, so a fully delivered flow reads somewhat below 100%. Mirrors of one flow between the same two nodes are summed on both sides.",
@@ -3281,7 +3988,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 112
+        "y": 141
       },
       "fieldConfig": {
         "defaults": {
@@ -3353,7 +4060,7 @@
       ]
     },
     {
-      "id": 47,
+      "id": 57,
       "type": "timeseries",
       "title": "Delivered per mirror",
       "description": "Payload committed on the target per mirror (solid) and the demand charged (dashed).",
@@ -3365,7 +4072,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 112
+        "y": 141
       },
       "fieldConfig": {
         "defaults": {
@@ -3450,7 +4157,7 @@
       ]
     },
     {
-      "id": 48,
+      "id": 58,
       "type": "timeseries",
       "title": "Late and lost transfers",
       "description": "Transfers per second that completed after their grain or batch interval (late) or were outstanding when a target was given up (lost), per mirror source.",
@@ -3462,7 +4169,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 120
+        "y": 149
       },
       "fieldConfig": {
         "defaults": {
@@ -3514,7 +4221,7 @@
       ]
     },
     {
-      "id": 49,
+      "id": 59,
       "type": "timeseries",
       "title": "Completion lag",
       "description": "Grains between the source head and the last grain completed to the target, per mirror.",
@@ -3526,7 +4233,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 120
+        "y": 149
       },
       "fieldConfig": {
         "defaults": {
@@ -3578,7 +4285,7 @@
       ]
     },
     {
-      "id": 50,
+      "id": 60,
       "type": "row",
       "title": "Redundancy sets",
       "collapsed": false,
@@ -3586,12 +4293,12 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 128
+        "y": 157
       },
       "panels": []
     },
     {
-      "id": 51,
+      "id": 61,
       "type": "table",
       "title": "Path disjointness",
       "description": "Whether the member mirrors of each MxlFlowRedundancySet arriving on one node use separate fabric ports, with the reason the operator gives.",
@@ -3603,7 +4310,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 129
+        "y": 158
       },
       "fieldConfig": {
         "defaults": {
@@ -3686,7 +4393,7 @@
       ]
     },
     {
-      "id": 52,
+      "id": 62,
       "type": "state-timeline",
       "title": "Disjointness over time",
       "description": "Path disjointness per redundancy set.",
@@ -3698,7 +4405,7 @@
         "h": 8,
         "w": 16,
         "x": 8,
-        "y": 129
+        "y": 158
       },
       "fieldConfig": {
         "defaults": {
@@ -3765,7 +4472,7 @@
       ]
     },
     {
-      "id": 53,
+      "id": 63,
       "type": "row",
       "title": "Placement",
       "collapsed": false,
@@ -3773,12 +4480,12 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 137
+        "y": 166
       },
       "panels": []
     },
     {
-      "id": 54,
+      "id": 64,
       "type": "timeseries",
       "title": "Placement latency",
       "description": "Time from a mirror's creation to its first placement, by percentile.",
@@ -3790,7 +4497,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 138
+        "y": 167
       },
       "fieldConfig": {
         "defaults": {
@@ -3862,7 +4569,7 @@
       ]
     },
     {
-      "id": 55,
+      "id": 65,
       "type": "timeseries",
       "title": "Placements",
       "description": "First placements per minute.",
@@ -3874,7 +4581,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 138
+        "y": 167
       },
       "fieldConfig": {
         "defaults": {
@@ -3926,7 +4633,7 @@
       ]
     },
     {
-      "id": 56,
+      "id": 66,
       "type": "timeseries",
       "title": "Mirrors by Placed reason",
       "description": "MxlFlowMirrors by the reason of their Placed condition.",
@@ -3938,7 +4645,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 138
+        "y": 167
       },
       "fieldConfig": {
         "defaults": {
@@ -3990,7 +4697,7 @@
       ]
     },
     {
-      "id": 57,
+      "id": 67,
       "type": "timeseries",
       "title": "Mirrors by phase",
       "description": "MxlFlowMirrors by phase.",
@@ -4002,7 +4709,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 146
+        "y": 175
       },
       "fieldConfig": {
         "defaults": {

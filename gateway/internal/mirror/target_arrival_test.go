@@ -55,7 +55,8 @@ func TestCommitArrivedGrain_InvalidArrivalIsCommittedInvalid(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, ga.Commit(64, tc.flags))
 
-			_, reason, err := commitArrivedGrain(w, idx, nil)
+			c, err := commitArrivedGrain(w, idx, nil)
+			reason := c.reason
 			require.NoError(t, err)
 			require.Equal(t, tc.reason, reason)
 
@@ -64,7 +65,7 @@ func TestCommitArrivedGrain_InvalidArrivalIsCommittedInvalid(t *testing.T) {
 			require.Equal(t, uint64(idx), g.Index)
 			require.Equal(t, tc.reason != "", g.Invalid(), "what a reader on the target is served")
 
-			_, _, err = commitArrivedGrain(w, idx+1, nil)
+			_, err = commitArrivedGrain(w, idx+1, nil)
 			require.NoError(t, err, "the next arrival commits past it")
 		})
 	}
