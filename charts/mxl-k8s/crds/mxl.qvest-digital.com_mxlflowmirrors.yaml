@@ -32,6 +32,23 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .spec.placement.sourceInterface
+      name: Source-If
+      type: string
+    - jsonPath: .spec.placement.targetInterface
+      name: Target-If
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Placed")].reason
+      name: Placement
+      type: string
+    - jsonPath: .status.sourceInterface
+      name: Bound-Source
+      priority: 1
+      type: string
+    - jsonPath: .status.targetInterface
+      name: Bound-Target
+      priority: 1
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -99,6 +116,29 @@ spec:
                 description: FlowID is the MXL flow being mirrored.
                 pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
                 type: string
+              placement:
+                description: |-
+                  Placement names the fabric interfaces the mirror is carried on.
+                  The operator writes it once both nodes report their interfaces;
+                  a placement written by hand is kept while both addresses stay
+                  advertised. See MxlFlowMirrorPlacement.
+                properties:
+                  sourceInterface:
+                    description: |-
+                      SourceInterface is the address on spec.sourceNode the source
+                      gateway's initiator binds.
+                    minLength: 1
+                    type: string
+                  targetInterface:
+                    description: |-
+                      TargetInterface is the address on spec.targetNode the target
+                      gateway's endpoint binds.
+                    minLength: 1
+                    type: string
+                required:
+                - sourceInterface
+                - targetInterface
+                type: object
               provider:
                 default: auto
                 description: |-
@@ -217,6 +257,14 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              demandBitsPerSecond:
+                description: |-
+                  DemandBitsPerSecond is the rate the operator charged against
+                  both interfaces of spec.placement when it placed the mirror.
+                  Written by the operator.
+                format: int64
+                minimum: 0
+                type: integer
               lastError:
                 description: |-
                   LastError is the most recent reconcile error message recorded
@@ -262,6 +310,11 @@ spec:
                   before the most recent retarget. Empty until the mirror has
                   been repointed at least once.
                 type: string
+              sourceInterface:
+                description: |-
+                  SourceInterface is the address the source gateway's initiator
+                  is bound to. Written by the source gateway.
+                type: string
               sourceRetargetedAt:
                 description: |-
                   SourceRetargetedAt is when spec.sourceNode was last repointed
@@ -294,6 +347,11 @@ spec:
                   mxlFabricsTargetSetup and serialized via
                   mxlFabricsTargetInfoToString. The initiator-side gateway parses
                   it with mxlFabricsTargetInfoFromString.
+                type: string
+              targetInterface:
+                description: |-
+                  TargetInterface is the address the target gateway's endpoint is
+                  bound to. Written by the target gateway.
                 type: string
               targetMaxSyncBatchSizeHint:
                 description: |-

@@ -143,6 +143,16 @@ type MxlFlowStatus struct {
 	// +kubebuilder:validation:Maximum=4294967295
 	MaxCommitBatchSizeHint int64 `json:"maxCommitBatchSizeHint,omitempty"`
 
+	// BitsPerSecond is the flow's payload rate as libmxl reports the
+	// flow on its origin node: grain size times grain rate for a
+	// discrete flow, bytes per sample across all channels times sample
+	// rate for a continuous one. The gateway on the origin node
+	// publishes it; unset until it has read the flow, and for formats
+	// without a fixed payload rate. Mirror placement charges it.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	BitsPerSecond int64 `json:"bitsPerSecond,omitempty"`
+
 	// Conditions describes the current state of the flow.
 	// +optional
 	// +listType=map
