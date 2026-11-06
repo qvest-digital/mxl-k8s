@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0-rc.44](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.43...api/v1.1.0-rc.44) (2026-11-06)
+
+
+### Features
+
+* **api:** describe fabric ports, flow rates and mirror placement ([#423](https://github.com/qvest-digital/mxl-k8s/issues/423)) ([f7ff416](https://github.com/qvest-digital/mxl-k8s/commit/f7ff41606c18eaf738e6fb4b0e58aedf65aa6ae0))
+
 ## [1.1.0-rc.43](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.25...api/v1.1.0-rc.43) (2026-11-05)
 
 
