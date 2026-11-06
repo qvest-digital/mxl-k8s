@@ -20,6 +20,11 @@ test/integration/kind/
     40-frames-flowing.sh
 ```
 
+`make kind-up` attaches every node to a second network and runs the
+gateways with both networks as fabric CIDRs, so each node offers two
+tcp fabric interfaces (case 31). `FABRIC_PORTS=1 make kind-up` keeps
+one, and case 31 then skips.
+
 ## Usage
 
 ```sh
@@ -43,6 +48,7 @@ Tunables (all optional, environment variables):
 | `MIRROR_TIMEOUT_SECS` | `180` | MxlFlowMirror Ready / reader Ready wait |
 | `PROBE_TIMEOUT_SECS` | `30` | Per-port-forward startup wait |
 | `FRAMES_WINDOW_SECS` | `5` | Case 40 sample window |
+| `PLACEMENT_TIMEOUT_SECS` | `60` | Case 31 wait for a mirror to be placed and bound |
 | `CLAIM_TIMEOUT_SECS` | `90` | Case 55 wait for the relocated producer's Origin claim |
 | `SELF_MIRROR_TIMEOUT_SECS` | `90` | Case 55 wait for the self-targeted mirror to go |
 | `SURVIVAL_SETTLE_SECS` | `10` | Case 55 settle window before asserting the flow outlived the teardown |

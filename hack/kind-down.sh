@@ -16,3 +16,11 @@ if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
 else
   echo "KIND cluster ${CLUSTER_NAME} not present; nothing to do"
 fi
+
+# The second fabric network kind-up.sh attaches the nodes to outlives
+# the cluster otherwise.
+fabric_net="${CLUSTER_NAME}-fabric-b"
+if $CONTAINER_RUNTIME network inspect "$fabric_net" >/dev/null 2>&1; then
+  echo "Removing network ${fabric_net}"
+  $CONTAINER_RUNTIME network rm "$fabric_net" >/dev/null
+fi
