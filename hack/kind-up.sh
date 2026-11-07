@@ -35,6 +35,11 @@
 # mxlfs. Start from a new cluster: the agent leaves a domain directory
 # that already holds flows a plain directory.
 #
+# With MXLFS=1, MXLFS_NUMA=flow also turns flow placement on
+# (mxlfs.numa.placement.mode=flow) and the exporter's NUMA counters
+# (mxlfs.numa.metrics.enabled); the mxlfs module on the host needs its
+# NUMA ioctls for the rings to be held.
+#
 # FABRIC_PORTS=2 (the default) attaches every node to a second network,
 # ${KIND_CLUSTER}-fabric-b, and runs the gateways with no bind address and
 # both networks as fabric CIDRs, so each node offers two tcp fabric
@@ -77,6 +82,7 @@ if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
 fi
 
 MXLFS="${MXLFS:-0}"
+MXLFS_NUMA="${MXLFS_NUMA:-}"
 MIRROR_TIMEOUT_SECS="${MIRROR_TIMEOUT_SECS:-180}"
 ROLLOUT_TIMEOUT_SECS="${ROLLOUT_TIMEOUT_SECS:-300}"
 
@@ -208,6 +214,9 @@ if [ "$MXLFS" = "1" ]; then
     exit 1
   fi
   MXLFS_SET=(--set mxlfs.enabled=true --set agent.csi.enabled=true)
+  if [ "$MXLFS_NUMA" = "flow" ]; then
+    MXLFS_SET+=(--set mxlfs.numa.placement.mode=flow --set mxlfs.numa.metrics.enabled=true)
+  fi
   DEMO_DIR=demo-mxlfs
 fi
 
