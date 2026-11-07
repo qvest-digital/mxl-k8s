@@ -212,11 +212,21 @@ func run(args []string) error {
 		if err := requireKind(kClient.RESTMapper(), "MxlFlowRedundancySet"); err != nil {
 			return fmt.Errorf("--mxlfs needs the redundancy set CRD: %w", err)
 		}
+		numaNode, err := mxlfsmount.NumaNode(cfg.MxlfsNumaNode, mxlfsmount.RDMAClass)
+		if err != nil {
+			setupLog.Info("mxlfs domains are mounted without numa_node=",
+				"mxlfs-numa-node", cfg.MxlfsNumaNode, "reason", err.Error())
+		} else if cfg.MxlfsNumaNode == "auto" {
+			setupLog.Info("mxlfs domains are mounted with the NUMA node of the RDMA devices",
+				"numa_node", numaNode)
+		}
 		mounts = &mxlfsmount.Mounter{
-			Fallback:    mxlfsmount.NodeEvent(kClient, cfg.NodeName, setupLog),
-			Huge:        cfg.MxlfsHuge,
-			HugeRefused: mxlfsmount.HugeRefusedEvent(kClient, cfg.NodeName, setupLog),
-			Log:         ctrl.Log.WithName("mxlfsmount"),
+			Fallback:        mxlfsmount.NodeEvent(kClient, cfg.NodeName, setupLog),
+			Huge:            cfg.MxlfsHuge,
+			HugeRefused:     mxlfsmount.HugeRefusedEvent(kClient, cfg.NodeName, setupLog),
+			NumaNode:        numaNode,
+			NumaNodeRefused: mxlfsmount.NumaNodeRefusedEvent(kClient, cfg.NodeName, setupLog),
+			Log:             ctrl.Log.WithName("mxlfsmount"),
 		}
 		if err := mounts.Ensure(cfg.DomainPath); err != nil {
 			return err

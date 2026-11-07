@@ -159,6 +159,93 @@ func TestEnsureDoesNotRetryWithoutHuge(t *testing.T) {
 	assert.Len(t, *fell, 1)
 }
 
+// numa_node= reaches the mount only when it is set, after huge=: a
+// module without it refuses a mount that names it.
+func TestEnsureMountsWithNumaNodeOnlyWhenSet(t *testing.T) {
+	m, _, _, options := harnessOpts(nil, nil)
+	m.NumaNode = "1"
+	require.NoError(t, m.Ensure(t.TempDir()))
+	assert.Equal(t, "mode=0777,wait=5000,numa_node=1", *options)
+
+	m, _, _, options = harnessOpts(nil, nil)
+	m.Huge = "always"
+	m.NumaNode = "0"
+	require.NoError(t, m.Ensure(t.TempDir()))
+	assert.Equal(t, "mode=0777,wait=5000,huge=always,numa_node=0", *options)
+}
+
+// A module that has huge= but not numa_node=, or that finds no memory on
+// the node, refuses the mount: the domain is mounted with huge= alone,
+// and the Node says why under numa_node='s own reason.
+func TestEnsureMountsWithoutNumaNodeWhenTheModuleRefusesIt(t *testing.T) {
+	dir := t.TempDir()
+	var mounts []string
+	var refused []fallback
+	m, _, fell := harness(nil, nil)
+	m.Huge = "always"
+	m.NumaNode = "1"
+	m.Mount = func(dir, opts string) error {
+		mounts = append(mounts, opts)
+		if strings.Contains(opts, "numa_node=") {
+			return unix.EINVAL
+		}
+		return nil
+	}
+	m.HugeRefused = func(string, error) { t.Error("HugeRefused told of a mount with huge=") }
+	m.NumaNodeRefused = func(dir string, err error) { refused = append(refused, fallback{dir, err}) }
+
+	require.NoError(t, m.Ensure(dir))
+	assert.Equal(t, []string{
+		"mode=0777,wait=5000,huge=always,numa_node=1",
+		"mode=0777,wait=5000,huge=always",
+	}, mounts)
+	assert.Empty(t, *fell, "the domain is an mxlfs")
+	require.Len(t, refused, 1)
+	assert.Equal(t, dir, refused[0].dir)
+	assert.ErrorIs(t, refused[0].err, unix.EINVAL)
+}
+
+// A module that predates both options refuses each in turn, the newest
+// first, and the Node hears of both.
+func TestEnsureMountsWithoutEitherOptionWhenTheModuleRefusesBoth(t *testing.T) {
+	var mounts []string
+	var told []string
+	m, _, fell := harness(nil, nil)
+	m.Huge = "always"
+	m.NumaNode = "1"
+	m.Mount = func(dir, opts string) error {
+		mounts = append(mounts, opts)
+		if strings.Contains(opts, "huge=") || strings.Contains(opts, "numa_node=") {
+			return unix.EINVAL
+		}
+		return nil
+	}
+	m.HugeRefused = func(string, error) { told = append(told, "huge") }
+	m.NumaNodeRefused = func(string, error) { told = append(told, "numa_node") }
+
+	require.NoError(t, m.Ensure(t.TempDir()))
+	assert.Equal(t, []string{
+		"mode=0777,wait=5000,huge=always,numa_node=1",
+		"mode=0777,wait=5000,huge=always",
+		"mode=0777,wait=5000",
+	}, mounts)
+	assert.Empty(t, *fell)
+	assert.Equal(t, []string{"numa_node", "huge"}, told)
+}
+
+// A mount that fails without numa_node= too leaves the domain plain, and
+// no option is told refused.
+func TestEnsureTellsNoRefusalWhenEveryMountFails(t *testing.T) {
+	m, mounted, fell := harness(nil, unix.EINVAL)
+	m.NumaNode = "1"
+	m.NumaNodeRefused = func(string, error) { t.Error("NumaNodeRefused told of a mount that failed") }
+
+	require.NoError(t, m.Ensure(t.TempDir()))
+	assert.Len(t, *mounted, 2)
+	require.Len(t, *fell, 1)
+	assert.ErrorIs(t, (*fell)[0].err, unix.EINVAL)
+}
+
 func TestEnsureDoesNotHideFlows(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "5fbec3b1-1b0f-417d-9059-8b94a47197ed.mxl-flow"), 0o755))
@@ -217,4 +304,96 @@ func TestHugeRefusedEventHasItsOwnReason(t *testing.T) {
 	assert.Equal(t, ReasonHugeRefused, ev.Reason)
 	assert.Equal(t, "n1", ev.InvolvedObject.Name)
 	assert.Contains(t, ev.Message, "/run/mxl/domain is mounted without huge=: invalid argument")
+}
+
+func TestNumaNodeRefusedEventHasItsOwnReason(t *testing.T) {
+	s := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(s))
+	c := fake.NewClientBuilder().WithScheme(s).Build()
+
+	NumaNodeRefusedEvent(c, "n1", logr.Discard())("/run/mxl/domain", unix.EINVAL)
+
+	var list corev1.EventList
+	require.NoError(t, c.List(context.Background(), &list, client.InNamespace("default")))
+	require.Len(t, list.Items, 1)
+	ev := list.Items[0]
+	assert.Equal(t, corev1.EventTypeWarning, ev.Type)
+	assert.Equal(t, ReasonNumaNodeRefused, ev.Reason)
+	assert.Equal(t, "n1", ev.InvolvedObject.Name)
+	assert.Contains(t, ev.Message, "/run/mxl/domain is mounted without numa_node=: invalid argument")
+}
+
+// rdmaClass builds a sysfs RDMA class in a temporary directory: each
+// device with the numa_node its device reports, or none without one.
+func rdmaClass(t *testing.T, devices map[string]string) string {
+	t.Helper()
+	class := t.TempDir()
+	for name, node := range devices {
+		dir := filepath.Join(class, name)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		if node == "" {
+			continue
+		}
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "device"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "device", "numa_node"), []byte(node+"\n"), 0o644))
+	}
+	return class
+}
+
+func TestRDMANumaNode(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		devices map[string]string
+		want    string
+		wantErr string
+	}{
+		{"one device", map[string]string{"mlx5_0": "1"}, "1", ""},
+		{"devices on one node", map[string]string{"mlx5_0": "0", "mlx5_1": "0"}, "0", ""},
+		{"a device without a PCI device is passed over", map[string]string{"mlx5_0": "1", "rxe0": ""}, "1", ""},
+		{"devices on two nodes", map[string]string{"mlx5_0": "0", "mlx5_1": "1"}, "", "nodes"},
+		{"a device on no node", map[string]string{"mlx5_0": "-1"}, "", "reports NUMA node -1"},
+		{"no device with a node", map[string]string{"rxe0": ""}, "", "no RDMA device"},
+		{"no device", map[string]string{}, "", "no RDMA device"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := RDMANumaNode(rdmaClass(t, tc.devices))
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.Empty(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// A node without RDMA has no class directory at all.
+func TestRDMANumaNodeWithoutTheClass(t *testing.T) {
+	_, err := RDMANumaNode(filepath.Join(t.TempDir(), "infiniband"))
+	require.ErrorContains(t, err, "no RDMA device")
+}
+
+func TestNumaNode(t *testing.T) {
+	class := rdmaClass(t, map[string]string{"mlx5_0": "1"})
+	for _, tc := range []struct {
+		value, want, wantErr string
+	}{
+		{"", "", ""},
+		{"none", "", ""},
+		{"0", "0", ""},
+		{"01", "1", ""}, // the kernel would read 01 as octal
+		{"auto", "1", ""},
+		{"near", "", "NUMA node"},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			got, err := NumaNode(tc.value, class)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }

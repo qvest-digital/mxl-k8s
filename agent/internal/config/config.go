@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -95,6 +96,11 @@ type Config struct {
 	// within_size or always. Empty leaves it to the module, which then
 	// needs no such option.
 	MxlfsHuge string
+
+	// MxlfsNumaNode is the numa_node= option every mxlfs domain is
+	// mounted with: a NUMA node, auto for the node every RDMA device of
+	// the node is on, or empty or none to leave it out.
+	MxlfsNumaNode string
 }
 
 // FromFlags populates a Config from command-line flags.
@@ -129,6 +135,10 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.StringVar(&c.MxlfsHuge, "mxlfs-huge", "",
 		"huge= mount option of every mxlfs domain (within_size, always). Empty "+
 			"leaves it out, for an mxlfs module without the option.")
+	fs.StringVar(&c.MxlfsNumaNode, "mxlfs-numa-node", "",
+		"numa_node= mount option of every mxlfs domain: a NUMA node, or auto for the "+
+			"node every RDMA device of the node is on, left out when they report none "+
+			"or several. Empty or none leaves it out, for an mxlfs module without the option.")
 	fs.DurationVar(&c.MaterializeTimeout, "materialize-timeout", 5*time.Second,
 		"Per-request budget for the intent dispatcher waiting for a mirror Ready.")
 	fs.IntVar(&c.IntentMirrorsPerPod, "intent-mirrors-per-pod", 64,
@@ -196,6 +206,13 @@ func (c *Config) Validate() error {
 	case "", "within_size", "always":
 	default:
 		return fmt.Errorf("--mxlfs-huge %q is not one of within_size, always", c.MxlfsHuge)
+	}
+	switch c.MxlfsNumaNode {
+	case "", "none", "auto":
+	default:
+		if _, err := strconv.ParseUint(c.MxlfsNumaNode, 10, 31); err != nil {
+			return fmt.Errorf("--mxlfs-numa-node %q is not a NUMA node, auto or none", c.MxlfsNumaNode)
+		}
 	}
 	if c.KubeAPIQPS <= 0 {
 		return fmt.Errorf("--kube-api-qps must be positive, got %v", c.KubeAPIQPS)

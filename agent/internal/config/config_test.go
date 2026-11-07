@@ -193,6 +193,31 @@ func TestValidate(t *testing.T) {
 			wantErr: "--mxlfs-huge",
 		},
 		{
+			name:    "a NUMA node passes",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNode: "1", KubeAPIQPS: 50, KubeAPIBurst: 100},
+			wantErr: "",
+		},
+		{
+			name:    "numa node auto passes",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNode: "auto", KubeAPIQPS: 50, KubeAPIBurst: 100},
+			wantErr: "",
+		},
+		{
+			name:    "numa node none passes",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNode: "none", KubeAPIQPS: 50, KubeAPIBurst: 100},
+			wantErr: "",
+		},
+		{
+			name:    "a negative NUMA node is rejected",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNode: "-1", KubeAPIQPS: 50, KubeAPIBurst: 100},
+			wantErr: "--mxlfs-numa-node",
+		},
+		{
+			name:    "a NUMA node that is no number is rejected",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNode: "near", KubeAPIQPS: 50, KubeAPIBurst: 100},
+			wantErr: "--mxlfs-numa-node",
+		},
+		{
 			name:    "unknown provider rejected",
 			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", Provider: "rdma"},
 			wantErr: "--provider",
