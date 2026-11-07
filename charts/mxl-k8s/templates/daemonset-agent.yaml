@@ -81,6 +81,9 @@ spec:
             {{- with .Values.mxlfs.huge }}
             - --mxlfs-huge={{ . }}
             {{- end }}
+            {{- with .Values.mxlfs.numaNode }}
+            - --mxlfs-numa-node={{ . }}
+            {{- end }}
             {{- end }}
             {{- if .Values.agent.csi.enabled }}
             - --csi-endpoint=unix:///csi/csi.sock
