@@ -27,6 +27,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/collector"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/config"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/domain"
+	"github.com/qvest-digital/mxl-k8s/exporter/internal/numa"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/topology"
 )
 
@@ -102,13 +103,27 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) error {
 		nodeReg.MustRegister(topology.New(reader, cfg.NodeName, log.WithName("topology")))
 	}
 
-	if err := doms.Scan(); err != nil {
+	scan := func() error { return doms.Scan() }
+	if cfg.MxlfsNumaMetrics {
+		placement := numa.New(log.WithName("numa"))
+		nodeReg.MustRegister(placement)
+		scan = func() error {
+			err := doms.Scan()
+			var paths []string
+			for _, d := range doms.Domains() {
+				paths = append(paths, d.Path())
+			}
+			placement.Scan(paths)
+			return err
+		}
+	}
+	if err := scan(); err != nil {
 		// A node that has never carried a flow has no domain directory
 		// yet. Failing to boot on that would take the DaemonSet down
 		// on exactly the nodes with nothing to report.
 		log.Error(err, "initial domain scan", "primary", cfg.DomainPath)
 	}
-	go scanLoop(ctx, doms, cfg.ScanPeriod, log)
+	go scanLoop(ctx, scan, cfg.ScanPeriod, log)
 
 	return serve(ctx, cfg, reg, log)
 }
@@ -144,7 +159,7 @@ func startTopologyCache(ctx context.Context, cfg *config.Config, log logr.Logger
 }
 
 // scanLoop re-lists the domains until ctx is done.
-func scanLoop(ctx context.Context, doms *domain.Set, period time.Duration, log logr.Logger) {
+func scanLoop(ctx context.Context, scan func() error, period time.Duration, log logr.Logger) {
 	t := time.NewTicker(period)
 	defer t.Stop()
 	for {
@@ -152,7 +167,7 @@ func scanLoop(ctx context.Context, doms *domain.Set, period time.Duration, log l
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := doms.Scan(); err != nil {
+			if err := scan(); err != nil {
 				log.Error(err, "scan domains")
 			}
 		}
