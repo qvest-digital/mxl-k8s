@@ -459,7 +459,7 @@
       "id": 122,
       "type": "stat",
       "title": "numa_node= Fallbacks in Range",
-      "description": "Bytes the mxlfs domains allocated on another NUMA node than the one they preferred, over the selected range: the preferred node had no free memory. Read by the exporter in every placement mode with mxlfs.numa.metrics.enabled.",
+      "description": "Bytes the mxlfs domains allocated on another NUMA node than the one they preferred, over the selected range: the preferred node had no free memory. Read by the exporter in every placement mode with mxlfs.numa.metrics.enabled. No value with mxlfs.numa.metrics.enabled off.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -482,7 +482,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
-          "noValue": "0",
+          "noValue": "NUMA metrics off",
           "thresholds": {
             "mode": "absolute",
             "steps": [
