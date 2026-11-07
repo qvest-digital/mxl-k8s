@@ -49,6 +49,10 @@ const ReasonHugeRefused = "MxlfsHugeRefused"
 // mounted without the numa_node= option the module refused.
 const ReasonNumaNodeRefused = "MxlfsNumaNodeRefused"
 
+// ReasonNumaNodeUnresolved is the reason of the Node event for domains
+// mounted without numa_node= because auto found no single NUMA node.
+const ReasonNumaNodeUnresolved = "MxlfsNumaNodeUnresolved"
+
 // RDMAClass is the sysfs class that lists the RDMA devices of the node.
 const RDMAClass = "/sys/class/infiniband"
 
@@ -245,6 +249,27 @@ func HugeRefusedEvent(c client.Client, node string, log logr.Logger) func(dir st
 // event on node.
 func NumaNodeRefusedEvent(c client.Client, node string, log logr.Logger) func(dir string, err error) {
 	return nodeEvent(c, node, log, ReasonNumaNodeRefused, "%s is mounted without numa_node=: %v")
+}
+
+// NumaNodeUnresolvedEvent returns an unresolved for ResolveNumaNode that
+// records a warning event on node.
+func NumaNodeUnresolvedEvent(c client.Client, node string, log logr.Logger) func(dir string, err error) {
+	return nodeEvent(c, node, log, ReasonNumaNodeUnresolved,
+		"%s gives no NUMA node; domains are mounted without numa_node= until the agent restarts: %v")
+}
+
+// ResolveNumaNode is NumaNode, once, at the agent's start. When it finds
+// no node, unresolved is told why with class, and the domains are mounted
+// without numa_node=: RDMA devices that appear later do not change that.
+func ResolveNumaNode(value, class string, unresolved func(dir string, err error)) string {
+	n, err := NumaNode(value, class)
+	if err != nil {
+		if unresolved != nil {
+			unresolved(class, err)
+		}
+		return ""
+	}
+	return n
 }
 
 // NumaNode turns a --mxlfs-numa-node value into Mounter.NumaNode: a node

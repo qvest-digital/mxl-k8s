@@ -212,11 +212,14 @@ func run(args []string) error {
 		if err := requireKind(kClient.RESTMapper(), "MxlFlowRedundancySet"); err != nil {
 			return fmt.Errorf("--mxlfs needs the redundancy set CRD: %w", err)
 		}
-		numaNode, err := mxlfsmount.NumaNode(cfg.MxlfsNumaNode, mxlfsmount.RDMAClass)
-		if err != nil {
-			setupLog.Info("mxlfs domains are mounted without numa_node=",
-				"mxlfs-numa-node", cfg.MxlfsNumaNode, "reason", err.Error())
-		} else if cfg.MxlfsNumaNode == "auto" {
+		unresolved := mxlfsmount.NumaNodeUnresolvedEvent(kClient, cfg.NodeName, setupLog)
+		numaNode := mxlfsmount.ResolveNumaNode(cfg.MxlfsNumaNode, mxlfsmount.RDMAClass,
+			func(dir string, err error) {
+				setupLog.Error(err, "mxlfs domains are mounted without numa_node=",
+					"mxlfs-numa-node", cfg.MxlfsNumaNode)
+				unresolved(dir, err)
+			})
+		if numaNode != "" && cfg.MxlfsNumaNode == "auto" {
 			setupLog.Info("mxlfs domains are mounted with the NUMA node of the RDMA devices",
 				"numa_node", numaNode)
 		}

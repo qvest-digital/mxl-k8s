@@ -397,3 +397,38 @@ func TestNumaNode(t *testing.T) {
 		})
 	}
 }
+
+// auto that finds no node is told, with the class it read; a node it
+// finds, and a value that is not auto, are not.
+func TestResolveNumaNodeTellsWhyAutoFoundNone(t *testing.T) {
+	var told []fallback
+	tell := func(dir string, err error) { told = append(told, fallback{dir, err}) }
+
+	empty := rdmaClass(t, map[string]string{})
+	assert.Empty(t, ResolveNumaNode("auto", empty, tell))
+	require.Len(t, told, 1)
+	assert.Equal(t, empty, told[0].dir)
+	assert.ErrorContains(t, told[0].err, "no RDMA device")
+
+	assert.Equal(t, "1", ResolveNumaNode("auto", rdmaClass(t, map[string]string{"mlx5_0": "1"}), tell))
+	assert.Equal(t, "0", ResolveNumaNode("0", empty, tell))
+	assert.Empty(t, ResolveNumaNode("", empty, tell))
+	assert.Len(t, told, 1)
+}
+
+func TestNumaNodeUnresolvedEventHasItsOwnReason(t *testing.T) {
+	s := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(s))
+	c := fake.NewClientBuilder().WithScheme(s).Build()
+
+	NumaNodeUnresolvedEvent(c, "n1", logr.Discard())("/sys/class/infiniband", errors.New("no RDMA device in /sys/class/infiniband reports a NUMA node"))
+
+	var list corev1.EventList
+	require.NoError(t, c.List(context.Background(), &list, client.InNamespace("default")))
+	require.Len(t, list.Items, 1)
+	ev := list.Items[0]
+	assert.Equal(t, corev1.EventTypeWarning, ev.Type)
+	assert.Equal(t, ReasonNumaNodeUnresolved, ev.Reason)
+	assert.Equal(t, "n1", ev.InvolvedObject.Name)
+	assert.Contains(t, ev.Message, "/sys/class/infiniband gives no NUMA node; domains are mounted without numa_node=")
+}
