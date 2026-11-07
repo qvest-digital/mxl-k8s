@@ -130,6 +130,30 @@ mxlfs:
   # enum: ["", "within_size", "always"]
   # @schema
   huge: ""
+  # -- numa_node= mount option of every mxlfs domain: every page of the
+  # domain prefers that NUMA node, whichever node the process that
+  # writes it runs on, and comes from another node when it has no free
+  # memory. A NUMA node, or auto for the node every RDMA device of the
+  # node reports (/sys/class/infiniband/*/device/numa_node), so that a
+  # NIC reads the rings of the domain from its own node. auto resolves
+  # once, when the agent starts; when the devices report no node or
+  # different ones it leaves the option out and the agent records a
+  # MxlfsNumaNodeUnresolved warning event on the Node, except on a host
+  # of one NUMA node, where every page is on that node anyway. The value
+  # is a string: pass a node on the command line with --set-string
+  # (mxlfs.numaNode=0), since --set makes a number the schema refuses.
+  # Empty or none leaves the option out: a page comes from the node the
+  # writing process runs on. An mxlfs module without
+  # the option, or one that finds no memory on the node, refuses a mount
+  # that names it; the agent then mounts the domain without numa_node=
+  # and records a MxlfsNumaNodeRefused warning event on the Node. A
+  # change applies to a domain only when it is mounted again, at the
+  # next node reboot.
+  # @schema
+  # type: string
+  # pattern: ^$|^none$|^auto$|^[0-9]+$
+  # @schema
+  numaNode: ""
   # -- Image of the init container that waits for mxlfs.ready. Needs a
   # POSIX sh, test and sleep.
   waitImage: busybox:1.38

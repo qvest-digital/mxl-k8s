@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,24 @@ const ReasonUnavailable = "MxlfsUnavailable"
 // without the huge= option the module refused.
 const ReasonHugeRefused = "MxlfsHugeRefused"
 
+// ReasonNumaNodeRefused is the reason of the Node event for a domain
+// mounted without the numa_node= option the module refused.
+const ReasonNumaNodeRefused = "MxlfsNumaNodeRefused"
+
+// ReasonNumaNodeUnresolved is the reason of the Node event for domains
+// mounted without numa_node= because auto found no single NUMA node.
+const ReasonNumaNodeUnresolved = "MxlfsNumaNodeUnresolved"
+
+// RDMAClass is the sysfs class that lists the RDMA devices of the node.
+const RDMAClass = "/sys/class/infiniband"
+
+// OnlineNodes is the sysfs list of the node's online NUMA nodes.
+const OnlineNodes = "/sys/devices/system/node/online"
+
+// ErrOneNode is ResolveNumaNode's error for auto on a host of one online
+// NUMA node, where every page is on that node with or without the option.
+var ErrOneNode = errors.New("the host has one online NUMA node")
+
 // Mounter decides once per directory whether it is an mxlfs.
 type Mounter struct {
 	// IsMxlfs reports whether dir is an mxlfs. Nil uses mxlfswatch.IsMxlfs.
@@ -57,12 +76,21 @@ type Mounter struct {
 	// An mxlfs module without the option refuses a mount that names it;
 	// the domain is then mounted without it and HugeRefused is told.
 	Huge string
+	// NumaNode is the mount's numa_node= option, or empty to leave it
+	// out: the NUMA node every page of the domain prefers, wherever the
+	// process that makes it runs. A module without the option refuses a
+	// mount that names it, as does one that finds no memory on the node;
+	// the domain is then mounted without it and NumaNodeRefused is told.
+	NumaNode string
 	// Fallback is told about every directory left plain, and why.
 	Fallback func(dir string, err error)
 	// HugeRefused is told about every domain mounted without Huge, and
 	// why.
 	HugeRefused func(dir string, err error)
-	Log         logr.Logger
+	// NumaNodeRefused is told about every domain mounted without
+	// NumaNode, and why.
+	NumaNodeRefused func(dir string, err error)
+	Log             logr.Logger
 
 	mu      sync.Mutex
 	decided map[string]bool
@@ -107,12 +135,31 @@ func (m *Mounter) Ensure(dir string) error {
 	return nil
 }
 
-// options are the mount options of every domain.
-func (m *Mounter) options() string {
-	if m.Huge == "" {
-		return Options
+// option is a mount option beyond Options, which a module may not have.
+type option struct {
+	name, value string
+	refused     func(dir string, err error)
+}
+
+// optional are the options set beyond Options, the oldest first.
+func (m *Mounter) optional() []option {
+	var o []option
+	if m.Huge != "" {
+		o = append(o, option{"huge", m.Huge, m.HugeRefused})
 	}
-	return Options + ",huge=" + m.Huge
+	if m.NumaNode != "" {
+		o = append(o, option{"numa_node", m.NumaNode, m.NumaNodeRefused})
+	}
+	return o
+}
+
+// join is Options with optional added.
+func join(optional []option) string {
+	s := Options
+	for _, o := range optional {
+		s += "," + o.name + "=" + o.value
+	}
+	return s
 }
 
 // Decided reports whether Ensure has run for dir: it is an mxlfs, or it
@@ -140,17 +187,29 @@ func (m *Mounter) mountEmpty(dir string, mount func(dir, options string) error) 
 	if n > 0 {
 		return "", fmt.Errorf("%s holds %d flows a mount would hide", dir, n)
 	}
-	options := m.options()
+	optional := m.optional()
+	options := join(optional)
 	err = mount(dir, options)
-	// A module that predates huge= refuses it as an unknown parameter.
-	// Without it the domain is still an mxlfs, with folios that end by EOF.
-	if err != nil && m.Huge != "" && errors.Is(err, unix.EINVAL) {
-		refused := err
-		options = Options
-		if err = mount(dir, options); err == nil {
-			m.Log.Error(refused, "mxlfs refused huge=; mounted without it", "directory", dir, "huge", m.Huge)
-			if m.HugeRefused != nil {
-				m.HugeRefused(dir, refused)
+	// A module that predates an option refuses it as an unknown
+	// parameter, and one that finds no memory on the numa_node= node
+	// refuses that. Without it the domain is still an mxlfs: with folios
+	// that end by EOF without huge=, with pages where the writing process
+	// runs without numa_node=. The newest option goes first, as a module
+	// that has it has every older one.
+	var refused []option
+	var refusals []error
+	for err != nil && len(optional) > 0 && errors.Is(err, unix.EINVAL) {
+		refused = append(refused, optional[len(optional)-1])
+		refusals = append(refusals, err)
+		optional = optional[:len(optional)-1]
+		options = join(optional)
+		err = mount(dir, options)
+	}
+	if err == nil {
+		for i, o := range refused {
+			m.Log.Error(refusals[i], "mxlfs refused "+o.name+"=; mounted without it", "directory", dir, o.name, o.value)
+			if o.refused != nil {
+				o.refused(dir, refusals[i])
 			}
 		}
 	}
@@ -191,6 +250,103 @@ func NodeEvent(c client.Client, node string, log logr.Logger) func(dir string, e
 // node.
 func HugeRefusedEvent(c client.Client, node string, log logr.Logger) func(dir string, err error) {
 	return nodeEvent(c, node, log, ReasonHugeRefused, "%s is mounted without huge=: %v")
+}
+
+// NumaNodeRefusedEvent returns a NumaNodeRefused that records a warning
+// event on node.
+func NumaNodeRefusedEvent(c client.Client, node string, log logr.Logger) func(dir string, err error) {
+	return nodeEvent(c, node, log, ReasonNumaNodeRefused, "%s is mounted without numa_node=: %v")
+}
+
+// NumaNodeUnresolvedEvent returns an unresolved for ResolveNumaNode that
+// records a warning event on node.
+func NumaNodeUnresolvedEvent(c client.Client, node string, log logr.Logger) func(dir string, err error) {
+	return nodeEvent(c, node, log, ReasonNumaNodeUnresolved,
+		"%s gives no NUMA node; domains are mounted without numa_node= and keep that "+
+			"until they are mounted again, at the next node reboot: %v")
+}
+
+// ResolveNumaNode is NumaNode, once, at the agent's start. When auto finds
+// no node on a host whose online list (online) names one NUMA node, it
+// returns ErrOneNode and tells nobody. When it finds none otherwise,
+// unresolved is told why with class. Either way the domains are mounted
+// without numa_node=, and RDMA devices that appear later do not change
+// that for a domain already mounted.
+func ResolveNumaNode(value, class, online string, unresolved func(dir string, err error)) (string, error) {
+	n, err := NumaNode(value, class)
+	if err == nil {
+		return n, nil
+	}
+	if value == "auto" && oneNode(online) {
+		return "", ErrOneNode
+	}
+	if unresolved != nil {
+		unresolved(class, err)
+	}
+	return "", err
+}
+
+// oneNode reports whether the sysfs list online names one NUMA node. A
+// kernel without NUMA has no such list, and one node.
+func oneNode(online string) bool {
+	b, err := os.ReadFile(online)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	s := strings.TrimSpace(string(b))
+	return err == nil && s != "" && !strings.ContainsAny(s, ",-")
+}
+
+// NumaNode turns a --mxlfs-numa-node value into Mounter.NumaNode: a node
+// as numa_node= takes it, auto as RDMANumaNode finds it in class, and
+// empty or none as empty. The error says why auto found no node.
+func NumaNode(value, class string) (string, error) {
+	switch value {
+	case "", "none":
+		return "", nil
+	case "auto":
+		return RDMANumaNode(class)
+	}
+	n, err := strconv.ParseUint(value, 10, 31)
+	if err != nil {
+		return "", fmt.Errorf("NUMA node %q: %w", value, err)
+	}
+	// Without leading zeros, which the kernel would read as octal.
+	return strconv.FormatUint(n, 10), nil
+}
+
+// RDMANumaNode returns the NUMA node every RDMA device in class reports
+// for its device (device/numa_node). A device without one, as a software
+// RDMA device that has no PCI device, is passed over. It fails when no
+// device reports a node, when one reports none (-1), or when they report
+// different nodes.
+func RDMANumaNode(class string) (string, error) {
+	entries, err := os.ReadDir(class)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	node := ""
+	for _, e := range entries {
+		b, err := os.ReadFile(filepath.Join(class, e.Name(), "device", "numa_node"))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		n := strings.TrimSpace(string(b))
+		if _, err := strconv.ParseUint(n, 10, 31); err != nil {
+			return "", fmt.Errorf("RDMA device %s reports NUMA node %s", e.Name(), n)
+		}
+		if node != "" && n != node {
+			return "", fmt.Errorf("RDMA devices are on NUMA nodes %s and %s", node, n)
+		}
+		node = n
+	}
+	if node == "" {
+		return "", fmt.Errorf("no RDMA device in %s reports a NUMA node", class)
+	}
+	return node, nil
 }
 
 func nodeEvent(c client.Client, node string, log logr.Logger, reason, format string) func(dir string, err error) {
