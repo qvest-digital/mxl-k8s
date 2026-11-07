@@ -213,6 +213,9 @@ func (l *Loop) Pass(ctx context.Context) error {
 		seen[f.ref] = true
 		state := l.flow(f, dir, topo)
 		if state == "" {
+			// A hold could come and go unseen while the ring cannot be
+			// read, so unheld time is counted afresh once it can.
+			delete(l.unheldSince, f.ref)
 			continue
 		}
 		if counts[dir] == nil {
