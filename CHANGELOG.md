@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.0-rc.48](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.47...v1.1.0-rc.48) (2026-11-07)
+
+
+### Features
+
+* **agent:** add NUMA placement modes and the flow release loop ([c0efd3e](https://github.com/qvest-digital/mxl-k8s/commit/c0efd3e694533e23770c07d5c26abf64d1074340))
+* **api:** mirror the NUMA ioctls of the mxlfs uapi ([c0efd3e](https://github.com/qvest-digital/mxl-k8s/commit/c0efd3e694533e23770c07d5c26abf64d1074340))
+* **chart:** configure NUMA placement and its metrics ([c0efd3e](https://github.com/qvest-digital/mxl-k8s/commit/c0efd3e694533e23770c07d5c26abf64d1074340))
+* **exporter:** export the mxlfs NUMA counters ([c0efd3e](https://github.com/qvest-digital/mxl-k8s/commit/c0efd3e694533e23770c07d5c26abf64d1074340))
+* **gateway:** hold and place mirrored rings on the NICs' NUMA node ([c0efd3e](https://github.com/qvest-digital/mxl-k8s/commit/c0efd3e694533e23770c07d5c26abf64d1074340))
+
 ## [1.1.0-rc.47](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.46...v1.1.0-rc.47) (2026-11-07)
 
 
