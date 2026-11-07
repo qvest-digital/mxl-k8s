@@ -377,6 +377,48 @@ func TestFlowStatesMetric(t *testing.T) {
 	require.NoError(t, testutil.GatherAndCompare(reg, strings.NewReader(want.String()), "mxl_agent_numa_release_flows"))
 }
 
+// A pass that cannot read the ring cannot see its holds either, so the
+// delay starts over once the ring can be read again.
+func TestUnreadableRingRestartsTheDelay(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// unreadable makes the ring unreadable and returns what undoes it.
+		unreadable func(t *testing.T, fx *fixture) func()
+	}{
+		{"ring files missing", func(t *testing.T, fx *fixture) func() {
+			flow := filepath.Join(fx.dir, flowA+".mxl-flow")
+			require.NoError(t, os.Rename(flow, flow+".away"))
+			return func() { require.NoError(t, os.Rename(flow+".away", flow)) }
+		}},
+		{"open fails", func(t *testing.T, fx *fixture) func() {
+			files := fx.ring.files
+			fx.ring.files = nil
+			return func() { fx.ring.files = files }
+		}},
+		{"pages fail", func(t *testing.T, fx *fixture) func() {
+			fx.ring.pagesErr = fmt.Errorf("pages: %w", syscall.EIO)
+			return func() { fx.ring.pagesErr = nil }
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newFixture(t)
+			fx.h.pid(10, "1", "4-7")
+			fx.use(10, podProd, observed.Output)
+			require.Equal(t, StateSettling, fx.pass(t))
+
+			readable := tc.unreadable(t, fx)
+			fx.clock.advance(2 * fx.loop.Delay)
+			require.Equal(t, "", fx.pass(t))
+			readable()
+
+			require.Equal(t, StateSettling, fx.pass(t), "moved without the delay since the ring was read again")
+			require.Empty(t, fx.ring.calls)
+			fx.clock.advance(fx.loop.Delay)
+			require.Equal(t, StateMoved, fx.pass(t))
+		})
+	}
+}
+
 // A hold the loop never saw, because the flow had no node then, still
 // restarts the delay: the loop counts unheld time only across passes
 // that saw the flow unheld and agreed.
