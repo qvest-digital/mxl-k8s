@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,10 +10,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/client-go/tools/record"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/config"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/mirror"
 )
@@ -106,4 +109,33 @@ func TestPlaceholderMarkersOutliveADomainOpen(t *testing.T) {
 	_, err = domains.For(context.Background(), "studio")
 	require.NoError(t, err)
 	assert.FileExists(t, later, "a domain opened later")
+}
+
+// Only flow mode places rings, and only on a host whose NICs give one
+// NUMA node; on any other it acts as off and says why on the Node.
+func TestPlacerPerMode(t *testing.T) {
+	one := func() (int32, error) { return 1, nil }
+	mixed := func() (int32, error) { return -1, errors.New("RDMA devices are on NUMA nodes 0 and 1") }
+	for _, tc := range []struct {
+		mode    string
+		nic     func() (int32, error)
+		placer  bool
+		warning bool
+	}{
+		{mode: "off", nic: one},
+		{mode: "node", nic: one},
+		{mode: "flow", nic: one, placer: true},
+		{mode: "flow", nic: mixed, warning: true},
+	} {
+		rec := record.NewFakeRecorder(4)
+		cfg := &config.Config{NodeName: "n1", Mxlfs: true, MxlfsNumaMode: tc.mode}
+		p := placerFor(cfg, rec, tc.nic)
+		assert.Equal(t, tc.placer, p != nil, tc.mode)
+		if tc.warning {
+			require.Len(t, rec.Events, 1)
+			assert.Contains(t, <-rec.Events, "Warning MxlfsNumaFlowUnresolved")
+		} else {
+			assert.Empty(t, rec.Events, tc.mode)
+		}
+	}
 }

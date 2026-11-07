@@ -154,7 +154,16 @@ type Config struct {
 	// allocation, the redundancy set merge engine. Off, every domain is
 	// a plain directory.
 	Mxlfs bool
+
+	// MxlfsNumaMode is how the rings of mxlfs domains are placed on NUMA
+	// nodes: off, node or flow. Only flow concerns the gateway: it holds
+	// the ring of every flow it registers with a NIC and moves it to the
+	// NICs' node first, and gives target rings that node as preference.
+	MxlfsNumaMode string
 }
+
+// FlowPlacement reports whether the gateway places rings per flow.
+func (c *Config) FlowPlacement() bool { return c.MxlfsNumaMode == "flow" }
 
 // FromFlags populates a Config from command-line flags.
 func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
@@ -221,6 +230,10 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"Run what a domain on mxlfs needs: placeholders for absent flows, lazy ring "+
 			"allocation and the MxlFlowRedundancySet merge engine. Off, every domain is "+
 			"treated as a plain directory.")
+	fs.StringVar(&c.MxlfsNumaMode, "mxlfs-numa-placement-mode", "off",
+		"NUMA placement of mxlfs rings: off, node (the mount's numa_node=, nothing per flow) or "+
+			"flow (hold the ring of every flow registered with a NIC and move it to the NICs' "+
+			"node first; needs --mxlfs and CAP_SYS_NICE).")
 	fs.BoolVar(&c.RDMAEnumerationLiveness, "rdma-enumeration-liveness", false,
 		"Fail the liveness probe while the host exposes RDMA devices that no enumerated "+
 			"provider accounts for. libfabric fixes a provider's device list at the first "+
@@ -357,6 +370,15 @@ func (c *Config) Validate() error {
 	}
 	if c.KubeAPIBurst <= 0 {
 		return fmt.Errorf("--kube-api-burst must be positive, got %d", c.KubeAPIBurst)
+	}
+	switch c.MxlfsNumaMode {
+	case "", "off", "node":
+	case "flow":
+		if !c.Mxlfs {
+			return fmt.Errorf("--mxlfs-numa-placement-mode=flow needs --mxlfs")
+		}
+	default:
+		return fmt.Errorf("--mxlfs-numa-placement-mode %q is not one of off, node, flow", c.MxlfsNumaMode)
 	}
 	return nil
 }

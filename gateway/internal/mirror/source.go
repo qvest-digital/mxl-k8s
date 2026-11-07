@@ -37,6 +37,7 @@ import (
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/numaplace"
 )
 
 // SourceFinalizerName is the finalizer the source-side reconciler
@@ -154,6 +155,11 @@ type SourceReconciler struct {
 	// SourceProgress reports ReaderNotAdvancing. Defaults to
 	// defaultReaderStallAfter.
 	ReaderStallAfter time.Duration
+
+	// Placer holds each flow's ring on an mxlfs domain from before its
+	// first initiator is set up until its last one closes, and moves it
+	// to the NIC's NUMA node first. Nil places nothing.
+	Placer *numaplace.Placer
 
 	opener initiatorOpener
 
@@ -277,6 +283,9 @@ type sourceLink struct {
 	progress  ProgressFunc
 	cancel    context.CancelFunc
 	done      chan struct{}
+	// release ends this link's count on its flow's ring placement, after
+	// the initiator is closed. Nil when nothing was placed.
+	release func()
 	// evicted is set by the loop before it closes done, when the
 	// initiator reported it holds the target no more.
 	evicted atomic.Bool
@@ -1041,6 +1050,7 @@ type libmxlOpener struct {
 	NodeName     string
 	Selector     fabric.Selector
 	PollInterval time.Duration
+	Placer       *numaplace.Placer
 }
 
 func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
@@ -1121,32 +1131,26 @@ func (o *libmxlOpener) attach(s *sharedSource, targetInfoStr string, e *sourceEn
 		_ = reader.Close()
 		return nil, fmt.Errorf("NewInitiator: %w", err)
 	}
-	if err := initiator.Setup(fabrics.InitiatorConfig{
+	place := func() func() { return func() {} }
+	if s.handles.OnMxlfs() {
+		place = func() func() {
+			return o.Placer.Acquire(s.handles.DomainPath(), s.key.flowID, mirrorRef(e.key))
+		}
+	}
+	release, info, err := setUpInitiator(initiator, place, fabrics.InitiatorConfig{
 		Interface: iface,
 		Reader:    reader,
 		Options:   initiatorOptions(s.cfg),
-	}); err != nil {
-		_ = initiator.Close()
-		_ = reader.Close()
-		return nil, fmt.Errorf("Initiator.Setup: %w", err)
-	}
-	info, err := fabrics.ParseTargetInfo(targetInfoStr)
+	}, targetInfoStr, fabrics.ParseTargetInfo)
 	if err != nil {
-		_ = initiator.Close()
 		_ = reader.Close()
-		return nil, fmt.Errorf("ParseTargetInfo: %w", err)
-	}
-	if err := initiator.AddTarget(info); err != nil {
-		_ = info.Close()
-		_ = initiator.Close()
-		_ = reader.Close()
-		return nil, fmt.Errorf("%w: %w", errAddTargetFailed, err)
+		return nil, err
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	progress := progressFuncFor(initiator, iface.Caps.Flags)
 	link := &sourceLink{reader: reader, initiator: initiator, info: info, progress: progress,
-		cancel: cancel, done: make(chan struct{})}
+		cancel: cancel, done: make(chan struct{}), release: release}
 	tr := linkTracker{sourceEntry: e, link: link}
 	probe := func() (uint64, error) {
 		rt, err := reader.Runtime()
@@ -1167,6 +1171,41 @@ func (o *libmxlOpener) attach(s *sharedSource, targetInfoStr string, e *sourceEn
 		go runTransferLoop(ctx, link.done, s.key.flowID, probe, transfer, progress, initiator.MakeProgressNonBlocking, s.poll, s.interval, tr)
 	}
 	return link, nil
+}
+
+// setupInitiator is what setUpInitiator does to an initiator.
+type setupInitiator interface {
+	Setup(fabrics.InitiatorConfig) error
+	AddTarget(*fabrics.TargetInfo) error
+	Close() error
+}
+
+// setUpInitiator places the flow's ring, sets the initiator up and adds
+// the target. A registered ring cannot move, so place runs before Setup,
+// and every failure releases the placement after the initiator is
+// closed. The returned release is the link's.
+func setUpInitiator(in setupInitiator, place func() func(), cfg fabrics.InitiatorConfig,
+	targetInfoStr string, parse func(string) (*fabrics.TargetInfo, error)) (func(), *fabrics.TargetInfo, error) {
+
+	release := place()
+	if err := in.Setup(cfg); err != nil {
+		_ = in.Close()
+		release()
+		return nil, nil, fmt.Errorf("Initiator.Setup: %w", err)
+	}
+	info, err := parse(targetInfoStr)
+	if err != nil {
+		_ = in.Close()
+		release()
+		return nil, nil, fmt.Errorf("ParseTargetInfo: %w", err)
+	}
+	if err := in.AddTarget(info); err != nil {
+		_ = info.Close()
+		_ = in.Close()
+		release()
+		return nil, nil, fmt.Errorf("%w: %w", errAddTargetFailed, err)
+	}
+	return release, info, nil
 }
 
 // newSampleTransfer is the SampleTransferFunc of a continuous flow. The
@@ -1260,6 +1299,9 @@ func (o *libmxlOpener) detach(link *sourceLink) {
 	}
 	if link.initiator != nil {
 		_ = link.initiator.Close()
+	}
+	if link.release != nil {
+		link.release()
 	}
 	if link.info != nil {
 		_ = link.info.Close()
@@ -2088,6 +2130,7 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			NodeName:     r.NodeName,
 			Selector:     r.Selector,
 			PollInterval: r.PollInterval,
+			Placer:       r.Placer,
 		}
 	}
 	if r.writerLiveFn == nil {

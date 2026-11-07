@@ -11,12 +11,16 @@ import (
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -27,6 +31,7 @@ import (
 
 	"github.com/qvest-digital/go-mxl/fabrics"
 
+	apimxlfs "github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/capabilities"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/config"
@@ -34,6 +39,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/merge"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/mirror"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/numaplace"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/originhints"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/placeholder"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/portmetrics"
@@ -166,6 +172,11 @@ func run(args []string) error {
 		return fmt.Errorf("register libmxl-monitoring poller: %w", err)
 	}
 
+	placer := numaPlacer(cfg, mgr.GetEventRecorderFor("mxl-numa-placement"))
+	if placer != nil {
+		metrics.Registry.MustRegister(placer)
+	}
+
 	targetReconciler := &mirror.TargetReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
@@ -177,6 +188,7 @@ func run(args []string) error {
 		PlacementWait: cfg.PlacementWait,
 		Recorder:      mgr.GetEventRecorderFor("mxl-target-gateway"),
 		Recorders:     replication,
+		Placer:        placer,
 	}
 	if err := targetReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup target reconciler: %w", err)
@@ -201,6 +213,7 @@ func run(args []string) error {
 		ReaderStallAfter: cfg.ReaderStallAfter,
 		Recorder:         mgr.GetEventRecorderFor("mxl-source-gateway"),
 		Recorders:        replication,
+		Placer:           placer,
 	}
 	if err := sourceReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup source reconciler: %w", err)
@@ -343,6 +356,36 @@ func run(args []string) error {
 
 	managerRan = true
 	return mgr.Start(ctrl.SetupSignalHandler())
+}
+
+// ReasonNumaFlowUnresolved is the reason of the Node event for a gateway
+// whose flow placement stays off because the NICs give no NUMA node.
+const ReasonNumaFlowUnresolved = "MxlfsNumaFlowUnresolved"
+
+// numaPlacer returns the placer of --mxlfs-numa-placement-mode=flow, or
+// nil for any other mode and on a host whose RDMA devices give no single
+// NUMA node, which rec is told about.
+func numaPlacer(cfg *config.Config, rec record.EventRecorder) *numaplace.Placer {
+	return placerFor(cfg, rec, func() (int32, error) {
+		return apimxlfs.HostNICNode(apimxlfs.RDMAClass, apimxlfs.OnlineNodes)
+	})
+}
+
+func placerFor(cfg *config.Config, rec record.EventRecorder, nicNode func() (int32, error)) *numaplace.Placer {
+	if !cfg.FlowPlacement() {
+		return nil
+	}
+	log := ctrl.Log.WithName("numaplace")
+	nic, err := nicNode()
+	if err != nil {
+		log.Error(err, "flow placement stays off: the NICs give no single NUMA node")
+		rec.Eventf(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: cfg.NodeName, UID: types.UID(cfg.NodeName)}},
+			corev1.EventTypeWarning, ReasonNumaFlowUnresolved,
+			"--mxlfs-numa-placement-mode=flow acts as off: %v", err)
+		return nil
+	}
+	log.Info("rings of registered flows are placed on the NICs' NUMA node", "numaNode", nic)
+	return numaplace.New(cfg.NodeName, nic, rec, log)
 }
 
 func providerNames(providers []fabrics.Provider) []string {

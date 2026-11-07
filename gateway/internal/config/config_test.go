@@ -266,3 +266,32 @@ func TestFromFlags_PlacementSettings(t *testing.T) {
 		assert.Contains(t, err.Error(), flagName)
 	}
 }
+
+// Only flow mode places per flow, and it needs mxlfs; off and node leave
+// the gateway as it was.
+func TestFromFlags_MxlfsNumaMode(t *testing.T) {
+	t.Setenv("NODE_NAME", "")
+	t.Setenv("MXL_DOMAIN", "")
+	t.Setenv("KUBECONFIG", "")
+	for _, tc := range []struct {
+		args      []string
+		flow      bool
+		wantError string
+	}{
+		{args: nil},
+		{args: []string{"--mxlfs-numa-placement-mode=off", "--mxlfs"}},
+		{args: []string{"--mxlfs-numa-placement-mode=node", "--mxlfs"}},
+		{args: []string{"--mxlfs-numa-placement-mode=flow", "--mxlfs"}, flow: true},
+		{args: []string{"--mxlfs-numa-placement-mode=flow"}, wantError: "needs --mxlfs"},
+		{args: []string{"--mxlfs-numa-placement-mode=nic", "--mxlfs"}, wantError: "not one of off, node, flow"},
+	} {
+		args := append([]string{"--node-name=n", "--domain-path=/run/mxl/domain"}, tc.args...)
+		c, err := FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), args)
+		if tc.wantError != "" {
+			require.ErrorContains(t, err, tc.wantError, "%v", tc.args)
+			continue
+		}
+		require.NoError(t, err, "%v", tc.args)
+		require.Equal(t, tc.flow, c.FlowPlacement(), "%v", tc.args)
+	}
+}
