@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -97,10 +99,44 @@ type Config struct {
 	// needs no such option.
 	MxlfsHuge string
 
-	// MxlfsNumaNode is the numa_node= option every mxlfs domain is
-	// mounted with: a NUMA node, auto for the node every RDMA device of
-	// the node is on, or empty or none to leave it out.
-	MxlfsNumaNode string
+	// MxlfsNumaMode is how the rings of mxlfs domains are placed on NUMA
+	// nodes: off, node or flow.
+	MxlfsNumaMode string
+
+	// MxlfsNumaNodeDefault is the numa_node= option node mode mounts
+	// every domain with: a NUMA node, or auto for the node every RDMA
+	// device of the node is on.
+	MxlfsNumaNodeDefault string
+
+	// MxlfsNumaFlowDefault is where flow mode allocates a page nothing
+	// placed: nic mounts every domain with the NICs' node as numa_node=,
+	// local leaves it to the allocating process.
+	MxlfsNumaFlowDefault string
+
+	// MxlfsNumaRelease* pace flow mode's release loop: how often it
+	// looks, how long a ring stays unheld before it moves, and how many
+	// bytes a second it moves.
+	MxlfsNumaReleasePeriod time.Duration
+	MxlfsNumaReleaseDelay  time.Duration
+	MxlfsNumaReleaseRate   string
+}
+
+// Placement modes.
+const (
+	NumaOff  = "off"
+	NumaNode = "node"
+	NumaFlow = "flow"
+)
+
+// ReleaseRate is --mxlfs-numa-placement-flow-release-rate in bytes a
+// second.
+func (c *Config) ReleaseRate() uint64 {
+	q, err := resource.ParseQuantity(c.MxlfsNumaReleaseRate)
+	if err != nil {
+		return 0
+	}
+	v, _ := q.AsInt64()
+	return uint64(max(v, 0))
 }
 
 // FromFlags populates a Config from command-line flags.
@@ -135,10 +171,22 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.StringVar(&c.MxlfsHuge, "mxlfs-huge", "",
 		"huge= mount option of every mxlfs domain (within_size, always). Empty "+
 			"leaves it out, for an mxlfs module without the option.")
-	fs.StringVar(&c.MxlfsNumaNode, "mxlfs-numa-node", "",
-		"numa_node= mount option of every mxlfs domain: a NUMA node, or auto for the "+
-			"node every RDMA device of the node is on, left out when they report none "+
-			"or several. Empty or none leaves it out, for an mxlfs module without the option.")
+	fs.StringVar(&c.MxlfsNumaMode, "mxlfs-numa-placement-mode", NumaOff,
+		"NUMA placement of the rings of mxlfs domains: off; node mounts every domain with "+
+			"--mxlfs-numa-placement-node-default as numa_node=; flow places rings per flow: the "+
+			"gateway holds and moves the rings it registers to the NICs' node, and the agent "+
+			"moves an unheld ring to the one node its local writers and readers are confined to.")
+	fs.StringVar(&c.MxlfsNumaNodeDefault, "mxlfs-numa-placement-node-default", "auto",
+		"Node mode's numa_node= mount option: a NUMA node, or auto for the node every RDMA "+
+			"device of the node is on, left out when they report none or several.")
+	fs.StringVar(&c.MxlfsNumaFlowDefault, "mxlfs-numa-placement-flow-default", "local",
+		"Flow mode's numa_node= for pages nothing placed: nic for the NICs' node, local for none.")
+	fs.DurationVar(&c.MxlfsNumaReleasePeriod, "mxlfs-numa-placement-flow-release-period", 30*time.Second,
+		"How often flow mode's release loop looks at the node's flows.")
+	fs.DurationVar(&c.MxlfsNumaReleaseDelay, "mxlfs-numa-placement-flow-release-delay", time.Minute,
+		"How long a ring stays unheld, counted from when the agent first saw it so, before it moves.")
+	fs.StringVar(&c.MxlfsNumaReleaseRate, "mxlfs-numa-placement-flow-release-rate", "512Mi",
+		"Bytes a second the release loop moves, a quantity.")
 	fs.DurationVar(&c.MaterializeTimeout, "materialize-timeout", 5*time.Second,
 		"Per-request budget for the intent dispatcher waiting for a mirror Ready.")
 	fs.IntVar(&c.IntentMirrorsPerPod, "intent-mirrors-per-pod", 64,
@@ -207,18 +255,49 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("--mxlfs-huge %q is not one of within_size, always", c.MxlfsHuge)
 	}
-	switch c.MxlfsNumaNode {
-	case "", "none", "auto":
-	default:
-		if _, err := strconv.ParseUint(c.MxlfsNumaNode, 10, 31); err != nil {
-			return fmt.Errorf("--mxlfs-numa-node %q is not a NUMA node, auto or none", c.MxlfsNumaNode)
-		}
+	if err := c.validateNuma(); err != nil {
+		return err
 	}
 	if c.KubeAPIQPS <= 0 {
 		return fmt.Errorf("--kube-api-qps must be positive, got %v", c.KubeAPIQPS)
 	}
 	if c.KubeAPIBurst <= 0 {
 		return fmt.Errorf("--kube-api-burst must be positive, got %d", c.KubeAPIBurst)
+	}
+	return nil
+}
+
+func (c *Config) validateNuma() error {
+	switch c.MxlfsNumaNodeDefault {
+	case "", "auto":
+	default:
+		if _, err := strconv.ParseUint(c.MxlfsNumaNodeDefault, 10, 31); err != nil {
+			return fmt.Errorf("--mxlfs-numa-placement-node-default %q is not a NUMA node or auto", c.MxlfsNumaNodeDefault)
+		}
+	}
+	switch c.MxlfsNumaMode {
+	case "", NumaOff, NumaNode:
+		return nil
+	case NumaFlow:
+		if !c.Mxlfs {
+			return fmt.Errorf("--mxlfs-numa-placement-mode=flow needs --mxlfs")
+		}
+	default:
+		return fmt.Errorf("--mxlfs-numa-placement-mode %q is not one of off, node, flow", c.MxlfsNumaMode)
+	}
+	switch c.MxlfsNumaFlowDefault {
+	case "", "nic", "local":
+	default:
+		return fmt.Errorf("--mxlfs-numa-placement-flow-default %q is not one of nic, local", c.MxlfsNumaFlowDefault)
+	}
+	if c.MxlfsNumaReleasePeriod <= 0 {
+		return fmt.Errorf("--mxlfs-numa-placement-flow-release-period must be positive, got %v", c.MxlfsNumaReleasePeriod)
+	}
+	if c.MxlfsNumaReleaseDelay < 0 {
+		return fmt.Errorf("--mxlfs-numa-placement-flow-release-delay must not be negative, got %v", c.MxlfsNumaReleaseDelay)
+	}
+	if c.ReleaseRate() == 0 {
+		return fmt.Errorf("--mxlfs-numa-placement-flow-release-rate %q is not a positive quantity", c.MxlfsNumaReleaseRate)
 	}
 	return nil
 }

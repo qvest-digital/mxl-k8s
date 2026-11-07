@@ -78,3 +78,24 @@ func TestScanCountsMappingsOfDeletedFiles(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, map[string][]Use{podR: {{FlowID: flowA, Direction: Input}}}, got)
 }
+
+// Per process: two processes of one pod each appear, a process mapping
+// several files of a flow appears once, and the one holding the flock is
+// the writer whichever mapping comes first.
+func TestScanProcsReportsEachProcessOnce(t *testing.T) {
+	ring := "7f02-7f03 r--s 00000000 00:2a 102 /run/mxl/domain/" + flowA + ".mxl-flow/grains/data.0\n" +
+		"7f03-7f04 r--s 00000000 00:2a 103 /run/mxl/domain/" + flowA + ".mxl-flow/grains/data.1\n"
+	data := "7f00-7f01 rw-s 00000000 00:2a 101 /run/mxl/domain/" + flowA + ".mxl-flow/data\n"
+	cg := "0::/kubepods/besteffort/pod" + podW + "/cri-1\n"
+	root := proc(t, "1: FLOCK  ADVISORY  READ 11 00:2a:101 0 EOF\n", map[int][2]string{
+		11: {cg, ring + data},
+		12: {cg, data + ring},
+	})
+	s := &Scanner{ProcRoot: root, Domains: func() map[string]string { return map[string]string{"00:2a": ""} }}
+	got, err := s.ScanProcs()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []ProcUse{
+		{PID: 11, Pod: podW, FlowID: flowA, Direction: Output},
+		{PID: 12, Pod: podW, FlowID: flowA, Direction: Input},
+	}, got)
+}

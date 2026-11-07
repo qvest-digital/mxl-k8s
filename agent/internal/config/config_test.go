@@ -194,28 +194,23 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:    "a NUMA node passes",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNode: "1", KubeAPIQPS: 50, KubeAPIBurst: 100},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNodeDefault: "1", KubeAPIQPS: 50, KubeAPIBurst: 100},
 			wantErr: "",
 		},
 		{
 			name:    "numa node auto passes",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNode: "auto", KubeAPIQPS: 50, KubeAPIBurst: 100},
-			wantErr: "",
-		},
-		{
-			name:    "numa node none passes",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNode: "none", KubeAPIQPS: 50, KubeAPIBurst: 100},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNodeDefault: "auto", KubeAPIQPS: 50, KubeAPIBurst: 100},
 			wantErr: "",
 		},
 		{
 			name:    "a negative NUMA node is rejected",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNode: "-1", KubeAPIQPS: 50, KubeAPIBurst: 100},
-			wantErr: "--mxlfs-numa-node",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNodeDefault: "-1", KubeAPIQPS: 50, KubeAPIBurst: 100},
+			wantErr: "--mxlfs-numa-placement-node-default",
 		},
 		{
 			name:    "a NUMA node that is no number is rejected",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNode: "near", KubeAPIQPS: 50, KubeAPIBurst: 100},
-			wantErr: "--mxlfs-numa-node",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNodeDefault: "near", KubeAPIQPS: 50, KubeAPIBurst: 100},
+			wantErr: "--mxlfs-numa-placement-node-default",
 		},
 		{
 			name:    "unknown provider rejected",
@@ -235,4 +230,47 @@ func TestValidate(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
+}
+
+// Every mode with its settings, and what each refuses.
+func TestNumaPlacementFlags(t *testing.T) {
+	base := []string{"--domain-path=/run/mxl/domain", "--node-name=n1", "--mxlfs"}
+	for _, tc := range []struct {
+		args     []string
+		mode     string
+		node     string
+		flowDflt string
+		rate     uint64
+		wantErr  string
+	}{
+		{args: nil, mode: NumaOff, node: "auto", flowDflt: "local"},
+		{args: []string{"--mxlfs-numa-placement-mode=node"}, mode: NumaNode, node: "auto", flowDflt: "local"},
+		{args: []string{"--mxlfs-numa-placement-mode=node", "--mxlfs-numa-placement-node-default=1"},
+			mode: NumaNode, node: "1", flowDflt: "local"},
+		{args: []string{"--mxlfs-numa-placement-mode=flow"}, mode: NumaFlow, node: "auto", flowDflt: "local", rate: 512 << 20},
+		{args: []string{"--mxlfs-numa-placement-mode=flow", "--mxlfs-numa-placement-flow-default=nic",
+			"--mxlfs-numa-placement-flow-release-rate=1Gi"}, mode: NumaFlow, node: "auto", flowDflt: "nic", rate: 1 << 30},
+		{args: []string{"--mxlfs-numa-placement-mode=flow", "--mxlfs-numa-placement-flow-default=far"}, wantErr: "nic, local"},
+		{args: []string{"--mxlfs-numa-placement-mode=flow", "--mxlfs-numa-placement-flow-release-rate=0"}, wantErr: "positive quantity"},
+		{args: []string{"--mxlfs-numa-placement-mode=flow", "--mxlfs-numa-placement-flow-release-period=0s"}, wantErr: "period"},
+		{args: []string{"--mxlfs-numa-placement-mode=numa"}, wantErr: "off, node, flow"},
+		{args: []string{"--mxlfs-numa-placement-node-default=none"}, wantErr: "NUMA node or auto"},
+		{args: []string{"--mxlfs-numa-node=auto"}, wantErr: "flag provided but not defined"},
+	} {
+		c, err := FromFlags(flag.NewFlagSet("t", flag.ContinueOnError), append(append([]string{}, base...), tc.args...))
+		if tc.wantErr != "" {
+			require.ErrorContains(t, err, tc.wantErr, "%v", tc.args)
+			continue
+		}
+		require.NoError(t, err, "%v", tc.args)
+		require.Equal(t, tc.mode, c.MxlfsNumaMode, "%v", tc.args)
+		require.Equal(t, tc.node, c.MxlfsNumaNodeDefault, "%v", tc.args)
+		require.Equal(t, tc.flowDflt, c.MxlfsNumaFlowDefault, "%v", tc.args)
+		if tc.mode == NumaFlow {
+			require.Equal(t, tc.rate, c.ReleaseRate(), "%v", tc.args)
+		}
+	}
+	_, err := FromFlags(flag.NewFlagSet("t", flag.ContinueOnError),
+		[]string{"--domain-path=/run/mxl/domain", "--node-name=n1", "--mxlfs-numa-placement-mode=flow"})
+	require.ErrorContains(t, err, "needs --mxlfs")
 }
