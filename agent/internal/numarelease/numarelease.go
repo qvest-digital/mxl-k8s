@@ -244,8 +244,12 @@ func (l *Loop) flow(f *flowUse, dir string, topo topology) string {
 		n, ok := procNode(l.procRoot, pid, topo)
 		switch {
 		case !ok:
+			// A hold could come and go unseen while the flow has no
+			// node, so unheld time is counted afresh once it has one.
+			delete(l.unheldSince, f.ref)
 			return StateUnpinned
 		case w >= 0 && n != w:
+			delete(l.unheldSince, f.ref)
 			return StateDisagree
 		}
 		w = n

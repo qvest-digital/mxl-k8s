@@ -188,7 +188,9 @@ func (p *Placer) Acquire(domain, flowID string, obj client.Object) (release func
 }
 
 // release ends one count. The last closes the files under p.mu, so an
-// acquire that follows finds the holds gone.
+// acquire that follows finds the holds gone. It takes pin.mu inside p.mu
+// only at zero links, while place takes p.mu inside pin.mu; the two never
+// meet, because a goroutine in place holds a link of that pin.
 func (p *Placer) release(k flowKey, pin *flowPin) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

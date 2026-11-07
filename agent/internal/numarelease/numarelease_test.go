@@ -376,3 +376,34 @@ func TestFlowStatesMetric(t *testing.T) {
 	}
 	require.NoError(t, testutil.GatherAndCompare(reg, strings.NewReader(want.String()), "mxl_agent_numa_release_flows"))
 }
+
+// A hold the loop never saw, because the flow had no node then, still
+// restarts the delay: the loop counts unheld time only across passes
+// that saw the flow unheld and agreed.
+func TestHoldWhileUnpinnedRestartsTheDelay(t *testing.T) {
+	fx := newFixture(t)
+	fx.h.pid(10, "1", "4-7")
+	fx.use(10, podProd, observed.Output)
+	require.Equal(t, StateSettling, fx.pass(t))
+
+	// The writer is unpinned while the gateway holds and drops the ring.
+	fx.clock.advance(30 * time.Second)
+	fx.h.pid(10, "0-1", "0-7")
+	fx.ring.hold(1)
+	require.Equal(t, StateUnpinned, fx.pass(t))
+	fx.clock.advance(20 * time.Second)
+	fx.ring.hold(0)
+	dropped := fx.clock.now()
+	require.Equal(t, StateUnpinned, fx.pass(t))
+
+	// Pinned again: nothing moves until the delay has passed since then.
+	fx.clock.advance(15 * time.Second)
+	fx.h.pid(10, "1", "4-7")
+	require.Equal(t, StateSettling, fx.pass(t))
+	for fx.clock.now().Sub(dropped) < fx.loop.Delay {
+		require.NotEqual(t, StateMoved, fx.pass(t), "moved %s after the hold dropped",
+			fx.clock.now().Sub(dropped))
+		fx.clock.advance(10 * time.Second)
+	}
+	require.Empty(t, fx.ring.calls)
+}
