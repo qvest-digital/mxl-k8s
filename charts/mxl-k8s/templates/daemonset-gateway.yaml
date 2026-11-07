@@ -30,9 +30,17 @@ rdma.enabled implies IPC_LOCK, which exempts the providers' memory
 registrations from RLIMIT_MEMLOCK. Users may add more via
 containerSecurityContext.capabilities.add.
 */ -}}
+{{- $numa := include "mxlk8s.numa.mode" $ctx -}}
 {{- $caps := list -}}
 {{- if $g.rdma.enabled -}}
   {{- $caps = append $caps "IPC_LOCK" -}}
+{{- end -}}
+{{- /*
+flow placement holds and moves ring files, which mxlfs allows with
+CAP_SYS_NICE, as moving another process's pages does.
+*/ -}}
+{{- if eq $numa "flow" -}}
+  {{- $caps = append $caps "SYS_NICE" -}}
 {{- end -}}
 {{- range $g.containerSecurityContext.capabilities.add -}}
   {{- $caps = append $caps . -}}
@@ -122,6 +130,9 @@ spec:
             {{- include "mxlk8s.flags.render" (dict "flags" $g.flags "keepEmpty" (list "bindAddress")) | nindent 12 }}
             {{- if $ctx.Values.mxlfs.enabled }}
             - --mxlfs
+            {{- end }}
+            {{- if eq $numa "flow" }}
+            - --mxlfs-numa-placement-mode=flow
             {{- end }}
             {{- with $g.args }}
             {{- toYaml . | nindent 12 }}

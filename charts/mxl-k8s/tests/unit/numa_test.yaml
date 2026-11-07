@@ -1,0 +1,257 @@
+suite: numa
+templates:
+  - templates/daemonset-agent.yaml
+  - templates/daemonset-gateway.yaml
+  - templates/daemonset-exporter.yaml
+tests:
+  # Off by default: no NUMA flag on any component, and the gateway gains
+  # no capability.
+  - it: places nothing by default
+    set:
+      mxlfs.enabled: true
+      exporter.enabled: true
+    asserts:
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[*]
+          pattern: ^--mxlfs-numa
+      - notContains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          content: SYS_NICE
+        template: templates/daemonset-gateway.yaml
+
+  - it: takes an empty mode for off
+    set:
+      mxlfs.enabled: true
+      mxlfs.numa.placement.mode: ""
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[*]
+          pattern: ^--mxlfs-numa
+
+  - it: renders off as no flag at all
+    set:
+      mxlfs.enabled: true
+      mxlfs.numa.placement.mode: "off"
+      mxlfs.numa.placement.node.default: "1"
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[*]
+          pattern: ^--mxlfs-numa
+
+  # Node mode with auto is what numa_node= auto was: every domain mounted
+  # with the RDMA devices' node, nothing per flow.
+  - it: node mode mounts with the node default, auto unless set
+    set:
+      mxlfs.enabled: true
+      mxlfs.numa.placement.mode: node
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-placement-mode=node
+        template: templates/daemonset-agent.yaml
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-placement-node-default=auto
+        template: templates/daemonset-agent.yaml
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[*]
+          pattern: ^--mxlfs-numa-placement-flow
+        template: templates/daemonset-agent.yaml
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[*]
+          pattern: ^--mxlfs-numa
+        template: templates/daemonset-gateway.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          content: SYS_NICE
+        template: templates/daemonset-gateway.yaml
+
+  - it: node mode passes an empty node default as auto
+    set:
+      mxlfs.enabled: true
+      mxlfs.numa.placement.mode: node
+      mxlfs.numa.placement.node.default: ""
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-placement-node-default=auto
+
+  # A node given as a string, as --set-string gives it: node 0 is passed,
+  # not dropped as empty.
+  - it: node mode passes NUMA node 0
+    set:
+      mxlfs.enabled: true
+      mxlfs.numa.placement.mode: node
+      mxlfs.numa.placement.node.default: "0"
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-placement-node-default=0
+
+  - it: refuses a node default that is no NUMA node or auto
+    set:
+      mxlfs.enabled: true
+      mxlfs.numa.placement.mode: node
+      mxlfs.numa.placement.node.default: none
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - failedTemplate: {}
+
+  - it: refuses an unknown mode
+    set:
+      mxlfs.enabled: true
+      mxlfs.numa.placement.mode: nic
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - failedTemplate: {}
+
+  - it: refuses node mode without mxlfs
+    set:
+      mxlfs.numa.placement.mode: node
+    template: templates/daemonset-gateway.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: mxlfs.numa.placement.mode node requires mxlfs.enabled
+
+  - it: refuses flow mode without mxlfs
+    set:
+      mxlfs.numa.placement.mode: flow
+    template: templates/daemonset-gateway.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: mxlfs.numa.placement.mode flow requires mxlfs.enabled
+
+  - it: flow mode runs the release loop with its defaults
+    set:
+      mxlfs.enabled: true
+      mxlfs.numa.placement.mode: flow
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-placement-mode=flow
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-placement-flow-default=local
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-placement-flow-release-period=30s
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-placement-flow-release-delay=60s
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-placement-flow-release-rate=512Mi
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[*]
+          pattern: ^--mxlfs-numa-placement-node-default
+
+  - it: flow mode passes the flow default and release settings
+    set:
+      mxlfs.enabled: true
+      mxlfs.numa.placement.mode: flow
+      mxlfs.numa.placement.flow.default: nic
+      mxlfs.numa.placement.flow.release.period: 10s
+      mxlfs.numa.placement.flow.release.delay: 2m
+      mxlfs.numa.placement.flow.release.rate: 1Gi
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-placement-flow-default=nic
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-placement-flow-release-period=10s
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-placement-flow-release-delay=2m
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-placement-flow-release-rate=1Gi
+
+  - it: refuses a flow default other than nic or local
+    set:
+      mxlfs.enabled: true
+      mxlfs.numa.placement.mode: flow
+      mxlfs.numa.placement.flow.default: far
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - failedTemplate: {}
+
+  - it: refuses a release rate that is no quantity
+    set:
+      mxlfs.enabled: true
+      mxlfs.numa.placement.mode: flow
+      mxlfs.numa.placement.flow.release.rate: fast
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - failedTemplate: {}
+
+  # Holding and moving ring files needs CAP_SYS_NICE, and only flow mode
+  # does it.
+  - it: flow mode gives the gateway its mode and CAP_SYS_NICE
+    set:
+      mxlfs.enabled: true
+      mxlfs.numa.placement.mode: flow
+      gateway.rdma.enabled: true
+    template: templates/daemonset-gateway.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-placement-mode=flow
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          content: SYS_NICE
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          content: IPC_LOCK
+
+  - it: every gateway variant gets CAP_SYS_NICE in flow mode
+    set:
+      mxlfs.enabled: true
+      mxlfs.numa.placement.mode: flow
+      gateway.variants.irdma:
+        enabled: true
+        nodeSelector:
+          fabric: irdma
+    template: templates/daemonset-gateway.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          content: SYS_NICE
+
+  # The counters are read in every mode, so per-node pages and fallbacks
+  # are visible with placement off.
+  - it: metrics.enabled turns the exporter's NUMA counters on in any mode
+    set:
+      exporter.enabled: true
+      mxlfs.numa.metrics.enabled: true
+    template: templates/daemonset-exporter.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-metrics
+
+  - it: leaves the exporter's NUMA counters off by default
+    set:
+      exporter.enabled: true
+    template: templates/daemonset-exporter.yaml
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-metrics
+
+  # The value it replaces is gone, not an alias.
+  - it: renders no flag for the removed mxlfs.numaNode
+    set:
+      mxlfs.enabled: true
+      mxlfs.numaNode: auto
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[*]
+          pattern: ^--mxlfs-numa

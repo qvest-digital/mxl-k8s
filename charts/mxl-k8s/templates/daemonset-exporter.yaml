@@ -65,6 +65,9 @@ spec:
             # Kept out of .flags so one value drives both the flag and
             # the ClusterRole that makes it usable.
             - --topology={{ .Values.exporter.topology.enabled }}
+            {{- if .Values.mxlfs.numa.metrics.enabled }}
+            - --mxlfs-numa-metrics
+            {{- end }}
             {{- with .Values.exporter.args }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
