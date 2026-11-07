@@ -398,22 +398,63 @@ func TestNumaNode(t *testing.T) {
 	}
 }
 
-// auto that finds no node is told, with the class it read; a node it
-// finds, and a value that is not auto, are not.
+// online writes a sysfs list of online NUMA nodes.
+func online(t *testing.T, list string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "online")
+	require.NoError(t, os.WriteFile(p, []byte(list+"\n"), 0o644))
+	return p
+}
+
+// auto that finds no node on a host of several NUMA nodes is told, with
+// the class it read; a node it finds, and a value that is not auto, are
+// not.
 func TestResolveNumaNodeTellsWhyAutoFoundNone(t *testing.T) {
 	var told []fallback
 	tell := func(dir string, err error) { told = append(told, fallback{dir, err}) }
+	two := online(t, "0-1")
 
 	empty := rdmaClass(t, map[string]string{})
-	assert.Empty(t, ResolveNumaNode("auto", empty, tell))
+	n, err := ResolveNumaNode("auto", empty, two, tell)
+	assert.Empty(t, n)
+	assert.ErrorContains(t, err, "no RDMA device")
 	require.Len(t, told, 1)
 	assert.Equal(t, empty, told[0].dir)
 	assert.ErrorContains(t, told[0].err, "no RDMA device")
 
-	assert.Equal(t, "1", ResolveNumaNode("auto", rdmaClass(t, map[string]string{"mlx5_0": "1"}), tell))
-	assert.Equal(t, "0", ResolveNumaNode("0", empty, tell))
-	assert.Empty(t, ResolveNumaNode("", empty, tell))
+	n, err = ResolveNumaNode("auto", rdmaClass(t, map[string]string{"mlx5_0": "1"}), two, tell)
+	require.NoError(t, err)
+	assert.Equal(t, "1", n)
+	n, _ = ResolveNumaNode("0", empty, two, tell)
+	assert.Equal(t, "0", n)
+	n, _ = ResolveNumaNode("", empty, two, tell)
+	assert.Empty(t, n)
 	assert.Len(t, told, 1)
+}
+
+// On a host of one NUMA node every page is on it either way, and devices
+// report -1 there: auto leaves the option out without telling. Several
+// nodes, listed as a range or apart, keep the warning.
+func TestResolveNumaNodeIsQuietOnOneNode(t *testing.T) {
+	minus := rdmaClass(t, map[string]string{"mlx5_0": "-1"})
+	for _, tc := range []struct {
+		name   string
+		online string
+		told   bool
+	}{
+		{"one node", online(t, "0"), false},
+		{"a kernel without NUMA", filepath.Join(t.TempDir(), "online"), false},
+		{"two nodes", online(t, "0-1"), true},
+		{"nodes apart", online(t, "0,2"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			told := false
+			n, err := ResolveNumaNode("auto", minus, tc.online, func(string, error) { told = true })
+			assert.Empty(t, n)
+			assert.Equal(t, tc.told, told)
+			assert.Equal(t, !tc.told, errors.Is(err, ErrOneNode))
+		})
+	}
 }
 
 func TestNumaNodeUnresolvedEventHasItsOwnReason(t *testing.T) {
@@ -431,4 +472,8 @@ func TestNumaNodeUnresolvedEventHasItsOwnReason(t *testing.T) {
 	assert.Equal(t, ReasonNumaNodeUnresolved, ev.Reason)
 	assert.Equal(t, "n1", ev.InvolvedObject.Name)
 	assert.Contains(t, ev.Message, "/sys/class/infiniband gives no NUMA node; domains are mounted without numa_node=")
+	// A restarted agent leaves a mounted domain alone; only a new mount,
+	// at the next node reboot, takes numa_node=.
+	assert.Contains(t, ev.Message, "until they are mounted again, at the next node reboot")
+	assert.NotContains(t, ev.Message, "restart")
 }

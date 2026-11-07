@@ -56,6 +56,13 @@ const ReasonNumaNodeUnresolved = "MxlfsNumaNodeUnresolved"
 // RDMAClass is the sysfs class that lists the RDMA devices of the node.
 const RDMAClass = "/sys/class/infiniband"
 
+// OnlineNodes is the sysfs list of the node's online NUMA nodes.
+const OnlineNodes = "/sys/devices/system/node/online"
+
+// ErrOneNode is ResolveNumaNode's error for auto on a host of one online
+// NUMA node, where every page is on that node with or without the option.
+var ErrOneNode = errors.New("the host has one online NUMA node")
+
 // Mounter decides once per directory whether it is an mxlfs.
 type Mounter struct {
 	// IsMxlfs reports whether dir is an mxlfs. Nil uses mxlfswatch.IsMxlfs.
@@ -255,21 +262,39 @@ func NumaNodeRefusedEvent(c client.Client, node string, log logr.Logger) func(di
 // records a warning event on node.
 func NumaNodeUnresolvedEvent(c client.Client, node string, log logr.Logger) func(dir string, err error) {
 	return nodeEvent(c, node, log, ReasonNumaNodeUnresolved,
-		"%s gives no NUMA node; domains are mounted without numa_node= until the agent restarts: %v")
+		"%s gives no NUMA node; domains are mounted without numa_node= and keep that "+
+			"until they are mounted again, at the next node reboot: %v")
 }
 
-// ResolveNumaNode is NumaNode, once, at the agent's start. When it finds
-// no node, unresolved is told why with class, and the domains are mounted
-// without numa_node=: RDMA devices that appear later do not change that.
-func ResolveNumaNode(value, class string, unresolved func(dir string, err error)) string {
+// ResolveNumaNode is NumaNode, once, at the agent's start. When auto finds
+// no node on a host whose online list (online) names one NUMA node, it
+// returns ErrOneNode and tells nobody. When it finds none otherwise,
+// unresolved is told why with class. Either way the domains are mounted
+// without numa_node=, and RDMA devices that appear later do not change
+// that for a domain already mounted.
+func ResolveNumaNode(value, class, online string, unresolved func(dir string, err error)) (string, error) {
 	n, err := NumaNode(value, class)
-	if err != nil {
-		if unresolved != nil {
-			unresolved(class, err)
-		}
-		return ""
+	if err == nil {
+		return n, nil
 	}
-	return n
+	if value == "auto" && oneNode(online) {
+		return "", ErrOneNode
+	}
+	if unresolved != nil {
+		unresolved(class, err)
+	}
+	return "", err
+}
+
+// oneNode reports whether the sysfs list online names one NUMA node. A
+// kernel without NUMA has no such list, and one node.
+func oneNode(online string) bool {
+	b, err := os.ReadFile(online)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	s := strings.TrimSpace(string(b))
+	return err == nil && s != "" && !strings.ContainsAny(s, ",-")
 }
 
 // NumaNode turns a --mxlfs-numa-node value into Mounter.NumaNode: a node

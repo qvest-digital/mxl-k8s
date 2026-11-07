@@ -213,13 +213,15 @@ func run(args []string) error {
 			return fmt.Errorf("--mxlfs needs the redundancy set CRD: %w", err)
 		}
 		unresolved := mxlfsmount.NumaNodeUnresolvedEvent(kClient, cfg.NodeName, setupLog)
-		numaNode := mxlfsmount.ResolveNumaNode(cfg.MxlfsNumaNode, mxlfsmount.RDMAClass,
-			func(dir string, err error) {
+		numaNode, err := mxlfsmount.ResolveNumaNode(cfg.MxlfsNumaNode, mxlfsmount.RDMAClass,
+			mxlfsmount.OnlineNodes, func(dir string, err error) {
 				setupLog.Error(err, "mxlfs domains are mounted without numa_node=",
 					"mxlfs-numa-node", cfg.MxlfsNumaNode)
 				unresolved(dir, err)
 			})
-		if numaNode != "" && cfg.MxlfsNumaNode == "auto" {
+		if errors.Is(err, mxlfsmount.ErrOneNode) {
+			setupLog.Info("mxlfs domains are mounted without numa_node=", "reason", err.Error())
+		} else if numaNode != "" && cfg.MxlfsNumaNode == "auto" {
 			setupLog.Info("mxlfs domains are mounted with the NUMA node of the RDMA devices",
 				"numa_node", numaNode)
 		}
