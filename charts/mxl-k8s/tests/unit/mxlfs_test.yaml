@@ -204,6 +204,18 @@ tests:
           path: spec.template.spec.containers[0].args
           content: --mxlfs-numa-node=1
 
+  # A node given as a string, as --set-string gives it: node 0 is passed,
+  # not dropped as empty.
+  - it: passes NUMA node 0 to the agent
+    set:
+      mxlfs.enabled: true
+      mxlfs.numaNode: "0"
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mxlfs-numa-node=0
+
   - it: refuses a numaNode that is no NUMA node, auto or none
     set:
       mxlfs.enabled: true
