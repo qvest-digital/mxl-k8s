@@ -333,3 +333,77 @@ func TestRunMxlfsFailsOnADirectoryThatIsNoMxlfs(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, wait)
 }
+
+// numaHost writes a sysfs RDMA class and online list: two nodes unless
+// one is set, and each device on the node given.
+func numaHost(t *testing.T, oneNode bool, devices map[string]string) (class, online string) {
+	t.Helper()
+	root := t.TempDir()
+	class = filepath.Join(root, "infiniband")
+	require.NoError(t, os.MkdirAll(class, 0o755))
+	for dev, n := range devices {
+		dir := filepath.Join(class, dev, "device")
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "numa_node"), []byte(n+"\n"), 0o644))
+	}
+	list := "0-1\n"
+	if oneNode {
+		list = "0\n"
+	}
+	online = filepath.Join(root, "online")
+	require.NoError(t, os.WriteFile(online, []byte(list), 0o644))
+	return class, online
+}
+
+// What each mode mounts with and whether the release loop runs. Node
+// mode with auto resolves exactly as the numa_node= auto it replaces.
+func TestNumaPlacementPerMode(t *testing.T) {
+	agree := map[string]string{"mlx5_0": "1", "mlx5_1": "1"}
+	mixed := map[string]string{"mlx5_0": "0", "mlx5_1": "1"}
+	for _, tc := range []struct {
+		name          string
+		mode, node    string
+		flowDefault   string
+		oneNode       bool
+		devices       map[string]string
+		wantNuma      string
+		wantNIC       int32
+		wantUnresolve bool
+		wantFlowWarn  bool
+	}{
+		{name: "off", mode: config.NumaOff, node: "auto", devices: agree, wantNIC: -1},
+		{name: "node auto", mode: config.NumaNode, node: "auto", devices: agree, wantNuma: "1", wantNIC: -1},
+		{name: "node auto on one node", mode: config.NumaNode, node: "auto", oneNode: true,
+			devices: map[string]string{"mlx5_0": "-1"}, wantNIC: -1},
+		{name: "node auto, devices disagree", mode: config.NumaNode, node: "auto", devices: mixed, wantNIC: -1, wantUnresolve: true},
+		{name: "node 0", mode: config.NumaNode, node: "0", devices: agree, wantNuma: "0", wantNIC: -1},
+		{name: "flow nic", mode: config.NumaFlow, flowDefault: "nic", devices: agree, wantNuma: "1", wantNIC: 1},
+		{name: "flow local", mode: config.NumaFlow, flowDefault: "local", devices: agree, wantNIC: 1},
+		{name: "flow nic on one node", mode: config.NumaFlow, flowDefault: "nic", oneNode: true, wantNIC: 0},
+		{name: "flow, devices disagree", mode: config.NumaFlow, flowDefault: "nic", devices: mixed, wantNIC: -1, wantFlowWarn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			class, online := numaHost(t, tc.oneNode, tc.devices)
+			var unresolved, flowWarn bool
+			cfg := &config.Config{MxlfsNumaMode: tc.mode, MxlfsNumaNodeDefault: tc.node, MxlfsNumaFlowDefault: tc.flowDefault}
+			numa, nic := numaPlacementFrom(cfg, class, online,
+				func(string, error) { unresolved = true }, func(string, error) { flowWarn = true })
+			assert.Equal(t, tc.wantNuma, numa)
+			assert.Equal(t, tc.wantNIC, nic)
+			assert.Equal(t, tc.wantUnresolve, unresolved)
+			assert.Equal(t, tc.wantFlowWarn, flowWarn)
+			if tc.mode == config.NumaNode {
+				old, _ := mxlfsmount.ResolveNumaNode(tc.node, class, online, nil)
+				assert.Equal(t, old, numa, "node mode resolves as numa_node= %s did", tc.node)
+			}
+		})
+	}
+}
+
+func TestDomainDirs(t *testing.T) {
+	doms := intent.Domains{Root: "/run/mxl/domains", Primary: "domain", ByDir: map[string]string{
+		"domain": "", "studio": "studio",
+	}}
+	assert.Equal(t, map[string]string{"": "/run/mxl/domain", "studio": "/run/mxl/domains/studio"},
+		domainDirs("/run/mxl/domain", doms))
+}

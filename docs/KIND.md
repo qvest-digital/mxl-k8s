@@ -218,6 +218,17 @@ MXLFS=1 make kind-up
 make kind-test
 ```
 
+`MXLFS_NUMA=flow` beside `MXLFS=1` also sets
+`mxlfs.numa.placement.mode=flow` and `mxlfs.numa.metrics.enabled=true`.
+Case `91-mxlfs-numa-placement` then asserts that the demo's mirrored
+ring is held on its source node, that the gateway's first acquire found
+it on the NICs' node or moved it there, and that a gateway restart takes
+the holds again; with a module that lacks the NUMA ioctls it asserts the
+mirror is Ready and the domain counted unsupported. A KIND host's nodes
+share the host's NUMA nodes, so moving a ring between two of them is not
+covered. Without flow placement the case passes without asserting
+anything.
+
 ## Integration suite
 
 `make kind-test` runs the bash suite under

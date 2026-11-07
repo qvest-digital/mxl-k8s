@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 
 	"golang.org/x/sys/unix"
+
+	apimxlfs "github.com/qvest-digital/mxl-k8s/api/mxlfs"
 )
 
 // Magic is the f_type statfs reports for an mxlfs.
@@ -79,21 +81,14 @@ func FlowDir(domain string, id [16]byte) string {
 // grain file of a discrete flow, or the channels file of a continuous
 // one.
 func AllocateFlow(flowDir string) error {
-	grains, err := filepath.Glob(filepath.Join(flowDir, "grains", "data.*"))
+	ring, err := apimxlfs.RingFiles(flowDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%s holds neither grains nor channels", flowDir)
+	}
 	if err != nil {
 		return err
 	}
-	if len(grains) == 0 {
-		channels := filepath.Join(flowDir, "channels")
-		if _, err := os.Stat(channels); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("%s holds neither grains nor channels", flowDir)
-			}
-			return err
-		}
-		grains = []string{channels}
-	}
-	for _, g := range grains {
+	for _, g := range ring {
 		if err := Allocate(g); err != nil {
 			return err
 		}

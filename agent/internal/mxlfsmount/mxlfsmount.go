@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/mxlfswatch"
+	apimxlfs "github.com/qvest-digital/mxl-k8s/api/mxlfs"
 )
 
 // Options are the mount options of every domain: writable by every
@@ -53,11 +54,16 @@ const ReasonNumaNodeRefused = "MxlfsNumaNodeRefused"
 // mounted without numa_node= because auto found no single NUMA node.
 const ReasonNumaNodeUnresolved = "MxlfsNumaNodeUnresolved"
 
+// ReasonNumaFlowUnresolved is the reason of the Node event for flow
+// placement that acts as off because the RDMA devices give no single
+// NUMA node.
+const ReasonNumaFlowUnresolved = "MxlfsNumaFlowUnresolved"
+
 // RDMAClass is the sysfs class that lists the RDMA devices of the node.
-const RDMAClass = "/sys/class/infiniband"
+const RDMAClass = apimxlfs.RDMAClass
 
 // OnlineNodes is the sysfs list of the node's online NUMA nodes.
-const OnlineNodes = "/sys/devices/system/node/online"
+const OnlineNodes = apimxlfs.OnlineNodes
 
 // ErrOneNode is ResolveNumaNode's error for auto on a host of one online
 // NUMA node, where every page is on that node with or without the option.
@@ -266,6 +272,13 @@ func NumaNodeUnresolvedEvent(c client.Client, node string, log logr.Logger) func
 			"until they are mounted again, at the next node reboot: %v")
 }
 
+// NumaFlowUnresolvedEvent returns a Node warning for flow placement that
+// acts as off.
+func NumaFlowUnresolvedEvent(c client.Client, node string, log logr.Logger) func(dir string, err error) {
+	return nodeEvent(c, node, log, ReasonNumaFlowUnresolved,
+		"%s gives no single NUMA node for the NICs; flow placement acts as off: %v")
+}
+
 // ResolveNumaNode is NumaNode, once, at the agent's start. When auto finds
 // no node on a host whose online list (online) names one NUMA node, it
 // returns ErrOneNode and tells nobody. When it finds none otherwise,
@@ -289,17 +302,13 @@ func ResolveNumaNode(value, class, online string, unresolved func(dir string, er
 // oneNode reports whether the sysfs list online names one NUMA node. A
 // kernel without NUMA has no such list, and one node.
 func oneNode(online string) bool {
-	b, err := os.ReadFile(online)
-	if errors.Is(err, fs.ErrNotExist) {
-		return true
-	}
-	s := strings.TrimSpace(string(b))
-	return err == nil && s != "" && !strings.ContainsAny(s, ",-")
+	_, ok := apimxlfs.SingleOnlineNode(online)
+	return ok
 }
 
-// NumaNode turns a --mxlfs-numa-node value into Mounter.NumaNode: a node
-// as numa_node= takes it, auto as RDMANumaNode finds it in class, and
-// empty or none as empty. The error says why auto found no node.
+// NumaNode turns a --mxlfs-numa-placement-node-default value into
+// Mounter.NumaNode: a node as numa_node= takes it, auto as RDMANumaNode
+// finds it in class, and empty or none as empty. The error says why auto found no node.
 func NumaNode(value, class string) (string, error) {
 	switch value {
 	case "", "none":
@@ -315,38 +324,14 @@ func NumaNode(value, class string) (string, error) {
 	return strconv.FormatUint(n, 10), nil
 }
 
-// RDMANumaNode returns the NUMA node every RDMA device in class reports
-// for its device (device/numa_node). A device without one, as a software
-// RDMA device that has no PCI device, is passed over. It fails when no
-// device reports a node, when one reports none (-1), or when they report
-// different nodes.
+// RDMANumaNode returns, as numa_node= takes it, the NUMA node every RDMA
+// device in class reports; see mxlfs.RDMANode.
 func RDMANumaNode(class string) (string, error) {
-	entries, err := os.ReadDir(class)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	n, err := apimxlfs.RDMANode(class)
+	if err != nil {
 		return "", err
 	}
-	node := ""
-	for _, e := range entries {
-		b, err := os.ReadFile(filepath.Join(class, e.Name(), "device", "numa_node"))
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return "", err
-		}
-		n := strings.TrimSpace(string(b))
-		if _, err := strconv.ParseUint(n, 10, 31); err != nil {
-			return "", fmt.Errorf("RDMA device %s reports NUMA node %s", e.Name(), n)
-		}
-		if node != "" && n != node {
-			return "", fmt.Errorf("RDMA devices are on NUMA nodes %s and %s", node, n)
-		}
-		node = n
-	}
-	if node == "" {
-		return "", fmt.Errorf("no RDMA device in %s reports a NUMA node", class)
-	}
-	return node, nil
+	return strconv.Itoa(int(n)), nil
 }
 
 func nodeEvent(c client.Client, node string, log logr.Logger, reason, format string) func(dir string, err error) {

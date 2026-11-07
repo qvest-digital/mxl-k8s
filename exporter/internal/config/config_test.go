@@ -43,3 +43,13 @@ func TestFromFlagsRejectsNonPositiveScanPeriod(t *testing.T) {
 	_, err := parse(t, "--node-name=node-a", "--domain-path=/run/mxl/domain", "--scan-period=0s")
 	require.ErrorContains(t, err, "--scan-period")
 }
+
+// The NUMA counters are off unless asked for, whatever the placement.
+func TestFromFlagsMxlfsNumaMetrics(t *testing.T) {
+	cfg, err := parse(t, "--node-name=node-a", "--domain-path=/run/mxl/domain")
+	require.NoError(t, err)
+	require.False(t, cfg.MxlfsNumaMetrics)
+	cfg, err = parse(t, "--node-name=node-a", "--domain-path=/run/mxl/domain", "--mxlfs-numa-metrics")
+	require.NoError(t, err)
+	require.True(t, cfg.MxlfsNumaMetrics)
+}

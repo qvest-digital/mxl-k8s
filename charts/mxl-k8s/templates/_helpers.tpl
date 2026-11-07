@@ -269,3 +269,16 @@ Call as: include "mxlk8s.mxlfs.waitContainer" (dict "Context" $ "root" "/run/mxl
       mountPath: {{ .root }}
       readOnly: true
 {{- end -}}
+
+{{/*
+The NUMA placement mode in effect: off, node or flow. Empty is off. A
+mode other than off needs mxlfs.enabled, as only an mxlfs domain has a
+numa_node= or per-file placement.
+*/}}
+{{- define "mxlk8s.numa.mode" -}}
+{{- $mode := .Values.mxlfs.numa.placement.mode | default "off" -}}
+{{- if and (ne $mode "off") (not .Values.mxlfs.enabled) -}}
+{{- fail (printf "mxlfs.numa.placement.mode %s requires mxlfs.enabled" $mode) -}}
+{{- end -}}
+{{- $mode -}}
+{{- end -}}

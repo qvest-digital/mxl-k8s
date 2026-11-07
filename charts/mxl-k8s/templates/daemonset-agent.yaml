@@ -81,9 +81,20 @@ spec:
             {{- with .Values.mxlfs.huge }}
             - --mxlfs-huge={{ . }}
             {{- end }}
-            {{- with .Values.mxlfs.numaNode }}
-            - --mxlfs-numa-node={{ . }}
             {{- end }}
+            {{- $numa := include "mxlk8s.numa.mode" . }}
+            {{- $placement := .Values.mxlfs.numa.placement }}
+            {{- if ne $numa "off" }}
+            - --mxlfs-numa-placement-mode={{ $numa }}
+            {{- end }}
+            {{- if eq $numa "node" }}
+            - --mxlfs-numa-placement-node-default={{ $placement.node.default | default "auto" }}
+            {{- end }}
+            {{- if eq $numa "flow" }}
+            - --mxlfs-numa-placement-flow-default={{ $placement.flow.default | default "local" }}
+            - --mxlfs-numa-placement-flow-release-period={{ $placement.flow.release.period }}
+            - --mxlfs-numa-placement-flow-release-delay={{ $placement.flow.release.delay }}
+            - --mxlfs-numa-placement-flow-release-rate={{ $placement.flow.release.rate }}
             {{- end }}
             {{- if .Values.agent.csi.enabled }}
             - --csi-endpoint=unix:///csi/csi.sock

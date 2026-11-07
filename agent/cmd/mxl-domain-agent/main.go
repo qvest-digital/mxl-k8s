@@ -8,14 +8,18 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -35,6 +39,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/agent/internal/intentsock"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/mxlfsmount"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/mxlfswatch"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/numarelease"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/observed"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/originlease"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/podlookup"
@@ -42,6 +47,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/agent/internal/shiminstall"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/statfs"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/tracker"
+	apimxlfs "github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -208,23 +214,15 @@ func run(args []string) error {
 	// as it is materialised. Without mxlfs a marker left by an earlier
 	// run with it goes, so no gateway or exporter waits on it.
 	var mounts *mxlfsmount.Mounter
+	// releaseNIC is the NICs' NUMA node in flow mode, and -1 when the
+	// release loop does not run.
+	releaseNIC := int32(-1)
 	if cfg.Mxlfs {
 		if err := requireKind(kClient.RESTMapper(), "MxlFlowRedundancySet"); err != nil {
 			return fmt.Errorf("--mxlfs needs the redundancy set CRD: %w", err)
 		}
-		unresolved := mxlfsmount.NumaNodeUnresolvedEvent(kClient, cfg.NodeName, setupLog)
-		numaNode, err := mxlfsmount.ResolveNumaNode(cfg.MxlfsNumaNode, mxlfsmount.RDMAClass,
-			mxlfsmount.OnlineNodes, func(dir string, err error) {
-				setupLog.Error(err, "mxlfs domains are mounted without numa_node=",
-					"mxlfs-numa-node", cfg.MxlfsNumaNode)
-				unresolved(dir, err)
-			})
-		if errors.Is(err, mxlfsmount.ErrOneNode) {
-			setupLog.Info("mxlfs domains are mounted without numa_node=", "reason", err.Error())
-		} else if numaNode != "" && cfg.MxlfsNumaNode == "auto" {
-			setupLog.Info("mxlfs domains are mounted with the NUMA node of the RDMA devices",
-				"numa_node", numaNode)
-		}
+		var numaNode string
+		numaNode, releaseNIC = numaPlacement(cfg, kClient)
 		mounts = &mxlfsmount.Mounter{
 			Fallback:        mxlfsmount.NodeEvent(kClient, cfg.NodeName, setupLog),
 			Huge:            cfg.MxlfsHuge,
@@ -353,6 +351,27 @@ func run(args []string) error {
 				}
 			}
 		}()
+	}
+
+	if releaseNIC >= 0 {
+		loop := numarelease.New(cfg.NodeName)
+		loop.Procs = scanner.ScanProcs
+		loop.Ours = func(ctx context.Context) (map[string]bool, error) {
+			return ownPodUIDs(ctx, kClient, cfg.NodeName, own)
+		}
+		loop.Domains = func() map[string]string {
+			domainsMu.Lock()
+			doms := current
+			domainsMu.Unlock()
+			return domainDirs(cfg.DomainPath, doms)
+		}
+		loop.Event = flowEvent(kClient, cfg.NodeName, ctrl.Log.WithName("numarelease"))
+		loop.Delay, loop.Rate = cfg.MxlfsNumaReleaseDelay, cfg.ReleaseRate()
+		loop.Log = ctrl.Log.WithName("numarelease")
+		reg := prometheus.NewRegistry()
+		reg.MustRegister(loop)
+		go serveMetrics(ctx, cfg.MetricsAddr, reg)
+		go loop.Run(ctx, cfg.MxlfsNumaReleasePeriod)
 	}
 
 	if cfg.ClaimStatusLabel != "" {
@@ -766,6 +785,122 @@ func domainDevices(primary string, doms intent.Domains) map[string]string {
 		byDev[dev] = ""
 	}
 	return byDev
+}
+
+// numaPlacement resolves the numa_node= option every domain is mounted
+// with, and in flow mode the NICs' NUMA node the release loop runs
+// against, -1 when it does not run. Node mode resolves
+// --mxlfs-numa-placement-node-default as numa_node= takes it. Flow mode
+// needs the RDMA devices to agree on one node, or acts as off and says
+// so on the Node; flow default nic then mounts with that node, except on
+// a host of one node, where every page is on it anyway.
+func numaPlacement(cfg *config.Config, c client.Client) (string, int32) {
+	return numaPlacementFrom(cfg, apimxlfs.RDMAClass, apimxlfs.OnlineNodes,
+		mxlfsmount.NumaNodeUnresolvedEvent(c, cfg.NodeName, setupLog),
+		mxlfsmount.NumaFlowUnresolvedEvent(c, cfg.NodeName, setupLog))
+}
+
+func numaPlacementFrom(cfg *config.Config, class, online string, unresolved, flowUnresolved func(string, error)) (string, int32) {
+	switch cfg.MxlfsNumaMode {
+	case config.NumaNode:
+		numaNode, err := mxlfsmount.ResolveNumaNode(cfg.MxlfsNumaNodeDefault, class, online,
+			func(dir string, err error) {
+				setupLog.Error(err, "mxlfs domains are mounted without numa_node=",
+					"mxlfs-numa-placement-node-default", cfg.MxlfsNumaNodeDefault)
+				unresolved(dir, err)
+			})
+		if errors.Is(err, mxlfsmount.ErrOneNode) {
+			setupLog.Info("mxlfs domains are mounted without numa_node=", "reason", err.Error())
+		} else if numaNode != "" && cfg.MxlfsNumaNodeDefault == "auto" {
+			setupLog.Info("mxlfs domains are mounted with the NUMA node of the RDMA devices",
+				"numa_node", numaNode)
+		}
+		return numaNode, -1
+	case config.NumaFlow:
+		nic, err := apimxlfs.HostNICNode(class, online)
+		if err != nil {
+			setupLog.Error(err, "flow placement acts as off: the NICs give no single NUMA node")
+			flowUnresolved(class, err)
+			return "", -1
+		}
+		setupLog.Info("rings are placed per flow", "nicNumaNode", nic, "default", cfg.MxlfsNumaFlowDefault)
+		if _, one := apimxlfs.SingleOnlineNode(online); cfg.MxlfsNumaFlowDefault == "nic" && !one {
+			return strconv.Itoa(int(nic)), nic
+		}
+		return "", nic
+	}
+	return "", -1
+}
+
+// domainDirs maps every domain name, empty for the primary, to its
+// directory.
+func domainDirs(primary string, doms intent.Domains) map[string]string {
+	out := map[string]string{"": primary}
+	for dir, name := range doms.ByDir {
+		if dir != doms.Primary {
+			out[name] = filepath.Join(doms.Root, dir)
+		}
+	}
+	return out
+}
+
+// ownPodUIDs returns the UIDs of mxl-k8s's own pods on node.
+func ownPodUIDs(ctx context.Context, c client.Client, node string, own func(*corev1.Pod) bool) (map[string]bool, error) {
+	var pods corev1.PodList
+	if err := c.List(ctx, &pods, client.MatchingFields{"spec.nodeName": node}); err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, p := range pods.Items {
+		if own(&p) {
+			out[string(p.UID)] = true
+		}
+	}
+	return out, nil
+}
+
+// flowEvent records an event on an MxlFlow.
+func flowEvent(c client.Client, node string, log logr.Logger) func(mxlv1alpha1.FlowRef, string, string, string) {
+	return func(ref mxlv1alpha1.FlowRef, kind, reason, message string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		obj := corev1.ObjectReference{APIVersion: mxlv1alpha1.GroupVersion.String(), Kind: "MxlFlow", Name: ref.Name()}
+		var f mxlv1alpha1.MxlFlow
+		if err := c.Get(ctx, client.ObjectKey{Name: ref.Name()}, &f); err == nil {
+			obj.UID = f.UID
+		}
+		now := metav1.NewTime(time.Now())
+		ev := &corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{GenerateName: ref.Name() + ".", Namespace: metav1.NamespaceDefault},
+			InvolvedObject: obj,
+			Reason:         reason,
+			Message:        message,
+			Type:           kind,
+			Source:         corev1.EventSource{Component: "mxl-domain-agent", Host: node},
+			FirstTimestamp: now,
+			LastTimestamp:  now,
+			Count:          1,
+		}
+		if err := c.Create(ctx, ev); err != nil {
+			log.Error(err, "record event", "reason", reason, "flow", ref.Name())
+		}
+	}
+}
+
+// serveMetrics serves reg on addr until ctx is done.
+func serveMetrics(ctx context.Context, addr string, reg *prometheus.Registry) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		ctrl.Log.WithName("metrics").Error(err, "metrics server exited")
+	}
 }
 
 // flowsInUse returns the flows processes on this node map, leaving out

@@ -60,39 +60,16 @@ var podUID = regexp.MustCompile(`pod([0-9a-f]{8}[-_][0-9a-f]{4}[-_][0-9a-f]{4}[-
 
 // Scan returns, per pod UID, the flows the pod's processes use.
 func (s *Scanner) Scan() (map[string][]Use, error) {
-	root := s.ProcRoot
-	if root == "" {
-		root = "/proc"
-	}
-	domains := s.Domains()
-	writers, err := s.lockHolders(filepath.Join(root, "locks"))
-	if err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(root)
+	procs, err := s.ScanProcs()
 	if err != nil {
 		return nil, err
 	}
 	type key struct{ pod, domain, flow string }
 	dirs := map[key]Direction{}
-	for _, e := range entries {
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil {
-			continue
-		}
-		pod := s.podOf(root, pid)
-		if pod == "" {
-			continue
-		}
-		for _, m := range s.flowMappings(root, pid, domains) {
-			k := key{pod, m.domain, m.flow}
-			d := Input
-			if m.data && writers[pid][m.devIno] {
-				d = Output
-			}
-			if dirs[k] != Output {
-				dirs[k] = d
-			}
+	for _, p := range procs {
+		k := key{p.Pod, p.Domain, p.FlowID}
+		if dirs[k] != Output {
+			dirs[k] = p.Direction
 		}
 	}
 	out := map[string][]Use{}
@@ -106,6 +83,61 @@ func (s *Scanner) Scan() (map[string][]Use, error) {
 			}
 			return uses[i].FlowID < uses[j].FlowID
 		})
+	}
+	return out, nil
+}
+
+// ProcUse is one flow one process in a pod reads or writes.
+type ProcUse struct {
+	PID       int
+	Pod       string // the pod UID
+	Domain    string // the MxlDomain name; empty for the primary domain
+	FlowID    string
+	Direction Direction
+}
+
+// ScanProcs returns every flow each process in a pod uses, once per
+// process and flow.
+func (s *Scanner) ScanProcs() ([]ProcUse, error) {
+	root := s.ProcRoot
+	if root == "" {
+		root = "/proc"
+	}
+	domains := s.Domains()
+	writers, err := s.lockHolders(filepath.Join(root, "locks"))
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	var out []ProcUse
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		pod := s.podOf(root, pid)
+		if pod == "" {
+			continue
+		}
+		seen := map[[2]string]int{}
+		for _, m := range s.flowMappings(root, pid, domains) {
+			d := Input
+			if m.data && writers[pid][m.devIno] {
+				d = Output
+			}
+			k := [2]string{m.domain, m.flow}
+			if i, ok := seen[k]; ok {
+				if d == Output {
+					out[i].Direction = Output
+				}
+				continue
+			}
+			seen[k] = len(out)
+			out = append(out, ProcUse{PID: pid, Pod: pod, Domain: m.domain, FlowID: m.flow, Direction: d})
+		}
 	}
 	return out, nil
 }

@@ -34,6 +34,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/mxlfs"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/numaplace"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/placeholder"
 )
 
@@ -318,6 +319,11 @@ type TargetReconciler struct {
 	// out.
 	Unfilled func(domain, id string)
 
+	// Placer gives the ring of a target on an mxlfs domain the NIC's
+	// NUMA node as its preference and holds it, before it is allocated.
+	// Nil places nothing.
+	Placer *numaplace.Placer
+
 	// Filled is told when a target's ring on an mxlfs domain has been
 	// allocated, with the domain directory and the flow id, so a
 	// placeholder there becomes a published copy. Nil leaves it out.
@@ -408,6 +414,10 @@ type targetEntry struct {
 	// pods, so the recovery path leaves it alone and only rebuilds
 	// the fabric side.
 	writer *mxl.Writer
+
+	// ringRelease drops the holds on the writer's ring files, and goes
+	// with the writer. Nil when nothing holds them.
+	ringRelease func()
 
 	// handles is the domain instance the writer was opened through;
 	// a fabric-side rebuild has to use the same one.
@@ -574,6 +584,10 @@ func (e *targetEntry) abandon() *mxl.Writer {
 	e.closed = true
 	writer := e.writer
 	e.writer = nil
+	if e.ringRelease != nil {
+		e.ringRelease()
+		e.ringRelease = nil
+	}
 	return writer
 }
 
@@ -996,19 +1010,26 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain string, i
 	}
 	// The ring has to be in place before the fabric side registers it:
 	// pinning a lazily allocated mxlfs ring would fault it in page by page.
+	// It is allocated on the NICs' NUMA node when the placer holds it.
+	ringRelease := func() {}
 	if handles.OnMxlfs() {
 		dir := mxlfs.FlowDir(handles.DomainPath(), writer.Config().Common.ID)
-		if err := mxlfs.AllocateFlow(dir); err != nil {
+		id := strings.TrimSuffix(filepath.Base(dir), ".mxl-flow")
+		ringRelease, err = allocateRing(func() func() {
+			return r.Placer.HoldTarget(handles.DomainPath(), id, mirrorRef(key))
+		}, func() error { return mxlfs.AllocateFlow(dir) })
+		if err != nil {
 			_ = writer.Close()
 			return nil, fmt.Errorf("%w: allocate ring: %w", errOpenWriterFailed, err)
 		}
 		if r.Filled != nil {
-			r.Filled(handles.DomainPath(), strings.TrimSuffix(filepath.Base(dir), ".mxl-flow"))
+			r.Filled(handles.DomainPath(), id)
 		}
 	}
 	target, info, s, bound, err := r.openFabricSideDispatch(handles, writer, provider, in.iface)
 	if err != nil {
 		_ = writer.Close()
+		ringRelease()
 		return nil, err
 	}
 
@@ -1023,8 +1044,21 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain string, i
 
 		boundInterface: bound,
 	}
+	entry.ringRelease = ringRelease
 	r.startProgressLoop(entry, key, target, info, s)
 	return entry, nil
+}
+
+// allocateRing holds a target's ring, which gives it its node
+// preference, and then allocates it, so the ring is allocated where the
+// preference says. A failed allocation drops the holds.
+func allocateRing(hold func() func(), allocate func() error) (release func(), err error) {
+	release = hold()
+	if err := allocate(); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
 }
 
 // openTargetDispatch routes the open through the test seam when set,
@@ -2295,7 +2329,12 @@ func closeTargetHandles(e *targetEntry, disp flowDisposition, grace time.Duratio
 	flusherCancel, flusherDone := e.flusherCancel, e.flusherDone
 	info, target, writer := e.info, e.target, e.writer
 	e.info, e.target, e.writer = nil, nil, nil
+	ringRelease := e.ringRelease
+	e.ringRelease = nil
 	e.lifecycle.Unlock()
+	if ringRelease != nil {
+		defer ringRelease()
+	}
 
 	if flusherCancel != nil {
 		flusherCancel()
