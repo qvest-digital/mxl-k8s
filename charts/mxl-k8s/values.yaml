@@ -139,7 +139,10 @@ mxlfs:
       # every flow it registers with a NIC and moves it to the NICs' node
       # first, a target's ring is allocated there, and the agent moves a
       # ring nothing holds to the node all local writers and readers of
-      # the flow are confined to, which needs CPU pinning. A page goes to
+      # the flow are confined to: every CPU their threads may run on is on
+      # that node, and they may allocate from it. A flow with any other
+      # local writer or reader counts as unpinned and the agent never
+      # moves its ring, so this needs CPU pinning. A page goes to
       # the file's own preference first, then to the mount's numa_node=,
       # then to the allocating task's memory policy; a file has a
       # preference only in flow mode, where a moved ring keeps it so its
@@ -188,8 +191,10 @@ mxlfs:
           # @schema
           period: 30s
           # -- How long a ring stays unheld, counted from when the agent
-          # first saw it so, before it moves. Covers a gateway restart,
-          # which drops the holds until its mirrors are attached again.
+          # first saw it so, before it moves; a pass that finds it held or
+          # cannot see its holds starts the count over. Covers a gateway
+          # restart, which drops the holds until its mirrors are attached
+          # again.
           # @schema
           # type: string
           # pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$

@@ -41,9 +41,13 @@ ends, and moves it to the NICs' node first; a target's ring is
 allocated there. The agent moves a ring nothing holds to the node every
 local writer and reader of the flow is confined to, CPUs and memory,
 which needs CPU pinning, and only once it has stayed unheld for
-`mxlfs.numa.placement.flow.release.delay`. On a node whose RDMA devices
-report no single NUMA node, `flow` acts as `off` and the agent and
-gateway record a `MxlfsNumaFlowUnresolved` warning event on the Node.
+`mxlfs.numa.placement.flow.release.delay`. A process is confined to a
+node when every CPU its threads may run on is on that node and it may
+allocate from it; a flow with any other local writer or reader counts as
+`unpinned` in `mxl_agent_numa_release_flows`, and the agent never moves
+its ring. On a node whose RDMA devices report no single NUMA node,
+`flow` acts as `off` and the agent and gateway record a
+`MxlfsNumaFlowUnresolved` warning event on the Node.
 
 A page goes to the file's own node preference first, then to the
 mount's `numa_node=`, then to the allocating task's memory policy. A
