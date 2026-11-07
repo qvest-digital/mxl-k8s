@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.0-rc.47](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.46...v1.1.0-rc.47) (2026-11-07)
+
+
+### Features
+
+* **agent:** mount mxlfs domains with a numa_node= option ([#433](https://github.com/qvest-digital/mxl-k8s/issues/433)) ([6c8ed47](https://github.com/qvest-digital/mxl-k8s/commit/6c8ed47b452eb8b8482210db9b1aa07ee0fd08ac))
+* **chart:** show mirrors' replication counts on the fabric dashboard ([#429](https://github.com/qvest-digital/mxl-k8s/issues/429)) ([3517f6f](https://github.com/qvest-digital/mxl-k8s/commit/3517f6feaa9797a083ac650c29eb36bd2401a950))
+* **gateway:** record mirrors through libmxl-monitoring ([#429](https://github.com/qvest-digital/mxl-k8s/issues/429)) ([3517f6f](https://github.com/qvest-digital/mxl-k8s/commit/3517f6feaa9797a083ac650c29eb36bd2401a950))
+
 ## [1.1.0-rc.46](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.45...v1.1.0-rc.46) (2026-11-06)
 
 
