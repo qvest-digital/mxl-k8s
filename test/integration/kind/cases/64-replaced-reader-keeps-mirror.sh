@@ -115,7 +115,9 @@ mirror=$(echo "${FLOW}--${tgt_node}" | tr '[:upper:]' '[:lower:]')
 
 # reading <pod>: the pod has printed a grain.
 reading() {
-  "${KUBECTL[@]}" -n "$NAMESPACE" logs "pod/$1" 2>/dev/null | grep -q 'idx='
+  local out
+  out=$("${KUBECTL[@]}" -n "$NAMESPACE" logs "pod/$1" 2>/dev/null) || return 1
+  grep -q 'idx=' <<<"$out"
 }
 wait_reading() {
   local deadline=$(( $(date +%s) + MIRROR_TIMEOUT_SECS ))
