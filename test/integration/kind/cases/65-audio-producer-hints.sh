@@ -183,8 +183,9 @@ echo "   ${delivered} samples delivered in ${WINDOW_SECS}s"
 
 gateway_pod="$(daemonset_pod_on gateway "$node_a")"
 [ -n "$gateway_pod" ] || fail "no running gateway pod on ${node_a}"
-if "${KUBECTL[@]}" -n "$NAMESPACE" logs "pod/${gateway_pod}" --since-time="$since" 2>/dev/null \
-     | grep -q "too large for the bounce buffer"; then
+gateway_logs=$("${KUBECTL[@]}" -n "$NAMESPACE" logs "pod/${gateway_pod}" --since-time="$since" 2>/dev/null) \
+  || fail "could not read the gateway log on ${node_a}"
+if grep -q "too large for the bounce buffer" <<<"$gateway_logs"; then
   fail "the source gateway on ${node_a} sent a batch the target's entry cannot hold"
 fi
 progress=$("${KUBECTL[@]}" -n "$NAMESPACE" get "mxlflowmirror/${mirror}" \
