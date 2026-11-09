@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0-rc.49](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.48...v1.1.0-rc.49) (2026-11-09)
+
+
+### Bug Fixes
+
+* **agent:** restart the release delay while a ring cannot be read ([#436](https://github.com/qvest-digital/mxl-k8s/issues/436)) ([b59f197](https://github.com/qvest-digital/mxl-k8s/commit/b59f1974ab1d49dfad0216329bd7b6bf99cb8457))
+
+
+### Dependencies
+
+* **go-mxl:** update go-mxl to v1.1.0-rc.14 ([#438](https://github.com/qvest-digital/mxl-k8s/issues/438)) ([60a8461](https://github.com/qvest-digital/mxl-k8s/commit/60a84613b6e8ec59bbcec7b106c33a03ebe844d2))
+
 ## [1.1.0-rc.48](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.47...v1.1.0-rc.48) (2026-11-07)
 
 
