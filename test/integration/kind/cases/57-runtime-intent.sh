@@ -196,7 +196,8 @@ fi
 
 agent=$("${KUBECTL[@]}" -n "$NAMESPACE" get pods -l app.kubernetes.io/name=mxl-k8s-agent \
           --field-selector "spec.nodeName=${node_b}" -o 'jsonpath={.items[0].metadata.name}')
-"${KUBECTL[@]}" -n "$NAMESPACE" logs "pod/${agent}" --since-time="$since" 2>/dev/null \
-  | grep -q 'does not mirror' \
+agent_logs=$("${KUBECTL[@]}" -n "$NAMESPACE" logs "pod/${agent}" --since-time="$since" 2>/dev/null) \
+  || fail "could not read the agent log on ${node_b}"
+grep -q 'does not mirror' <<<"$agent_logs" \
   || fail "the agent on ${node_b} did not say why the open was refused"
 echo "   refused cleanly; consumer still Running"
