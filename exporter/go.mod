@@ -8,7 +8,7 @@ require (
 	github.com/qvest-digital/mxl-k8s/api v1.1.0-rc.45 // x-release-please-version
 	golang.org/x/sys v0.47.0
 	k8s.io/apimachinery v0.37.0
-	k8s.io/client-go v0.37.0
+	k8s.io/client-go v11.0.0+incompatible
 	sigs.k8s.io/controller-runtime v0.24.1
 )
 
