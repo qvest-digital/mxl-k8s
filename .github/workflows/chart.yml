@@ -50,9 +50,9 @@ env:
   # renovate: datasource=github-releases depName=helm/helm versioning=semver
   HELM_VERSION: v4.3.1
   # renovate: datasource=github-releases depName=helm-unittest/helm-unittest versioning=semver extractVersion=^v(?<version>.+)$
-  HELM_UNITTEST_VERSION: "1.1.2"
+  HELM_UNITTEST_VERSION: "1.2.1"
   # renovate: datasource=github-releases depName=dadav/helm-schema versioning=semver
-  HELM_SCHEMA_VERSION: "0.23.5"
+  HELM_SCHEMA_VERSION: "0.24.0"
   # renovate: datasource=go depName=github.com/norwoodj/helm-docs versioning=semver
   HELM_DOCS_VERSION: v1.14.2
   # renovate: datasource=github-releases depName=yannh/kubeconform versioning=semver
@@ -60,7 +60,7 @@ env:
   # mikefarah/yq for in-place yaml editing of values.yaml at
   # package-time. Pinned because we rely on `yq -i` semantics.
   # renovate: datasource=github-releases depName=mikefarah/yq versioning=semver
-  YQ_VERSION: v4.53.6
+  YQ_VERSION: v4.54.3
 
 jobs:
   # Decides whether this diff concerns the chart at all. Gating meta on
