@@ -189,6 +189,46 @@ any side effects:
 ERROR: BUILD must be 'local' or a non-empty image tag
 ```
 
+## mxlfs domains (`MXLFS`)
+
+`MXLFS=1 make kind-up` installs the chart with `mxlfs.enabled=true` and
+`agent.csi.enabled=true`, so the agent on every node mounts an mxlfs on
+the domain directories, and applies the demo from
+[`examples/kind/demo-mxlfs/`](../examples/kind/demo-mxlfs/), whose pods
+take the domain through the agent's CSI volume. KIND
+nodes are containers on the host kernel, so the
+[mxlfs](https://github.com/danielclasen/mxlfs) module has to be loaded
+on the host; `kind-up.sh` stops before the chart install when the
+nodes' kernel lists no mxlfs in `/proc/filesystems`. Bring the cluster
+up from scratch (`make kind-down` first): a domain directory that
+already holds flows is left a plain directory.
+
+On such a cluster every case runs against mxlfs domains, and case
+`90-mxlfs-node-domains` covers what only mxlfs does: the mounts and the
+agent's ready marker, a mirror requested by a consumer that carries no
+shim and has no `MxlReceiver`, and an `MxlFlowRedundancySet` read
+through the loss of its local member. On a cluster without mxlfs the
+case passes without asserting anything. The `kind-integration` job
+runs on GitHub-hosted runners, which have no mxlfs module, so there
+the case is skipped; it runs where a developer or a self-hosted runner
+has the module loaded:
+
+```sh
+MXLFS=1 make kind-up
+make kind-test
+```
+
+`MXLFS_NUMA=flow` beside `MXLFS=1` also sets
+`mxlfs.numa.placement.mode=flow` and `mxlfs.numa.metrics.enabled=true`.
+Case `91-mxlfs-numa-placement` then asserts that the demo's mirrored
+ring is held on its source node, that the gateway's first acquire found
+it on the NICs' node or moved it there, and that a gateway restart takes
+the holds again; with a module that lacks the NUMA ioctls it asserts the
+mirror is Ready and the domain counted unsupported. A KIND host's nodes
+share the host's NUMA nodes, so moving a ring between two of them is not
+covered. Without flow placement the case passes without asserting
+anything.
+
 ## Integration suite
 
 `make kind-test` runs the bash suite under
@@ -211,8 +251,10 @@ The same suite drives the `kind-integration` GitHub Actions job in
 `.github/workflows/images.yml`. On a same-repo pull request it runs
 when the diff rebuilds any image, and when the diff changes what the
 cluster runs without rebuilding one -- the chart, the CRDs, the RBAC,
-the demo manifests, the harness. Those two cases differ in what the
-cluster is built from:
+the demo manifests, the harness. It runs twice, with two fabric
+interfaces per node (`FABRIC_PORTS=2`, the `make kind-up` default) and
+with one bound to the pod IP (`FABRIC_PORTS=1`, the chart's default).
+Those two cases differ in what the cluster is built from:
 
 - An image was rebuilt: the job pulls that build from GHCR at
   `BUILD=pr-<num>-<sha>`, with the components the diff did not touch

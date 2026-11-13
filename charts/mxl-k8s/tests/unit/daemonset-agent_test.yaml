@@ -16,9 +16,9 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].securityContext.capabilities.add
           content: SYS_ADMIN
-      - equal:
-          path: spec.template.spec.containers[0].args[0]
-          value: --domain-path=/run/mxl/domain
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --domain-path=/run/mxl/domain
 
   - it: pod template name label matches the selector
     asserts:
@@ -72,6 +72,20 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].args
           content: --shim-path=
+
+  # An image older than a flag rejects it, so a flag left empty must not
+  # reach the binary at all.
+  - it: renders no arg for an empty string flag
+    set:
+      agent.flags.claimStatusLabel: ""
+      agent.flags.provider: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --claim-status-label=
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --provider=
 
   - it: runs in the host PID namespace so SO_PEERCRED returns host PIDs
     asserts:

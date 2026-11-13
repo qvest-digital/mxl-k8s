@@ -162,14 +162,15 @@ The reader prints one line per grain (`idx=... size=... slices=.../...`).
 Use `make kind-status` for the converged state of the CRDs and
 pods, `make kind-down` to tear the cluster down.
 
-The cluster also brings up kube-prometheus-stack, with the exporter
-scraped and the flow dashboard loaded:
+The cluster also brings up kube-prometheus-stack, with the exporter,
+gateway and operator scraped and the flow and fabric dashboards
+loaded:
 
 ```sh
 make kind-grafana
 ```
 
-It prints the dashboard URL and credentials (admin / admin). The
+It prints the dashboard URLs and credentials (admin / admin). The
 forward binds every interface, so the board is reachable from another
 host on the network; `KIND_GRAFANA_ADDRESS=127.0.0.1` keeps it on the
 loopback, and `KIND_GRAFANA_PORT` moves it off 3000.
@@ -207,9 +208,11 @@ per node -- `Origin` on the node the writer runs on -- which separates a
 produced flow from a mirrored one without a media function labelling
 itself.
 
-The chart ships a Grafana dashboard over those metrics under
-`dashboards.enabled`, as a ConfigMap for Grafana's dashboard sidecar to
-discover. That sidecar's `searchNamespace` defaults to the namespace
+The chart ships two Grafana dashboards under `dashboards.enabled`:
+"MXL Flow Metrics" over those metrics, and "MXL Fabric" over the
+operator's placement metrics and the gateway's port and link metrics
+(see [`docs/RDMA.md`](docs/RDMA.md#metrics)). Each is a ConfigMap for
+Grafana's dashboard sidecar to discover. That sidecar's `searchNamespace` defaults to the namespace
 Grafana runs in, so a Grafana installed elsewhere needs either that
 setting widened or `dashboards.namespace` pointed at it. The discovery
 label, folder annotation and Prometheus datasource uid are values too;

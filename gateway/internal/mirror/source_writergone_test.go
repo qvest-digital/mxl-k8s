@@ -61,7 +61,7 @@ func TestRunFlusher_ReleasesReaderWhenWriterGoneWithoutARebuildState(t *testing.
 		sources:      map[types.NamespacedName]*sourceEntry{key: entry},
 		attempts:     attemptTable[sourceAddInputs]{},
 		rebuilds:     map[sourceKey]uint32{},
-		writerLiveFn: func(string) (bool, error) { return false, nil },
+		writerLiveFn: func(mxlv1alpha1.FlowRef) (bool, error) { return false, nil },
 		rebuildFn: func(types.NamespacedName) {
 			t.Error("a flow with no writer must be released, not reopened")
 		},
@@ -112,7 +112,7 @@ func TestRunFlusher_KeepsReaderWhileTheWriterIsLive(t *testing.T) {
 		sources:      map[types.NamespacedName]*sourceEntry{key: entry},
 		attempts:     attemptTable[sourceAddInputs]{},
 		rebuilds:     map[sourceKey]uint32{},
-		writerLiveFn: func(string) (bool, error) { return true, nil },
+		writerLiveFn: func(mxlv1alpha1.FlowRef) (bool, error) { return true, nil },
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -166,7 +166,7 @@ func TestReconcile_DoesNotOpenAReaderWhileTheWriterIsGone(t *testing.T) {
 		FlushInterval: time.Hour,
 		sources:       map[types.NamespacedName]*sourceEntry{},
 		attempts:      attemptTable[sourceAddInputs]{},
-		writerLiveFn:  func(string) (bool, error) { return false, nil },
+		writerLiveFn:  func(mxlv1alpha1.FlowRef) (bool, error) { return false, nil },
 	}
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
@@ -211,7 +211,7 @@ func TestReconcile_OpensAReaderOnceTheWriterIsBack(t *testing.T) {
 		FlushInterval: time.Hour,
 		sources:       map[types.NamespacedName]*sourceEntry{},
 		attempts:      attemptTable[sourceAddInputs]{},
-		writerLiveFn:  func(string) (bool, error) { return live, nil },
+		writerLiveFn:  func(mxlv1alpha1.FlowRef) (bool, error) { return live, nil },
 	}
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
@@ -264,7 +264,7 @@ func TestReconcile_ParksAMirrorWhoseFlowIsNotInTheDomain(t *testing.T) {
 		FlushInterval: time.Hour,
 		sources:       map[types.NamespacedName]*sourceEntry{},
 		attempts:      attemptTable[sourceAddInputs]{},
-		writerLiveFn: func(string) (bool, error) {
+		writerLiveFn: func(mxlv1alpha1.FlowRef) (bool, error) {
 			return false, fmt.Errorf("IsFlowActive: %w", mxl.ErrFlowNotFound)
 		},
 	}

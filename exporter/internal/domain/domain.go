@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/qvest-digital/go-mxl/mxl"
+
+	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
 // flowDirSuffix is what libmxl names a flow's directory inside a
@@ -46,7 +48,8 @@ type Observation struct {
 
 	// LatencyGrains is how far the head index sits behind where the
 	// MXL clock says it should be at this grain rate. Negative means
-	// the writer is running ahead of the clock.
+	// the writer is running ahead of the clock. Zero on an event flow,
+	// whose head does not follow the clock.
 	LatencyGrains int64
 
 	// WriteAge is the MXL-clock time since the last write. Derived
@@ -55,9 +58,9 @@ type Observation struct {
 	WriteAge time.Duration
 
 	// HaveWriteAge reports whether WriteAge carries a reading. Only a
-	// discrete flow stamps the field it derives from, so a continuous
-	// flow leaves it unset rather than reporting an age measured from
-	// a timestamp nothing advances.
+	// discrete or an event flow stamps the field it derives from, so a
+	// continuous flow leaves it unset rather than reporting an age
+	// measured from a timestamp nothing advances.
 	HaveWriteAge bool
 
 	// Def is the parsed flow_def.json, nil when it could not be read
@@ -298,12 +301,18 @@ func (d *Domain) Observe() []Observation {
 				obs.HaveInfo = true
 				obs.Info = info
 
+				format := info.Config.Common.Format
 				rate := info.Config.Common.GrainRate
 				haveRate := rate.Den != 0 && rate.Num != 0
-				if haveRate {
+				// An event flow's head is a queue position, not a time:
+				// MXL_UNDEFINED_INDEX until the first commit, then one
+				// step per event however far apart they come.
+				if haveRate && format != mxl.FormatEvent {
 					obs.LatencyGrains = int64(mxl.TimestampToIndex(rate, now)) - int64(info.Runtime.HeadIndex)
 				}
-				if info.Config.Common.Format.IsDiscrete() {
+				// The discrete and the event writer both stamp
+				// lastWriteTime on every commit.
+				if format.IsDiscrete() || format == mxl.FormatEvent {
 					if lw := info.Runtime.LastWriteTime; lw != 0 && now > lw {
 						obs.WriteAge = time.Duration(now-lw) * time.Nanosecond
 						obs.HaveWriteAge = true
@@ -344,7 +353,9 @@ func (d *Domain) listFlows() (map[string]struct{}, map[string]uint64, error) {
 			continue
 		}
 		id := strings.TrimSuffix(de.Name(), flowDirSuffix)
-		if id == "" {
+		// A placeholder is not a flow this node has: its ring is empty and
+		// unallocated, and reading it would report a flow that is not here.
+		if id == "" || mxlv1alpha1.IsPlaceholder(d.path, id) {
 			continue
 		}
 		ids[id] = struct{}{}

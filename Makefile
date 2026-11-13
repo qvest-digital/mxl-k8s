@@ -166,9 +166,17 @@ test: envtest-assets
 test-one:
 	$(call test_module,$(MODULE))
 
+# libmxl-monitoring's static libraries, built from the module version
+# gateway/go.mod pins; the gateway's cgo build links them.
+LIBMXL_MONITORING_DIR ?= $(CURDIR)/bin/libmxl-monitoring
+
+.PHONY: libmxl-monitoring
+libmxl-monitoring:
+	bash hack/build-libmxl-monitoring.sh $(LIBMXL_MONITORING_DIR)
+
 .PHONY: test-gateway
-test-gateway:
-	$(call test_module,gateway)
+test-gateway: libmxl-monitoring
+	CGO_LDFLAGS="$${CGO_LDFLAGS:+$$CGO_LDFLAGS }-L$(LIBMXL_MONITORING_DIR)" $(MAKE) --no-print-directory test-one MODULE=gateway
 
 .PHONY: test-all
 test-all: test test-gateway
@@ -259,6 +267,7 @@ kind-status:
 kind-grafana:
 	@echo "Grafana on http://$(KIND_GRAFANA_HOST):$(KIND_GRAFANA_PORT)  (admin / admin)"
 	@echo "Flow dashboard: http://$(KIND_GRAFANA_HOST):$(KIND_GRAFANA_PORT)/d/mxl-flow-metrics"
+	@echo "Fabric dashboard: http://$(KIND_GRAFANA_HOST):$(KIND_GRAFANA_PORT)/d/mxl-fabric"
 	@test "$(KIND_GRAFANA_ADDRESS)" = "127.0.0.1" || \
 	    echo "Bound on $(KIND_GRAFANA_ADDRESS): reachable from other hosts, with the default admin password. KIND_GRAFANA_ADDRESS=127.0.0.1 keeps it local."
 	kubectl --context kind-$(KIND_CLUSTER) -n monitoring port-forward \

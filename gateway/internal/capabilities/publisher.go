@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -20,6 +21,7 @@ import (
 	"github.com/qvest-digital/go-mxl/fabrics"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/ports"
 )
 
 // InterfaceLister enumerates the fabric interfaces libmxl-fabrics
@@ -108,9 +110,47 @@ type Publisher struct {
 	// from the status refresh.
 	ProbePeriod time.Duration
 
+	// Capacities override the link speed placement plans an interface
+	// for. Empty keeps the reported link speed.
+	Capacities []ports.CapacityRule
+
+	// Budgets declare caps the node's interfaces share. Empty declares
+	// none.
+	Budgets []ports.BudgetRule
+
+	// MaxUtilizationPercent is published for placement on this node.
+	// Zero leaves it to the operator's default.
+	MaxUtilizationPercent int32
+
+	// Host reads subnets and NUMA nodes.
+	Host ports.Host
+
 	// Refresh runs from a single goroutine, so these need no lock.
 	lastProbe time.Time
 	cached    []mxlv1alpha1.MxlFabricsProviderCapability
+	budgets   []mxlv1alpha1.MxlFabricBudget
+
+	// published is a copy of what the last probe produced, for readers
+	// outside that goroutine.
+	publishedMu sync.Mutex
+	published   *Published
+}
+
+// Published is what a probe produced for the node's status.
+type Published struct {
+	Providers []mxlv1alpha1.MxlFabricsProviderCapability
+	Budgets   []mxlv1alpha1.MxlFabricBudget
+}
+
+// Published returns what the last probe produced, and false before the
+// first.
+func (p *Publisher) Published() (Published, bool) {
+	p.publishedMu.Lock()
+	defer p.publishedMu.Unlock()
+	if p.published == nil {
+		return Published{}, false
+	}
+	return *p.published, true
 }
 
 // Name is the metadata.name used for the gateway's
@@ -255,6 +295,9 @@ func (p *Publisher) Refresh(ctx context.Context) error {
 	}
 
 	obj.Status.Providers = probed
+	obj.Status.MultiDomain = true
+	obj.Status.Budgets = p.budgets
+	obj.Status.MaxUtilizationPercent = p.MaxUtilizationPercent
 	recovered := meta.SetStatusCondition(&obj.Status.Conditions, metav1.Condition{
 		Type:    mxlv1alpha1.ConditionTypeProbed,
 		Status:  metav1.ConditionTrue,
@@ -446,12 +489,23 @@ func (p *Publisher) probe(ctx context.Context) ([]mxlv1alpha1.MxlFabricsProvider
 		out = append(out, mxlv1alpha1.MxlFabricsProviderCapability{
 			Name:        mxlv1alpha1.MxlFabricsProvider(name),
 			DeviceCount: int32(fabric.DeviceCount(group)),
-			Interfaces:  describe(fabric.Dedupe(group)),
+			Interfaces:  p.describe(fabric.Dedupe(group)),
 		})
 	}
+	p.budgets = p.assignBudgets(out)
 
 	p.cached = out
 	p.lastProbe = time.Now()
+	// Copied: the status update decodes its response into the slices it
+	// was handed.
+	pub := &Published{Budgets: make([]mxlv1alpha1.MxlFabricBudget, len(p.budgets))}
+	copy(pub.Budgets, p.budgets)
+	for _, c := range out {
+		pub.Providers = append(pub.Providers, *c.DeepCopy())
+	}
+	p.publishedMu.Lock()
+	p.published = pub
+	p.publishedMu.Unlock()
 	return out, nil
 }
 
@@ -474,8 +528,32 @@ func (p *Publisher) allows(provider fabrics.Provider) bool {
 	return slices.Contains(p.Providers, provider)
 }
 
-// describe renders enumerated interfaces into their API form.
-func describe(ifaces []fabrics.InterfaceConfig) []mxlv1alpha1.MxlFabricInterface {
+// assignBudgets instantiates the configured budgets over every
+// published interface and records on each the budgets it draws on.
+func (p *Publisher) assignBudgets(caps []mxlv1alpha1.MxlFabricsProviderCapability) []mxlv1alpha1.MxlFabricBudget {
+	var members []ports.Member
+	seen := map[string]struct{}{}
+	for _, c := range caps {
+		for _, i := range c.Interfaces {
+			if _, dup := seen[i.Address]; dup {
+				continue
+			}
+			seen[i.Address] = struct{}{}
+			members = append(members, ports.Member{Address: i.Address, PCIAddress: i.PCIAddress})
+		}
+	}
+	budgets, names := ports.Assign(p.Budgets, members)
+	for ci := range caps {
+		for ii := range caps[ci].Interfaces {
+			caps[ci].Interfaces[ii].Budgets = names[caps[ci].Interfaces[ii].Address]
+		}
+	}
+	return budgets
+}
+
+// describe renders enumerated interfaces into their API form, with the
+// facts placement plans against.
+func (p *Publisher) describe(ifaces []fabrics.InterfaceConfig) []mxlv1alpha1.MxlFabricInterface {
 	if len(ifaces) == 0 {
 		return nil
 	}
@@ -491,6 +569,9 @@ func describe(ifaces []fabrics.InterfaceConfig) []mxlv1alpha1.MxlFabricInterface
 			LinkSpeedBitsPerSecond: int64(attrs.LinkSpeed),
 			MaxMessageSize:         int64(iface.Caps.MaxMessageSize),
 			PCIAddress:             attrs.PCIAddress,
+			CapacityBitsPerSecond:  ports.Capacity(p.Capacities, attrs.Device, iface.Address.Node, int64(attrs.LinkSpeed)),
+			Subnet:                 p.Host.Subnet(iface.Address.Node),
+			NUMANode:               p.Host.NUMANode(attrs.PCIAddress),
 		})
 	}
 	return out

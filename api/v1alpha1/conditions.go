@@ -5,6 +5,20 @@ package v1alpha1
 // entry in status.conditions; the operator and the two gateway
 // reconcilers must not overlap on the same type.
 const (
+	// ConditionTypeMaterialised reports whether every node an MxlDomain
+	// is selected on carries it as its spec describes. Owned by the
+	// operator and written to MxlDomain status; the per-node entries
+	// it summarises are the agents'.
+	ConditionTypeMaterialised = "Materialised"
+
+	// ConditionTypeReachable reports whether a flow of an MxlDomain
+	// written on any of its nodes can be read on all of them, which is
+	// what a controller given the domain's id assumes. False when the
+	// domain is materialised on more than one node without being
+	// mirrored there: each node then holds a separate store under one
+	// id. Owned by the operator.
+	ConditionTypeReachable = "Reachable"
+
 	// ConditionTypeSourceProgress reports whether the source-side
 	// gateway is transferring grains for a mirror. Owned by the
 	// source gateway reconciler.
@@ -92,6 +106,43 @@ const (
 	// provider will build an endpoint on, so the gateway reports the
 	// difference rather than acting on it.
 	ConditionTypeRDMADevicesEnumerated = "RDMADevicesEnumerated"
+
+	// ConditionTypeValid reports whether an MxlFlowRedundancySet's
+	// members can be merged. Owned by the operator; a gateway serves a
+	// set's output only while it is True for the set's generation. Once
+	// True for a generation, a member going away or changing geometry
+	// does not make it False; ConditionTypeMembersReady reports that.
+	ConditionTypeValid = "Valid"
+
+	// ConditionTypeMembersReady reports whether every member of an
+	// MxlFlowRedundancySet has an MxlFlow with an Origin, in the
+	// geometry of the first member that has one, and is in no node's
+	// status.stalledMembers entry. Owned by the operator. A False
+	// condition names the members the output is served without.
+	ConditionTypeMembersReady = "MembersReady"
+
+	// ConditionTypeOutputReady reports whether every node in an
+	// MxlFlowRedundancySet's status.nodes has a gateway that can merge
+	// the output there: a gateway pod on the node, not terminating,
+	// Ready for at least a few seconds. Owned by the operator. A False
+	// condition names the nodes the output is not served on. Members
+	// that stop are reported by ConditionTypeMembersReady, not here.
+	ConditionTypeOutputReady = "OutputReady"
+
+	// ConditionTypePlaced reports whether an MxlFlowMirror carries a
+	// placement on a pair of fabric interfaces, and on what terms.
+	// Owned by the operator. True with ReasonPlaced or
+	// ReasonOvercommitted; False with ReasonHeld, ReasonAwaitingDemand
+	// or ReasonNoInterface.
+	ConditionTypePlaced = "Placed"
+
+	// ConditionTypePathsDisjoint reports whether the member mirrors
+	// of an MxlFlowRedundancySet arriving on one node leave and arrive
+	// on separate fabric interfaces. Owned by the operator. False with
+	// ReasonSharedSourceInterface or ReasonSharedTargetInterface when
+	// placement found no disjoint pair within capacity, Unknown with
+	// ReasonUnplaced while a member mirror has no placement.
+	ConditionTypePathsDisjoint = "PathsDisjoint"
 )
 
 // Condition reason constants for MxlFlowMirror and MxlFlow status.
@@ -202,6 +253,11 @@ const (
 	// reference to a live MxlReceiver.
 	ReasonReceiverOwned = "ReceiverOwned"
 
+	// ReasonRedundancySetOwned marks an MxlFlowMirror claimed by an owner
+	// reference to an MxlFlowRedundancySet whose output is wanted on the
+	// mirror's target node.
+	ReasonRedundancySetOwned = "RedundancySetOwned"
+
 	// ReasonRequestorLive marks an MxlFlowMirror claimed by a
 	// spec.requestor pod that is still present with the recorded UID.
 	ReasonRequestorLive = "RequestorLive"
@@ -256,4 +312,44 @@ const (
 	// host RDMA device list could not be read. The enumerated
 	// providers stand; only the cross-check is missing.
 	ReasonHostDevicesUnreadable = "HostDevicesUnreadable"
+
+	// ReasonPlaced marks an MxlFlowMirror placed on a pair of fabric
+	// interfaces with its demand inside both interfaces' plannable
+	// capacity and every budget they draw on.
+	ReasonPlaced = "Placed"
+
+	// ReasonOvercommitted marks an MxlFlowMirror placed on the least
+	// loaded pair because no pair had room for its demand.
+	ReasonOvercommitted = "Overcommitted"
+
+	// ReasonHeld marks an MxlFlowMirror left unplaced because no pair
+	// had room for its demand and the operator is configured to hold
+	// such mirrors rather than overcommit an interface.
+	ReasonHeld = "Held"
+
+	// ReasonAwaitingDemand marks an MxlFlowMirror whose flow has not
+	// published its payload rate yet. Placement waits for it for a
+	// bounded time, then places on the configured provisional demand.
+	ReasonAwaitingDemand = "AwaitingDemand"
+
+	// ReasonNoInterface marks an MxlFlowMirror for which one of its two
+	// nodes advertises no interface for spec.provider.
+	ReasonNoInterface = "NoInterface"
+
+	// ReasonDisjoint marks an MxlFlowRedundancySet whose member mirrors
+	// to each node share no fabric interface on either side.
+	ReasonDisjoint = "Disjoint"
+
+	// ReasonSharedSourceInterface marks an MxlFlowRedundancySet two of
+	// whose member mirrors leave one node on the same interface.
+	ReasonSharedSourceInterface = "SharedSourceInterface"
+
+	// ReasonSharedTargetInterface marks an MxlFlowRedundancySet two of
+	// whose member mirrors arrive on the same interface of a node.
+	ReasonSharedTargetInterface = "SharedTargetInterface"
+
+	// ReasonUnplaced marks an MxlFlowRedundancySet with a member mirror
+	// that has no placement yet, so whether its paths are disjoint is
+	// not known.
+	ReasonUnplaced = "Unplaced"
 )

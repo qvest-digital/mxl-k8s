@@ -20,11 +20,12 @@ var expectedKinds = map[string]struct {
 	item runtime.Object
 	list runtime.Object
 }{
-	"MxlDomain":           {&MxlDomain{}, &MxlDomainList{}},
-	"MxlFlow":             {&MxlFlow{}, &MxlFlowList{}},
-	"MxlFlowMirror":       {&MxlFlowMirror{}, &MxlFlowMirrorList{}},
-	"MxlReceiver":         {&MxlReceiver{}, &MxlReceiverList{}},
-	"MxlNodeCapabilities": {&MxlNodeCapabilities{}, &MxlNodeCapabilitiesList{}},
+	"MxlDomain":            {&MxlDomain{}, &MxlDomainList{}},
+	"MxlFlow":              {&MxlFlow{}, &MxlFlowList{}},
+	"MxlFlowMirror":        {&MxlFlowMirror{}, &MxlFlowMirrorList{}},
+	"MxlReceiver":          {&MxlReceiver{}, &MxlReceiverList{}},
+	"MxlNodeCapabilities":  {&MxlNodeCapabilities{}, &MxlNodeCapabilitiesList{}},
+	"MxlFlowRedundancySet": {&MxlFlowRedundancySet{}, &MxlFlowRedundancySetList{}},
 }
 
 func TestGroupVersion(t *testing.T) {

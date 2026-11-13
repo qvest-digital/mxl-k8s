@@ -27,6 +27,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/collector"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/config"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/domain"
+	"github.com/qvest-digital/mxl-k8s/exporter/internal/numa"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/topology"
 )
 
@@ -59,11 +60,11 @@ func main() {
 }
 
 func run(ctx context.Context, cfg *config.Config, log logr.Logger) error {
-	dom, err := domain.Open(cfg.DomainPath, cfg.FlowLifetime)
+	doms, err := domain.OpenSet(cfg.DomainPath, cfg.FlowLifetime)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = dom.Close() }()
+	defer func() { _ = doms.Close() }()
 
 	// The node name labels every series this process emits, so a flow
 	// mirrored onto three nodes is three samples rather than three
@@ -75,9 +76,23 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) error {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
+	flows := func() []collector.Source {
+		var out []collector.Source
+		for _, d := range doms.Domains() {
+			out = append(out, d)
+		}
+		return out
+	}
+	domains := func() []collector.DomainSource {
+		var out []collector.DomainSource
+		for _, d := range doms.Domains() {
+			out = append(out, d)
+		}
+		return out
+	}
 	nodeReg.MustRegister(
-		collector.NewFlowCollector(dom),
-		collector.NewDomainCollector(dom, log.WithName("domain")),
+		collector.NewFlowCollector(flows),
+		collector.NewDomainCollector(domains, log.WithName("domain")),
 	)
 
 	if cfg.TopologyEnabled {
@@ -88,13 +103,27 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) error {
 		nodeReg.MustRegister(topology.New(reader, cfg.NodeName, log.WithName("topology")))
 	}
 
-	if err := dom.Scan(); err != nil {
+	scan := func() error { return doms.Scan() }
+	if cfg.MxlfsNumaMetrics {
+		placement := numa.New(log.WithName("numa"))
+		nodeReg.MustRegister(placement)
+		scan = func() error {
+			err := doms.Scan()
+			var paths []string
+			for _, d := range doms.Domains() {
+				paths = append(paths, d.Path())
+			}
+			placement.Scan(paths)
+			return err
+		}
+	}
+	if err := scan(); err != nil {
 		// A node that has never carried a flow has no domain directory
 		// yet. Failing to boot on that would take the DaemonSet down
 		// on exactly the nodes with nothing to report.
-		log.Error(err, "initial domain scan", "domain", cfg.DomainPath)
+		log.Error(err, "initial domain scan", "primary", cfg.DomainPath)
 	}
-	go scanLoop(ctx, dom, cfg.ScanPeriod, log)
+	go scanLoop(ctx, scan, cfg.ScanPeriod, log)
 
 	return serve(ctx, cfg, reg, log)
 }
@@ -129,8 +158,8 @@ func startTopologyCache(ctx context.Context, cfg *config.Config, log logr.Logger
 	return c, nil
 }
 
-// scanLoop re-lists the domain until ctx is done.
-func scanLoop(ctx context.Context, dom *domain.Domain, period time.Duration, log logr.Logger) {
+// scanLoop re-lists the domains until ctx is done.
+func scanLoop(ctx context.Context, scan func() error, period time.Duration, log logr.Logger) {
 	t := time.NewTicker(period)
 	defer t.Stop()
 	for {
@@ -138,8 +167,8 @@ func scanLoop(ctx context.Context, dom *domain.Domain, period time.Duration, log
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := dom.Scan(); err != nil {
-				log.Error(err, "scan domain")
+			if err := scan(); err != nil {
+				log.Error(err, "scan domains")
 			}
 		}
 	}

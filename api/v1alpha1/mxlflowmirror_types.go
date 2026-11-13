@@ -40,6 +40,18 @@ type MxlFlowMirrorSpec struct {
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 	FlowID string `json:"flowID"`
 
+	// Domain is the MxlDomain the flow belongs to, one without a
+	// spec.directory, whose flows live at domains/<id>. Empty is the
+	// primary domain, the one the agent's --domain-path names, and the
+	// only spelling of it; every object written before domains existed
+	// carries none. Immutable: the same id in another domain is another
+	// flow.
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="domain is immutable"
+	Domain string `json:"domain,omitempty"`
+
 	// SourceNode is the Kubernetes node hosting the origin flow.
 	// +kubebuilder:validation:Required
 	SourceNode string `json:"sourceNode"`
@@ -60,6 +72,37 @@ type MxlFlowMirrorSpec struct {
 	// MxlReceiver-driven ones.
 	// +optional
 	Requestor *PodRef `json:"requestor,omitempty"`
+
+	// Placement names the fabric interfaces the mirror is carried on.
+	// The operator writes it once both nodes report their interfaces;
+	// a placement written by hand is kept while both addresses stay
+	// advertised. See MxlFlowMirrorPlacement.
+	// +optional
+	Placement *MxlFlowMirrorPlacement `json:"placement,omitempty"`
+}
+
+// MxlFlowMirrorPlacement is the pair of fabric interfaces one mirror
+// is carried on, each named by the address its node's
+// MxlNodeCapabilities lists under spec.provider.
+//
+// A placement is not moved because load changed. The operator places
+// the mirror again only when one of the two addresses is no longer
+// advertised for the provider on its node (link down, interface
+// deselected, capability change), when spec.provider or
+// spec.sourceNode changes to something the addresses do not belong
+// to, or when the placement is cleared.
+type MxlFlowMirrorPlacement struct {
+	// SourceInterface is the address on spec.sourceNode the source
+	// gateway's initiator binds.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	SourceInterface string `json:"sourceInterface"`
+
+	// TargetInterface is the address on spec.targetNode the target
+	// gateway's endpoint binds.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	TargetInterface string `json:"targetInterface"`
 }
 
 // MxlFlowMirrorStatus reports the runtime state of a mirror.
@@ -74,6 +117,18 @@ type MxlFlowMirrorStatus struct {
 	// it with mxlFabricsTargetInfoFromString.
 	// +optional
 	TargetInfo string `json:"targetInfo,omitempty"`
+
+	// TargetMaxSyncBatchSizeHint is the maxSyncBatchSizeHint of the
+	// flow the target gateway writes, published with TargetInfo. For a
+	// continuous flow libmxl-fabrics sizes the target's bounce-buffer
+	// entries from it and rejects a larger sample batch, so the source
+	// gateway sends none. A target gateway that does not publish it
+	// leaves it unset, and the source then assumes libmxl's default of
+	// 10 ms of samples.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4294967295
+	TargetMaxSyncBatchSizeHint int64 `json:"targetMaxSyncBatchSizeHint,omitempty"`
 
 	// ObservedGeneration is the spec generation last reconciled.
 	// +optional
@@ -145,6 +200,23 @@ type MxlFlowMirrorStatus struct {
 	// have each side's server-side apply reset the other's value.
 	// +optional
 	TargetAttemptCount int32 `json:"targetAttemptCount,omitempty"`
+
+	// SourceInterface is the address the source gateway's initiator
+	// is bound to. Written by the source gateway.
+	// +optional
+	SourceInterface string `json:"sourceInterface,omitempty"`
+
+	// TargetInterface is the address the target gateway's endpoint is
+	// bound to. Written by the target gateway.
+	// +optional
+	TargetInterface string `json:"targetInterface,omitempty"`
+
+	// DemandBitsPerSecond is the rate the operator charged against
+	// both interfaces of spec.placement when it placed the mirror.
+	// Written by the operator.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	DemandBitsPerSecond int64 `json:"demandBitsPerSecond,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -155,6 +227,11 @@ type MxlFlowMirrorStatus struct {
 // +kubebuilder:printcolumn:name=Target,type=string,JSONPath=`.spec.targetNode`
 // +kubebuilder:printcolumn:name=Provider,type=string,JSONPath=`.spec.provider`
 // +kubebuilder:printcolumn:name=Phase,type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name=Source-If,type=string,JSONPath=`.spec.placement.sourceInterface`
+// +kubebuilder:printcolumn:name=Target-If,type=string,JSONPath=`.spec.placement.targetInterface`
+// +kubebuilder:printcolumn:name=Placement,type=string,JSONPath=`.status.conditions[?(@.type=="Placed")].reason`
+// +kubebuilder:printcolumn:name=Bound-Source,type=string,JSONPath=`.status.sourceInterface`,priority=1
+// +kubebuilder:printcolumn:name=Bound-Target,type=string,JSONPath=`.status.targetInterface`,priority=1
 // +kubebuilder:printcolumn:name=Age,type=date,JSONPath=`.metadata.creationTimestamp`
 
 // MxlFlowMirror represents the desired and observed state of one

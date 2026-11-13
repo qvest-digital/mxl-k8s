@@ -31,11 +31,11 @@ type fakeOriginClaimer struct {
 	err     error
 }
 
-func (f *fakeOriginClaimer) ClaimOrigin(_ context.Context, flowID string) error {
+func (f *fakeOriginClaimer) ClaimOrigin(_ context.Context, ref mxlv1alpha1.FlowRef) error {
 	if f.err != nil {
 		return f.err
 	}
-	f.claimed = append(f.claimed, flowID)
+	f.claimed = append(f.claimed, ref.Name())
 	return nil
 }
 
@@ -87,4 +87,48 @@ func TestNotifyProducerAttached_NoClaimerIsNoOp(t *testing.T) {
 
 	require.NoError(t, d.NotifyProducerAttached(context.Background(), 1,
 		"/run/mxl/domain/"+flowID+".mxl-flow/data"))
+}
+
+// A producer rescheduled onto a node that mirrors a flow of a second
+// domain attaches to that directory; the claim has to name that domain's
+// flow, or its Origin is never recorded and nothing recovers.
+func TestNotifyProducerAttached_ClaimsInTheFlowsDomain(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	origin := &fakeOriginClaimer{}
+	d := &Dispatcher{
+		Client:     c,
+		Resolver:   &podlookup.Resolver{Client: c, NodeName: "n-target"},
+		DomainPath: "/run/mxl/domain",
+		NodeName:   "n-target",
+		Origin:     origin,
+		Domains: func() Domains {
+			return Domains{Root: "/run/mxl", Primary: "domain",
+				ByDir: map[string]string{"domains/d1": "studio"}}
+		},
+	}
+
+	require.NoError(t, d.NotifyProducerAttached(context.Background(), 4242,
+		"/run/mxl/domains/d1/"+flowID+".mxl-flow/data"))
+	assert.Equal(t, []string{"studio." + flowID}, origin.claimed)
+}
+
+// The domain registry lists only domains Ready on this node. With no
+// MxlDomain materialised for the primary directory -- a failed first sync,
+// or a chart that manages none -- a primary-domain producer is still the
+// flow's origin, as it was before domains existed.
+func TestNotifyProducerAttached_PrimaryWithoutARegisteredDomain(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	origin := &fakeOriginClaimer{}
+	d := &Dispatcher{
+		Client:     c,
+		Resolver:   &podlookup.Resolver{Client: c, NodeName: "n-target"},
+		DomainPath: "/run/mxl/domain",
+		NodeName:   "n-target",
+		Origin:     origin,
+		Domains:    func() Domains { return Domains{Root: "/run/mxl", Primary: "domain"} },
+	}
+
+	require.NoError(t, d.NotifyProducerAttached(context.Background(), 4242,
+		"/run/mxl/domain/"+flowID+".mxl-flow/data"))
+	assert.Equal(t, []string{flowID}, origin.claimed)
 }

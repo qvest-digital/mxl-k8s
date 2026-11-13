@@ -41,6 +41,84 @@ type MxlFabricInterface struct {
 	// reports no PCI bus attributes.
 	// +optional
 	PCIAddress string `json:"pciAddress,omitempty"`
+
+	// CapacityBitsPerSecond is the rate mirror placement plans this
+	// interface for, in each direction. It is the gateway's configured
+	// capacity override for the interface where one matches, and
+	// LinkSpeedBitsPerSecond otherwise. Zero means unknown: placement
+	// then never counts the interface as full.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	CapacityBitsPerSecond int64 `json:"capacityBitsPerSecond,omitempty"`
+
+	// Subnet is the prefix of the host network interface that carries
+	// Address, in CIDR form. Placement prefers pairing interfaces that
+	// share a subnet. Empty when the address is not an IP address or no
+	// host interface carries it.
+	// +optional
+	Subnet string `json:"subnet,omitempty"`
+
+	// Budgets names the entries of status.budgets this interface
+	// draws on.
+	// +optional
+	// +listType=set
+	Budgets []string `json:"budgets,omitempty"`
+
+	// NUMANode is the NUMA node of the interface's PCI device, as the
+	// host reports it. Unset when the provider reported no PCI address
+	// or the host exposes no NUMA node for it.
+	// +optional
+	NUMANode *int32 `json:"numaNode,omitempty"`
+}
+
+// MxlFabricBudgetScope is what one shared fabric budget spans.
+// +kubebuilder:validation:Enum=nic;host
+type MxlFabricBudgetScope string
+
+const (
+	// FabricBudgetNIC spans the interfaces of one PCI device: every
+	// function sharing a domain, bus and device number.
+	FabricBudgetNIC MxlFabricBudgetScope = "nic"
+	// FabricBudgetHost spans every fabric interface of the node.
+	FabricBudgetHost MxlFabricBudgetScope = "host"
+)
+
+// MxlFabricBudgetMode is which traffic a shared fabric budget counts.
+// +kubebuilder:validation:Enum=ingress;egress;combined
+type MxlFabricBudgetMode string
+
+const (
+	// FabricBudgetIngress counts mirrors received on the budget's
+	// interfaces.
+	FabricBudgetIngress MxlFabricBudgetMode = "ingress"
+	// FabricBudgetEgress counts mirrors sent from the budget's
+	// interfaces.
+	FabricBudgetEgress MxlFabricBudgetMode = "egress"
+	// FabricBudgetCombined counts both directions against one cap.
+	FabricBudgetCombined MxlFabricBudgetMode = "combined"
+)
+
+// MxlFabricBudget is a cap shared by several fabric interfaces, below
+// the sum of their capacities: interfaces of one device, or of one
+// host, that cannot all run at their own capacity at once.
+type MxlFabricBudget struct {
+	// Name identifies the budget within the node. Interfaces name it
+	// in their budgets list.
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Scope is what the budget spans.
+	// +kubebuilder:validation:Required
+	Scope MxlFabricBudgetScope `json:"scope"`
+
+	// Mode is which traffic the budget counts.
+	// +kubebuilder:validation:Required
+	Mode MxlFabricBudgetMode `json:"mode"`
+
+	// CapacityBitsPerSecond is the cap.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	CapacityBitsPerSecond int64 `json:"capacityBitsPerSecond"`
 }
 
 // MxlFabricsProviderCapability reports what one libmxl-fabrics
@@ -100,6 +178,29 @@ type MxlNodeCapabilitiesStatus struct {
 	// +listType=map
 	// +listMapKey=name
 	Providers []MxlFabricsProviderCapability `json:"providers,omitempty"`
+
+	// MultiDomain reports that the gateway mirrors a flow in the
+	// MxlDomain its MxlFlowMirror names rather than always in the
+	// primary one. An agent creates a mirror naming another domain
+	// only toward and from nodes that report it: a gateway without it
+	// would copy the primary domain's flow of the same id.
+	// +optional
+	MultiDomain bool `json:"multiDomain,omitempty"`
+
+	// Budgets lists the shared caps the gateway is configured with
+	// over this node's fabric interfaces. Empty when none is.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Budgets []MxlFabricBudget `json:"budgets,omitempty"`
+
+	// MaxUtilizationPercent is how much of an interface's or budget's
+	// capacity placement may commit on this node. Zero leaves it to the
+	// operator's default.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	MaxUtilizationPercent int32 `json:"maxUtilizationPercent,omitempty"`
 
 	// LastSeen is the last time the gateway updated this resource.
 	// +optional

@@ -66,6 +66,18 @@ type MxlFlowSpec struct {
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 	ID string `json:"id"`
 
+	// Domain is the MxlDomain the flow belongs to, one without a
+	// spec.directory, whose flows live at domains/<id>. Empty is the
+	// primary domain, the one the agent's --domain-path names, and the
+	// only spelling of it; every object written before domains existed
+	// carries none. Immutable: the same id in another domain is another
+	// flow.
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="domain is immutable"
+	Domain string `json:"domain,omitempty"`
+
 	// Definition is the verbatim NMOS-shaped flow definition document
 	// (the contents of flow_def.json). It is stored opaquely; mxl-k8s
 	// does not validate its inner structure.
@@ -108,6 +120,38 @@ type MxlFlowStatus struct {
 	// possible before this field existed.
 	// +optional
 	OriginChangedAt *metav1.Time `json:"originChangedAt,omitempty"`
+
+	// MaxSyncBatchSizeHint and MaxCommitBatchSizeHint are the batch size
+	// hints libmxl reports for the flow on its origin node, in samples
+	// for a continuous flow and in slices for a grain. The gateway on
+	// the origin node publishes them; unset until it has read them.
+	//
+	// libmxl takes them from the options of the writer that creates the
+	// flow, and the flow definition does not carry them. A mirror's
+	// target creates its copy with them: libmxl-fabrics sizes an audio
+	// target's bounce-buffer entries from the copy's sync hint, and the
+	// source sends batches of the origin's.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4294967295
+	MaxSyncBatchSizeHint int64 `json:"maxSyncBatchSizeHint,omitempty"`
+
+	// MaxCommitBatchSizeHint is the flow's maxCommitBatchSizeHint on its
+	// origin node; see MaxSyncBatchSizeHint.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4294967295
+	MaxCommitBatchSizeHint int64 `json:"maxCommitBatchSizeHint,omitempty"`
+
+	// BitsPerSecond is the flow's payload rate as libmxl reports the
+	// flow on its origin node: grain size times grain rate for a
+	// discrete flow, bytes per sample across all channels times sample
+	// rate for a continuous one. The gateway on the origin node
+	// publishes it; unset until it has read the flow, and for formats
+	// without a fixed payload rate. Mirror placement charges it.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	BitsPerSecond int64 `json:"bitsPerSecond,omitempty"`
 
 	// Conditions describes the current state of the flow.
 	// +optional

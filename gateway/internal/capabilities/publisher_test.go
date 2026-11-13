@@ -3,7 +3,10 @@ package capabilities
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -24,6 +27,7 @@ import (
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/ports"
 )
 
 func TestMain(m *testing.M) {
@@ -186,6 +190,20 @@ func TestRefresh_PublishesWhatTheProbeFound(t *testing.T) {
 	assert.Equal(t, fabrics.ProviderAny, l.got.Provider,
 		"one sweep answers for every provider; querying per provider would "+
 			"multiply fi_getinfo calls for the same answer")
+}
+
+// A mirror naming another domain is only created toward a gateway that
+// reports multiDomain; one that did not would copy the primary domain's
+// flow of the same id.
+func TestRefresh_ReportsMultiDomain(t *testing.T) {
+	p := &Publisher{
+		Client:    newClient(t, existingCR()).Build(),
+		NodeName:  "n1",
+		Providers: []fabrics.Provider{fabrics.ProviderAny},
+		Lister:    &fakeLister{},
+	}
+	require.NoError(t, p.Refresh(context.Background()))
+	assert.True(t, getCR(t, p).Status.MultiDomain)
 }
 
 // The mixed-hardware case from the issue: the same DaemonSet flag on
@@ -847,4 +865,92 @@ func TestRefresh_TellsTheObserverWhenNoComparisonApplies(t *testing.T) {
 
 	require.Len(t, obs.applies, 1)
 	assert.False(t, obs.applies[0], "no host device list means no comparison ran")
+}
+
+// Placement plans against what each interface can carry and what it
+// shares. Capacity is the provider's link speed unless overridden,
+// budgets group the functions of one PCI device, and the node's
+// ceiling is passed through.
+func TestRefresh_PublishesWhatPlacementPlansAgainst(t *testing.T) {
+	port := func(addr, pci string, speed string) fabrics.InterfaceConfig {
+		c := iface(fabrics.ProviderTCP, addr, "")
+		c.Attr = `{"device_name":"fab` + pci[len(pci)-1:] + `","link_state":"up","link_speed":` + speed +
+			`,"pci_domain_id":0,"pci_bus_id":59,"pci_device_id":0,"pci_function_id":` + pci[len(pci)-1:] + `}`
+		return c
+	}
+	sys := t.TempDir()
+	dev := filepath.Join(sys, "bus", "pci", "devices", "0000:3b:00.0")
+	require.NoError(t, os.MkdirAll(dev, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dev, "numa_node"), []byte("1\n"), 0o644))
+
+	caps, err := ports.ParseCapacities("192.0.2.129=10G")
+	require.NoError(t, err)
+	budgets, err := ports.ParseBudgets("nic=40G:combined")
+	require.NoError(t, err)
+	p := &Publisher{
+		Client:    newClient(t, existingCR()).Build(),
+		NodeName:  "n1",
+		Providers: []fabrics.Provider{fabrics.ProviderAny},
+		Lister: &fakeLister{out: []fabrics.InterfaceConfig{
+			port("192.0.2.1", "0000:3b:00.0", "25000000000"),
+			port("192.0.2.129", "0000:3b:00.1", "25000000000"),
+		}},
+		Capacities:            caps,
+		Budgets:               budgets,
+		MaxUtilizationPercent: 70,
+		Host: ports.Host{SysRoot: sys, Addrs: func() ([]net.Addr, error) {
+			return []net.Addr{
+				&net.IPNet{IP: net.ParseIP("192.0.2.1").To4(), Mask: net.CIDRMask(25, 32)},
+				&net.IPNet{IP: net.ParseIP("192.0.2.129").To4(), Mask: net.CIDRMask(25, 32)},
+			}, nil
+		}},
+	}
+	require.NoError(t, p.Refresh(context.Background()))
+
+	got := getCR(t, p)
+	tcp := providerByName(got.Status.Providers, mxlv1alpha1.ProviderTCP)
+	require.NotNil(t, tcp)
+	require.Len(t, tcp.Interfaces, 2)
+	a, b := tcp.Interfaces[0], tcp.Interfaces[1]
+	assert.Equal(t, int64(25_000_000_000), a.CapacityBitsPerSecond, "link speed when nothing overrides it")
+	assert.Equal(t, int64(10_000_000_000), b.CapacityBitsPerSecond)
+	assert.Equal(t, "192.0.2.0/25", a.Subnet)
+	assert.Equal(t, "192.0.2.128/25", b.Subnet)
+	require.NotNil(t, a.NUMANode)
+	assert.Equal(t, int32(1), *a.NUMANode)
+	assert.Nil(t, b.NUMANode, "no numa_node for that function")
+	assert.Equal(t, []string{"nic-0000-3b-00-combined"}, a.Budgets)
+	assert.Equal(t, []string{"nic-0000-3b-00-combined"}, b.Budgets)
+	assert.Equal(t, []mxlv1alpha1.MxlFabricBudget{{
+		Name: "nic-0000-3b-00-combined", Scope: mxlv1alpha1.FabricBudgetNIC,
+		Mode: mxlv1alpha1.FabricBudgetCombined, CapacityBitsPerSecond: 40_000_000_000,
+	}}, got.Status.Budgets)
+	assert.Equal(t, int32(70), got.Status.MaxUtilizationPercent)
+}
+
+// Metrics read what the probe published from another goroutine; they
+// get a copy, so the status update decoding into the probe's slices
+// cannot change what a scrape reads.
+func TestPublished_ReturnsACopyOfTheLastProbe(t *testing.T) {
+	p := &Publisher{
+		Client:    newClient(t, existingCR()).Build(),
+		NodeName:  "n1",
+		Providers: []fabrics.Provider{fabrics.ProviderAny},
+		Lister:    &fakeLister{out: []fabrics.InterfaceConfig{iface(fabrics.ProviderTCP, "192.0.2.13", "eth0")}},
+	}
+	_, ok := p.Published()
+	require.False(t, ok, "nothing before the first probe")
+
+	require.NoError(t, p.Refresh(context.Background()))
+	got, ok := p.Published()
+	require.True(t, ok)
+	tcp := providerByName(got.Providers, mxlv1alpha1.ProviderTCP)
+	require.NotNil(t, tcp)
+	require.Len(t, tcp.Interfaces, 1)
+	assert.Equal(t, "eth0", tcp.Interfaces[0].Device)
+
+	p.cached[0].Interfaces = nil
+	again, _ := p.Published()
+	assert.Equal(t, got, again)
+	assert.NotEmpty(t, providerByName(again.Providers, mxlv1alpha1.ProviderTCP).Interfaces)
 }

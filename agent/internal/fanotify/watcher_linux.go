@@ -78,8 +78,9 @@ func (w *Watcher) MarkInode(path string, mask uint64) error {
 	return nil
 }
 
-// Close releases the fanotify file descriptor. A concurrent Run call
-// returns once the kernel surfaces the close as EBADF.
+// Close releases the fanotify file descriptor. Call it once Run has
+// returned: closing a descriptor does not wake a read already blocked on
+// it, which is why Run stops on its context instead.
 func (w *Watcher) Close() error {
 	if w.fd < 0 {
 		return nil
@@ -90,40 +91,60 @@ func (w *Watcher) Close() error {
 }
 
 // Run reads events from the kernel and forwards them on out until ctx
-// is canceled or the underlying fd is closed. Closes out on return.
+// is canceled. Closes out on return.
 func (w *Watcher) Run(ctx context.Context, out chan<- Event) error {
 	defer close(out)
+	return readUntilDone(ctx, w.fd, func(b []byte) error { return dispatch(ctx, b, out) })
+}
 
-	// When ctx is canceled, close the fd to unblock the read syscall.
-	doneCh := make(chan struct{})
-	defer close(doneCh)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = w.Close()
-		case <-doneCh:
-		}
-	}()
+// readUntilDone reads fd and hands each read to handle until ctx is
+// canceled. A read is only issued once poll reports fd readable, and an
+// eventfd written on cancel wakes the poll, so a cancel returns promptly
+// whether or not anything ever arrives on fd. Closing fd to interrupt a
+// blocked read does not work on Linux: the read keeps its reference and
+// sleeps on.
+func readUntilDone(ctx context.Context, fd int, handle func([]byte) error) error {
+	wake, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
+	if err != nil {
+		return fmt.Errorf("eventfd: %w", err)
+	}
+	defer unix.Close(wake)
+	stop := context.AfterFunc(ctx, func() {
+		var one [8]byte
+		binary.NativeEndian.PutUint64(one[:], 1)
+		_, _ = unix.Write(wake, one[:])
+	})
+	defer stop()
 
+	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}, {Fd: int32(wake), Events: unix.POLLIN}}
 	buf := make([]byte, 8192)
 	for {
-		n, err := unix.Read(w.fd, buf)
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
+		if _, err := unix.Poll(fds, -1); err != nil {
 			if errors.Is(err, unix.EINTR) {
 				continue
 			}
-			if errors.Is(err, unix.EBADF) {
-				return nil
+			return fmt.Errorf("poll fanotify: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if fds[0].Revents&(unix.POLLERR|unix.POLLNVAL) != 0 {
+			return fmt.Errorf("poll fanotify: revents %#x", fds[0].Revents)
+		}
+		if fds[0].Revents&(unix.POLLIN|unix.POLLHUP) == 0 {
+			continue
+		}
+		n, err := unix.Read(fd, buf)
+		if err != nil {
+			if errors.Is(err, unix.EINTR) || errors.Is(err, unix.EAGAIN) {
+				continue
 			}
 			return fmt.Errorf("read fanotify: %w", err)
 		}
 		if n == 0 {
 			return nil
 		}
-		if err := dispatch(ctx, buf[:n], out); err != nil {
+		if err := handle(buf[:n]); err != nil {
 			return err
 		}
 	}

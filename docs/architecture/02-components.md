@@ -13,15 +13,15 @@ component, showing the workflow rather than a labelled rectangle.
 | `MxlFlowMirror` | Namespaced | operator (declarative) or agent (intent), then operator (source node) | gateway (both sides), operator (`Claimed`, `Sourceable`) | operator, gateway (target + source), agent |
 | `MxlFlow` | Cluster | agent (on first appearance) | agent (`locations`), operator (everything else) | operator, gateway (source side), agent |
 | `Lease` (coordination.k8s.io, `mxl-system`) | Namespaced | agent | agent | operator, agent |
-| `MxlDomain` | Cluster (per-node) | bootstrap / agent | agent | operator (observe), agent |
+| `MxlDomain` | Cluster (per domain) | user or chart (`domains`) | agent (its node's `nodes[]` entry), operator (`Materialised`) | operator, agent |
 | `MxlNodeCapabilities` | Cluster (per-node) | gateway | gateway | operator (observe), gateway |
 
 The RBAC verbs that encode this table live in
 `+kubebuilder:rbac` markers next to each reconciler -- most
 authoritatively
-[`operator/internal/receiver/controller.go:35-40`](../../operator/internal/receiver/controller.go)
+[`operator/internal/receiver/controller.go`](../../operator/internal/receiver/controller.go)
 and
-[`gateway/internal/mirror/target.go:81-84`](../../gateway/internal/mirror/target.go).
+[`gateway/internal/mirror/target.go`](../../gateway/internal/mirror/target.go).
 
 ## Operator
 
@@ -58,7 +58,16 @@ The grace covers one case only: a source the flow may yet republish.
 
 A claim names its claimant -- this receiver, this pod UID -- so the
 claimant being gone is unambiguous, and an unclaimed mirror is deleted
-at once. That verdict is confirmed against the apiserver rather than
+without the grace period: at once for a receiver, after a 30s handover
+window for a requestor pod. A reader replaced on the same node opens
+the mirrored copy that is already there, so it never asks for the
+mirror and is never recorded as its requestor; the agent on the target
+node, sweeping every 10s, names a pod whose processes still map the
+flow as the new `spec.requestor` inside that window. The window rests
+on that agent: if it is down for more than about 20s while a reader is
+replaced, the mirror is collected under the new reader as before. That
+verdict is
+confirmed against the apiserver rather than
 the informer cache first, so it cannot race a pod created a moment
 ago. A node that has left the cluster is equally unambiguous at either
 end of a mirror: nothing will publish on it again and no gateway will
@@ -70,7 +79,7 @@ exactly like that until it republishes. Holding it
 there rather than in the operator's memory is what makes the grace
 survive an operator restart, which would otherwise reset the timer on
 every object at once on every rollout. `--gc-grace-period` (default
-5m) has to outlast a producer or consumer pod rolling over.
+5m) has to outlast a producer pod rolling over.
 
 - **`MxlFlowMirror`** is justified by a claim and by a source, and
   needs both. `Claimed` reads True while an owner reference names a
@@ -78,8 +87,9 @@ every object at once on every rollout. `--gc-grace-period` (default
   ways a mirror is asked for, both written onto the object by the
   side that asked. `Sourceable` reads True while the target node
   exists and the flow names an Origin whose Lease is being renewed.
-  Losing the claim collects at once, as does either node leaving the
-  cluster; only an origin that has not republished waits out
+  Losing the claim collects at once, or after the handover window
+  for a requestor pod, as does either node leaving the cluster; only
+  an origin that has not republished waits out
   `--gc-grace-period`. Neither the creator labels nor `status.phase`
   is consulted: a label
   can be edited off an object, and the phase says whether grains are
@@ -126,7 +136,11 @@ CR disappears, regardless of which side the gateway is acting on.
 The target-side lifecycle is worth its own diagram because the
 recovery path is non-obvious: a fatal `ReadGrain` error rebuilds the
 fabric side *without* closing the `mxl.Writer`, so consumer pods'
-`FlowReader` handles stay valid across the recovery.
+`FlowReader` handles stay valid across the recovery. A live target
+follows a repoint ahead of the `Ready` fast path: a new
+`spec.sourceNode` only relabels its counters, a new `spec.provider`
+takes the same rebuild for the new provider and republishes
+`TargetInfo`.
 
 ![Gateway: TargetReconciler state, including recovery](./diagrams/02-gateway-lifecycle.drawio.svg)
 
@@ -140,17 +154,26 @@ Three transitions in particular are easy to miss:
 - **A target that will not open** counts consecutive failures in
   `status.targetAttemptCount` and leaves `Materializing` for
   `Degraded` past `maxTargetOpenAttempts`
-  ([`target.go:516`](../../gateway/internal/mirror/target.go)):
+  ([`target.go`](../../gateway/internal/mirror/target.go)):
   `Materializing` is the state a consumer waits through, so a mirror
-  parked there reads as one about to go `Ready`. When the failure came
-  from the local writer, that threshold also reclaims the flow
+  parked there reads as one about to go `Ready`. When the target's
+  own writer would not open, that threshold also reclaims the flow
   directory -- a gateway restart part-way through materialising a
   target leaves a grain ring shorter than the flow header declares,
-  and libmxl fails every later open of that path. Only a directory
-  this node is not the flow's `Origin` for is removed; an `Origin`
-  location means a local producer has taken it over.
+  and libmxl fails every later open of that path. A directory this
+  node is the flow's `Origin` for is never removed, and on mxlfs,
+  where the gateway sees every process's locks, neither is one
+  another process on the node holds a writer on: either means a
+  local producer has taken it over.
+- **A process on the node writing the flow**, on mxlfs, makes the
+  target stand down instead of failing: `Degraded` with reason
+  `LocalWriter`, no attempt counted, no writer opened and the
+  directory left alone, retried every few seconds. The agent
+  publishes the node as `Origin` once a writer on the flow resolves
+  to a pod that is not mxl-k8s's own, and the operator then deletes
+  the mirror.
 - **Fatal `ReadGrain`** triggers `recoverFromFatalError`
-  ([`target.go:924`](../../gateway/internal/mirror/target.go)),
+  ([`target.go`](../../gateway/internal/mirror/target.go)),
   which closes only the fabric triple
   (`Regions`/`Target`/`Info`). The `mxl.Writer` is intentionally
   retained -- the on-disk flow definition and any consumer
@@ -179,7 +202,13 @@ the operator). The two paths converge on a single CR per
 (flow, target node) because `MirrorName` is the same algorithm.
 The difference visible in the API is the `spec.requestor` field:
 intent-path mirrors carry the requesting Pod's `name`/`namespace`/
-`uid`, declarative-path mirrors leave it nil.
+`uid`, declarative-path mirrors leave it nil. When that pod stops
+mapping the flow and another pod on the node still maps it, the agent
+moves `spec.requestor` and the `requestor-pod-uid` label to that pod
+([`handover.go`](../../agent/internal/intent/handover.go)). A pod in
+the mirror's namespace is preferred; failing one, a reader in another
+namespace is named, and the mirror then counts against that pod's
+`intentMirrorsPerPod` as one it had asked for.
 
 `waitReady`
 ([`dispatcher.go:203`](../../agent/internal/intent/dispatcher.go))
@@ -262,7 +291,9 @@ The eight steps in order:
    `Origin` vs `Ready` is decided by whether an `MxlFlowMirror`
    already names this node as `target`: producer-side directories
    get `Origin`, mirror-target directories get `Ready` so
-   `resolveSourceNode` keeps pointing at the real writer.
+   `resolveSourceNode` keeps pointing at the real writer. On mxlfs a
+   producer among the directory's writers makes it `Origin` either
+   way.
 3. **User applies an `MxlReceiver`.** Spec carries `flowID` plus
    exactly one of `podSelector` / `podRef`.
 4. **Operator's `receiver.Reconciler` wakes** on the watch event,
@@ -282,11 +313,11 @@ The eight steps in order:
    the progress goroutine.
 7. **Source-node gateway's `SourceReconciler` wakes** on the
    mirror's status update -- it has `Watches(MxlFlowMirror)` *and*
-   `Watches(MxlFlow)`. It opens
-   `mxl.Instance.NewReader` ->
-   `fabrics.RegionsForFlowReader` -> `fabrics.Instance.NewInitiator`
-   -> `Initiator.Setup` -> `ParseTargetInfo` -> `AddTarget`, then
-   spawns the transfer goroutine.
+   `Watches(MxlFlow)`. It opens `mxl.Instance.NewReader`, shared by
+   the mirrors of the flow, then for this mirror
+   `fabrics.Instance.NewInitiator` -> `Initiator.Setup` ->
+   `ParseTargetInfo` -> `AddTarget`, and spawns the mirror's
+   transfer goroutine.
 8. **Operator's `receiver.Reconciler` wakes** on the mirror's
    status update via its `Watches(MxlFlowMirror)` and patches
    `MxlReceiver.status` with `boundMirror` and `phase=Bound`.

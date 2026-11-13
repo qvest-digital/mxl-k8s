@@ -65,6 +65,9 @@ spec:
           imagePullPolicy: {{ include "mxlk8s.imagePullPolicy" (dict "global" .Values.global "image" .Values.operator.image) }}
           args:
             {{- include "mxlk8s.flags.render" (dict "flags" .Values.operator.flags) | nindent 12 }}
+            {{- if .Values.mxlfs.enabled }}
+            - --mxlfs
+            {{- end }}
             {{- with .Values.operator.args }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

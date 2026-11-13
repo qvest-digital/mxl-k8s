@@ -451,6 +451,68 @@ func Test_ensureMirror_StampsLabelOnCreate(t *testing.T) {
 	assert.Equal(t, "r", m.Labels[mxlv1alpha1.LabelCreatedByReceiver])
 }
 
+// A receiver in a domain other than the primary gets a mirror carrying
+// that domain, named apart from the primary domain's mirror of the same
+// id, and only between gateways that report multiDomain: an older one
+// would copy the primary domain's flow of that id instead.
+func Test_ensureMirror_DomainNeedsMultiDomainGateways(t *testing.T) {
+	ctx := context.Background()
+	const id = "11111111-2222-3333-4444-555555555555"
+	recv := &mxlv1alpha1.MxlReceiver{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r"},
+		Spec: mxlv1alpha1.MxlReceiverSpec{
+			FlowID:   id,
+			Domain:   "studio-b",
+			Provider: mxlv1alpha1.ProviderTCP,
+		},
+	}
+	studio := &mxlv1alpha1.MxlDomain{
+		ObjectMeta: metav1.ObjectMeta{Name: "studio-b"},
+		Spec:       mxlv1alpha1.MxlDomainSpec{ID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"},
+	}
+	multi := func(node string) *mxlv1alpha1.MxlNodeCapabilities {
+		c := nodeCaps(node, mxlv1alpha1.ProviderTCP)
+		c.Status.MultiDomain = true
+		return c
+	}
+
+	old := fake.NewClientBuilder().WithScheme(unitScheme(t)).
+		WithObjects(studio, multi("n-src"), nodeCaps("n-tgt", mxlv1alpha1.ProviderTCP)).Build()
+	_, err := (&Reconciler{Client: old}).ensureMirror(ctx, recv, "n-src", nodeTarget{node: "n-tgt", namespace: "ns"})
+	require.ErrorIs(t, err, errNotMultiDomain)
+
+	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).
+		WithObjects(studio, multi("n-src"), multi("n-tgt")).Build()
+	m, err := (&Reconciler{Client: c}).ensureMirror(ctx, recv, "n-src", nodeTarget{node: "n-tgt", namespace: "ns"})
+	require.NoError(t, err)
+	assert.Equal(t, "studio-b", m.Spec.Domain)
+	assert.NotEqual(t, mirrorName(id, "n-tgt"), m.Name)
+}
+
+// The primary domain is spelled empty. A receiver naming its MxlDomain, or
+// any domain in a directory of its own, would look for an MxlFlow
+// "<name>.<id>" that never exists and wait forever without a reason; it is
+// refused with one instead.
+func Test_ensureMirror_RefusesADomainNotMirroredByName(t *testing.T) {
+	ctx := context.Background()
+	primary := &mxlv1alpha1.MxlDomain{
+		ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		Spec:       mxlv1alpha1.MxlDomainSpec{ID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", Directory: "domain"},
+	}
+	for _, domain := range []string{"default", "missing"} {
+		recv := &mxlv1alpha1.MxlReceiver{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "r"},
+			Spec: mxlv1alpha1.MxlReceiverSpec{
+				FlowID: "11111111-2222-3333-4444-555555555555", Domain: domain,
+				Provider: mxlv1alpha1.ProviderTCP,
+			},
+		}
+		c := fake.NewClientBuilder().WithScheme(unitScheme(t)).WithObjects(primary).Build()
+		_, err := (&Reconciler{Client: c}).ensureMirror(ctx, recv, "n-src", nodeTarget{node: "n-tgt", namespace: "ns"})
+		require.ErrorIs(t, err, errDomainNotMirrored, domain)
+	}
+}
+
 // nodeCaps builds an MxlNodeCapabilities advertising the named
 // providers, seeded via WithObjects so the fake client persists the
 // status resolveProvider reads.

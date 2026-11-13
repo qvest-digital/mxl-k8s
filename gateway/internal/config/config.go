@@ -14,6 +14,7 @@ import (
 
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/domaingc"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/ports"
 )
 
 // Config holds the gateway's runtime configuration.
@@ -56,6 +57,23 @@ type Config struct {
 	// bits per second. Zero imposes no restriction.
 	FabricMinLinkSpeed uint64
 
+	// PortCapacities override the link speed mirror placement plans
+	// each fabric interface for.
+	PortCapacities []ports.CapacityRule
+
+	// Budgets are caps shared by the fabric interfaces of one device or
+	// of the host.
+	Budgets []ports.BudgetRule
+
+	// MaxUtilizationPercent is how much of a capacity placement may
+	// commit on this node. Zero leaves it to the operator.
+	MaxUtilizationPercent int32
+
+	// PlacementWait is how long the target side of a mirror with no
+	// placement waits for the operator to place it before binding the
+	// first interface, on a node offering more than one.
+	PlacementWait time.Duration
+
 	// Kubeconfig is an optional kubeconfig path; empty uses in-cluster.
 	Kubeconfig string
 
@@ -90,18 +108,6 @@ type Config struct {
 	// the probe fails. Measured across consecutive enumerations, so
 	// it wants to span several ProbePeriod.
 	RDMAEnumerationGrace time.Duration
-
-	// PacingFraction is how much of a grain's own edit-rate interval
-	// the source gateway spreads that grain's transmission over. It
-	// caps peak rate at the flow's own rate divided by this, and costs
-	// up to this much of a grain interval in added latency. Negative
-	// disables pacing and restores whole-grain transfers, which is the
-	// default.
-	PacingFraction float64
-
-	// PacingChunks is how many slice ranges a paced grain is split
-	// into. Under 2 disables pacing.
-	PacingChunks int
 
 	// DegradedAfter is the inactivity window the target-side
 	// reconciler uses to demote a Ready mirror to Degraded and to
@@ -143,12 +149,27 @@ type Config struct {
 	// KubeAPIBurst is the burst ceiling of the Kubernetes API client
 	// rate limiter.
 	KubeAPIBurst int
+
+	// Mxlfs runs what a domain on mxlfs needs: placeholders, lazy
+	// allocation, the redundancy set merge engine. Off, every domain is
+	// a plain directory.
+	Mxlfs bool
+
+	// MxlfsNumaMode is how the rings of mxlfs domains are placed on NUMA
+	// nodes: off, node or flow. Only flow concerns the gateway: it holds
+	// the ring of every flow it registers with a NIC and moves it to the
+	// NICs' node first, and gives target rings that node as preference.
+	MxlfsNumaMode string
 }
+
+// FlowPlacement reports whether the gateway places rings per flow.
+func (c *Config) FlowPlacement() bool { return c.MxlfsNumaMode == "flow" }
 
 // FromFlags populates a Config from command-line flags.
 func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	c := &Config{}
-	var providers, fabricCIDRs, fabricDevices, fabricMinLinkSpeed string
+	var providers, fabricCIDRs, fabricDevices, fabricMinLinkSpeed, portCapacity, budgets string
+	var maxUtilization int
 	fs.StringVar(&c.NodeName, "node-name", os.Getenv("NODE_NAME"),
 		"Kubernetes node name (defaults to $NODE_NAME).")
 	fs.StringVar(&c.DomainPath, "domain-path", os.Getenv("MXL_DOMAIN"),
@@ -173,6 +194,21 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 			"(for example 25G). Empty imposes no floor. An interface whose provider reports no "+
 			"link speed is rejected when this is set, which includes most interfaces with no "+
 			"physical NIC behind them.")
+	fs.StringVar(&portCapacity, "fabric-port-capacity", "",
+		"Comma-separated <match>=<quantity> overrides of the capacity mirror placement plans a fabric "+
+			"interface for, in bits per second; match is a device name, an address or a CIDR, and the "+
+			"first match wins. Unmatched interfaces keep the link speed their provider reports.")
+	fs.StringVar(&budgets, "fabric-shared-budget", "",
+		"Comma-separated <scope>=<quantity>[:<mode>] caps shared by several fabric interfaces, in bits "+
+			"per second. Scope nic makes one per PCI device, host one over every interface; mode ingress "+
+			"(default) counts mirrors received, egress mirrors sent, combined both. Empty declares none.")
+	fs.IntVar(&maxUtilization, "fabric-max-utilization", 0,
+		"Percent of an interface's or budget's capacity mirror placement may commit on this node. "+
+			"Zero leaves it to the operator's --placement-max-utilization.")
+	fs.DurationVar(&c.PlacementWait, "placement-wait", 10*time.Second,
+		"How long the target side of a mirror the operator has not placed waits, on a node offering more "+
+			"than one fabric interface, before binding the first as an unplaced mirror does. The operator "+
+			"places within its reconcile; this covers an operator that is down or slow.")
 	fs.StringVar(&c.Kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"),
 		"Path to a kubeconfig file. Empty uses the in-cluster config.")
 	fs.StringVar(&c.ProbeAddr, "health-probe-bind-address", ":8081",
@@ -190,6 +226,14 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 			"still refreshes every --resync-period from the last result. Each enumeration "+
 			"sweeps every provider libfabric was built with and warns about those it finds "+
 			"no device for.")
+	fs.BoolVar(&c.Mxlfs, "mxlfs", false,
+		"Run what a domain on mxlfs needs: placeholders for absent flows, lazy ring "+
+			"allocation and the MxlFlowRedundancySet merge engine. Off, every domain is "+
+			"treated as a plain directory.")
+	fs.StringVar(&c.MxlfsNumaMode, "mxlfs-numa-placement-mode", "off",
+		"NUMA placement of mxlfs rings: off, node (the mount's numa_node=, nothing per flow) or "+
+			"flow (hold the ring of every flow registered with a NIC and move it to the NICs' "+
+			"node first; needs --mxlfs and CAP_SYS_NICE).")
 	fs.BoolVar(&c.RDMAEnumerationLiveness, "rdma-enumeration-liveness", false,
 		"Fail the liveness probe while the host exposes RDMA devices that no enumerated "+
 			"provider accounts for. libfabric fixes a provider's device list at the first "+
@@ -201,15 +245,6 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"How long the host device discrepancy must hold before --rdma-enumeration-liveness "+
 			"fails the probe. Spans several --probe-period so a single enumeration does not "+
 			"decide it.")
-	fs.Float64Var(&c.PacingFraction, "pacing-fraction", -1,
-		"Fraction of a grain's own interval to spread that grain's transmission over. "+
-			"Caps peak rate at the flow's rate divided by this, and costs up to this much "+
-			"of a grain interval in latency. Negative disables pacing, which is the "+
-			"default; 0.5 is where to start when enabling it.")
-	fs.IntVar(&c.PacingChunks, "pacing-chunks", 8,
-		"Number of slice ranges a paced grain is split into. Higher shortens the burst "+
-			"further at the cost of one cgo call and one RMA write per plane each. "+
-			"Under 2 disables pacing.")
 	fs.DurationVar(&c.DegradedAfter, "degraded-after", 10*time.Second,
 		"Grain-commit inactivity after which the target gateway demotes a mirror to Degraded.")
 	fs.DurationVar(&c.DomainGCInterval, "domain-gc-interval", domaingc.DefaultInterval,
@@ -268,6 +303,17 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		c.FabricMinLinkSpeed = uint64(bits)
 	}
 
+	var err error
+	if c.PortCapacities, err = ports.ParseCapacities(portCapacity); err != nil {
+		return nil, fmt.Errorf("--fabric-port-capacity: %w", err)
+	}
+	if c.Budgets, err = ports.ParseBudgets(budgets); err != nil {
+		return nil, fmt.Errorf("--fabric-shared-budget: %w", err)
+	}
+	if maxUtilization < 0 || maxUtilization > 100 {
+		return nil, fmt.Errorf("--fabric-max-utilization must be 0..100, got %d", maxUtilization)
+	}
+	c.MaxUtilizationPercent = int32(maxUtilization)
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -313,6 +359,9 @@ func (c *Config) Validate() error {
 	if len(c.Providers) == 0 {
 		return fmt.Errorf("--providers must list at least one provider")
 	}
+	if c.PlacementWait < 0 {
+		return fmt.Errorf("--placement-wait must not be negative, got %v", c.PlacementWait)
+	}
 	if c.ProbePeriod < 0 {
 		return fmt.Errorf("--probe-period must not be negative, got %v", c.ProbePeriod)
 	}
@@ -322,12 +371,14 @@ func (c *Config) Validate() error {
 	if c.KubeAPIBurst <= 0 {
 		return fmt.Errorf("--kube-api-burst must be positive, got %d", c.KubeAPIBurst)
 	}
-	// A fraction at or above 1 spreads a grain over its whole interval
-	// or beyond, so its transmission runs into the next grain's and the
-	// mirror never catches up. Disabling is spelled with a negative
-	// value, which keeps zero meaning "unset" for the reconciler.
-	if c.PacingFraction >= 1 {
-		return fmt.Errorf("--pacing-fraction must be below 1, got %v", c.PacingFraction)
+	switch c.MxlfsNumaMode {
+	case "", "off", "node":
+	case "flow":
+		if !c.Mxlfs {
+			return fmt.Errorf("--mxlfs-numa-placement-mode=flow needs --mxlfs")
+		}
+	default:
+		return fmt.Errorf("--mxlfs-numa-placement-mode %q is not one of off, node, flow", c.MxlfsNumaMode)
 	}
 	return nil
 }

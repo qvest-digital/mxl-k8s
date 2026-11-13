@@ -17,10 +17,15 @@ spec:
     - port: metrics
       interval: {{ .Values.gateway.metrics.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.gateway.metrics.serviceMonitor.scrapeTimeout }}
-      {{- with .Values.gateway.metrics.serviceMonitor.relabelings }}
       relabelings:
+        # Every series carries the gateway variant its pod belongs to, so
+        # what a node class publishes groups by variant. A pod of the
+        # base gateway has no such label and its series none.
+        - sourceLabels: [__meta_kubernetes_pod_label_mxl_qvest_digital_com_gateway_variant]
+          targetLabel: variant
+        {{- with .Values.gateway.metrics.serviceMonitor.relabelings }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       {{- with .Values.gateway.metrics.serviceMonitor.metricRelabelings }}
       metricRelabelings:
         {{- toYaml . | nindent 8 }}

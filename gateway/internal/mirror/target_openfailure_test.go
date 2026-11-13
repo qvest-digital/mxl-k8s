@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -20,6 +21,7 @@ import (
 	"github.com/qvest-digital/go-mxl/fabrics"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
 )
 
 const openFailureFlowID = "11111111-2222-3333-4444-555555555555"
@@ -290,7 +292,7 @@ func TestReclaimUnusableFlowDir_MissingDirectory(t *testing.T) {
 		NodeName:   "node-a",
 		DomainPath: t.TempDir(),
 	}
-	assert.False(t, r.reclaimUnusableFlowDir(context.Background(), openFailureFlowID))
+	assert.False(t, r.reclaimUnusableFlowDir(context.Background(), mxlv1alpha1.FlowRef{ID: openFailureFlowID}))
 }
 
 func TestReclaimUnusableFlowDir_UnsetDomainPath(t *testing.T) {
@@ -299,5 +301,192 @@ func TestReclaimUnusableFlowDir_UnsetDomainPath(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &TargetReconciler{Client: c, Scheme: scheme, NodeName: "node-a"}
-	assert.False(t, r.reclaimUnusableFlowDir(context.Background(), openFailureFlowID))
+	assert.False(t, r.reclaimUnusableFlowDir(context.Background(), mxlv1alpha1.FlowRef{ID: openFailureFlowID}))
+}
+
+// fakeForeignWriter makes /proc/locks, as flowlocks reads it, list a
+// shared flock another process holds on dir's data file: what a local
+// producer's libmxl writer looks like to the gateway.
+func fakeForeignWriter(t *testing.T, dir string) {
+	t.Helper()
+	data := filepath.Join(dir, "data")
+	require.NoError(t, os.WriteFile(data, nil, 0o644))
+	var st unix.Stat_t
+	require.NoError(t, unix.Stat(data, &st))
+	locks := filepath.Join(t.TempDir(), "locks")
+	require.NoError(t, os.WriteFile(locks, []byte(fmt.Sprintf("1: FLOCK  ADVISORY  READ %d %02x:%02x:%d 0 EOF\n",
+		os.Getpid()+1, unix.Major(st.Dev), unix.Minor(st.Dev), st.Ino)), 0o644))
+	saved := flowlocks.ProcLocks
+	flowlocks.ProcLocks = locks
+	t.Cleanup(func() { flowlocks.ProcLocks = saved })
+}
+
+func TestTarget_LocalWriterStandsDownAndKeepsTheFlowDir(t *testing.T) {
+	// A producer that restarts onto a node a mirror targets opens the
+	// mirror's directory and takes it over. This node's location still
+	// reads Ready, the mirror copy's, until the agent catches up, and
+	// the target cannot open while the producer writes. Counting that
+	// as an open failure reclaimed the producer's live ring at the
+	// third attempt: the producer went on writing into unlinked files
+	// and the flow was gone cluster-wide. The local writer wins
+	// instead: no reclaim, no escalation, a reason saying why.
+	for name, openErr := range map[string]error{
+		"bare":    errLocalWriter,
+		"wrapped": fmt.Errorf("%w: %w", errOpenWriterFailed, errLocalWriter),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newOpenFailureFixture(t, openErr, mxlv1alpha1.MxlFlowLocationReady)
+			dir := writeTornFlowDir(t, f.domain, openFailureFlowID, 100)
+
+			for range terminalTargetOpenAttempts + 1 {
+				res, err := f.r.Reconcile(context.Background(), f.req)
+				require.NoError(t, err)
+				assert.Equal(t, localWriterRecheckInterval, res.RequeueAfter)
+				f.advance(localWriterRecheckInterval)
+			}
+
+			assert.DirExists(t, dir,
+				"a flow a process on this node writes is that process's, "+
+					"whatever this node's location reads")
+			assert.Equal(t, int(terminalTargetOpenAttempts+1), f.opens,
+				"the target looks again on every recheck, so it resumes "+
+					"should the local writer exit")
+			got := f.mirror(t)
+			assert.Equal(t, mxlv1alpha1.MxlFlowMirrorDegraded, got.Status.Phase,
+				"standing down is not a failure run: it must never reach "+
+					"Failed, which an intent waiting on the mirror reads "+
+					"as permanent")
+			assert.Zero(t, got.Status.TargetAttemptCount)
+			require.Len(t, got.Status.Conditions, 1)
+			assert.Equal(t, ReasonLocalWriter, got.Status.Conditions[0].Reason)
+		})
+	}
+}
+
+func TestTarget_LocalWriterGatesTheRetryWithoutAStatusWrite(t *testing.T) {
+	// The status write wakes this reconciler through its own watch, so
+	// the recheck has to hold on the way in, and a stand-down already
+	// on status must not be written again.
+	f := newOpenFailureFixture(t, errLocalWriter, mxlv1alpha1.MxlFlowLocationReady)
+
+	_, err := f.r.Reconcile(context.Background(), f.req)
+	require.NoError(t, err)
+	written := f.mirror(t).ResourceVersion
+
+	res, err := f.r.Reconcile(context.Background(), f.req)
+	require.NoError(t, err)
+	assert.Equal(t, 1, f.opens, "a pass inside the recheck interval must not open")
+	assert.Positive(t, res.RequeueAfter)
+
+	f.advance(localWriterRecheckInterval)
+	_, err = f.r.Reconcile(context.Background(), f.req)
+	require.NoError(t, err)
+	assert.Equal(t, 2, f.opens)
+	assert.Equal(t, written, f.mirror(t).ResourceVersion,
+		"an unchanged stand-down must not rewrite status")
+}
+
+func TestTarget_WriterFailureKeepsFlowDirAForeignProcessWrites(t *testing.T) {
+	// The reclaim judged ownership by the MxlFlow alone, which lags a
+	// producer that has just opened the flow. Whatever makes the
+	// target's own writer fail, a directory another process on this
+	// node holds a writer on is that process's flow.
+	f := newOpenFailureFixture(t,
+		fmt.Errorf("%w: NewWriter: mxl: unknown error", errOpenWriterFailed),
+		mxlv1alpha1.MxlFlowLocationReady)
+	dir := writeTornFlowDir(t, f.domain, openFailureFlowID, 46)
+	fakeForeignWriter(t, dir)
+
+	for range maxTargetOpenAttempts + 1 {
+		_, err := f.r.Reconcile(context.Background(), f.req)
+		require.NoError(t, err)
+		f.advancePastBackoff()
+	}
+
+	assert.DirExists(t, dir)
+	assert.Equal(t, mxlv1alpha1.MxlFlowMirrorDegraded, f.mirror(t).Status.Phase,
+		"the failure still escalates; only the reclaim is withheld")
+}
+
+func TestTarget_LocalWriterClosesALiveTarget(t *testing.T) {
+	// A target still live when the open path finds a local writer would
+	// go on writing over the producer's ring; it gives its writer up as
+	// StopFlow does for a placeholder taken over.
+	f := newOpenFailureFixture(t, errLocalWriter, mxlv1alpha1.MxlFlowLocationReady)
+	f.r.targets[f.key] = &targetEntry{flowID: openFailureFlowID, provider: fabrics.ProviderTCP}
+
+	_, err := f.r.Reconcile(context.Background(), f.req)
+	require.NoError(t, err)
+
+	assert.NotContains(t, f.r.targets, f.key)
+	assert.Equal(t, ReasonLocalWriter, f.mirror(t).Status.Conditions[0].Reason)
+}
+
+// recordingReclaimFS is the real filesystem with every path a reclaim
+// touches recorded.
+type recordingReclaimFS struct {
+	osReclaimFS
+	touched []string
+}
+
+func (f *recordingReclaimFS) Names(dir string) ([]string, error) {
+	f.touched = append(f.touched, "names "+dir)
+	return f.osReclaimFS.Names(dir)
+}
+
+func (f *recordingReclaimFS) ForeignWriters(dataPath string) (int, error) {
+	f.touched = append(f.touched, "writers "+dataPath)
+	return f.osReclaimFS.ForeignWriters(dataPath)
+}
+
+func (f *recordingReclaimFS) ReadDir(dir string) ([]os.DirEntry, error) {
+	f.touched = append(f.touched, "readdir "+dir)
+	return f.osReclaimFS.ReadDir(dir)
+}
+
+func (f *recordingReclaimFS) RemoveAll(path string) error {
+	f.touched = append(f.touched, "remove "+path)
+	return f.osReclaimFS.RemoveAll(path)
+}
+
+// On a domain that waits for a missing flow name to appear, resolving
+// one blocks for the whole wait. A reclaim of a directory that is not
+// there has to find that out from the domain's listing and resolve
+// nothing below the domain.
+func TestReclaimUnusableFlowDir_MissingDirectoryResolvesNoPathInIt(t *testing.T) {
+	scheme := newSourceTestScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	domain := t.TempDir()
+	fsys := &recordingReclaimFS{}
+	r := &TargetReconciler{
+		Client:     c,
+		Scheme:     scheme,
+		NodeName:   "node-a",
+		DomainPath: domain,
+		reclaimFS:  fsys,
+	}
+	assert.False(t, r.reclaimUnusableFlowDir(context.Background(), mxlv1alpha1.FlowRef{ID: openFailureFlowID}))
+	assert.Equal(t, []string{"names " + domain}, fsys.touched,
+		"a reclaim of a missing flow directory resolved a path below the domain")
+}
+
+// A directory that is there is still checked for a local writer and
+// removed through the same filesystem.
+func TestReclaimUnusableFlowDir_PresentDirectoryIsRemoved(t *testing.T) {
+	scheme := newSourceTestScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	domain := t.TempDir()
+	dir := writeTornFlowDir(t, domain, openFailureFlowID, 59)
+	fsys := &recordingReclaimFS{}
+	r := &TargetReconciler{
+		Client:     c,
+		Scheme:     scheme,
+		NodeName:   "node-a",
+		DomainPath: domain,
+		reclaimFS:  fsys,
+	}
+	assert.True(t, r.reclaimUnusableFlowDir(context.Background(), mxlv1alpha1.FlowRef{ID: openFailureFlowID}))
+	assert.NoDirExists(t, dir)
+	assert.Contains(t, fsys.touched, "writers "+filepath.Join(dir, "data"))
+	assert.Contains(t, fsys.touched, "remove "+dir)
 }

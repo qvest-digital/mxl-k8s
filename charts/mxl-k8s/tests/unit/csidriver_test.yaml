@@ -1,0 +1,75 @@
+suite: csi
+templates:
+  - templates/csidriver.yaml
+  - templates/daemonset-agent.yaml
+tests:
+  - it: renders no CSIDriver by default
+    template: templates/csidriver.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders an ephemeral CSIDriver with pod info when enabled
+    template: templates/csidriver.yaml
+    set:
+      mxlfs.enabled: true
+      agent.csi.enabled: true
+    asserts:
+      - isKind:
+          of: CSIDriver
+      - equal:
+          path: metadata.name
+          value: mxl.qvest-digital.com
+      - equal:
+          path: spec.podInfoOnMount
+          value: true
+      - equal:
+          path: spec.attachRequired
+          value: false
+      - contains:
+          path: spec.volumeLifecycleModes
+          content: Ephemeral
+
+  - it: leaves the agent unprivileged without the CSI plugin
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].securityContext.privileged
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 1
+
+  - it: runs the plugin, a registrar and Bidirectional pod mounts when enabled
+    template: templates/daemonset-agent.yaml
+    set:
+      mxlfs.enabled: true
+      agent.csi.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --csi-endpoint=unix:///csi/csi.sock
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.privileged
+          value: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: kubelet-pods
+            mountPath: /var/lib/kubelet/pods
+            mountPropagation: Bidirectional
+      - equal:
+          path: spec.template.spec.containers[1].name
+          value: csi-registrar
+      - contains:
+          path: spec.template.spec.containers[1].args
+          content: --kubelet-registration-path=/var/lib/kubelet/plugins/mxl.qvest-digital.com/csi.sock
+
+  # The plugin binds a domain the agent has mounted as mxlfs; without
+  # the agent mounting anything there is nothing for it to wait on.
+  - it: refuses the plugin without mxlfs
+    template: templates/daemonset-agent.yaml
+    set:
+      agent.csi.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: agent.csi.enabled requires mxlfs.enabled

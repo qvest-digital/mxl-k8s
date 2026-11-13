@@ -211,12 +211,67 @@ func backdate(t *testing.T, c client.Client, name string, by time.Duration) {
 
 // --- claim -----------------------------------------------------------
 
-// A claim names its claimant, so the claimant being gone is not the
-// ambiguous signal a missing source is: a producer can come back to
-// the node it left, a named pod cannot. Waiting would pull a whole
-// flow across the fabric for the grace period with nothing reading it.
-func TestClaim_RequestorPodGone_CollectsAtOnce(t *testing.T) {
+// collectedAfterHandover reports whether a mirror whose requestor is
+// gone survives the first pass and is deleted once the handover window
+// has passed with nobody named in its place.
+func collectedAfterHandover(t *testing.T, r *Reconciler, c client.Client, name string) bool {
+	t.Helper()
+	res := reconcileOnce(t, r, name)
+	if mirrorGone(t, c, name) {
+		t.Errorf("collected on the pass that found its requestor gone; the agent had no time to hand it over")
+		return true
+	}
+	assert.Greater(t, res.RequeueAfter, RequestorHandover-10*time.Second,
+		"the pass has to come back when the window closes, since nothing else may arrive to wake it")
+	assert.LessOrEqual(t, res.RequeueAfter, RequestorHandover)
+	backdate(t, c, name, RequestorHandover)
+	reconcileOnce(t, r, name)
+	return mirrorGone(t, c, name)
+}
+
+// A claim names its claimant, and a named pod does not come back the
+// way a producer can, so this waits only the handover window and not
+// the grace period: long enough for the agent to name a reader still
+// using the flow, short enough that a flow nobody reads is not pulled
+// across the fabric for minutes.
+func TestClaim_RequestorPodGone_CollectedAfterTheHandover(t *testing.T) {
 	m := newMirror(withIntentLabel(), withRequestor("consumer", "uid-1"))
+	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode))
+
+	assert.True(t, collectedAfterHandover(t, r, c, m.Name))
+}
+
+// A reader replaced on the same node opens a flow whose mirrored
+// directory is still there, so it never asks and is never recorded as
+// the requestor. Collecting the moment the old pod went left the new
+// one reading a ring nothing wrote any more, offline until it too was
+// replaced. The agent naming it inside the window is what keeps the
+// mirror.
+func TestClaim_RequestorHandedOverInsideTheWindow_IsKept(t *testing.T) {
+	m := newMirror(withIntentLabel(), withRequestor("old", "uid-old"))
+	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode), pod("new", "uid-new"))
+
+	reconcileOnce(t, r, m.Name)
+	require.False(t, mirrorGone(t, c, m.Name),
+		"the old reader going must not take the mirror from the new one before the agent can name it")
+
+	got := getMirror(t, c, m.Name)
+	got.Spec.Requestor = &mxlv1alpha1.PodRef{Namespace: testNS, Name: "new", UID: "uid-new"}
+	require.NoError(t, c.Update(context.Background(), got))
+	backdate(t, c, m.Name, RequestorHandover)
+
+	reconcileOnce(t, r, m.Name)
+	require.False(t, mirrorGone(t, c, m.Name))
+	claimed := condition(t, getMirror(t, c, m.Name), mxlv1alpha1.ConditionTypeClaimed)
+	require.NotNil(t, claimed)
+	assert.Equal(t, mxlv1alpha1.ReasonRequestorLive, claimed.Reason)
+}
+
+// The window exists for a reader on the target node. One that has left
+// the cluster has none, so the mirror goes at once.
+func TestClaim_RequestorGoneOnADepartedTarget_CollectsAtOnce(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	m.Spec.TargetNode = "reclaimed"
 	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode))
 
 	reconcileOnce(t, r, m.Name)
@@ -241,8 +296,7 @@ func TestClaim_RequestorPodReplaced_IsUnclaimed(t *testing.T) {
 	m := newMirror(withRequestor("consumer", "uid-1"))
 	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), pod("consumer", "uid-2"))
 
-	reconcileOnce(t, r, m.Name)
-	assert.True(t, mirrorGone(t, c, m.Name))
+	assert.True(t, collectedAfterHandover(t, r, c, m.Name))
 }
 
 func TestClaim_LiveReceiverOwner_IsKept(t *testing.T) {
@@ -255,6 +309,69 @@ func TestClaim_LiveReceiverOwner_IsKept(t *testing.T) {
 	claimed := condition(t, getMirror(t, c, m.Name), mxlv1alpha1.ConditionTypeClaimed)
 	require.NotNil(t, claimed)
 	assert.Equal(t, mxlv1alpha1.ReasonReceiverOwned, claimed.Reason)
+}
+
+func withSetOwner(name string, uid types.UID) mirrorOpt {
+	return func(m *mxlv1alpha1.MxlFlowMirror) {
+		m.OwnerReferences = append(m.OwnerReferences, metav1.OwnerReference{
+			APIVersion: mxlv1alpha1.GroupVersion.String(),
+			Kind:       "MxlFlowRedundancySet",
+			Name:       name,
+			UID:        uid,
+		})
+	}
+}
+
+func set(uid types.UID, nodes ...string) *mxlv1alpha1.MxlFlowRedundancySet {
+	return &mxlv1alpha1.MxlFlowRedundancySet{
+		ObjectMeta: metav1.ObjectMeta{Name: "programme", UID: uid},
+		Status:     mxlv1alpha1.MxlFlowRedundancySetStatus{Nodes: nodes},
+	}
+}
+
+// A set mirrors each member to every node its output is read on, and
+// no pod is named on such a mirror: the reader holds the output, not
+// the member. The set wanting the output on the target is the claim.
+func TestClaim_SetWantingOutputOnTarget_IsKept(t *testing.T) {
+	m := newMirror(withSetOwner("programme", "set-uid"))
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), set("set-uid", tgtNode))
+	r.RedundancySets = true
+
+	reconcileOnce(t, r, m.Name)
+	assert.False(t, mirrorGone(t, c, m.Name))
+
+	claimed := condition(t, getMirror(t, c, m.Name), mxlv1alpha1.ConditionTypeClaimed)
+	require.NotNil(t, claimed)
+	assert.Equal(t, mxlv1alpha1.ReasonRedundancySetOwned, claimed.Reason)
+}
+
+func TestClaim_SetNotWantingOutputOnTarget_IsCollected(t *testing.T) {
+	m := newMirror(withSetOwner("programme", "set-uid"))
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), set("set-uid", "elsewhere"))
+	r.RedundancySets = true
+
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name))
+}
+
+func TestClaim_SetRecreatedUnderTheSameName_IsNotAClaim(t *testing.T) {
+	m := newMirror(withSetOwner("programme", "old-uid"))
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), set("new-uid", tgtNode))
+	r.RedundancySets = true
+
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name))
+}
+
+// Without redundancy sets the operator has no access to them, and an
+// owner reference left from when it had is no claim: the mirror goes
+// like any other nothing wants.
+func TestClaim_SetOwnerWithoutRedundancySets_IsNotAClaim(t *testing.T) {
+	m := newMirror(withSetOwner("programme", "set-uid"))
+	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), set("set-uid", tgtNode))
+
+	reconcileOnce(t, r, m.Name)
+	assert.True(t, mirrorGone(t, c, m.Name))
 }
 
 // The trap the old collectors left open. A receiver that stops wanting
@@ -291,8 +408,7 @@ func TestClaim_NoCreatorLabels_IsStillJudgedOnItsRequestor(t *testing.T) {
 	m.Labels = nil
 	r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode))
 
-	reconcileOnce(t, r, m.Name)
-	assert.True(t, mirrorGone(t, c, m.Name),
+	assert.True(t, collectedAfterHandover(t, r, c, m.Name),
 		"a claim is what the requesting side wrote into spec and "+
 			"ownerReferences; a label that can be edited off must not be "+
 			"what decides whether an object can ever be collected")
@@ -376,8 +492,7 @@ func TestSource_LeaseExpiredAndUnclaimed_IsStillCollected(t *testing.T) {
 	r, c := harness(t, time.Hour, m, flowOriginAt(srcNode))
 	r.Lease = &fakeLease{fresh: map[string]bool{}}
 
-	reconcileOnce(t, r, m.Name)
-	assert.True(t, mirrorGone(t, c, m.Name))
+	assert.True(t, collectedAfterHandover(t, r, c, m.Name))
 }
 
 // No gateway will ever open the writer: the DaemonSet pod that would
@@ -535,6 +650,21 @@ func TestWatches_EnqueueTheMirrorsEachInputAffects(t *testing.T) {
 	assert.Len(t, r.nodeToMirrors(ctx, node(tgtNode)), 1)
 	assert.Len(t, r.nodeToMirrors(ctx, node(srcNode)), 1)
 	assert.Empty(t, r.nodeToMirrors(ctx, node("unrelated")))
+}
+
+// A set leaving a node changes nothing on its member mirrors there, so
+// only a watch on the set brings them back to be collected.
+func TestWatches_EnqueueTheMirrorsASetOwns(t *testing.T) {
+	m := newMirror(withSetOwner("programme", "set-uid"))
+	other := newMirror(withRequestor("consumer", "uid-1"))
+	other.Name = "m2"
+	r, _ := harness(t, time.Hour, m, other)
+	ctx := context.Background()
+
+	got := r.setToMirrors(ctx, set("set-uid"))
+	require.Len(t, got, 1)
+	assert.Equal(t, m.Name, got[0].Name)
+	assert.Empty(t, r.setToMirrors(ctx, set("new-uid")), "a set recreated under the name owns nothing")
 }
 
 func TestPodPredicate_DenyKubeSystem(t *testing.T) {

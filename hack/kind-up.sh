@@ -26,12 +26,32 @@
 #
 # Set IMAGE_REGISTRY=<prefix> to override the registry prefix.
 # Default is ghcr.io/qvest-digital/mxl-k8s.
+#
+# Set MXLFS=1 to serve the node domains from mxlfs (mxlfs.enabled), with
+# the agent's CSI volume on (agent.csi.enabled) and the demo pods taking
+# their domain through it (examples/kind/demo-mxlfs). KIND nodes share the
+# host kernel, so the mxlfs module has to be loaded on the host; the
+# script stops before installing the chart when the nodes' kernel has no
+# mxlfs. Start from a new cluster: the agent leaves a domain directory
+# that already holds flows a plain directory.
+#
+# With MXLFS=1, MXLFS_NUMA=flow also turns flow placement on
+# (mxlfs.numa.placement.mode=flow) and the exporter's NUMA counters
+# (mxlfs.numa.metrics.enabled); the mxlfs module on the host needs its
+# NUMA ioctls for the rings to be held.
+#
+# FABRIC_PORTS=2 (the default) attaches every node to a second network,
+# ${KIND_CLUSTER}-fabric-b, and runs the gateways with no bind address and
+# both networks as fabric CIDRs, so each node offers two tcp fabric
+# interfaces in two subnets and mirrors are placed across them.
+# FABRIC_PORTS=1 keeps the gateways bound to the pod IP alone.
 
 set -euo pipefail
 
 CLUSTER_NAME="${KIND_CLUSTER:-mxl-k8s-demo}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 BUILD="${BUILD-local}"
+FABRIC_PORTS="${FABRIC_PORTS:-2}"
 IMAGE_REGISTRY="${IMAGE_REGISTRY:-ghcr.io/qvest-digital/mxl-k8s}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../" && pwd)"
 KIND_CONFIG="${REPO_ROOT}/hack/kind-config.yaml"
@@ -61,6 +81,8 @@ if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
   export KIND_EXPERIMENTAL_PROVIDER=podman
 fi
 
+MXLFS="${MXLFS:-0}"
+MXLFS_NUMA="${MXLFS_NUMA:-}"
 MIRROR_TIMEOUT_SECS="${MIRROR_TIMEOUT_SECS:-180}"
 ROLLOUT_TIMEOUT_SECS="${ROLLOUT_TIMEOUT_SECS:-300}"
 
@@ -183,6 +205,21 @@ load_image() {
   fi
 }
 
+MXLFS_SET=()
+DEMO_DIR=demo
+if [ "$MXLFS" = "1" ]; then
+  node="${CLUSTER_NAME}-control-plane"
+  if ! $CONTAINER_RUNTIME exec "$node" grep -qw mxlfs /proc/filesystems; then
+    echo "ERROR: MXLFS=1 but the kernel of the KIND nodes has no mxlfs; load the module on the host" >&2
+    exit 1
+  fi
+  MXLFS_SET=(--set mxlfs.enabled=true --set agent.csi.enabled=true)
+  if [ "$MXLFS_NUMA" = "flow" ]; then
+    MXLFS_SET+=(--set mxlfs.numa.placement.mode=flow --set mxlfs.numa.metrics.enabled=true)
+  fi
+  DEMO_DIR=demo-mxlfs
+fi
+
 log "Loading images into the cluster"
 for tag in "${IMAGE_TAGS[@]}"; do
   echo "  -> ${tag}"
@@ -239,10 +276,56 @@ if [ "$MONITORING" = "1" ]; then
     --set gateway.metrics.serviceMonitor.enabled=true
     --set gateway.metrics.serviceMonitor.interval=15s
     --set "gateway.metrics.serviceMonitor.labels.release=${MONITORING_RELEASE}"
+    # The operator carries the placement and mirror state the fabric
+    # dashboard's planning panels read.
+    --set operator.metrics.serviceMonitor.enabled=true
+    --set operator.metrics.serviceMonitor.interval=15s
+    --set "operator.metrics.serviceMonitor.labels.release=${MONITORING_RELEASE}"
     --set dashboards.enabled=true
     --set "dashboards.namespace=${MONITORING_NAMESPACE}"
   )
 fi
+
+# ipv4_subnet prints the IPv4 subnet of a container network.
+ipv4_subnet() {
+  local subnets s
+  if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+    subnets=$($CONTAINER_RUNTIME network inspect -f '{{range .Subnets}}{{.Subnet}} {{end}}' "$1")
+  else
+    subnets=$($CONTAINER_RUNTIME network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' "$1")
+  fi
+  for s in $subnets; do
+    case "$s" in
+      *:*) ;;
+      *) echo "$s"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+FABRIC_SET=()
+case "$FABRIC_PORTS" in
+  1) ;;
+  2)
+    log "Attaching the nodes to a second fabric network"
+    fabric_net="${CLUSTER_NAME}-fabric-b"
+    if ! $CONTAINER_RUNTIME network inspect "$fabric_net" >/dev/null 2>&1; then
+      $CONTAINER_RUNTIME network create "$fabric_net" >/dev/null
+    fi
+    for node in $(kind get nodes --name "$CLUSTER_NAME"); do
+      if ! $CONTAINER_RUNTIME inspect -f '{{json .NetworkSettings.Networks}}' "$node" | grep -q "\"${fabric_net}\""; then
+        $CONTAINER_RUNTIME network connect "$fabric_net" "$node"
+      fi
+    done
+    cidr_a=$(ipv4_subnet kind) || { echo "ERROR: no IPv4 subnet on network kind" >&2; exit 1; }
+    cidr_b=$(ipv4_subnet "$fabric_net") || { echo "ERROR: no IPv4 subnet on network ${fabric_net}" >&2; exit 1; }
+    echo "  -> fabric CIDRs ${cidr_a} ${cidr_b}"
+    # No bind address: the CIDRs select the two interfaces, and
+    # placement picks one of them per mirror.
+    FABRIC_SET=(--set gateway.flags.bindAddress= --set "gateway.flags.fabricCidr={${cidr_a},${cidr_b}}")
+    ;;
+  *) echo "ERROR: FABRIC_PORTS must be 1 or 2, got ${FABRIC_PORTS}" >&2; exit 1 ;;
+esac
 
 log "Installing the mxl-k8s Helm chart"
 # Helm 3 installs charts/mxl-k8s/crds/ on first install automatically
@@ -258,6 +341,8 @@ helm upgrade --install mxl-k8s "${REPO_ROOT}/charts/mxl-k8s" \
   --set exporter.image.tag="$TAG" \
   --set exporter.enabled=true \
   ${MONITORING_SET[@]+"${MONITORING_SET[@]}"} \
+  ${MXLFS_SET[@]+"${MXLFS_SET[@]}"} \
+  ${FABRIC_SET[@]+"${FABRIC_SET[@]}"} \
   --wait --timeout="${ROLLOUT_TIMEOUT_SECS}s"
 
 apply_demo() {
@@ -265,7 +350,7 @@ apply_demo() {
   # the writer/receiver/reader manifests in ../../tcp-demo without
   # duplicating them under examples/kind/demo/.
   "${KUBECTL[@]}" kustomize --load-restrictor=LoadRestrictionsNone \
-      "${REPO_ROOT}/examples/kind/demo/" \
+      "${REPO_ROOT}/examples/kind/${DEMO_DIR}/" \
     | "${KUBECTL[@]}" apply -f -
 }
 

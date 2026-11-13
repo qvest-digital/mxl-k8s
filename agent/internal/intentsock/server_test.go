@@ -219,3 +219,48 @@ func TestServer_RunBindsAndServesOverRealUDS(t *testing.T) {
 		t.Fatal("Run did not return after ctx cancel")
 	}
 }
+
+// The wire contract between a shim and an agent of different releases.
+// Both ship independently -- the shim is copied into consumer pods and
+// outlives agent upgrades -- so each side must accept what the other
+// side's older or newer build sends.
+//
+// A shim newer than this agent may add fields to the request; an agent
+// that refused them would turn every open into ENOENT across a rolling
+// upgrade. The shim reads only "ok":true from the reply, so the reply
+// may grow as well, but must keep that key and value.
+func TestHandle_WireContract_AcrossVersions(t *testing.T) {
+	flowPath := `/run/mxl/domain/11111111-2222-3333-4444-555555555555.mxl-flow/flow_def.json`
+	cases := []struct {
+		name string
+		req  string
+	}{
+		{"shim before the event field", `{"path":"` + flowPath + `"}`},
+		{"shim with a field this agent does not know", `{"path":"` + flowPath + `","domain_id":"x","v":2}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := &fakeDispatcher{}
+			srv := &Server{Dispatcher: disp,
+				PeerPIDFn: func(net.Conn) (int32, error) { return 7, nil }}
+
+			out := runOneRequest(t, srv, tc.req+"\n")
+			assert.Contains(t, out, `"ok":true`,
+				"the shim matches this exact substring; anything else is ENOENT")
+			assert.Equal(t, flowPath, disp.lastCall().path)
+		})
+	}
+}
+
+// A refusal must come back as a reply, never as a dropped connection:
+// the shim maps both to ENOENT, but only a reply carries the reason
+// into the agent log and back to anyone reading the socket.
+func TestHandle_Refusal_IsAReplyWithoutOK(t *testing.T) {
+	disp := &fakeDispatcher{err: errors.New("in a domain mxl-k8s does not mirror")}
+	srv := &Server{Dispatcher: disp,
+		PeerPIDFn: func(net.Conn) (int32, error) { return 7, nil }}
+
+	out := runOneRequest(t, srv, `{"path":"/run/mxl/scratch/x.mxl-flow/flow_def.json"}`+"\n")
+	assert.NotContains(t, out, `"ok":true`)
+	assert.Contains(t, out, "does not mirror")
+}

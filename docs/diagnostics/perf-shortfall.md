@@ -23,7 +23,7 @@ go tool trace /tmp/gw.trace
 
 ### What to look for
 
-In `go tool trace`, sort goroutines by latency and look for the `runTransferLoop` goroutine (spawned at `gateway/internal/mirror/source.go:262`). Inspect blocking syscall durations near the cgo crossing into libmxl-fabrics. The `MakeProgressNonBlocking` call at `gateway/internal/mirror/source.go:579` is the cgo call site. The loop's outer ticker is set at `progressInterval = 2 * time.Millisecond` (see `gateway/internal/mirror/source.go:235-237`).
+In `go tool trace`, sort goroutines by latency and look for the `runTransferLoop` goroutines, one per mirror (`gateway/internal/mirror/source_transfer.go`). Inspect blocking syscall durations near the cgo crossing into libmxl-fabrics: `awaitTransfer` calls `MakeProgress` after every transfer until it completes. While nothing new is in the ring the loop polls the head every 2 ms.
 
 If `MakeProgress` median latency consistently exceeds 1 ms, the gateway hot-path is a suspect.
 
@@ -98,16 +98,13 @@ When you have the status code, file it as a comment on the `qvest-digital/go-mxl
 
 ### Source code
 
-- `gateway/internal/mirror/source.go:165-329` — `Reconcile` and the source-entry lifecycle
-- `gateway/internal/mirror/source.go:235-237` — `progressInterval` default
-- `gateway/internal/mirror/source.go:262` — `runTransferLoop` go statement
-- `gateway/internal/mirror/source.go:579` — `MakeProgress` error filter
-- `gateway/internal/mirror/source.go:585-590` — `isReaderAgedOut`
+- `gateway/internal/mirror/source.go` -- `Reconcile`, the source-entry lifecycle and `libmxlOpener.attach`, which starts each mirror's loop
+- `gateway/internal/mirror/source_transfer.go` -- `runTransferLoop`, `runSampleTransferLoop` and `awaitTransfer`
 
 ### Related issues
 
-- `qvest-digital/go-mxl#45` — Typed error for `fabrics.ErrNotReady` / `unrecognized status`
-- `qvest-digital/mediamtx#3` — mediamtx-mxl source does not re-attach after writer epoch change
+- `qvest-digital/go-mxl#45` -- Typed error for `fabrics.ErrNotReady` / `unrecognized status`
+- `qvest-digital/mediamtx#3` -- mediamtx-mxl source does not re-attach after writer epoch change
 
 ### Related chart values
 

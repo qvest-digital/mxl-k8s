@@ -1,5 +1,132 @@
 # Changelog
 
+## [1.1.0-rc.45](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.44...api/v1.1.0-rc.45) (2026-11-07)
+
+
+### Features
+
+* **agent:** add NUMA placement modes and the flow release loop ([c0efd3e](https://github.com/qvest-digital/mxl-k8s/commit/c0efd3e694533e23770c07d5c26abf64d1074340))
+* **api:** mirror the NUMA ioctls of the mxlfs uapi ([c0efd3e](https://github.com/qvest-digital/mxl-k8s/commit/c0efd3e694533e23770c07d5c26abf64d1074340))
+* **chart:** configure NUMA placement and its metrics ([c0efd3e](https://github.com/qvest-digital/mxl-k8s/commit/c0efd3e694533e23770c07d5c26abf64d1074340))
+* **exporter:** export the mxlfs NUMA counters ([c0efd3e](https://github.com/qvest-digital/mxl-k8s/commit/c0efd3e694533e23770c07d5c26abf64d1074340))
+* **gateway:** hold and place mirrored rings on the NICs' NUMA node ([c0efd3e](https://github.com/qvest-digital/mxl-k8s/commit/c0efd3e694533e23770c07d5c26abf64d1074340))
+
+## [1.1.0-rc.44](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.43...api/v1.1.0-rc.44) (2026-11-06)
+
+
+### Features
+
+* **api:** describe fabric ports, flow rates and mirror placement ([#423](https://github.com/qvest-digital/mxl-k8s/issues/423)) ([f7ff416](https://github.com/qvest-digital/mxl-k8s/commit/f7ff41606c18eaf738e6fb4b0e58aedf65aa6ae0))
+
+## [1.1.0-rc.43](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.25...api/v1.1.0-rc.43) (2026-11-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* **gateway:** the gateway rejects --pacing-fraction, --pacing-chunks and --grains-in-flight, and the chart drops gateway.flags.pacingFraction, gateway.flags.pacingChunks and gateway.flags.grainsInFlight. The gateway no longer exports mxl_gateway_mirror_transfers_posted_total, mxl_gateway_mirror_transfers_in_flight, mxl_gateway_mirror_transfers_torn_total and mxl_gateway_mirror_accounting_errors_total, and mxl_gateway_mirror_transfers_total drops the outcomes failed and skipped. mxl_gateway_mirror_source_unsent_grains_total no longer reports reason="invalid": an invalid grain is sent as its header, and the target's mxl_gateway_mirror_target_invalid_grains_total{reason="invalid_from_source"} counts it. During a rolling upgrade from 1.1.0-rc.42, audio batches from a source gateway not yet upgraded into an upgraded target are rejected when the producer's sync hint is below 10 ms of samples, until both gateways run this version.
+
+### Features
+
+* **api:** add batch size hints to MxlFlow and MxlFlowMirror status ([#418](https://github.com/qvest-digital/mxl-k8s/issues/418)) ([6bd511b](https://github.com/qvest-digital/mxl-k8s/commit/6bd511bc2bb217333a9e0609a5b5f68a8ab3af17))
+* **gateway:** create a mirror's copy with the producer's batch hints ([#415](https://github.com/qvest-digital/mxl-k8s/issues/415)) ([2fc6b5e](https://github.com/qvest-digital/mxl-k8s/commit/2fc6b5ef05e9c4f82b61b0c1602890d0d8232df7))
+
+
+### Bug Fixes
+
+* **gateway:** keep 64 receives posted at every target ([#415](https://github.com/qvest-digital/mxl-k8s/issues/415)) ([2fc6b5e](https://github.com/qvest-digital/mxl-k8s/commit/2fc6b5ef05e9c4f82b61b0c1602890d0d8232df7))
+* **gateway:** poll the target again as soon as a blocking read times out ([#415](https://github.com/qvest-digital/mxl-k8s/issues/415)) ([2fc6b5e](https://github.com/qvest-digital/mxl-k8s/commit/2fc6b5ef05e9c4f82b61b0c1602890d0d8232df7))
+
+
+### Code Refactoring
+
+* **gateway:** one initiator per mirror, one transfer in flight ([#415](https://github.com/qvest-digital/mxl-k8s/issues/415)) ([2fc6b5e](https://github.com/qvest-digital/mxl-k8s/commit/2fc6b5ef05e9c4f82b61b0c1602890d0d8232df7))
+
+## [1.1.0-rc.25](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.24...api/v1.1.0-rc.25) (2026-10-28)
+
+
+### Bug Fixes
+
+* **gateway:** stop setting an RC target up again on a source re-add ([#396](https://github.com/qvest-digital/mxl-k8s/issues/396)) ([5bb09b3](https://github.com/qvest-digital/mxl-k8s/commit/5bb09b30e513957528e50c50baa5c687d2eed121))
+
+## [1.1.0-rc.24](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.23...api/v1.1.0-rc.24) (2026-10-28)
+
+
+### Features
+
+* **api:** add MxlFlowMirror status.targetAddedAt ([9806ee9](https://github.com/qvest-digital/mxl-k8s/commit/9806ee9f420c0e2b98a9b0b38ee0321284b19929))
+* **operator:** report a redundancy set's output down with its gateway ([#382](https://github.com/qvest-digital/mxl-k8s/issues/382)) ([1bad348](https://github.com/qvest-digital/mxl-k8s/commit/1bad348680048d58548ae98e933e6617b41c750e))
+
+
+### Bug Fixes
+
+* **gateway:** log the times a source re-add was judged on ([#386](https://github.com/qvest-digital/mxl-k8s/issues/386)) ([1156128](https://github.com/qvest-digital/mxl-k8s/commit/11561280ea901ebabefc75a89c62d3921d579d4e))
+* **gateway:** set an RC target up again when its source reconnects ([9806ee9](https://github.com/qvest-digital/mxl-k8s/commit/9806ee9f420c0e2b98a9b0b38ee0321284b19929))
+
+## [1.1.0-rc.23](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.22...api/v1.1.0-rc.23) (2026-10-26)
+
+
+### Features
+
+* report a redundancy set member that stops advancing ([#371](https://github.com/qvest-digital/mxl-k8s/issues/371)) ([0715ca0](https://github.com/qvest-digital/mxl-k8s/commit/0715ca0aef8b63b045a7aab73d2cd0f97b0ed31a))
+
+## [1.1.0-rc.22](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.21...api/v1.1.0-rc.22) (2026-10-25)
+
+
+### Features
+
+* serve MXL domains from mxlfs behind mxlfs.enabled, with redundancy sets ([5aa764d](https://github.com/qvest-digital/mxl-k8s/commit/5aa764dad4aa82b5ed86c8225a0648479f185e6b))
+
+
+### Bug Fixes
+
+* **agent:** create an MxlFlow only from the Origin's copy ([5aa764d](https://github.com/qvest-digital/mxl-k8s/commit/5aa764dad4aa82b5ed86c8225a0648479f185e6b))
+* **agent:** refresh a flow's definition before claiming its Origin ([5aa764d](https://github.com/qvest-digital/mxl-k8s/commit/5aa764dad4aa82b5ed86c8225a0648479f185e6b))
+* **chart:** render no argument for an empty string flag ([5aa764d](https://github.com/qvest-digital/mxl-k8s/commit/5aa764dad4aa82b5ed86c8225a0648479f185e6b))
+* **gateway:** mirror an empty data grain as an empty grain ([5aa764d](https://github.com/qvest-digital/mxl-k8s/commit/5aa764dad4aa82b5ed86c8225a0648479f185e6b))
+* **gateway:** mirror ANC data grains by their committed length ([5aa764d](https://github.com/qvest-digital/mxl-k8s/commit/5aa764dad4aa82b5ed86c8225a0648479f185e6b))
+
+## [1.1.0-rc.21](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.20...api/v1.1.0-rc.21) (2026-09-24)
+
+
+### Features
+
+* **agent:** mirror another domain only between multi-domain gateways ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **agent:** track and mirror the flows of every MxlDomain on the node ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **api:** name flows, mirrors and leases by domain and id ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **api:** place a domain without a directory at domains/&lt;id&gt; ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **chart:** mount domains/ in the gateway and make domain directories optional ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **gateway:** mirror a flow in the MxlDomain its mirror names ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **operator:** key receivers, mirrors and leases by domain and id ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+
+
+### Bug Fixes
+
+* **agent:** claim origin and resolve the primary domain for every path ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **agent:** refuse a primary domain path inside domains/ ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **agent:** stop a fanotify watcher that has nothing to read ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **api:** check the Origin Lease of the flow in its own domain ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **api:** spell the primary domain one way only and keep MxlDomain names DNS labels ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+* **gateway:** label mirror and location metrics with the domain ([f51382a](https://github.com/qvest-digital/mxl-k8s/commit/f51382ab8ff8a66f729fe45426aab8f1713109d6))
+
+## [1.1.0-rc.20](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.15...api/v1.1.0-rc.20) (2026-09-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **api:** MxlDomain spec.nodeName and spec.hostPath, and the top-level status capacity, free-bytes, fanotify and lastSeen fields, are gone. spec.id and spec.directory are required. Objects in the old per-node shape are deleted by the operator.
+
+### Features
+
+* **agent:** materialise every MxlDomain selected for the node ([b1ac9ec](https://github.com/qvest-digital/mxl-k8s/commit/b1ac9eca2bb1ce90dedb8c5297d7778ab9161686))
+* **api:** make MxlDomain the domain and write its identity to nodes ([b1ac9ec](https://github.com/qvest-digital/mxl-k8s/commit/b1ac9eca2bb1ce90dedb8c5297d7778ab9161686))
+* **chart:** create MxlDomains from values and keep their ids ([b1ac9ec](https://github.com/qvest-digital/mxl-k8s/commit/b1ac9eca2bb1ce90dedb8c5297d7778ab9161686))
+* **operator:** summarise MxlDomain nodes and drop the per-node shape ([b1ac9ec](https://github.com/qvest-digital/mxl-k8s/commit/b1ac9eca2bb1ce90dedb8c5297d7778ab9161686))
+
+
+### Bug Fixes
+
+* **agent:** say why an intent outside the mirrored domain is refused ([b1ac9ec](https://github.com/qvest-digital/mxl-k8s/commit/b1ac9eca2bb1ce90dedb8c5297d7778ab9161686))
+
 ## [1.0.0-rc.15](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.0.0-rc.14...api/v1.0.0-rc.15) (2026-09-06)
 
 

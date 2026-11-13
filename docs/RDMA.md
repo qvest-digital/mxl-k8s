@@ -18,17 +18,10 @@ gateway which of a node's NICs the fabric is.
   below.
 - `rdma-core` userspace (provides `libibverbs`, `librdmacm`,
   `ibstat`, `rdma`, ...). Most distros' default package set.
-- `RLIMIT_MEMLOCK` set to `infinity` or at least multiple GiB.
-  Common patterns:
-  - `/etc/security/limits.d/rdma.conf`:
-    ```
-    *       hard    memlock         unlimited
-    *       soft    memlock         unlimited
-    ```
-  - For containerd / cri-o, set `default_ulimits` or pass
-    `LimitMEMLOCK=infinity` in the runtime's systemd unit.
-  - The mxl-fabrics-gateway pod also asks for `SYS_RESOURCE` so
-    it can raise its own limit if the host default is low.
+- Nothing for `RLIMIT_MEMLOCK`. A memory registration pins pages
+  against that limit only for a process without `CAP_IPC_LOCK`, and
+  the gateway runs with it, so the inherited 8 MiB default is not a
+  ceiling for the gateway.
 - `/dev/infiniband/{rdma_cm,uverbs0,...}` present and readable by
   the container user. The gateway DaemonSet bind-mounts
   `/dev/infiniband` into the pod.
@@ -40,10 +33,9 @@ gateway which of a node's NICs the fabric is.
 
 ### Per-pod
 
-- `securityContext.capabilities.add: ["IPC_LOCK", "SYS_RESOURCE"]`
-  on the gateway container. `IPC_LOCK` lets libmxl call `mlock(2)`
-  on the tmpfs grain pages; `SYS_RESOURCE` lets the process raise
-  its own `RLIMIT_MEMLOCK` when the host default is low.
+- `securityContext.capabilities.add: ["IPC_LOCK"]` on the gateway
+  container, which exempts the provider's memory registrations from
+  `RLIMIT_MEMLOCK`.
 - Bind-mount `/dev/infiniband` from the host.
 - Optional knobs the gateway forwards into libfabric via env:
   - `FI_VERBS_IFACE=<ifname>`: pin verbs to a specific interface
@@ -145,7 +137,7 @@ host setup is AWS-specific.
   (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-start.html);
   this lays down the `efa` kernel module and the userspace
   libfabric EFA provider plugin.
-- `RLIMIT_MEMLOCK` as above.
+- Nothing for `RLIMIT_MEMLOCK`, as above.
 - `/dev/infiniband/uverbs0` is present once the module is loaded;
   no PFC or DSCP knobs to fuss with (EFA is its own protocol on
   the Nitro fabric).
@@ -162,8 +154,8 @@ host setup is AWS-specific.
 
 ### Per-pod
 
-- `securityContext.capabilities.add: ["IPC_LOCK", "SYS_RESOURCE"]`,
-  same reason as verbs.
+- `securityContext.capabilities.add: ["IPC_LOCK"]`, same reason as
+  verbs.
 - Bind-mount `/dev/infiniband` from the host.
 - Nothing on the gateway DaemonSet: the default `--providers=any`
   advertises efa on the nodes that have an adapter and leaves it
@@ -172,6 +164,13 @@ host setup is AWS-specific.
 - `MxlFlowMirror.spec.provider: efa` (or
   `MxlReceiver.spec.provider: efa`) to pin a mirror rather than
   letting `selection.Resolve` pick from what both nodes report.
+- The gateway image sets `FI_EFA_ENABLE_SHM_TRANSFER=0`: every mirror
+  crosses nodes, so the shared-memory path the provider would open
+  beside each endpoint carries nothing.
+- EFA delivers the RMA writes of one initiator in any order
+  (`fi_info -p efa -v` reports no write-after-write ordering). The
+  gateway sends each grain as one transfer, and libmxl-fabrics sends
+  each audio transfer as a single write.
 - Multus is *not* the right tool for EFA pods -- EFA is exposed
   via the host's network namespace. `hostNetwork: true` on the
   gateway DaemonSet (as in the rdma-demo example) keeps the
@@ -345,6 +344,270 @@ A node that ends up advertising nothing logs the count of excluded
 interfaces and the first exclusion with its reason; the full list
 appears with `gateway.flags.zapLogLevel: debug`.
 
+## Placing mirrors on fabric interfaces
+
+A node whose selection keeps more than one interface for a provider
+carries every one of them as a port of its own: with `bindAddress:
+""` and the fabric scoped by `fabricCidr` or `fabricDevice`, each
+selected interface is advertised, and the operator chooses for every
+mirror the interface its source leaves on and the one its target
+arrives on. The choice is `spec.placement` on the MxlFlowMirror, and
+what the two gateways bound is `status.sourceInterface` and
+`status.targetInterface`. `kubectl get mxlflowmirrors` shows the
+pair and the `Placed` reason; `-o wide` adds the bound pair.
+
+libmxl-fabrics binds a target or initiator to the address of the
+interface its setup is handed, so a mirror's endpoints bind the
+placed addresses.
+
+### Several ports in one subnet
+
+The ports of a node can all sit in the fabric's one subnet, each with
+an address of its own, so every port reaches every other without a
+router. The host then has two connected routes for one prefix and
+several interfaces that could answer ARP for each address, and needs,
+per fabric port:
+
+| Setting | Value | Effect |
+| --- | --- | --- |
+| `net.ipv4.conf.<port>.arp_ignore` | 1 | A port answers ARP only for its own address, so peers learn each address on the port that holds it. |
+| `net.ipv4.conf.<port>.arp_announce` | 2 | ARP requests leaving a port carry that port's address. |
+| `net.ipv4.conf.<port>.rp_filter` | 2, or 0 on the port and on `all` | The kernel applies the larger of `conf/all` and the port's value, so 0 on the port alone leaves a strict `all` in force. Strict (1) drops a packet whose source the routing table would reach through another port, which in one subnet is the normal case: both ports hold a connected route to it and only one is preferred. Loose (2) drops only a source with no route at all. |
+| A policy rule per port address | `from <address> lookup <table>`, the table holding the subnet route on that port | A socket bound to a port's address leaves on that port rather than on the first matching connected route. |
+
+`verbs` and `efa` connections set up through RDMA CM are pinned to
+the bound port by the kernel: binding the source address records its
+interface, and the route lookup is restricted to it. `tcp` sockets are
+not, which is what the policy rules cover. The ARP settings apply to
+every provider.
+
+Ports in separate subnets need none of the policy rules, since each
+subnet is a connected route on its own port, but only reach the peers'
+ports in the same subnet. `--placement-pairing` keeps pairs within one
+subnet when the nodes have them.
+
+A node with one interface per provider, or one bound to
+`--bind-address`, has one candidate, and its mirrors bind it exactly
+as without placement.
+
+### What is planned against
+
+Load is accounted per port: the device the provider names for an
+interface, or its address where it names none. Two addresses of one
+device, an IPv4 and an IPv6 address or two addresses on one
+link, share that port's capacity. The device is named per provider
+(the netdev for `tcp`, the RDMA device for `verbs`), so mirrors of two
+providers on one NIC are accounted on two ports. Every port is planned
+at a capacity per direction, sending and receiving counted separately:
+
+| Source | Chart value | Meaning |
+| --- | --- | --- |
+| Provider link speed | - | Default capacity. An interface reporting none is never counted full. |
+| `--fabric-port-capacity` | `gateway.flags.fabricPortCapacity` | `<match>=<quantity>` overrides, match a device name, an address or a CIDR; first match wins. |
+| `--fabric-shared-budget` | `gateway.flags.fabricSharedBudget` | `<scope>=<quantity>[:<mode>]` caps shared by several interfaces. Scope `nic` makes one per PCI device over its functions, `host` one over every interface. Mode `ingress` (default) counts mirrors received, `egress` mirrors sent, `combined` both against one cap. Off unless set. |
+| `--fabric-max-utilization` | `gateway.flags.fabricMaxUtilization` | Percent of a capacity this node class may commit; 0 uses the operator's. |
+| `--placement-max-utilization` | `operator.flags.placementMaxUtilization` | Default percent, 80. |
+
+Grains leave as whole-grain bursts at line rate, so a receiver can
+overflow while its average load is below the link speed; the
+utilization ceiling is the headroom kept for that.
+
+A mirror is charged its flow's `status.bitsPerSecond`, which the
+gateway on the flow's origin node reads off libmxl (grain size times
+grain rate, or sample width times channels times sample rate), plus
+`--placement-protocol-overhead` percent (default 5). A flow that has
+not published a rate within `--placement-demand-wait` (default 5s) of
+the mirror's creation is charged `--placement-provisional-demand`
+(default 0, placing by mirror count alone), and charged its real rate
+once it publishes one. `MxlNodeCapabilities` shows each interface's
+`capacityBitsPerSecond`, `subnet`, `budgets` and `numaNode`, and the
+node's `budgets`.
+
+A data flow's grain size is the maximum its definition declares, so its
+rate is an upper bound on what it carries.
+
+### How a pair is chosen
+
+Candidates are every pair of a source interface and a target
+interface for the mirror's provider whose links are not down. With
+`--placement-pairing=prefer-same-subnet` (default) only pairs within
+one subnet are kept when any exists; `same-subnet` keeps only those,
+`any` keeps every pair. Link-local addresses are left out whenever
+the node offers another: every node's link-local addresses share one
+prefix and would otherwise read as a subnet of their own. Among them:
+
+1. a pair with room for the demand on both interfaces and every
+   budget they draw on beats one without;
+2. for a member of an MxlFlowRedundancySet, a pair sharing no
+   port with the set's other members arriving on the same node
+   beats one sharing only a sending port, which beats one
+   sharing a receiving port;
+3. then the most headroom left on the tighter side, the least load,
+   the fewest mirrors and the lowest addresses.
+
+A mirror no pair has room for is placed and reported `Overcommitted`
+with `--placement-overcommit=place` (default), on the pair the same
+order picks among the pairs without room: disjointness from its
+redundancy siblings first, then the most headroom, which is negative.
+With `hold` it is left unplaced, not set up, and reported `Held`. A set
+whose members share a port reports `PathsDisjoint=False` naming it.
+
+### When a placement changes
+
+A placement is not moved because load changed, and there is no
+automatic rebalance. A mirror is placed again only when one of its
+two interfaces is no longer advertised for its provider (link down,
+deselected, capability change, as the gateway's next probe reports
+it; see `gateway.flags.probePeriod`), when its provider or source node
+changes to one the interfaces do not belong to, or when
+`spec.placement` is cleared by hand. A placement written by hand is
+kept while both addresses are advertised. Its gateways then rebuild
+the side whose interface changed.
+
+The operator places a mirror within its own reconcile, before the
+target side opens. A target gateway on a node offering more than one
+interface waits up to `gateway.flags.placementWait` (default 10s)
+after the mirror's creation for a placement, and then binds the first
+interface as an unplaced mirror does; that bound only matters when
+the operator is down or slow. A mirror its gateways bound before
+placement existed keeps the interfaces it is bound to.
+
+### Metrics
+
+Series per metric are bounded as the last column says: N is the nodes
+reporting capabilities, P the ports a node reports, L the links under
+them, B a node's shared budgets, M the MxlFlowMirrors, S the
+MxlFlowRedundancySets.
+
+Operator, placement as committed (the leader's replica only):
+
+| Metric | Labels | Series |
+| --- | --- | --- |
+| `mxl_operator_port_committed_bits_per_second` | `node`, `port`, `direction` | N x P x 2 |
+| `mxl_operator_port_mirrors` | `node`, `port`, `direction` | N x P x 2 |
+| `mxl_operator_port_capacity_bits_per_second` | `node`, `port` | N x P; absent while capacity is unknown |
+| `mxl_operator_port_plannable_bits_per_second` | `node`, `port` | N x P; capacity times the node's ceiling |
+| `mxl_operator_node_max_utilization_ratio` | `node` | N; the node's own ceiling, or the operator's |
+| `mxl_operator_budget_capacity_bits_per_second`, `_plannable_bits_per_second` | `node`, `budget`, `scope`, `mode` | N x B |
+| `mxl_operator_budget_committed_bits_per_second` | `node`, `budget`, `scope`, `mode`, `direction` | N x B x 2 |
+| `mxl_operator_placement_max_utilization_ratio`, `_protocol_overhead_ratio`, `_provisional_demand_bits_per_second`, `_demand_wait_seconds` | | 1 each; the operator's flags |
+| `mxl_operator_placement_policy_info` | `overcommit`, `pairing` | 1 |
+| `mxl_operator_mirrors` | `phase`, `placement` | phases x Placed reasons; `None` where a mirror has neither yet |
+| `mxl_operator_mirror_demand_bits_per_second` | `namespace`, `mirror`, `domain`, `flow_id`, `source_node`, `target_node`, `provider` | M |
+| `mxl_operator_mirror_placement_info` | the above, `source_port`, `target_port`, `placement`, `phase` | M |
+| `mxl_operator_redundancyset_paths_disjoint` | `redundancyset`, `reason` | S |
+| `mxl_operator_mirror_placement_seconds` | | histogram: time from a mirror's creation to its first placement |
+
+Gateway, per node:
+
+| Metric | Labels | Series |
+| --- | --- | --- |
+| `mxl_gateway_fabric_port_info` | `node`, `provider`, `port`, `address`, `link`, `netdev`, `rdma_device`, `rdma_port`, `pci_address`, `numa_node` | one per published interface |
+| `mxl_gateway_fabric_max_utilization_ratio` | `node` | 1; absent when the gateway leaves it to the operator |
+| `mxl_gateway_fabric_budget_bits_per_second` | `node`, `budget`, `scope`, `mode` | B |
+| `mxl_gateway_link_received_bytes_total`, `_transmitted_bytes_total` | `node`, `link`, `source` | L x 3 |
+| `mxl_gateway_link_up`, `mxl_gateway_link_speed_bits_per_second`, `mxl_gateway_link_carrier_changes_total`, `mxl_gateway_link_xmit_wait_total` | `node`, `link` | L |
+| `mxl_gateway_link_errors_total` | `node`, `link`, `source`, `counter` | L x 15 |
+| `mxl_gateway_link_pause_frames_total` | `node`, `link`, `direction` | L x 2 |
+| `mxl_gateway_interface_transmitted_bytes_total`, `_received_bytes_total` | `node`, `interface` | addresses; bytes the live mirrors moved |
+| `mxl_gateway_interface_mirrors` | `node`, `interface`, `direction` | addresses x 2; mirrors bound |
+
+A port is what placement accounts load on: the device the provider
+names, or the address. A link is the physical port under it: the
+netdev, or the RDMA device where there is none. The tcp and verbs ports
+of one NIC are two ports on one link. Only interfaces backed by a
+device are links; a bridge, bond or veth has its info series with an
+empty `link` and no counters. An RDMA device over a bond (RoCE link
+aggregation) is the exception: its port names the bond as its netdev,
+so the link is the bond, with the RDMA device's counters and the bond's
+netdev statistics but no `mac` source, since a bond reports no MAC
+statistics. The member ports are not exported.
+
+A link's bytes are exported per `source`, because no one kernel
+interface counts the same traffic on every driver:
+
+| `source` | Kernel interface | Counts |
+| --- | --- | --- |
+| `mac` | ethtool netlink standard statistics, group `eth-mac` (`OctetsReceivedOK`, `OctetsTransmittedOK`) | Everything the MAC sent or received: the wire |
+| `rdma` | `/sys/class/infiniband/<dev>/ports/<n>/counters/port_{rcv,xmit}_data` times 4, or the port's `hw_counters/{rx,tx}_bytes` where the driver has no port counters | RDMA traffic only |
+| `netdev` | `/sys/class/net/<if>/statistics/{rx,tx}_bytes` | The kernel network stack's traffic; on some drivers RDMA traffic too, on others not |
+
+A source the kernel or driver does not report is absent, never zero.
+The dashboard reads `mac` where a link has it and otherwise the larger
+of `rdma` and `netdev`, a lower bound on the wire. `errors` are the
+netdev drop and error statistics, the RDMA port error counters
+(`port_rcv_errors`, `port_xmit_discards`, `symbol_error`,
+`link_downed`, ...) and the MAC's `FrameCheckSequenceErrors`. Pause
+frames are 802.3x pause only; per-priority flow control is not in the
+standard statistics. With a `gateway.variants` entry, the chart's
+ServiceMonitor labels every gateway series with `variant`.
+
+#### Replication: where each unit ends
+
+The gateway records every mirror through
+[libmxl-monitoring](https://github.com/marquies/libmxl-monitoring)'s
+replication roles: one handle per mirror on the node that sources it
+(`mxl_gateway_source_*`) and one on the node that targets it
+(`mxl_gateway_target_*`). The `flow` label is the mirror,
+`<namespace>/<name>`, the same on both nodes; it joins
+`mxl_operator_mirror_placement_info` through
+`label_join(..., "flow", "/", "namespace", "mirror")`. Units are grains
+for a discrete flow and samples for a continuous one. The families,
+their labels and result values are the library's, with `node` added.
+
+What the source transfer loop counts, with the library's outcomes as it
+defines them:
+
+| Series | Unit counted |
+| --- | --- |
+| `mxl_gateway_source_reads_total{result="ok"}` | read complete and offered to the target, recorded once its transfer is no longer outstanding |
+| `mxl_gateway_source_reads_total{result="invalid"}` | read flagged invalid: the writer left it incomplete or jumped over it, and only its header is sent |
+| `mxl_gateway_source_reads_total{result="too_late"}` | a read that came back too late: the ring had overtaken the loop |
+| `mxl_gateway_source_skipped_total` | units jumped over after a read that came back too late; resync jumps are not in it |
+| `mxl_gateway_source_reads_total{result="too_early"}` | a grain still not there a grace period after its media timestamp |
+
+The loop reads only the grains it sends. A resync, where it trails the
+head by more than 4 grains and jumps to it, reads nothing and records
+nothing here; `mxl_gateway_mirror_source_unsent_grains_total{reason="resync"}`
+counts those grains. For the grains a loop jumps over, a grain the
+writer never completed is not told apart from one the copy lost.
+Samples of a continuous flow are read by libmxl-fabrics inside the
+transfer, so their source handle counts OK reads only. A unit's
+arrival latency includes its transfer.
+
+On the target, `mxl_gateway_target_writes_total{result="ok"}` counts
+units committed complete, including an arrival a second mirror of the
+flow committed first, and `mxl_gateway_target_invalid_input_total`
+arrivals committed invalid (`invalid` from the source, `missing` for a
+slot a later write overtook).
+
+These series give no copy-loss figure. The units skipped after a
+too-late read span whatever the ring held, grains the writer jumped
+over included; a commit failure, a target that restarted and a source
+that restarted each leave a source read without a target write, or no
+count at all.
+
+`mxl_gateway_source_reads_total{result="too_early"}` counts a grain the
+gateway still waited for a grace period (one grain, or one batch of
+samples, plus 50 ms) after its media timestamp: the writer's lateness.
+`mxl_gateway_source_arrival_seconds` and
+`mxl_gateway_target_commit_seconds` are the library's latency
+histograms against media timestamps, so source and target compare
+directly. The library's other families (`flow_state`,
+`flow_delivering`, `open_failures_total`, `opens_total`, `lost_total`,
+`age_seconds`, `stalls_total`, `flow_info`) are exported as it renders
+them.
+
+What became of a transfer itself (completed in time, late, lost with
+its target) is not in the library's model; `mxl_gateway_mirror_transfers_total`
+above keeps counting it per batch.
+
+Series per mirror and role are fixed: 25 to 27 counters and gauges
+and one histogram of 20 series (17 bounds, +Inf, sum, count).
+
+Utilization is the committed or measured rate over
+`capacityBitsPerSecond`, or over the plannable gauge.
+
 ## Clusters whose nodes differ
 
 Everything above assumes every node can do the same thing. When they
@@ -498,8 +761,9 @@ covering a verbs class, an EFA class, and a tcp catch-all together.
 
 ### The hostPath mount
 
-`rdma.enabled` adds `IPC_LOCK` and `SYS_RESOURCE`, which libmxl needs
-to pin shm pages, and is independent of how the device is reached.
+`rdma.enabled` adds `IPC_LOCK`, which exempts the providers' memory
+registrations from `RLIMIT_MEMLOCK`, and is independent of how the
+device is reached.
 `rdma.mountInfiniband` controls the `/dev/infiniband` bind mount
 separately, because a node whose devices come from a device plugin
 wants the capabilities without the mount.
@@ -526,6 +790,6 @@ those nodes belong in their own variant.
 | Two gateway pods on one node | Two `gateway.variants` entries match the same node. Their selectors have to be complementary; both pods open the same domain and overwrite each other's `MxlNodeCapabilities`. |
 | `RDMA_CM_EVENT_REJECTED` in gateway logs | Both ends agree on the provider but the wire-side handshake fails. For RoCEv2 this is almost always PFC/DSCP misconfiguration on the switches. |
 | Throughput far below NIC line rate | PFC pauses too aggressive or wrong traffic class. Use `mlnx_qos`, `ethtool -S` counters. |
-| `cannot allocate memory` from libmxl-fabrics | `RLIMIT_MEMLOCK` too low. Bump the host default or rely on the gateway's `SYS_RESOURCE` cap. |
+| `cannot allocate memory` from libmxl-fabrics | The gateway runs without `IPC_LOCK`, so its registrations count against `RLIMIT_MEMLOCK`. Set `rdma.enabled`. |
 | Verbs fine within a node, fails across | RoCE traffic isn't getting through. Check `ip link`, `ip route`, and the underlying VLAN/MTU/PFC. |
 | EFA endpoint setup fails | EFA security group rule missing. EFA traffic flows between instances *only* when an inbound rule allowing all traffic from the same SG is in place. |

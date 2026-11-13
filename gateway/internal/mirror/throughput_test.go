@@ -3,12 +3,16 @@ package mirror
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/qvest-digital/go-mxl/fabrics"
+	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
 func TestThroughputCollectorReportsBothDirections(t *testing.T) {
@@ -31,13 +35,43 @@ func TestThroughputCollectorReportsBothDirections(t *testing.T) {
 	expected := `
 # HELP mxl_gateway_mirror_received_bytes_total Payload bytes committed to the local flow for a mirror this node is the target of.
 # TYPE mxl_gateway_mirror_received_bytes_total counter
-mxl_gateway_mirror_received_bytes_total{flow_id="flow-b",node="n01",peer_node="n03",provider="tcp"} 4096
-# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes handed to the fabric for a mirror this node is the source of.
+mxl_gateway_mirror_received_bytes_total{domain="",flow_id="flow-b",node="n01",peer_node="n03",provider="tcp"} 4096
+# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes of completed transfers for a mirror this node is the source of.
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
-mxl_gateway_mirror_transmitted_bytes_total{flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 5529600
+mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 5529600
 `
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(expected),
 		"mxl_gateway_mirror_received_bytes_total", "mxl_gateway_mirror_transmitted_bytes_total"))
+}
+
+// The source sends an invalid grain as its header, so only the target
+// counts invalid grains: the ones it committed invalid, by reason.
+func TestThroughputCollectorReportsInvalidGrains(t *testing.T) {
+	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
+	sent := &sourceEntry{shared: testShared("flow-a", fabrics.ProviderVerbs), peerNode: "n02"}
+	src.sources[types.NamespacedName{Namespace: "p", Name: "a"}] = sent
+
+	tgt := &TargetReconciler{targets: map[types.NamespacedName]*targetEntry{}}
+	got := &targetEntry{flowID: "flow-b", peerNode: "n03", provider: fabrics.ProviderVerbs}
+	got.recordInvalid(invalidFromSource)
+	got.recordInvalid(invalidIndexMismatch)
+	got.recordInvalid(invalidIndexMismatch)
+	got.recordInvalid("")
+	tgt.targets[types.NamespacedName{Namespace: "p", Name: "b"}] = got
+
+	c := &ThroughputCollector{NodeName: "n01", Source: src, Target: tgt}
+	expected := `
+# HELP mxl_gateway_mirror_source_unsent_grains_total Grains the source half did not offer to the initiator, by reason: resync (the loop fell more than a few grains behind the head and resumed at it) or aged_out (the producer had reused the slot). Each one is a grain no target receives. An invalid grain is not counted here: its header is offered, and the target commits it invalid.
+# TYPE mxl_gateway_mirror_source_unsent_grains_total counter
+mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs",reason="aged_out"} 0
+mxl_gateway_mirror_source_unsent_grains_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs",reason="resync"} 0
+# HELP mxl_gateway_mirror_target_invalid_grains_total Arrived grains the target half committed invalid: flagged invalid at the source (invalid_from_source), or whose slot header names another index than the one committed, a later write into the slot having landed (index_mismatch). The commit rewrites that header, so the later grain is flagged invalid too, not served.
+# TYPE mxl_gateway_mirror_target_invalid_grains_total counter
+mxl_gateway_mirror_target_invalid_grains_total{domain="",flow_id="flow-b",node="n01",peer_node="n03",provider="verbs",reason="index_mismatch"} 2
+mxl_gateway_mirror_target_invalid_grains_total{domain="",flow_id="flow-b",node="n01",peer_node="n03",provider="verbs",reason="invalid_from_source"} 1
+`
+	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(expected),
+		"mxl_gateway_mirror_source_unsent_grains_total", "mxl_gateway_mirror_target_invalid_grains_total"))
 }
 
 func TestThroughputCollectorForgetsClosedMirrors(t *testing.T) {
@@ -76,10 +110,10 @@ func TestThroughputCollectorSurvivesOneFlowMirroredTwice(t *testing.T) {
 	}
 	c := &ThroughputCollector{NodeName: "n01", Source: src}
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(`
-# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes handed to the fabric for a mirror this node is the source of.
+# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes of completed transfers for a mirror this node is the source of.
 # TYPE mxl_gateway_mirror_transmitted_bytes_total counter
-mxl_gateway_mirror_transmitted_bytes_total{flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
-mxl_gateway_mirror_transmitted_bytes_total{flow_id="flow-a",node="n01",peer_node="n03",provider="verbs"} 1000
+mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
+mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n03",provider="verbs"} 1000
 `), "mxl_gateway_mirror_transmitted_bytes_total"),
 		"one flow mirrored to two peers must yield two distinct series")
 
@@ -107,6 +141,126 @@ func TestThroughputCollectorReportsSkippedSamples(t *testing.T) {
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(`
 # HELP mxl_gateway_mirror_skipped_samples_total Samples the source half advanced past without sending, having left the readable window. The target's head still moves over them, so each is published as stale ring content.
 # TYPE mxl_gateway_mirror_skipped_samples_total counter
-mxl_gateway_mirror_skipped_samples_total{flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 19200
+mxl_gateway_mirror_skipped_samples_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 19200
 `), "mxl_gateway_mirror_skipped_samples_total"))
+}
+
+// The same flow id in two domains is two flows. Mirrored to the same peer
+// they must be two series; folded into one, a sc dashboard would read the
+// sum as one flow's rate.
+func TestThroughputCollectorSeparatesDomains(t *testing.T) {
+	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
+	for _, domain := range []string{"", "studio"} {
+		e := &sourceEntry{
+			shared:   &sharedSource{key: sourceKey{domain: domain, flowID: "flow-a", provider: fabrics.ProviderVerbs}},
+			peerNode: "n02",
+		}
+		e.bytes.Store(1000)
+		src.sources[types.NamespacedName{Namespace: "p", Name: domain + "flow-a"}] = e
+	}
+	c := &ThroughputCollector{NodeName: "n01", Source: src}
+	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(`
+# HELP mxl_gateway_mirror_transmitted_bytes_total Payload bytes of completed transfers for a mirror this node is the source of.
+# TYPE mxl_gateway_mirror_transmitted_bytes_total counter
+mxl_gateway_mirror_transmitted_bytes_total{domain="",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
+mxl_gateway_mirror_transmitted_bytes_total{domain="studio",flow_id="flow-a",node="n01",peer_node="n02",provider="verbs"} 1000
+`), "mxl_gateway_mirror_transmitted_bytes_total"))
+}
+
+// A Lease or MxlFlow event in one domain looks mirrors up by this index;
+// keyed by the bare id it would also wake, and judge, the mirrors of the
+// same id in another domain.
+func TestIndexMirrorByFlowCarriesTheDomain(t *testing.T) {
+	m := func(domain string) *mxlv1alpha1.MxlFlowMirror {
+		return &mxlv1alpha1.MxlFlowMirror{Spec: mxlv1alpha1.MxlFlowMirrorSpec{FlowID: "flow-a", Domain: domain}}
+	}
+	require.Equal(t, []string{"flow-a"}, indexMirrorByFlow(m("")))
+	require.Equal(t, []string{"studio.flow-a"}, indexMirrorByFlow(m("studio")))
+}
+
+// Each transfer is counted once, under one outcome. Lag carries its
+// unit in its name, because a grain and a sample are not the same
+// distance.
+func TestThroughputCollectorReportsTransferCounts(t *testing.T) {
+	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
+	video := &sourceEntry{shared: testShared("flow-v", fabrics.ProviderVerbs), peerNode: "n02"}
+	for i := uint64(90); i < 97; i++ {
+		video.recordCompleted(i, 0, i >= 95, time.Now())
+	}
+	video.recordDropped(true)
+	video.lastHead.Store(100)
+	audioShared := testShared("flow-a", fabrics.ProviderVerbs)
+	audioShared.continuous = true
+	audio := &sourceEntry{shared: audioShared, peerNode: "n02"}
+	audio.recordCompleted(48000, 0, false, time.Now())
+	audio.lastHead.Store(48480)
+	idle := &sourceEntry{shared: testShared("flow-i", fabrics.ProviderVerbs), peerNode: "n02"}
+	src.sources[types.NamespacedName{Namespace: "p", Name: "v"}] = video
+	src.sources[types.NamespacedName{Namespace: "p", Name: "a"}] = audio
+	src.sources[types.NamespacedName{Namespace: "p", Name: "i"}] = idle
+
+	reg := prometheus.NewPedanticRegistry()
+	require.NoError(t, reg.Register(&ThroughputCollector{NodeName: "n01", Source: src}))
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	values := map[string]float64{}
+	for _, f := range families {
+		for _, m := range f.GetMetric() {
+			key := f.GetName()
+			for _, l := range m.GetLabel() {
+				switch l.GetName() {
+				case "flow_id", "outcome":
+					key += "/" + l.GetValue()
+				}
+			}
+			values[key] = m.GetCounter().GetValue() + m.GetGauge().GetValue()
+		}
+	}
+
+	assert.Equal(t, 5.0, values["mxl_gateway_mirror_transfers_total/flow-v/completed"])
+	assert.Equal(t, 2.0, values["mxl_gateway_mirror_transfers_total/flow-v/late"])
+	assert.Equal(t, 1.0, values["mxl_gateway_mirror_transfers_total/flow-v/lost"])
+	assert.Equal(t, 4.0, values["mxl_gateway_mirror_completion_lag_grains/flow-v"])
+	assert.Equal(t, 480.0, values["mxl_gateway_mirror_completion_lag_samples/flow-a"])
+	_, audioAsGrains := values["mxl_gateway_mirror_completion_lag_grains/flow-a"]
+	assert.False(t, audioAsGrains, "an audio lag in samples published as grains")
+	_, idleLag := values["mxl_gateway_mirror_completion_lag_grains/flow-i"]
+	assert.False(t, idleLag, "no lag before the first completion")
+}
+
+// Per-interface sums are what show whether placement spread a node's
+// mirrors over its ports. A mirror not bound yet is left out rather
+// than reported under an empty interface.
+func TestThroughputCollectorReportsPerInterface(t *testing.T) {
+	src := &SourceReconciler{sources: map[types.NamespacedName]*sourceEntry{}}
+	for i, e := range []struct {
+		iface string
+		bytes uint64
+	}{{"192.0.2.1", 100}, {"192.0.2.1", 50}, {"192.0.2.129", 70}, {"", 999}} {
+		s := &sourceEntry{shared: testShared("flow-a", fabrics.ProviderTCP), peerNode: "n02", boundInterface: e.iface}
+		s.bytes.Store(e.bytes)
+		src.sources[types.NamespacedName{Namespace: "p", Name: string(rune('a' + i))}] = s
+	}
+	tgt := &TargetReconciler{targets: map[types.NamespacedName]*targetEntry{}}
+	got := &targetEntry{flowID: "flow-b", peerNode: "n03", provider: fabrics.ProviderTCP, boundInterface: "192.0.2.129"}
+	got.bytes.Store(4096)
+	tgt.targets[types.NamespacedName{Namespace: "p", Name: "b"}] = got
+
+	c := &ThroughputCollector{NodeName: "n01", Source: src, Target: tgt}
+	expected := `
+# HELP mxl_gateway_interface_mirrors Live mirrors bound to a fabric interface of this node, by direction: egress for the ones it sources, ingress for the ones it targets.
+# TYPE mxl_gateway_interface_mirrors gauge
+mxl_gateway_interface_mirrors{direction="egress",interface="192.0.2.1",node="n01"} 2
+mxl_gateway_interface_mirrors{direction="egress",interface="192.0.2.129",node="n01"} 1
+mxl_gateway_interface_mirrors{direction="ingress",interface="192.0.2.129",node="n01"} 1
+# HELP mxl_gateway_interface_received_bytes_total Payload bytes committed by the live mirrors this node targets through a fabric interface. A mirror set up again starts its own count afresh, so the sum can step down when one is.
+# TYPE mxl_gateway_interface_received_bytes_total counter
+mxl_gateway_interface_received_bytes_total{interface="192.0.2.129",node="n01"} 4096
+# HELP mxl_gateway_interface_transmitted_bytes_total Payload bytes of completed transfers of the live mirrors this node sources through a fabric interface. A mirror set up again starts its own count afresh, so the sum can step down when one is.
+# TYPE mxl_gateway_interface_transmitted_bytes_total counter
+mxl_gateway_interface_transmitted_bytes_total{interface="192.0.2.1",node="n01"} 150
+mxl_gateway_interface_transmitted_bytes_total{interface="192.0.2.129",node="n01"} 70
+`
+	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(expected),
+		"mxl_gateway_interface_mirrors", "mxl_gateway_interface_received_bytes_total", "mxl_gateway_interface_transmitted_bytes_total"))
 }

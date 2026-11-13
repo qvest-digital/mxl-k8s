@@ -37,6 +37,193 @@ crds:
 rbac:
   create: true
 
+# -- MXL domains the chart creates as MxlDomain objects. Each one is
+# materialised by the agent on every selected node as a directory under
+# agent.hostPath.run carrying domain_def.json, the identity BCP-007-03
+# NMOS nodes publish as mxl_domain_id. Flows are tracked and mirrored
+# between nodes in the domain whose directory is the base of
+# agent.flags.domainPath and in every domain without a directory, which
+# lives at domains/<id>; one in any other directory is materialised on
+# each node but not mirrored. Set an empty list to manage MxlDomains
+# outside the chart.
+domains:
+  - # -- Object name.
+    name: default
+    # -- Directory below the runtime root, immutable. The base of
+    # agent.flags.domainPath for the primary domain; empty places the
+    # domain at domains/<id>.
+    directory: domain
+    # -- Domain identity, a lowercase UUID. Empty keeps the id an
+    # existing object already has, and generates one on first
+    # install. Set it where it has to be known ahead of time or has
+    # to survive the object being deleted. Also set it wherever the
+    # chart is rendered without access to the cluster (helm template,
+    # helm diff, Argo CD, a GitOps render step): there the lookup
+    # finds nothing and every render generates a new id, which the
+    # API server then refuses as a change to an immutable field.
+    id: ""
+    # -- domain_def.json label.
+    label: ""
+    # -- domain_def.json description.
+    description: ""
+    # -- domain_def.json tags, each an array of strings.
+    tags: {}
+    # -- Ring depth libmxl gives new flows, written to options.json
+    # (e.g. "2s"). Empty leaves options.json alone.
+    historyDuration: ""
+    # -- Nodes the domain is materialised on. Empty is every agent
+    # node.
+    nodeSelector: {}
+
+# -- mxlfs, a memory filesystem for MXL domains, on every domain. Off,
+# every domain is a plain directory and the chart renders none of the
+# following.
+#
+# On, the agent mounts an mxlfs (mode=0777,wait=5000) on each domain
+# directory it materialises, before writing into it, and runs privileged
+# for Bidirectional propagation of the runtime root. A directory that is
+# already an mxlfs is left alone. Where the mount fails, as on a node
+# whose kernel has no mxlfs module, or where the directory already
+# holds flows, the domain stays a plain directory: the agent logs the
+# error and records a MxlfsUnavailable warning event on the Node.
+#
+# The agent, gateway and operator run with --mxlfs, which adds
+# placeholders for flows absent on a node, lazy ring allocation and
+# MxlFlowRedundancySets, with the RBAC they need; the CRD must be
+# installed. The gateway runs in the host PID namespace, so it sees the
+# flocks of local producers through /proc/locks. The gateway and the
+# exporter wait in an init container for mxlfs.ready, which the agent
+# writes to the runtime root once it has mounted or left plain the
+# domains known at its start, and see later mounts through
+# HostToContainer propagation. agent.csi.enabled requires this.
+#
+# MXL pods take the domain through the agent's CSI volume
+# (agent.csi.enabled), which is published only once the agent has
+# mounted the domain or left it plain. A pod that mounts the domain
+# directory as a hostPath can start before the agent, as after a node
+# restart, and create a flow in the plain directory; the agent then
+# leaves that domain plain and records the MxlfsUnavailable event.
+#
+# A placeholder is a libmxl writer the gateway holds open, one per flow
+# with no copy on the node, and libmxl maps every grain of a discrete
+# flow on its own: a video or data flow costs the gateway its grain
+# count plus two memory mappings (250 + 2 for 5s of history at 50
+# fps), an audio flow two. Mirrors and merged outputs in the gateway
+# add their own. The kernel caps mappings per process at
+# vm.max_map_count, 65530 by default, which at that history is about
+# 250 such flows across the node's mxlfs domains; past it, creating a
+# placeholder or a mirror fails. Raise vm.max_map_count on the nodes
+# for more.
+mxlfs:
+  enabled: false
+  # -- huge= mount option of every mxlfs domain, as tmpfs's: within_size
+  # gives a file folios that end by EOF; always gives a file of at least
+  # 2 MiB one 2 MiB folio for its last partial 2 MiB, so a NIC maps a
+  # registered grain with one translation per 2 MiB instead of a page
+  # size the smallest tail folio sets, at up to 2 MiB more memory per
+  # such file (736 KiB for a 1080p v210 grain). Empty leaves the option
+  # out. An mxlfs module without it refuses a mount that names it; the
+  # agent then mounts the domain without huge= and records a
+  # MxlfsHugeRefused warning event on the Node. A change applies to a
+  # domain only when it is mounted again, at the next node reboot.
+  # @schema
+  # enum: ["", "within_size", "always"]
+  # @schema
+  huge: ""
+  numa:
+    placement:
+      # -- On which NUMA node the pages of the rings of mxlfs domains are
+      # allocated. off leaves it to the process that allocates them. node
+      # mounts every domain with placement.node.default as numa_node=.
+      # flow places each ring by its use: the gateway holds the ring of
+      # every flow it registers with a NIC and moves it to the NICs' node
+      # first, a target's ring is allocated there, and the agent moves a
+      # ring nothing holds to the node all local writers and readers of
+      # the flow are confined to: every CPU their threads may run on is on
+      # that node, and they may allocate from it. A flow with any other
+      # local writer or reader counts as unpinned and the agent never
+      # moves its ring, so this needs CPU pinning. A page goes to
+      # the file's own preference first, then to the mount's numa_node=,
+      # then to the allocating task's memory policy; a file has a
+      # preference only in flow mode, where a moved ring keeps it so its
+      # later pages follow it. flow needs mxlfs.enabled and gives the
+      # gateway CAP_SYS_NICE. On a node whose RDMA devices report no
+      # single NUMA node it acts as off, and the agent and gateway record
+      # a MxlfsNumaFlowUnresolved warning event on the Node. Empty is
+      # off. A change of the mount option applies to a domain only when
+      # it is mounted again, at the next node reboot.
+      # @schema
+      # enum: ["", "off", "node", "flow"]
+      # @schema
+      mode: "off"
+      node:
+        # -- node mode's numa_node=: a NUMA node, or auto for the node
+        # every RDMA device of the node reports
+        # (/sys/class/infiniband/*/device/numa_node). auto resolves once,
+        # when the agent starts; when the devices report no node or
+        # different ones it leaves the option out and the agent records a
+        # MxlfsNumaNodeUnresolved warning event on the Node, except on a
+        # host of one NUMA node, where every page is on that node anyway.
+        # The value is a string: pass a node on the command line with
+        # --set-string, since --set makes a number the schema refuses. An
+        # mxlfs module without the option, or one that finds no memory on
+        # the node, refuses a mount that names it; the agent then mounts
+        # the domain without numa_node= and records a MxlfsNumaNodeRefused
+        # warning event on the Node. Empty is auto.
+        # @schema
+        # type: string
+        # pattern: ^$|^auto$|^[0-9]+$
+        # @schema
+        default: auto
+      flow:
+        # -- flow mode's numa_node= for pages nothing placed: nic mounts
+        # every domain with the NICs' node, local leaves it to the
+        # allocating process. Empty is local.
+        # @schema
+        # enum: ["", "nic", "local"]
+        # @schema
+        default: local
+        release:
+          # -- How often the agent looks for rings to move in flow mode.
+          # @schema
+          # type: string
+          # pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+          # @schema
+          period: 30s
+          # -- How long a ring stays unheld, counted from when the agent
+          # first saw it so, before it moves; a pass that finds it held or
+          # cannot see its holds starts the count over. Covers a gateway
+          # restart, which drops the holds until its mirrors are attached
+          # again.
+          # @schema
+          # type: string
+          # pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+          # @schema
+          delay: 60s
+          # -- Bytes a second the agent moves, a quantity.
+          # @schema
+          # type: string
+          # pattern: ^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$
+          # @schema
+          rate: 512Mi
+    metrics:
+      # -- Export the NUMA counters of every mxlfs domain from the
+      # exporter, in every placement mode: the domain's and each flow
+      # ring's pages per NUMA node, allocations that fell back to another
+      # node, and the moves. Read on every exporter scan, never on a
+      # scrape. Needs an mxlfs module with the NUMA ioctls; with an older
+      # one the series are left out.
+      enabled: false
+  # -- Image of the init container that waits for mxlfs.ready. Needs a
+  # POSIX sh, test and sleep.
+  waitImage: busybox:1.38
+  # -- Resources of that init container.
+  waitResources:
+    requests:
+      cpu: 1m
+      memory: 4Mi
+    limits: {}
+
 # -- Pre-delete lifecycle hooks. The domain wipe removes stale
 # .mxl-flow directories under gateway.flags.domainPath at chart
 # uninstall, because they live on a hostPath and survive namespace
@@ -131,8 +318,55 @@ operator:
     # between the old pod releasing it and the new one publishing
     # again, and collecting inside that window costs the stream a
     # re-materialization for no reason. It does not gate an unclaimed
-    # mirror, which goes at once.
+    # mirror, which goes at once, or after a 30s handover window when its
+    # requestor pod has gone.
     gcGracePeriod: 5m
+    # @schema
+    # type: integer
+    # minimum: 1
+    # maximum: 100
+    # @schema
+    # -- Percent of a fabric interface's or shared budget's capacity
+    # mirror placement may commit, on nodes whose gateway sets no
+    # gateway.flags.fabricMaxUtilization. Grains leave as line-rate
+    # bursts, so a receiver overflows before its average load reaches
+    # the link speed.
+    placementMaxUtilization: 80
+    # @schema
+    # type: integer
+    # minimum: 0
+    # maximum: 100
+    # @schema
+    # -- Percent added to a flow's published payload rate for protocol
+    # framing when it is charged to an interface.
+    placementProtocolOverhead: 5
+    # -- Rate in bits per second charged for a flow that has not
+    # published its payload rate within placementDemandWait, as a
+    # quantity. "0" places such mirrors by mirror count alone.
+    placementProvisionalDemand: "0"
+    # @schema
+    # pattern: ^[0-9]+(ns|us|ms|s|m|h)$
+    # @schema
+    # -- How long after its creation a mirror waits for its flow's
+    # payload rate before it is placed on the provisional demand.
+    placementDemandWait: 5s
+    # @schema
+    # enum: ["prefer-same-subnet", "same-subnet", "any"]
+    # @schema
+    # -- How a source interface is paired with a target interface.
+    # prefer-same-subnet keeps pairs whose addresses share a subnet when
+    # any does; same-subnet keeps only those; any keeps every pair. With
+    # every fabric port in one subnet all pairs qualify and the setting
+    # changes nothing; it matters where ports sit in separate subnets.
+    placementPairing: prefer-same-subnet
+    # @schema
+    # enum: ["place", "hold"]
+    # @schema
+    # -- What happens to a mirror no interface pair has room for. place
+    # puts it on the pair with the most headroom left and reports it
+    # Overcommitted; hold leaves it unplaced and unset up, and reports
+    # it Held.
+    placementOvercommit: place
     # @schema
     # enum: ["debug", "info", "warn", "error"]
     # @schema
@@ -254,6 +488,45 @@ agent:
     # pods cannot see it. Empty disables the drop.
     shimPath: /run/mxl/libmxl-intent.so
     materializeTimeout: 5s
+    # @schema
+    # type: integer
+    # minimum: 0
+    # @schema
+    # -- Most live mirrors the agent creates on demand for one pod, the
+    # mirrors a process opening a flow absent here asks for. Such a
+    # mirror lives as long as the pod, read or not, so this is a cap on
+    # what the pod accumulates over its lifetime; intentMirrorBurst is
+    # what stops a glob. A refused request is logged and recorded as an
+    # event on the pod: a process waiting on the open gets ENOENT, and
+    # one that already opened the flow's placeholder on an mxlfs domain
+    # is asked for again while it runs if the burst limit refused it; a
+    # refusal by this count is final. Mirrors an MxlReceiver or a
+    # redundancy set declares are not counted; one the agent handed to
+    # the pod because it still reads it after its requestor went is. 0 is
+    # unlimited.
+    intentMirrorsPerPod: 64
+    # @schema
+    # type: integer
+    # minimum: 0
+    # @schema
+    # -- Most live mirrors the agent creates on demand onto its node,
+    # for all pods together, over their lifetimes. 0 is unlimited.
+    intentMirrorsPerNode: 128
+    # @schema
+    # type: integer
+    # minimum: 0
+    # @schema
+    # -- Most mirrors the agent creates on demand for one pod within
+    # intentMirrorBurstWindow, so a process opening every flow at once,
+    # as a glob over the domain does, gets only a few at a time. The
+    # history is the agent's memory and starts afresh when the agent
+    # restarts. 0 is unlimited.
+    intentMirrorBurst: 8
+    # @schema
+    # type: string
+    # pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+    # @schema
+    intentMirrorBurstWindow: 10s
     resyncPeriod: 30s
     # -- Client-side request rate to the API server. A node holding
     # many flows spends one Get and one Update per flow per renewal
@@ -264,6 +537,13 @@ agent:
     # -- Client-side burst above kubeApiQps. 0 leaves the client-go
     # default in place.
     kubeApiBurst: 100
+    # -- Pod label naming a pod's dmf-k8s MediaFunctionClaim, in the
+    # pod's namespace. When set, the agent writes each such claim's
+    # status.io from the flows its pods on the node are observed to
+    # read and write, and gets RBAC for mediafunctionclaims. dmf-k8s
+    # names a function's Helm release after its claim, so
+    # app.kubernetes.io/instance names it. Empty disables.
+    claimStatusLabel: ""
     # @schema
     # enum: ["", "tcp", "verbs", "efa", "shm", "auto"]
     # @schema
@@ -285,6 +565,31 @@ agent:
     # enum: ["debug", "info", "warn", "error"]
     # @schema
     zapLogLevel: info
+  # -- CSI node plugin that delivers the domain to pods as an inline
+  # ephemeral volume (driver mxl.qvest-digital.com), with the volume
+  # attributes domain (an MxlDomain name; empty for the primary domain)
+  # and access (read, the default, or write). Requires mxlfs.enabled. A
+  # publish is refused, and retried by the kubelet, until the agent has
+  # mounted the domain or left it plain. Write access is granted to any
+  # pod that asks for it in its volume attributes, and the domain
+  # directory is mode 0777, so a pod with write access can create,
+  # overwrite or remove any flow in the domain.
+  csi:
+    enabled: false
+    # @schema
+    # pattern: ^/.+
+    # @schema
+    # -- The kubelet's root directory on the node.
+    kubeletDir: /var/lib/kubelet
+    registrar:
+      image:
+        repository: registry.k8s.io/sig-storage/csi-node-driver-registrar
+        tag: v2.15.0
+      resources:
+        requests:
+          cpu: 5m
+          memory: 16Mi
+        limits: {}
   # -- hostPath layout. The agent mounts the whole /run/mxl so the
   # intent socket lands on the host where consumer pods can see it.
   hostPath:
@@ -306,6 +611,7 @@ agent:
   # intent socket's SO_PEERCRED-based pod identification: without it
   # the connecting consumer pod's PID is not visible to the agent
   # and the on-demand mirror materialization path silently fails.
+  # mxlfs.enabled requires it.
   hostPID: true
   podAnnotations: {}
   podLabels: {}
@@ -375,6 +681,15 @@ agent:
 # endpoint binds the node interface.
 gateway:
   enabled: true
+  # @schema
+  # type: object
+  # required: true
+  # @schema
+  # -- DaemonSet update strategy. With mxlfs one gateway per node is
+  # assumed: a gateway clears every placeholder marker in a domain as it
+  # opens it, so a second gateway on the node would clear the markers of
+  # the first one's placeholders. With mxlfs.enabled the chart refuses
+  # a rollingUpdate.maxSurge other than 0.
   updateStrategy:
     # @schema
     # enum: ["RollingUpdate", "OnDelete"]
@@ -442,7 +757,42 @@ gateway:
     # rejected when this is set, which includes interfaces with no
     # physical NIC behind them.
     fabricMinLinkSpeed: ""
-    resyncPeriod: 30s
+    # -- Capacity overrides for mirror placement, each
+    # `<match>=<quantity>` in bits per second, where match is a device
+    # name, an address or a CIDR and the first match wins. An
+    # interface no entry matches is planned at the link speed its
+    # provider reports; one reporting none is never counted full.
+    fabricPortCapacity: []
+    # -- Caps several fabric interfaces share, each
+    # `<scope>=<quantity>[:<mode>]` in bits per second. Scope `nic`
+    # makes one cap per PCI device over its functions, `host` one over
+    # every interface of the node. Mode `ingress` (the default) counts
+    # mirrors received, `egress` mirrors sent, `combined` both against
+    # one cap. Empty declares none.
+    fabricSharedBudget: []
+    # @schema
+    # type: integer
+    # minimum: 0
+    # maximum: 100
+    # @schema
+    # -- Percent of an interface's or budget's capacity placement may
+    # commit on this gateway's nodes. 0 leaves it to
+    # operator.flags.placementMaxUtilization.
+    fabricMaxUtilization: 0
+    # @schema
+    # pattern: ^[0-9]+(ns|us|ms|s|m|h)$
+    # @schema
+    # -- How long the target side of a mirror the operator has not
+    # placed waits before binding the first interface, on a node
+    # offering more than one. The operator places within its own
+    # reconcile, so a running operator adds no delay; this bounds the
+    # wait when it is down or slow.
+    placementWait: 10s
+    # -- How often the gateway refreshes MxlNodeCapabilities. Every
+    # pass reads each RDMA port state out of sysfs; on irdma that
+    # read takes the kernel global rtnl lock, so this is also how
+    # often a node contends for it against pod sandbox setup.
+    resyncPeriod: 60s
     # -- Shortest interval between two libmxl-fabrics interface
     # enumerations. Status still refreshes every resyncPeriod from the
     # last result. Each enumeration sweeps every provider libfabric was
@@ -470,37 +820,6 @@ gateway:
     # index, having never transferred a grain, before SourceProgress
     # reports ReaderNotAdvancing.
     readerStallAfter: 20s
-    # -- How much of a grain's own interval the source gateway spreads
-    # that grain's transmission over, instead of handing the fabric a
-    # whole grain the NIC then drains at line rate. Negative disables
-    # pacing and restores whole-grain transfers, which is the default:
-    # the burst is only worth shaping where a receiver loses grains to
-    # it, and where nothing is lost the added latency and the per-chunk
-    # cost buy nothing. Turn it on when a receiver several flows
-    # converge on reports drops well below nominal link utilisation,
-    # which is the signature of overlapping bursts rather than of
-    # offered load. Peak rate becomes the flow's own rate divided by
-    # this, so 0.5 halves the burst and doubles its length, and is
-    # where to start. The cost is latency: a grain completes at the
-    # receiver up to this much of its interval later. Depends on the
-    # flow's edit rate alone, never on the link speed, so one value
-    # holds from 25GbE to EFA. Raise it toward 1 while drops remain;
-    # lower it when the added latency matters more than the burst.
-    # Must stay below 1, or a grain's transmission runs into the next
-    # one.
-    pacingFraction: -1
-    # -- How many slice ranges a paced grain is split into. Read only
-    # while pacingFraction is positive. This sets how short the
-    # individual bursts get: the contiguous burst is one grain divided
-    # by this, and switch buffer occupancy follows that length. Each
-    # range costs one cgo call and, because a partial range leaves
-    # libmxl-fabrics's one-write-per-grain fast path, one RMA write per
-    # plane. Raise it if the switch still reports drops at a pacing
-    # fraction you are happy with; lower it if gateway CPU is the
-    # constraint. Capped by the grain's slice count, so a flow with
-    # fewer slices than this uses one range per slice. Under 2 disables
-    # pacing.
-    pacingChunks: 8
     # -- How often libmxl reclaims flow directories no writer holds.
     # The criterion is libmxl's own: a writer keeps a shared lock for
     # as long as it is attached, so a live producer or mirror writer is
@@ -569,12 +888,19 @@ gateway:
     # @schema
     domain: /run/mxl/domain
     # @schema
+    # pattern: ^/.+
+    # @schema
+    # -- Where every MxlDomain without a directory lives, one
+    # subdirectory per id. Must be domains/ below the runtime root
+    # the primary domain sits in.
+    domains: /run/mxl/domains
+    # @schema
     # enum: ["DirectoryOrCreate", "Directory"]
     # @schema
     type: DirectoryOrCreate
   rdma:
-    # -- Add the capabilities the verbs/efa providers need
-    # (IPC_LOCK, SYS_RESOURCE; libmxl pins shm pages).
+    # -- Add the capability the verbs/efa providers need: IPC_LOCK,
+    # which exempts their memory registrations from RLIMIT_MEMLOCK.
     enabled: false
     # -- Bind-mount the host's InfiniBand device directory into
     # the gateway. Only consulted when rdma.enabled is set.
@@ -595,6 +921,21 @@ gateway:
     # DaemonSet that is only meant to run on RDMA-capable
     # nodes, and a hang on one that is not.
     infinibandHostPathType: Directory
+    # @schema
+    # type: integer
+    # minimum: -1
+    # maximum: 31
+    # not:
+    #   const: 0
+    # @schema
+    # -- Local ACK timeout of the verbs provider's RC queue pairs, as
+    # the exponent n of 4.096us x 2^n: 14 is 67ms. 1 to 31, or -1.
+    # Set as FI_VERBS_ACK_TIMEOUT when rdma.enabled and the providers
+    # include verbs (or any). Only the libfabric patch carried by the
+    # go-mxl image reads it. -1 leaves it unset, and a queue pair keeps
+    # the timeout RDMA-CM computes. No effect on a device whose driver does
+    # not program a queue pair's ACK timeout, such as irdma.
+    verbsAckTimeout: 14
     extraEnv: []
     # -- Extended-resource name advertised by a Kubernetes
     # device plugin. `devic.es/rdma` from generic-device-plugin

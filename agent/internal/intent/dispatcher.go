@@ -17,16 +17,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/qvest-digital/mxl-k8s/agent/internal/podlookup"
 	"github.com/qvest-digital/mxl-k8s/api/selection"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -37,8 +39,9 @@ const (
 )
 
 // FlowChecker reports whether the named flow's flow_def.json is
-// present locally. The default implementation stats the filesystem
-// under DomainPath; tests inject a closure that fakes the lookup.
+// present locally. The default implementation lists the domain
+// directory and reads the flow's own directory; tests inject a closure
+// that fakes the lookup.
 type FlowChecker func(flowID string) bool
 
 // LeaseChecker is the slice of the originlease.Manager surface the
@@ -54,8 +57,12 @@ type LeaseChecker interface {
 // Dispatcher resolves a libmxl-intent.so request into an
 // MxlFlowMirror reconciliation that completes (Ready) or fails.
 type Dispatcher struct {
+	refusalMu sync.Mutex
+	refusals  map[string]time.Time
+	nowFn     func() time.Time
+
 	Client     client.Client
-	Resolver   *podlookup.Resolver
+	Resolver   PodResolver
 	DomainPath string
 	NodeName   string
 
@@ -72,8 +79,8 @@ type Dispatcher struct {
 	// default.
 	PollInterval time.Duration
 
-	// FlowChecker overrides the filesystem-based local-flow check.
-	// Nil falls back to the default stat under DomainPath.
+	// FlowChecker replaces the whole local-flow check, the listing of
+	// the domain included. Nil uses the default under DomainPath.
 	FlowChecker FlowChecker
 
 	// Lease, when set, gates resolveSourceNode's Origin picks on a
@@ -82,11 +89,103 @@ type Dispatcher struct {
 	// the operator owns the OriginFresh condition writeback.
 	Lease LeaseChecker
 
+	// Domains is the MXL domains materialised on this node, read per
+	// request because they come and go. Nil resolves only the primary
+	// domain, DomainPath.
+	Domains func() Domains
+
+	// Own reports a pod as mxl-k8s's own: the gateway filling a
+	// placeholder or the exporter reading one opens it as no reader
+	// wanting a mirror. Nil treats every pod as a consumer.
+	Own func(*corev1.Pod) bool
+
 	// Origin records this node as a flow's origin when a local
 	// producer attaches to a flow that already existed. Nil makes
 	// NotifyProducerAttached a no-op, which is what a dispatcher
 	// wired without a publisher wants.
 	Origin OriginClaimer
+
+	// Limits bounds the mirrors the dispatcher creates. The zero value
+	// creates without bound.
+	Limits Limits
+
+	// limitMu makes counting the mirrors and creating one a single step,
+	// so a burst of requests cannot all pass the count before any
+	// mirror exists.
+	limitMu sync.Mutex
+	bursts  map[types.UID]*burst
+}
+
+// burst is one pod's mirrors created on demand inside the burst window,
+// and the flows its burst limit refused it, in the order first refused.
+type burst struct {
+	pod     metav1.ObjectMeta // to refuse it before its pod is looked up
+	created []time.Time
+	waiting []waiter
+}
+
+// waiter is a flow a burst refused, and when it was told to ask again.
+type waiter struct {
+	flow string
+	at   time.Time
+}
+
+// Limits bounds the mirrors one node's agent creates on demand. A
+// process that opens every flow of a domain, as a glob over it does,
+// otherwise gets a mirror onto the node for each, and enough of them at
+// once wedge the node. Only mirrors this dispatcher created count: a
+// mirror an MxlReceiver or a redundancy set declared is neither counted
+// nor refused, and a request that an existing mirror already serves
+// creates nothing. Zero leaves a limit off.
+//
+// Burst is what stops a glob. PerPod and PerNode count every live mirror
+// created on demand, and such a mirror lives as long as the pod it was
+// created for, whether or not the pod still reads it, so they bound what
+// a long-lived pod accumulates over its lifetime.
+type Limits struct {
+	// PerPod is how many live mirrors one pod may have had created.
+	PerPod int
+	// PerNode is how many live mirrors may have been created onto this
+	// node, for all pods together.
+	PerNode int
+	// Burst is how many mirrors one pod may have created within
+	// BurstWindow. The history is the agent's memory, so a restarted
+	// agent starts each pod's window afresh.
+	Burst       int
+	BurstWindow time.Duration
+}
+
+// LimitError is a request Limits refused. RetryAfter is how long until
+// it could pass, and is zero for a count of live mirrors: an on-demand
+// mirror lives as long as its pod, so a pod at its count stays there.
+type LimitError struct {
+	msg        string
+	retryAfter time.Duration
+}
+
+func (e *LimitError) Error() string { return e.msg }
+
+// RetryAfter is how long until the request could pass, when a place in
+// the pod's burst window frees for it; zero when waiting does not make it
+// pass. The pod's refused flows are given the places in the order they
+// were refused, the k-th the one the k-th oldest creation leaves, so as
+// many ask again together as places free.
+func (e *LimitError) RetryAfter() time.Duration { return e.retryAfter }
+
+// ReasonMirrorLimitReached is the reason of the event a pod gets when a
+// mirror it asked for is refused by a limit.
+const ReasonMirrorLimitReached = "MirrorLimitReached"
+
+// PodResolver finds the pod of a host PID; *podlookup.Resolver is the
+// one the agent runs with.
+type PodResolver interface {
+	PodForPID(ctx context.Context, pid int32) (*corev1.Pod, error)
+}
+
+// uidResolver is a PodResolver that names a PID's pod UID without the
+// API, as *podlookup.Resolver does from /proc.
+type uidResolver interface {
+	UIDForPID(pid int32) (string, error)
 }
 
 // OriginClaimer is the slice of the flowpublisher.Publisher surface
@@ -94,7 +193,7 @@ type Dispatcher struct {
 // package does not depend on the publisher, matching how LeaseChecker
 // keeps the Lease manager out.
 type OriginClaimer interface {
-	ClaimOrigin(ctx context.Context, flowID string) error
+	ClaimOrigin(ctx context.Context, ref mxlv1alpha1.FlowRef) error
 }
 
 // Materialize ensures that the flow referenced by path is, or will
@@ -105,13 +204,19 @@ type OriginClaimer interface {
 // pid is the host PID of the consumer process that triggered the
 // request (typically obtained via SO_PEERCRED on the UDS).
 func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) error {
-	flowID, ok := FlowIDFromPath(d.DomainPath, path)
+	ref, ok := d.flowRef(path)
+	flowID := ref.ID
 	if !ok {
-		return fmt.Errorf("%q is not a flow_def.json under %s", path, d.DomainPath)
-	}
-
-	if d.flowExistsLocally(flowID) {
-		return nil
+		err := d.notMirrored(path)
+		// At the default level: the consumer only sees ENOENT, so this
+		// line is where an operator learns the flow was never going to
+		// be brought here. Once per flow directory per window, because
+		// one refused open arrives as a burst of probes and retries.
+		if d.shouldLogRefusal(path) {
+			log.FromContext(ctx).WithName("intent").Info("intent request refused",
+				"pid", pid, "reason", err.Error())
+		}
+		return err
 	}
 
 	timeout := d.MaterializeTimeout
@@ -121,19 +226,22 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 	wctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	pod, err := d.Resolver.PodForPID(wctx, pid)
-	if err != nil {
-		return fmt.Errorf("pod lookup: %w", err)
+	if err := d.refuseEarly(wctx, pid, ref); err != nil {
+		return err
 	}
 
-	l := log.FromContext(ctx).WithName("intent").WithValues(
-		"flowID", flowID,
-		"pod", pod.GetNamespace()+"/"+pod.GetName(),
-		"pid", pid,
-	)
-	l.Info("intent request received")
+	// The pid is resolved before anything else: the reader is certain
+	// to exist only while its open waits for this request, so any check
+	// ahead of the lookup that waits can outlast it. A missing flow is
+	// still the reason reported over a failed lookup, since no mirror
+	// could follow either way.
+	pod, podErr := d.Resolver.PodForPID(wctx, pid)
 
-	res, err := d.resolveSourceNode(wctx, flowID)
+	if d.flowExistsLocally(ref) {
+		return nil
+	}
+
+	res, err := d.resolveSourceNode(wctx, ref)
 	if err != nil {
 		return fmt.Errorf("resolve source node: %w", err)
 	}
@@ -143,6 +251,24 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 		}
 		return errors.New("MxlFlow not yet known cluster-wide")
 	}
+
+	if podErr != nil {
+		return fmt.Errorf("pod lookup: %w", podErr)
+	}
+	// The open trigger checks this too, but passes on a pid whose pod it
+	// could not resolve; a mirror for the gateway's or the exporter's
+	// open is one no reader asked for.
+	if d.Own != nil && d.Own(pod) {
+		return fmt.Errorf("pod %s/%s is mxl-k8s's own, not a reader", pod.Namespace, pod.Name)
+	}
+
+	l := log.FromContext(ctx).WithName("intent").WithValues(
+		"flowID", flowID,
+		"pod", pod.GetNamespace()+"/"+pod.GetName(),
+		"pid", pid,
+	)
+	l.Info("intent request received")
+
 	sourceNode := res.Node
 	if sourceNode == d.NodeName {
 		// The flow's origin is this node; the producer should have
@@ -154,7 +280,7 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 		return nil
 	}
 
-	mirror, err := d.ensureMirror(wctx, flowID, sourceNode, pod)
+	mirror, err := d.ensureMirror(wctx, ref, sourceNode, pod)
 	if err != nil {
 		return fmt.Errorf("ensure mirror: %w", err)
 	}
@@ -164,6 +290,65 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 	}
 	l.Info("intent request fulfilled", "sourceNode", sourceNode, "mirror", mirror.Name)
 	return nil
+}
+
+// refusalLogWindow is how long a refusal for one flow directory stays
+// logged before it is logged again.
+const refusalLogWindow = time.Minute
+
+// shouldLogRefusal reports whether a refusal for path is the first in
+// its window. Keyed by the flow directory, so the several files libmxl
+// probes for one open count once.
+func (d *Dispatcher) shouldLogRefusal(path string) bool {
+	key := path
+	if i := strings.Index(path, ".mxl-flow"); i >= 0 {
+		key = path[:i]
+	}
+	now := time.Now()
+	if d.nowFn != nil {
+		now = d.nowFn()
+	}
+	d.refusalMu.Lock()
+	defer d.refusalMu.Unlock()
+	if d.refusals == nil {
+		d.refusals = map[string]time.Time{}
+	}
+	for k, at := range d.refusals {
+		if now.Sub(at) > refusalLogWindow {
+			delete(d.refusals, k)
+		}
+	}
+	if _, seen := d.refusals[key]; seen {
+		return false
+	}
+	d.refusals[key] = now
+	return true
+}
+
+// notMirrored explains why a path outside the mirrored domain gets no
+// mirror. The shim turns any refusal into ENOENT for the consumer, so
+// this text, in the agent log and the refusal, is the only account of
+// why a flow that exists on another node was not brought here.
+//
+// A sibling directory carrying domain_def.json is another MxlDomain:
+// materialised on this node with its identity, but its flows are not
+// tracked, so a flow written on another node cannot be found and
+// mirrored. The check reads the filesystem the agent already writes
+// rather than the API, so a refusal costs no request.
+func (d *Dispatcher) notMirrored(path string) error {
+	root := filepath.Dir(filepath.Clean(d.DomainPath))
+	if rel, err := filepath.Rel(root, filepath.Clean(path)); err == nil &&
+		!strings.HasPrefix(rel, "..") {
+		dir := strings.Split(rel, string(filepath.Separator))[0]
+		if _, err := os.Stat(filepath.Join(root, dir, mxlv1alpha1.DomainDefFile)); err == nil &&
+			dir != filepath.Base(filepath.Clean(d.DomainPath)) {
+			return fmt.Errorf("%q is in MXL domain directory %q, which mxl-k8s "+
+				"materialises on this node but does not mirror; only flows under %s "+
+				"are brought here from other nodes", path, dir, d.DomainPath)
+		}
+	}
+	return fmt.Errorf("%q is not a flow path under %s, the MXL domain mxl-k8s mirrors",
+		path, d.DomainPath)
 }
 
 // FlowIDFromPath returns the flow id if path is under
@@ -195,17 +380,54 @@ func FlowIDFromPath(domain, path string) (string, bool) {
 	return id, true
 }
 
-func (d *Dispatcher) flowExistsLocally(flowID string) bool {
-	if d.FlowChecker != nil {
-		return d.FlowChecker(flowID)
+func (d *Dispatcher) flowExistsLocally(ref mxlv1alpha1.FlowRef) bool {
+	if d.FlowChecker != nil && ref.Domain == "" {
+		return d.FlowChecker(ref.ID)
 	}
-	_, err := os.Stat(filepath.Join(d.DomainPath, flowID+".mxl-flow", "flow_def.json"))
-	return err == nil
+	dir := d.domainDir(ref)
+	if dir == "" {
+		return false
+	}
+	// Listed rather than looked up by name: on an mxlfs mounted with
+	// wait=, a lookup of a missing flow directory waits for it to
+	// appear, which would hold this request until the reader that made
+	// it has given up.
+	if !listed(dir, ref.ID+".mxl-flow") {
+		return false
+	}
+	// The directory is listed, so its dentry is positive and the walk into
+	// it does not wait; flow_def.json is no flow name and never waits.
+	_, err := statFlowDef(filepath.Join(dir, ref.ID+".mxl-flow", "flow_def.json"))
+	// A placeholder lists the flow without holding it.
+	return err == nil && !mxlv1alpha1.IsPlaceholder(dir, ref.ID)
 }
 
-func (d *Dispatcher) resolveSourceNode(ctx context.Context, flowID string) (mxlv1alpha1.OriginResolution, error) {
+// statFlowDef looks a flow's flow_def.json up by name. A seam for tests,
+// which have no mxlfs to show that a lookup of a missing flow waits.
+var statFlowDef = os.Stat
+
+// listed reports whether dir has an entry called name, reading the
+// directory instead of looking the name up.
+func listed(dir, name string) bool {
+	f, err := os.Open(dir)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	for {
+		names, err := f.Readdirnames(256)
+		if slices.Contains(names, name) {
+			return true
+		}
+		if err != nil {
+			return false
+		}
+	}
+}
+
+func (d *Dispatcher) resolveSourceNode(ctx context.Context, ref mxlv1alpha1.FlowRef) (mxlv1alpha1.OriginResolution, error) {
 	var flow mxlv1alpha1.MxlFlow
-	if err := d.Client.Get(ctx, types.NamespacedName{Name: flowID}, &flow); err != nil {
+	if err := d.Client.Get(ctx, types.NamespacedName{Name: ref.Name()}, &flow); err != nil {
 		if apierrors.IsNotFound(err) {
 			return mxlv1alpha1.OriginResolution{}, nil
 		}
@@ -248,25 +470,26 @@ func (d *Dispatcher) leaseFreshness(ctx context.Context) mxlv1alpha1.LeaseFreshn
 // reclaimed source would look identical to a real producer and claim
 // a false Origin.
 func (d *Dispatcher) NotifyProducerAttached(ctx context.Context, pid int32, path string) error {
-	flowID, ok := FlowIDFromPath(d.DomainPath, path)
+	ref, ok := d.flowRef(path)
 	if !ok {
-		return fmt.Errorf("%q is not under %s", path, d.DomainPath)
+		return d.notMirrored(path)
 	}
 	if d.Origin == nil {
 		return nil
 	}
 
-	l := log.FromContext(ctx).WithName("intent").WithValues("flowID", flowID, "pid", pid)
+	l := log.FromContext(ctx).WithName("intent").WithValues("flow", ref.Name(), "pid", pid)
 	if pod, err := d.Resolver.PodForPID(ctx, pid); err == nil {
 		l = l.WithValues("pod", pod.GetNamespace()+"/"+pod.GetName())
 	}
 	l.V(1).Info("producer attached to existing flow")
 
-	return d.Origin.ClaimOrigin(ctx, flowID)
+	return d.Origin.ClaimOrigin(ctx, ref)
 }
 
-func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string, pod metav1.Object) (*mxlv1alpha1.MxlFlowMirror, error) {
-	name := MirrorName(flowID, d.NodeName)
+func (d *Dispatcher) ensureMirror(ctx context.Context, ref mxlv1alpha1.FlowRef, sourceNode string, pod metav1.Object) (*mxlv1alpha1.MxlFlowMirror, error) {
+	flowID := ref.ID
+	name := mxlv1alpha1.MirrorNameFor(ref, d.NodeName)
 
 	var existing mxlv1alpha1.MxlFlowMirror
 	err := d.Client.Get(ctx, types.NamespacedName{Namespace: pod.GetNamespace(), Name: name}, &existing)
@@ -293,8 +516,21 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string
 		return nil, err
 	}
 
+	if ref.Domain != "" {
+		if err := d.requireMultiDomain(ctx, sourceNode, d.NodeName); err != nil {
+			return nil, err
+		}
+	}
+
 	provider, err := d.resolveProvider(ctx, flowID, sourceNode)
 	if err != nil {
+		return nil, err
+	}
+
+	d.limitMu.Lock()
+	defer d.limitMu.Unlock()
+	if err := d.admit(ctx, pod, ref); err != nil {
+		d.refuse(ctx, ref, pod, err)
 		return nil, err
 	}
 
@@ -309,6 +545,7 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string
 		},
 		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
 			FlowID:     flowID,
+			Domain:     ref.Domain,
 			SourceNode: sourceNode,
 			TargetNode: d.NodeName,
 			Provider:   provider,
@@ -328,7 +565,190 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, flowID, sourceNode string
 		}
 		return &existing, nil
 	}
+	b := d.bursts[pod.GetUID()]
+	b.created = append(b.created, d.now())
 	return desired, nil
+}
+
+func (d *Dispatcher) now() time.Time {
+	if d.nowFn != nil {
+		return d.nowFn()
+	}
+	return time.Now()
+}
+
+// admit reports why pod may not have another mirror of ref created, or
+// nil. The caller holds limitMu.
+func (d *Dispatcher) admit(ctx context.Context, pod metav1.Object, ref mxlv1alpha1.FlowRef) error {
+	now := d.now()
+	d.pruneBursts(now)
+	b := d.bursts[pod.GetUID()]
+	if b == nil {
+		b = &burst{pod: metav1.ObjectMeta{Namespace: pod.GetNamespace(), Name: pod.GetName(), UID: pod.GetUID()}}
+		d.bursts[pod.GetUID()] = b
+	}
+	if err := d.burstRefusal(b, ref, now); err != nil {
+		return err
+	}
+	if d.Limits.PerPod <= 0 && d.Limits.PerNode <= 0 {
+		return nil
+	}
+	var mirrors mxlv1alpha1.MxlFlowMirrorList
+	if err := d.Client.List(ctx, &mirrors,
+		client.MatchingLabels{mxlv1alpha1.LabelCreatedByIntent: d.NodeName}); err != nil {
+		return fmt.Errorf("count on-demand mirrors: %w", err)
+	}
+	node, own := 0, 0
+	for _, m := range mirrors.Items {
+		if !m.DeletionTimestamp.IsZero() || m.Spec.TargetNode != d.NodeName {
+			continue
+		}
+		node++
+		if m.Labels[mxlv1alpha1.LabelRequestorPodUID] == string(pod.GetUID()) {
+			own++
+		}
+	}
+	if d.Limits.PerPod > 0 && own >= d.Limits.PerPod {
+		return &LimitError{msg: fmt.Sprintf("pod %s/%s already has %d mirrors created on demand, its limit",
+			pod.GetNamespace(), pod.GetName(), own)}
+	}
+	if d.Limits.PerNode > 0 && node >= d.Limits.PerNode {
+		return &LimitError{msg: fmt.Sprintf("node %s already has %d mirrors created on demand, its limit",
+			d.NodeName, node)}
+	}
+	return nil
+}
+
+// pruneBursts forgets creations that have left the burst window, and
+// refused flows that did not ask again within a window of when they were
+// told to. The caller holds limitMu.
+func (d *Dispatcher) pruneBursts(now time.Time) {
+	if d.bursts == nil {
+		d.bursts = map[types.UID]*burst{}
+	}
+	for uid, b := range d.bursts {
+		b.created = slices.DeleteFunc(b.created, func(t time.Time) bool {
+			return now.Sub(t) >= d.Limits.BurstWindow
+		})
+		b.waiting = slices.DeleteFunc(b.waiting, func(w waiter) bool {
+			return now.Sub(w.at) >= d.Limits.BurstWindow
+		})
+		if len(b.created) == 0 && len(b.waiting) == 0 {
+			delete(d.bursts, uid)
+		}
+	}
+}
+
+// burstRefusal refuses ref when b's window is full, telling it to ask
+// again when its place frees, and otherwise lets it pass and forgets it
+// was refused. The caller holds limitMu.
+func (d *Dispatcher) burstRefusal(b *burst, ref mxlv1alpha1.FlowRef, now time.Time) error {
+	i := slices.IndexFunc(b.waiting, func(w waiter) bool { return w.flow == ref.Name() })
+	n, window := d.Limits.Burst, d.Limits.BurstWindow
+	if n <= 0 || len(b.created) < n {
+		if i >= 0 {
+			b.waiting = slices.Delete(b.waiting, i, i+1)
+		}
+		return nil
+	}
+	if i < 0 {
+		b.waiting = append(b.waiting, waiter{flow: ref.Name()})
+		i = len(b.waiting) - 1
+	}
+	// The i-th flow refused gets the place the i-th oldest creation
+	// frees, and once those are given, the one the creation it lets in
+	// frees a window later.
+	at := b.created[len(b.created)-n+i%n].Add(time.Duration(i/n+1) * window)
+	b.waiting[i].at = at
+	return &LimitError{
+		msg: fmt.Sprintf("pod %s/%s had %d mirrors created on demand in the last %s, its limit",
+			b.pod.Namespace, b.pod.Name, len(b.created), window),
+		retryAfter: at.Sub(now),
+	}
+}
+
+// refuseEarly refuses a request by its pod's burst limit before the pod
+// is looked up, from the pod UID /proc names for pid. A refused flow asks
+// again until it passes, and the full path costs it a pod List and the
+// provider's lookups each time. What that path answers ahead of the limit
+// is checked first and left to it: a flow already here, one no other node
+// can source, one a mirror already serves.
+func (d *Dispatcher) refuseEarly(ctx context.Context, pid int32, ref mxlv1alpha1.FlowRef) error {
+	r, ok := d.Resolver.(uidResolver)
+	if !ok || d.Limits.Burst <= 0 {
+		return nil
+	}
+	uid, err := r.UIDForPID(pid)
+	if err != nil {
+		return nil
+	}
+	full := func() *burst {
+		d.pruneBursts(d.now())
+		if b := d.bursts[types.UID(uid)]; b != nil && len(b.created) >= d.Limits.Burst {
+			return b
+		}
+		return nil
+	}
+	d.limitMu.Lock()
+	b := full()
+	var ns string
+	if b != nil {
+		ns = b.pod.Namespace
+	}
+	d.limitMu.Unlock()
+	if b == nil || d.flowExistsLocally(ref) {
+		return nil
+	}
+	if res, err := d.resolveSourceNode(ctx, ref); err != nil || !res.Found || res.Node == d.NodeName {
+		return nil
+	}
+	var existing mxlv1alpha1.MxlFlowMirror
+	key := types.NamespacedName{Namespace: ns, Name: mxlv1alpha1.MirrorNameFor(ref, d.NodeName)}
+	if err := d.Client.Get(ctx, key, &existing); !apierrors.IsNotFound(err) {
+		return nil
+	}
+
+	d.limitMu.Lock()
+	defer d.limitMu.Unlock()
+	if b = full(); b == nil {
+		return nil
+	}
+	err = d.burstRefusal(b, ref, d.now())
+	if err != nil {
+		d.refuse(ctx, ref, &b.pod, err)
+	}
+	return err
+}
+
+// refuse logs a request a limit refused and records it as an event on
+// the pod, once per pod per refusal window: the pod sees only ENOENT,
+// and a glob is refused for every flow it reaches.
+func (d *Dispatcher) refuse(ctx context.Context, ref mxlv1alpha1.FlowRef, pod metav1.Object, why error) {
+	if !d.shouldLogRefusal("limit/" + string(pod.GetUID())) {
+		return
+	}
+	l := log.FromContext(ctx).WithName("intent")
+	l.Info("intent request refused", "flowID", ref.ID, "pod", pod.GetNamespace()+"/"+pod.GetName(),
+		"reason", why.Error())
+	now := metav1.NewTime(d.now())
+	ev := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: pod.GetName() + ".", Namespace: pod.GetNamespace()},
+		InvolvedObject: corev1.ObjectReference{APIVersion: "v1", Kind: "Pod",
+			Namespace: pod.GetNamespace(), Name: pod.GetName(), UID: pod.GetUID()},
+		Reason: ReasonMirrorLimitReached,
+		Message: fmt.Sprintf("no mirror of flow %s created onto %s: %v; a process waiting on the open "+
+			"gets ENOENT; for one that opened the flow's placeholder, a refusal by the burst limit is "+
+			"asked for again while it runs, and one by a count of live mirrors is final",
+			ref.Name(), d.NodeName, why),
+		Type:           corev1.EventTypeWarning,
+		Source:         corev1.EventSource{Component: "mxl-domain-agent", Host: d.NodeName},
+		FirstTimestamp: now,
+		LastTimestamp:  now,
+		Count:          1,
+	}
+	if err := d.Client.Create(ctx, ev); err != nil {
+		l.Error(err, "record event", "reason", ReasonMirrorLimitReached)
+	}
 }
 
 // resolveProvider decides which libmxl-fabrics provider an on-demand
@@ -365,6 +785,24 @@ func (d *Dispatcher) resolveProvider(ctx context.Context, flowID, sourceNode str
 		l.Info("resolved mirror provider")
 	}
 	return provider, nil
+}
+
+// requireMultiDomain refuses a mirror in a domain other than the primary
+// unless the gateway on every node it involves reports multiDomain. A
+// gateway without it ignores spec.domain and would copy the primary
+// domain's flow of the same id, which is a wrong picture rather than a
+// failure.
+func (d *Dispatcher) requireMultiDomain(ctx context.Context, nodes ...string) error {
+	for _, node := range nodes {
+		caps, err := d.nodeCapabilities(ctx, node)
+		if err != nil {
+			return fmt.Errorf("node %s capabilities: %w", node, err)
+		}
+		if !caps.MultiDomain {
+			return fmt.Errorf("the gateway on node %s mirrors only the primary MXL domain", node)
+		}
+	}
+	return nil
 }
 
 // nodeCapabilities reads the cluster-scoped MxlNodeCapabilities the
@@ -419,4 +857,41 @@ func (d *Dispatcher) waitReady(ctx context.Context, mirror *mxlv1alpha1.MxlFlowM
 // structural rather than a matter of two copies staying in step.
 func MirrorName(flowID, targetNode string) string {
 	return mxlv1alpha1.MirrorName(flowID, targetNode)
+}
+
+// flowRef is the flow a path names. With Domains set it resolves against every
+// domain materialised on the node; without, only the primary, as before
+// domains existed.
+//
+// The primary domain is resolved from DomainPath whether or not an
+// MxlDomain naming its directory is materialised yet: the registry only
+// lists domains Ready on this node, and a missed sync must not refuse
+// every request the agent served before domains existed.
+func (d *Dispatcher) flowRef(path string) (mxlv1alpha1.FlowRef, bool) {
+	if d.Domains != nil {
+		if ref, ok := d.Domains().FlowRefFromPath(path); ok {
+			return ref, true
+		}
+	}
+	id, ok := FlowIDFromPath(d.DomainPath, path)
+	return mxlv1alpha1.FlowRef{ID: id}, ok
+}
+
+// domainDir is the directory a flow's domain is materialised in on this
+// node, and empty for a domain that is not: never the primary directory,
+// which holds another flow of the same id.
+func (d *Dispatcher) domainDir(ref mxlv1alpha1.FlowRef) string {
+	if ref.Domain == "" {
+		return d.DomainPath
+	}
+	if d.Domains == nil {
+		return ""
+	}
+	doms := d.Domains()
+	for dir, name := range doms.ByDir {
+		if name == ref.Domain {
+			return filepath.Join(doms.Root, dir)
+		}
+	}
+	return ""
 }

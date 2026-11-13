@@ -8,13 +8,21 @@ import (
 	"net/http"
 	_ "net/http/pprof" // registers /debug/pprof handlers on http.DefaultServeMux
 	"os"
+	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -23,13 +31,20 @@ import (
 
 	"github.com/qvest-digital/go-mxl/fabrics"
 
+	apimxlfs "github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/capabilities"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/config"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/domaingc"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/merge"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/mirror"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/numaplace"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/originhints"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/placeholder"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/portmetrics"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/rdma"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/replmon"
 )
 
 var (
@@ -71,20 +86,58 @@ func run(args []string) error {
 
 	// Open libmxl handles up front so any misconfiguration (bad
 	// domain path, missing .so) fails before the manager comes up.
-	handles, err := instance.Open(cfg.DomainPath)
+	handles, err := instance.Open(cfg.DomainPath, cfg.Mxlfs)
 	if err != nil {
 		return fmt.Errorf("open libmxl: %w", err)
 	}
-	defer func() { _ = handles.Close() }()
 
+	// Below the pod's default termination grace period of 30s, so a
+	// runnable that does not stop ends the process before the kubelet
+	// kills it.
+	shutdownTimeout := 20 * time.Second
 	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: cfg.MetricsAddr},
-		HealthProbeBindAddress: cfg.ProbeAddr,
+		Scheme:                  scheme,
+		Metrics:                 metricsserver.Options{BindAddress: cfg.MetricsAddr},
+		HealthProbeBindAddress:  cfg.ProbeAddr,
+		GracefulShutdownTimeout: &shutdownTimeout,
 	})
 	if err != nil {
+		_ = handles.Close()
 		return fmt.Errorf("construct manager: %w", err)
 	}
+
+	// Every other MxlDomain is opened below the runtime root the primary
+	// domain sits in, on its first mirror or once it is ready here,
+	// whichever comes first.
+	domains := &instance.Set{
+		Primary: handles,
+		Directory: func(ctx context.Context, name string) (string, error) {
+			var d mxlv1alpha1.MxlDomain
+			if err := mgr.GetClient().Get(ctx, client.ObjectKey{Name: name}, &d); err != nil {
+				return "", err
+			}
+			return d.Spec.Path(), nil
+		},
+		Mxlfs: cfg.Mxlfs,
+	}
+	// Once the manager has run, the domains stay open until the process
+	// exits. Mirror transfer loops are not runnables and still drive the
+	// fabrics instances when the manager returns: destroying one under
+	// a loop faults inside cgo. Closing the libmxl instances would also
+	// offer every mirror copy for deletion, one at a time.
+	//
+	// At exit the kernel does what a crash leaves to it: it releases the
+	// flocks and mappings and closes every descriptor, which closes the
+	// tcp provider's sockets and, for verbs and efa, the device files
+	// whose release destroys the queue pairs and memory registrations.
+	// The mirror copies stay in their domains without a writer until the
+	// next gateway's domain sweeper collects them.
+	managerRan := false
+	defer func() {
+		if !managerRan {
+			_ = domains.Close()
+		}
+	}()
 
 	if cfg.PprofAddr != "" {
 		pprofSrv := &http.Server{
@@ -108,32 +161,74 @@ func run(args []string) error {
 	// the publisher advertises, and nothing else.
 	selector := cfg.Selector()
 
+	// Every mirror's reads, writes and copy outcomes, recorded through
+	// libmxl-monitoring and served beside controller-runtime's metrics.
+	replication, err := replmon.New(ctrl.Log.WithName("replmon"))
+	if err != nil {
+		return fmt.Errorf("libmxl-monitoring: %w", err)
+	}
+	metrics.Registry.MustRegister(&replmon.Collector{NodeName: cfg.NodeName, M: replication})
+	if err := mgr.Add(manager.RunnableFunc(replication.Run)); err != nil {
+		return fmt.Errorf("register libmxl-monitoring poller: %w", err)
+	}
+
+	placer := numaPlacer(cfg, mgr.GetEventRecorderFor("mxl-numa-placement"))
+	if placer != nil {
+		metrics.Registry.MustRegister(placer)
+	}
+
 	targetReconciler := &mirror.TargetReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 		NodeName:      cfg.NodeName,
 		Selector:      selector,
-		Handles:       handles,
+		Domains:       domains,
 		DomainPath:    cfg.DomainPath,
 		DegradedAfter: cfg.DegradedAfter,
+		PlacementWait: cfg.PlacementWait,
 		Recorder:      mgr.GetEventRecorderFor("mxl-target-gateway"),
+		Recorders:     replication,
+		Placer:        placer,
 	}
 	if err := targetReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup target reconciler: %w", err)
+	}
+
+	if cfg.Mxlfs {
+		if err := requireKind(mgr.GetRESTMapper(), "MxlFlowRedundancySet"); err != nil {
+			return fmt.Errorf("--mxlfs needs the redundancy set CRD: %w", err)
+		}
+	}
+	for _, c := range mxlfsComponents(cfg.Mxlfs, mgr.GetClient(), cfg.NodeName, domains, targetReconciler) {
+		if err := c.setup(mgr); err != nil {
+			return fmt.Errorf("setup %s: %w", c.name, err)
+		}
 	}
 	sourceReconciler := &mirror.SourceReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
 		NodeName:         cfg.NodeName,
 		Selector:         selector,
-		Handles:          handles,
+		Domains:          domains,
 		ReaderStallAfter: cfg.ReaderStallAfter,
-		PacingFraction:   cfg.PacingFraction,
-		PacingChunks:     cfg.PacingChunks,
 		Recorder:         mgr.GetEventRecorderFor("mxl-source-gateway"),
+		Recorders:        replication,
+		Placer:           placer,
 	}
 	if err := sourceReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup source reconciler: %w", err)
+	}
+	// The batch size hints of the flows produced here, which a mirror's
+	// target creates its copy with.
+	hints := &originhints.Publisher{Client: mgr.GetClient(), NodeName: cfg.NodeName, Domain: placeholder.FromSet(domains)}
+	if err := hints.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup origin hints publisher: %w", err)
+	}
+	// Every domain ready here is opened, used or not, so the sweeper
+	// below runs in each of them.
+	opener := &instance.Opener{Client: mgr.GetClient(), NodeName: cfg.NodeName, Set: domains}
+	if err := opener.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup domain opener: %w", err)
 	}
 
 	// Both reconcilers hold per-mirror byte counters the collector
@@ -153,19 +248,42 @@ func run(args []string) error {
 	// MxlNodeCapabilities publisher runs as a Manager Runnable so it
 	// joins the leader-election / shutdown lifecycle and only fires
 	// once the cache has synced.
+	pub := &capabilities.Publisher{
+		Client:             mgr.GetClient(),
+		APIReader:          mgr.GetAPIReader(),
+		Recorder:           mgr.GetEventRecorderFor("mxl-node-capabilities"),
+		NodeName:           cfg.NodeName,
+		Providers:          cfg.Providers,
+		Lister:             handles.Fabrics(),
+		Selector:           selector,
+		HostDevices:        rdma.Inventory{},
+		HostDeviceObserver: enumerationGate,
+		ProbePeriod:        cfg.ProbePeriod,
+		Capacities:         cfg.PortCapacities,
+		Budgets:            cfg.Budgets,
+
+		MaxUtilizationPercent: cfg.MaxUtilizationPercent,
+	}
+
+	// The fabric ports the publisher last probed, the links under them
+	// and their kernel counters, read on scrape. The ethtool connection
+	// opens on the first scrape; a kernel or driver without those
+	// statistics leaves their series out.
+	ethtool := &portmetrics.Netlink{}
+	defer func() { _ = ethtool.Close() }()
+	metrics.Registry.MustRegister(&portmetrics.Collector{
+		NodeName: cfg.NodeName,
+		Snapshot: func() (portmetrics.Snapshot, bool) {
+			p, ok := pub.Published()
+			return portmetrics.Snapshot{Providers: p.Providers, Budgets: p.Budgets,
+				MaxUtilizationPercent: cfg.MaxUtilizationPercent}, ok
+		},
+		Sysfs:   portmetrics.Sysfs{NetdevOf: portmetrics.NetdevByAddress},
+		Ethtool: ethtool,
+		Log:     ctrl.Log.WithName("portmetrics"),
+	})
+
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		pub := &capabilities.Publisher{
-			Client:             mgr.GetClient(),
-			APIReader:          mgr.GetAPIReader(),
-			Recorder:           mgr.GetEventRecorderFor("mxl-node-capabilities"),
-			NodeName:           cfg.NodeName,
-			Providers:          cfg.Providers,
-			Lister:             handles.Fabrics(),
-			Selector:           selector,
-			HostDevices:        rdma.Inventory{},
-			HostDeviceObserver: enumerationGate,
-			ProbePeriod:        cfg.ProbePeriod,
-		}
 		if err := pub.EnsureExists(ctx); err != nil {
 			return err
 		}
@@ -178,18 +296,30 @@ func run(args []string) error {
 	// Reclaiming abandoned flow directories is a Manager Runnable so
 	// it starts only once the caches have synced, which is the first
 	// half of not collecting a mirror copy the target reconciler has
-	// yet to re-establish; the sweeper's own grace is the second.
-	sweeper := &domaingc.Sweeper{
-		DomainPath:    cfg.DomainPath,
-		Interval:      cfg.DomainGCInterval,
-		Grace:         cfg.DomainGCGrace,
-		ScaffoldGrace: cfg.DomainGCScaffoldGrace,
-		Log:           ctrl.Log.WithName("domaingc"),
-	}
-	if inst := handles.MXL(); inst != nil {
-		sweeper.Collector = inst
-	}
-	if err := mgr.Add(manager.RunnableFunc(sweeper.Start)); err != nil {
+	// yet to re-establish; the sweeper's own grace is the second. One
+	// sweeper per open domain, each from the moment it is opened.
+	// The sweepers are joined before the runnable returns, so none
+	// collects while the process exits.
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		var sweepers sync.WaitGroup
+		defer sweepers.Wait()
+		domains.Watch(func(h *instance.Handles) {
+			sweeper := &domaingc.Sweeper{
+				DomainPath:    h.DomainPath(),
+				Interval:      cfg.DomainGCInterval,
+				Grace:         cfg.DomainGCGrace,
+				ScaffoldGrace: cfg.DomainGCScaffoldGrace,
+				Log:           ctrl.Log.WithName("domaingc").WithValues("domain", h.DomainPath()),
+			}
+			if inst := h.MXL(); inst != nil {
+				sweeper.Collector = inst
+			}
+			sweepers.Add(1)
+			go func() { defer sweepers.Done(); _ = sweeper.Start(ctx) }()
+		})
+		<-ctx.Done()
+		return nil
+	})); err != nil {
 		return fmt.Errorf("add domain gc sweeper: %w", err)
 	}
 
@@ -224,7 +354,38 @@ func run(args []string) error {
 		"rdmaEnumerationLiveness", cfg.RDMAEnumerationLiveness,
 		"rdmaEnumerationGrace", cfg.RDMAEnumerationGrace)
 
+	managerRan = true
 	return mgr.Start(ctrl.SetupSignalHandler())
+}
+
+// ReasonNumaFlowUnresolved is the reason of the Node event for a gateway
+// whose flow placement stays off because the NICs give no NUMA node.
+const ReasonNumaFlowUnresolved = "MxlfsNumaFlowUnresolved"
+
+// numaPlacer returns the placer of --mxlfs-numa-placement-mode=flow, or
+// nil for any other mode and on a host whose RDMA devices give no single
+// NUMA node, which rec is told about.
+func numaPlacer(cfg *config.Config, rec record.EventRecorder) *numaplace.Placer {
+	return placerFor(cfg, rec, func() (int32, error) {
+		return apimxlfs.HostNICNode(apimxlfs.RDMAClass, apimxlfs.OnlineNodes)
+	})
+}
+
+func placerFor(cfg *config.Config, rec record.EventRecorder, nicNode func() (int32, error)) *numaplace.Placer {
+	if !cfg.FlowPlacement() {
+		return nil
+	}
+	log := ctrl.Log.WithName("numaplace")
+	nic, err := nicNode()
+	if err != nil {
+		log.Error(err, "flow placement stays off: the NICs give no single NUMA node")
+		rec.Eventf(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: cfg.NodeName, UID: types.UID(cfg.NodeName)}},
+			corev1.EventTypeWarning, ReasonNumaFlowUnresolved,
+			"--mxlfs-numa-placement-mode=flow acts as off: %v", err)
+		return nil
+	}
+	log.Info("rings of registered flows are placed on the NICs' NUMA node", "numaNode", nic)
+	return numaplace.New(cfg.NodeName, nic, rec, log)
 }
 
 func providerNames(providers []fabrics.Provider) []string {
@@ -233,4 +394,81 @@ func providerNames(providers []fabrics.Provider) []string {
 		out = append(out, p.String())
 	}
 	return out
+}
+
+// setDomains resolves an MxlDomain name to its directory for the merge
+// reconciler, opening the domain as a mirror would.
+type setDomains struct{ s *instance.Set }
+
+func (d setDomains) DomainPath(ctx context.Context, name string) (string, bool, error) {
+	h, err := d.s.For(ctx, name)
+	if err != nil {
+		return "", false, err
+	}
+	return h.DomainPath(), h.OnMxlfs(), nil
+}
+
+type component struct {
+	name  string
+	setup func(ctrl.Manager) error
+}
+
+// mxlfsComponents wires what a domain on mxlfs needs into the target
+// reconciler and returns the controllers and runnables that go with it.
+// Without mxlfs it returns none and leaves the target's hooks nil.
+func mxlfsComponents(on bool, c client.Client, node string, domains *instance.Set,
+	target *mirror.TargetReconciler) []component {
+
+	if !on {
+		return nil
+	}
+	// On an mxlfs domain every MxlFlow absent here gets a placeholder,
+	// so every pod on the node sees the whole domain.
+	placeholders := &placeholder.Manager{
+		Client:      c,
+		NodeName:    node,
+		Domain:      placeholder.FromSet(domains),
+		LocalWriter: target.StopFlow,
+	}
+	target.Filled = placeholders.Filled
+	target.Unfilled = placeholders.Unfilled
+	target.Retire = placeholders.Retire
+
+	// Redundancy sets whose output a reader wants on this node.
+	sets := &merge.Reconciler{
+		Client:   c,
+		NodeName: node,
+		Domains:  setDomains{domains},
+	}
+	target.SamplesCommitted = sets.SamplesCommitted
+
+	return []component{
+		// Before any placeholder controller runs, so no domain is opened
+		// unseen: the markers a previous gateway left in it are judged
+		// once the placeholders still absent here are held again.
+		{"stale placeholder markers", func(ctrl.Manager) error {
+			domains.Watch(func(h *instance.Handles) { placeholders.DomainOpened(h.DomainPath()) })
+			return nil
+		}},
+		{"redundancy set reconciler", sets.SetupWithManager},
+		{"placeholder reconciler", func(mgr ctrl.Manager) error {
+			if err := ctrl.NewControllerManagedBy(mgr).
+				Named("placeholder").
+				For(&mxlv1alpha1.MxlFlow{}).
+				Complete(placeholders); err != nil {
+				return err
+			}
+			return mgr.Add(placeholders)
+		}},
+	}
+}
+
+// requireKind fails when the API server does not serve kind: a
+// controller for it would otherwise wait for its cache without end.
+func requireKind(mapper meta.RESTMapper, kind string) error {
+	gk := schema.GroupKind{Group: mxlv1alpha1.GroupVersion.Group, Kind: kind}
+	if _, err := mapper.RESTMapping(gk, mxlv1alpha1.GroupVersion.Version); err != nil {
+		return fmt.Errorf("%s is not served (is its CRD installed?): %w", gk, err)
+	}
+	return nil
 }

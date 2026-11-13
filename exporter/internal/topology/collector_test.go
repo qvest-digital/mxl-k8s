@@ -46,7 +46,7 @@ func TestCollectReportsOriginForTheLocalNode(t *testing.T) {
 	expected := `
 # HELP mxl_flow_location_info 1 for the phase this flow is in on this node. Phase is Origin on the node the writer runs on.
 # TYPE mxl_flow_location_info gauge
-mxl_flow_location_info{flow_id="5fbec3b1-1b0f-417d-9059-8b94a47197ed",phase="Origin"} 1
+mxl_flow_location_info{domain="",flow_id="5fbec3b1-1b0f-417d-9059-8b94a47197ed",phase="Origin"} 1
 `
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(expected), "mxl_flow_location_info"))
 }
@@ -64,7 +64,7 @@ func TestCollectReportsReadyOnTheConsumingNode(t *testing.T) {
 	expected := `
 # HELP mxl_flow_location_info 1 for the phase this flow is in on this node. Phase is Origin on the node the writer runs on.
 # TYPE mxl_flow_location_info gauge
-mxl_flow_location_info{flow_id="5fbec3b1-1b0f-417d-9059-8b94a47197ed",phase="Ready"} 1
+mxl_flow_location_info{domain="",flow_id="5fbec3b1-1b0f-417d-9059-8b94a47197ed",phase="Ready"} 1
 `
 	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(expected), "mxl_flow_location_info"))
 }
@@ -80,4 +80,23 @@ func TestCollectSkipsFlowsNotOnThisNode(t *testing.T) {
 	)
 
 	require.Equal(t, 0, testutil.CollectAndCount(c, "mxl_flow_location_info"))
+}
+
+// The same flow id in a second domain is another MxlFlow. Without the
+// domain the two would share one label set, and a duplicate fails the
+// scrape of every metric on the endpoint.
+func TestCollectSeparatesDomainsOfOneID(t *testing.T) {
+	const id = "5fbec3b1-1b0f-417d-9059-8b94a47197ed"
+	origin := mxlv1alpha1.MxlFlowLocation{NodeName: "node-a", Phase: mxlv1alpha1.MxlFlowLocationOrigin}
+	second := flow("studio."+id, id, origin)
+	second.Spec.Domain = "studio"
+	c := newCollector(t, "node-a", flow(id, id, origin), second)
+
+	expected := `
+# HELP mxl_flow_location_info 1 for the phase this flow is in on this node. Phase is Origin on the node the writer runs on.
+# TYPE mxl_flow_location_info gauge
+mxl_flow_location_info{domain="",flow_id="5fbec3b1-1b0f-417d-9059-8b94a47197ed",phase="Origin"} 1
+mxl_flow_location_info{domain="studio",flow_id="5fbec3b1-1b0f-417d-9059-8b94a47197ed",phase="Origin"} 1
+`
+	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(expected), "mxl_flow_location_info"))
 }

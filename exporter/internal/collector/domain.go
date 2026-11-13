@@ -29,15 +29,16 @@ type DomainSource interface {
 	Stat() (domain.FSStat, error)
 }
 
-// DomainCollector exports the domain-wide counters.
+// DomainCollector exports the domain-wide counters of each domain.
 type DomainCollector struct {
-	src DomainSource
-	log logr.Logger
+	list func() []DomainSource
+	log  logr.Logger
 }
 
-// NewDomainCollector returns a collector over src.
-func NewDomainCollector(src DomainSource, log logr.Logger) *DomainCollector {
-	return &DomainCollector{src: src, log: log}
+// NewDomainCollector returns a collector over the domains list returns
+// at each scrape.
+func NewDomainCollector(list func() []DomainSource, log logr.Logger) *DomainCollector {
+	return &DomainCollector{list: list, log: log}
 }
 
 // Describe implements prometheus.Collector.
@@ -51,18 +52,24 @@ func (c *DomainCollector) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect implements prometheus.Collector.
 func (c *DomainCollector) Collect(ch chan<- prometheus.Metric) {
-	dom := c.src.Path()
+	for _, src := range c.list() {
+		c.collectDomain(ch, src)
+	}
+}
+
+func (c *DomainCollector) collectDomain(ch chan<- prometheus.Metric, src DomainSource) {
+	dom := src.Path()
 
 	var present int
-	for _, obs := range c.src.Observe() {
+	for _, obs := range src.Observe() {
 		if obs.Present {
 			present++
 		}
 	}
 	ch <- prometheus.MustNewConstMetric(descNumFlows, prometheus.GaugeValue, float64(present), dom)
-	ch <- prometheus.MustNewConstMetric(descDomainSize, prometheus.GaugeValue, float64(c.src.SizeBytes()), dom)
+	ch <- prometheus.MustNewConstMetric(descDomainSize, prometheus.GaugeValue, float64(src.SizeBytes()), dom)
 
-	st, err := c.src.Stat()
+	st, err := src.Stat()
 	if err != nil {
 		// The domain directory can be absent on a node that has never
 		// carried a flow. Skipping the filesystem series leaves a gap

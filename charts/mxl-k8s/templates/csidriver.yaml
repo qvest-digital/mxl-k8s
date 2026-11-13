@@ -1,0 +1,16 @@
+{{- if and .Values.agent.enabled .Values.agent.csi.enabled }}
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: mxl.qvest-digital.com
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "agent") | nindent 4 }}
+spec:
+  # A volume is a bind mount of the node's domain: nothing to attach.
+  attachRequired: false
+  # The plugin records which pod each volume is for.
+  podInfoOnMount: true
+  volumeLifecycleModes:
+    - Ephemeral
+  fsGroupPolicy: None
+{{- end }}

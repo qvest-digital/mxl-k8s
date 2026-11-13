@@ -107,3 +107,24 @@ tests:
       - equal:
           path: spec.template.spec.serviceAccountName
           value: mxl-k8s-operator
+
+  - it: renders the placement defaults
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --placement-max-utilization=80
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --placement-protocol-overhead=5
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --placement-overcommit=place
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --placement-pairing=prefer-same-subnet
+
+  - it: rejects an unknown overcommit policy
+    set:
+      operator.flags.placementOvercommit: drop
+    asserts:
+      - failedTemplate: {}

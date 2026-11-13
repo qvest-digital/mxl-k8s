@@ -79,26 +79,26 @@ func TestWriterGone_NilSeamAndErrorsAssumeTheWriterIsLive(t *testing.T) {
 	// answer is not grounds for tearing down a mirror that may be
 	// perfectly healthy, so both cases have to answer "not gone".
 	r := &SourceReconciler{}
-	assert.False(t, r.writerGone("f1"), "a nil seam must not strand a mirror")
+	assert.False(t, r.writerGone(mxlv1alpha1.FlowRef{ID: "f1"}), "a nil seam must not strand a mirror")
 
-	r = &SourceReconciler{writerLiveFn: func(string) (bool, error) {
+	r = &SourceReconciler{writerLiveFn: func(mxlv1alpha1.FlowRef) (bool, error) {
 		return false, assert.AnError
 	}}
-	assert.False(t, r.writerGone("f1"), "an error must not strand a mirror")
+	assert.False(t, r.writerGone(mxlv1alpha1.FlowRef{ID: "f1"}), "an error must not strand a mirror")
 
-	r = &SourceReconciler{writerLiveFn: func(string) (bool, error) {
+	r = &SourceReconciler{writerLiveFn: func(mxlv1alpha1.FlowRef) (bool, error) {
 		t.Fatal("an empty flowID must not reach libmxl")
 		return false, nil
 	}}
-	assert.False(t, r.writerGone(""))
+	assert.False(t, r.writerGone(mxlv1alpha1.FlowRef{}))
 }
 
 func TestWriterGone_ReportsGoneOnlyWhenLibmxlSaysSo(t *testing.T) {
-	r := &SourceReconciler{writerLiveFn: func(string) (bool, error) { return true, nil }}
-	assert.False(t, r.writerGone("f1"))
+	r := &SourceReconciler{writerLiveFn: func(mxlv1alpha1.FlowRef) (bool, error) { return true, nil }}
+	assert.False(t, r.writerGone(mxlv1alpha1.FlowRef{ID: "f1"}))
 
-	r = &SourceReconciler{writerLiveFn: func(string) (bool, error) { return false, nil }}
-	assert.True(t, r.writerGone("f1"),
+	r = &SourceReconciler{writerLiveFn: func(mxlv1alpha1.FlowRef) (bool, error) { return false, nil }}
+	assert.True(t, r.writerGone(mxlv1alpha1.FlowRef{ID: "f1"}),
 		"libmxl reporting no active writer is the authoritative answer, not "+
 			"an inference from a stalled head")
 }
@@ -108,9 +108,9 @@ func TestWriterGone_ReadsAFlowLibmxlCannotFindAsGone(t *testing.T) {
 	// that is not in this node's domain has no writer here, and no
 	// reader can be opened on it either. Wrapped, because the seam
 	// reports the call it made.
-	r := &SourceReconciler{writerLiveFn: func(string) (bool, error) {
+	r := &SourceReconciler{writerLiveFn: func(mxlv1alpha1.FlowRef) (bool, error) {
 		return false, fmt.Errorf("IsFlowActive: %w", mxl.ErrFlowNotFound)
 	}}
-	assert.True(t, r.writerGone("f1"),
+	assert.True(t, r.writerGone(mxlv1alpha1.FlowRef{ID: "f1"}),
 		"a flow that is not in the domain has no writer to wait for")
 }

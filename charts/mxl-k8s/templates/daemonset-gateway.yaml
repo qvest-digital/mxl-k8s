@@ -20,15 +20,27 @@ probes, update strategy, service account -- stays shared.
 {{- $ctx := .Context -}}
 {{- $g := .gateway -}}
 {{- $variant := .variant -}}
+{{- $surge := dig "rollingUpdate" "maxSurge" 0 $g.updateStrategy | default 0 | toString -}}
+{{- if and $ctx.Values.mxlfs.enabled (not (has $surge (list "0" "0%"))) -}}
+{{- fail (printf "mxlfs.enabled requires gateway.updateStrategy.rollingUpdate.maxSurge 0, not %s: a gateway clears every placeholder marker in a domain as it opens it, so a second gateway on the node would clear the markers of the first one's placeholders" $surge) -}}
+{{- end -}}
 {{- /*
 Build the effective capability list for the gateway container.
-rdma.enabled implies IPC_LOCK + SYS_RESOURCE (libmxl pins shm pages).
-Users may add more via containerSecurityContext.capabilities.add.
+rdma.enabled implies IPC_LOCK, which exempts the providers' memory
+registrations from RLIMIT_MEMLOCK. Users may add more via
+containerSecurityContext.capabilities.add.
 */ -}}
+{{- $numa := include "mxlk8s.numa.mode" $ctx -}}
 {{- $caps := list -}}
 {{- if $g.rdma.enabled -}}
   {{- $caps = append $caps "IPC_LOCK" -}}
-  {{- $caps = append $caps "SYS_RESOURCE" -}}
+{{- end -}}
+{{- /*
+flow placement holds and moves ring files, which mxlfs allows with
+CAP_SYS_NICE, as moving another process's pages does.
+*/ -}}
+{{- if eq $numa "flow" -}}
+  {{- $caps = append $caps "SYS_NICE" -}}
 {{- end -}}
 {{- range $g.containerSecurityContext.capabilities.add -}}
   {{- $caps = append $caps . -}}
@@ -68,6 +80,11 @@ spec:
     spec:
       serviceAccountName: {{ include "mxlk8s.serviceAccountName" (dict "Context" $ctx "component" "gateway" "values" $ctx.Values.gateway) }}
       hostNetwork: {{ $g.hostNetwork }}
+      {{- if $ctx.Values.mxlfs.enabled }}
+      # Local producers' flocks, read through /proc/locks, list only
+      # holders visible in the reader's PID namespace.
+      hostPID: true
+      {{- end }}
       dnsPolicy: {{ $g.dnsPolicy }}
       {{- with $ctx.Values.global.image.pullSecrets }}
       imagePullSecrets:
@@ -96,16 +113,27 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with $g.initContainers }}
+      {{- if or $ctx.Values.mxlfs.enabled $g.initContainers }}
       initContainers:
+        {{- if $ctx.Values.mxlfs.enabled }}
+        {{- include "mxlk8s.mxlfs.waitContainer" (dict "Context" $ctx "root" (dir $g.hostPath.domain)) | nindent 8 }}
+        {{- end }}
+        {{- with $g.initContainers }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
       containers:
         - name: gateway
           image: {{ include "mxlk8s.image" (dict "Context" $ctx "image" $g.image) }}
           imagePullPolicy: {{ include "mxlk8s.imagePullPolicy" (dict "global" $ctx.Values.global "image" $g.image) }}
           args:
-            {{- include "mxlk8s.flags.render" (dict "flags" $g.flags) | nindent 12 }}
+            {{- include "mxlk8s.flags.render" (dict "flags" $g.flags "keepEmpty" (list "bindAddress")) | nindent 12 }}
+            {{- if $ctx.Values.mxlfs.enabled }}
+            - --mxlfs
+            {{- end }}
+            {{- if eq $numa "flow" }}
+            - --mxlfs-numa-placement-mode=flow
+            {{- end }}
             {{- with $g.args }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -120,6 +148,12 @@ spec:
                   fieldPath: status.podIP
             {{- with $g.extraEnv }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- $providers := $g.flags.providers | default list }}
+            {{- $ack := $g.rdma.verbsAckTimeout }}
+            {{- if and $g.rdma.enabled (not (kindIs "invalid" $ack)) (gt (int $ack) 0) (or (has "verbs" $providers) (has "any" $providers)) }}
+            - name: FI_VERBS_ACK_TIMEOUT
+              value: {{ int $ack | quote }}
             {{- end }}
             {{- if $g.rdma.enabled }}
             {{- with $g.rdma.extraEnv }}
@@ -164,6 +198,15 @@ spec:
           volumeMounts:
             - name: mxl-domain
               mountPath: {{ $g.hostPath.domain }}
+              {{- if $ctx.Values.mxlfs.enabled }}
+              mountPropagation: HostToContainer
+              {{- end }}
+            - name: mxl-domains
+              mountPath: {{ $g.hostPath.domains }}
+              {{- if $ctx.Values.mxlfs.enabled }}
+              # The agent mounts each domains/<id> as it appears.
+              mountPropagation: HostToContainer
+              {{- end }}
             {{- if and $g.rdma.enabled $g.rdma.mountInfiniband }}
             - name: infiniband
               mountPath: {{ $g.rdma.infinibandHostPath }}
@@ -179,6 +222,16 @@ spec:
           hostPath:
             path: {{ $g.hostPath.domain }}
             type: {{ $g.hostPath.type }}
+        - name: mxl-domains
+          hostPath:
+            path: {{ $g.hostPath.domains }}
+            type: {{ $g.hostPath.type }}
+        {{- if $ctx.Values.mxlfs.enabled }}
+        - name: mxl-run
+          hostPath:
+            path: {{ dir $g.hostPath.domain }}
+            type: {{ $g.hostPath.type }}
+        {{- end }}
         {{- if and $g.rdma.enabled $g.rdma.mountInfiniband }}
         - name: infiniband
           hostPath:

@@ -230,3 +230,52 @@ func TestObserveJudgesAContinuousFlowByItsHead(t *testing.T) {
 		"a continuous flow whose writer stopped must go inactive once the "+
 			"clock outruns its head by the span a reader could still reach")
 }
+
+const activeTestEventDef = `{
+  "id": "8d0f6a52-3c1e-4b7a-9f2d-61c4e0a9b7d3",
+  "format": "urn:x-nmos:format:event",
+  "tags": { "urn:x-nmos:tag:grouphint/v1.0": ["exporter probe:Event"] },
+  "label": "activity probe, events",
+  "grain_rate": { "numerator": 1000, "denominator": 1 }
+}`
+
+func TestObserveJudgesAnEventFlowByItsLastWrite(t *testing.T) {
+	// An event flow's head index is a queue position: libmxl leaves it
+	// at MXL_UNDEFINED_INDEX until the first commit and then steps it
+	// once per event, however far apart they arrive. Read as a clock
+	// index it puts every event flow about 1.8e12 grains behind at
+	// 1000/s and reports it stalled for good. The event writer stamps
+	// lastWriteTime on every commit, as the discrete one does, and flow
+	// creation stamps it too, so a flow just created is as fresh as
+	// one just written.
+	dir := t.TempDir()
+	inst, err := mxl.NewInstance(dir, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = inst.Close() })
+
+	w, _, err := inst.NewWriter(activeTestEventDef)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = w.Close() })
+	require.Equal(t, mxl.FormatEvent, w.Config().Common.Format)
+
+	d, err := Open(dir, time.Minute)
+	require.NoError(t, err)
+	t.Cleanup(func() { d.Close() })
+	require.NoError(t, d.Scan())
+
+	obs := d.Observe()
+	require.Len(t, obs, 1)
+	require.True(t, obs[0].HaveWriteAge,
+		"an event flow stamps its last write time, so its age is a reading")
+	require.Zero(t, obs[0].LatencyGrains,
+		"an event flow's head does not follow the clock, so it has no latency")
+	require.True(t, obs[0].Active,
+		"an event flow written moments ago must read as active")
+
+	require.Eventually(t, func() bool {
+		o := d.Observe()
+		return len(o) == 1 && !o[0].Active
+	}, 5*time.Second, 20*time.Millisecond,
+		"an event flow nothing writes to must go inactive once its last "+
+			"write ages past the window")
+}

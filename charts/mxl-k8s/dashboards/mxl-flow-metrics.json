@@ -4,7 +4,20 @@
   },
   "editable": false,
   "graphTooltip": 1,
-  "links": [],
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "mxl"
+      ],
+      "title": "MXL dashboards",
+      "asDropdown": false,
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false,
+      "icon": "external link"
+    }
+  ],
   "title": "MXL Flow Metrics",
   "uid": "mxl-flow-metrics",
   "tags": [
@@ -374,6 +387,608 @@
       ]
     },
     {
+      "id": 120,
+      "type": "row",
+      "title": "Memory placement",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "panels": []
+    },
+    {
+      "id": 121,
+      "type": "stat",
+      "title": "Rings Held Off Their NIC Node",
+      "description": "Source rings the gateway holds for a registered flow with pages on another NUMA node than the NICs'. Such a ring is read across the interconnect on every transfer. Needs mxlfs.numa.placement.mode flow; no value with it off.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 10
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "colorMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "flow placement off",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(mxl_gateway_numa_off_nic_rings{node=~\"$node\"})",
+          "legendFormat": "",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 122,
+      "type": "stat",
+      "title": "numa_node= Fallbacks in Range",
+      "description": "Bytes the mxlfs domains allocated on another NUMA node than the one they preferred, over the selected range: the preferred node had no free memory. Read by the exporter in every placement mode with mxlfs.numa.metrics.enabled. No value with mxlfs.numa.metrics.enabled off.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 10
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "colorMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "NUMA metrics off",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(increase(mxl_domain_numa_fallback_bytes_total{node=~\"$node\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 129,
+      "type": "state-timeline",
+      "title": "Release Loop States",
+      "description": "Flows with a local writer per state of the agent's release loop: unpinned and disagree flows stay where they are, held ones are registered by the gateway, settling ones wait out the release delay. Flow mode only.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "options": {
+        "rowHeight": 0.9,
+        "showValue": "auto",
+        "alignValue": "left",
+        "mergeValues": true,
+        "tooltip": {
+          "mode": "single"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "flow placement off",
+          "custom": {
+            "lineWidth": 0,
+            "fillOpacity": 70
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              },
+              {
+                "color": "blue",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (state) (mxl_agent_numa_release_flows{node=~\"$node\"})",
+          "legendFormat": "{{state}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 123,
+      "type": "timeseries",
+      "title": "Domain Bytes per NUMA Node",
+      "description": "Pages of the mxlfs domains on each NUMA node. Read in every placement mode.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (node, numa_node) (mxl_domain_numa_bytes{node=~\"$node\"})",
+          "legendFormat": "{{node}} / NUMA {{numa_node}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 124,
+      "type": "timeseries",
+      "title": "Moves and Refused Blocks",
+      "description": "Ring file moves per interval by result, and blocks a move left where they were by reason: pinned is a registered ring, view a block a view maps, held a ring the gateway holds.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (result) (increase(mxl_domain_numa_moves_total{node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "moves {{result}}",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (reason) (increase(mxl_domain_numa_move_refused_blocks_total{node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "refused {{reason}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 125,
+      "type": "timeseries",
+      "title": "Bytes Moved per Second",
+      "description": "Ring bytes moved between NUMA nodes: by the gateway to the NICs' node before a flow's first registration, and by the agent to the node of a flow's local writers and readers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (node) (rate(mxl_gateway_numa_moved_bytes_total{node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "{{node}} gateway",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (node) (rate(mxl_agent_numa_release_bytes_total{node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "{{node}} agent",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 126,
+      "type": "timeseries",
+      "title": "Block Window",
+      "description": "How long a moving block was unmapped, the longest an access to it waited: p50 and p99 per interval, and the longest since the domain was mounted.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(mxl_domain_numa_move_block_window_seconds_bucket{node=~\"$node\"}[$__rate_interval])))",
+          "legendFormat": "p50",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(mxl_domain_numa_move_block_window_seconds_bucket{node=~\"$node\"}[$__rate_interval])))",
+          "legendFormat": "p99",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(mxl_domain_numa_move_block_window_max_seconds{node=~\"$node\"})",
+          "legendFormat": "max",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 127,
+      "type": "timeseries",
+      "title": "Gateway Move Time p95",
+      "description": "Time from holding a source ring to having moved it, which delays the flow's first registration, p95 per node.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, node) (rate(mxl_gateway_numa_move_seconds_bucket{node=~\"$node\"}[$__rate_interval])))",
+          "legendFormat": "{{node}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 128,
+      "type": "table",
+      "title": "Ring Bytes per Flow and NUMA Node",
+      "description": "Where each flow's ring is, and whether an open file holds it in place (held 1: the gateway registers it).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "held"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": true,
+          "format": "table",
+          "expr": "sum by (node, domain, flow_id, numa_node) (mxl_flow_ring_numa_bytes{node=~\"$node\",flow_id=~\"$flow\"})",
+          "legendFormat": ""
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": true,
+          "format": "table",
+          "expr": "max by (node, domain, flow_id) (mxl_flow_ring_held{node=~\"$node\",flow_id=~\"$flow\"})",
+          "legendFormat": ""
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "Value #A": "bytes",
+              "Value #B": "held"
+            },
+            "indexByName": {
+              "node": 0,
+              "domain": 1,
+              "flow_id": 2,
+              "numa_node": 3,
+              "Value #A": 4,
+              "Value #B": 5
+            }
+          }
+        }
+      ]
+    },
+    {
       "id": 101,
       "title": "End-to-End Flow Status",
       "type": "row",
@@ -381,7 +996,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 9
+        "y": 38
       },
       "collapsed": false,
       "panels": []
@@ -395,7 +1010,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 10
+        "y": 39
       },
       "datasource": {
         "type": "prometheus",
@@ -446,7 +1061,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 10
+        "y": 39
       },
       "datasource": {
         "type": "prometheus",
@@ -497,7 +1112,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 10
+        "y": 39
       },
       "datasource": {
         "type": "prometheus",
@@ -547,7 +1162,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 43
       },
       "collapsed": false,
       "panels": []
@@ -561,7 +1176,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 15
+        "y": 44
       },
       "datasource": {
         "type": "prometheus",
@@ -652,7 +1267,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 21
+        "y": 50
       },
       "datasource": {
         "type": "prometheus",
@@ -729,7 +1344,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 27
+        "y": 56
       },
       "collapsed": false,
       "panels": []
@@ -743,7 +1358,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 28
+        "y": 57
       },
       "datasource": {
         "type": "prometheus",
@@ -797,7 +1412,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 28
+        "y": 57
       },
       "datasource": {
         "type": "prometheus",
@@ -850,7 +1465,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 36
+        "y": 65
       },
       "collapsed": false,
       "panels": []
@@ -864,7 +1479,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 37
+        "y": 66
       },
       "datasource": {
         "type": "prometheus",
@@ -914,7 +1529,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 37
+        "y": 66
       },
       "datasource": {
         "type": "prometheus",
@@ -964,7 +1579,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 45
+        "y": 74
       },
       "panels": []
     },
@@ -981,7 +1596,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 46
+        "y": 75
       },
       "fieldConfig": {
         "defaults": {
@@ -1042,7 +1657,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 46
+        "y": 75
       },
       "fieldConfig": {
         "defaults": {
@@ -1103,7 +1718,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 54
+        "y": 83
       },
       "fieldConfig": {
         "defaults": {
@@ -1164,7 +1779,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 54
+        "y": 83
       },
       "fieldConfig": {
         "defaults": {
@@ -1220,7 +1835,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 62
+        "y": 91
       },
       "collapsed": false,
       "panels": []
@@ -1234,7 +1849,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 63
+        "y": 92
       },
       "datasource": {
         "type": "prometheus",
@@ -1288,7 +1903,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 71
+        "y": 100
       },
       "collapsed": false,
       "panels": []
@@ -1302,7 +1917,7 @@
         "h": 4,
         "w": 12,
         "x": 0,
-        "y": 72
+        "y": 101
       },
       "datasource": {
         "type": "prometheus",
@@ -1350,7 +1965,7 @@
         "h": 4,
         "w": 12,
         "x": 12,
-        "y": 72
+        "y": 101
       },
       "datasource": {
         "type": "prometheus",
@@ -1397,7 +2012,7 @@
         "h": 4,
         "w": 12,
         "x": 0,
-        "y": 76
+        "y": 105
       },
       "datasource": {
         "type": "prometheus",
@@ -1445,7 +2060,7 @@
         "h": 4,
         "w": 12,
         "x": 12,
-        "y": 76
+        "y": 105
       },
       "datasource": {
         "type": "prometheus",
@@ -1502,7 +2117,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 80
+        "y": 109
       },
       "collapsed": false,
       "panels": []
@@ -1516,7 +2131,7 @@
         "h": 16,
         "w": 24,
         "x": 0,
-        "y": 81
+        "y": 110
       },
       "datasource": {
         "type": "prometheus",

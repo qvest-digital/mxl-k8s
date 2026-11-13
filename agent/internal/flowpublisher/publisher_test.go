@@ -205,6 +205,35 @@ func TestPublishVanished_MarksLocationStale(t *testing.T) {
 	assert.Equal(t, mxlv1alpha1.MxlFlowLocationReady, byNode["other"])
 }
 
+// On mxlfs the gateway holds a placeholder for a flow on every node
+// without a copy, and each one's marker is published as a vanish. Each
+// of those nodes used to gain a Stale entry.
+func TestPublishVanished_UnlistedNodeAddsNoLocation(t *testing.T) {
+	scheme := newScheme(t)
+	existing := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: ObjectMeta(validFlowID),
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: validFlowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{
+				{NodeName: "other", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(existing).
+		Build()
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: "/tmp", NodeName: "n1"}
+
+	require.NoError(t, p.PublishVanished(context.Background(), validFlowID+".mxl-flow"))
+
+	var got mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
+	assert.Equal(t, existing.Status.Locations, got.Status.Locations,
+		"a node with no entry has no copy to demote")
+}
+
 func TestPublishVanished_MissingMxlFlowIsNoOp(t *testing.T) {
 	scheme := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -271,7 +300,7 @@ func TestPublishAppeared_MirrorTargetMarksReadyNotOrigin(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
-		WithObjects(mirror).
+		WithObjects(mirror, existingFlow()).
 		Build()
 
 	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}

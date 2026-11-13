@@ -66,7 +66,7 @@ func TestRunTargetProgressLoop_CommitsArrivedGrains(t *testing.T) {
 	fatal := atomic.Int32{}
 	onFatal := func() { fatal.Add(1) }
 
-	go runTargetProgressLoop(ctx, done, read, nil, commit, onFatal, nil)
+	go runTargetProgressLoop(ctx, done, read, commit, onFatal, nil)
 
 	require.Eventually(t, func() bool { return len(committedSnap()) == 2 },
 		time.Second, time.Millisecond, "expected 2 commits")
@@ -96,7 +96,7 @@ func TestRunTargetProgressLoop_FatalErrorExitsAndCallsOnFatalOnce(t *testing.T) 
 	onFatal := func() { fatalCalls.Add(1) }
 
 	done := make(chan struct{})
-	go runTargetProgressLoop(context.Background(), done, read, nil, commit, onFatal, nil)
+	go runTargetProgressLoop(context.Background(), done, read, commit, onFatal, nil)
 
 	select {
 	case <-done:
@@ -134,7 +134,7 @@ func TestRunTargetProgressLoop_InterruptedIsRetriedNotFatal(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go runTargetProgressLoop(ctx, done, read, nil, commit, onFatal, nil)
+	go runTargetProgressLoop(ctx, done, read, commit, onFatal, nil)
 
 	select {
 	case idx := <-committed:
@@ -205,7 +205,7 @@ func TestRunTargetProgressLoop_CommitErrorIsLoggedButLoopContinues(t *testing.T)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runTargetProgressLoop(ctx, done, read, nil, commit, onFatal, nil)
+	go runTargetProgressLoop(ctx, done, read, commit, onFatal, nil)
 
 	require.Eventually(t, func() bool { return commitCalls.Load() >= 2 },
 		time.Second, time.Millisecond)
@@ -220,7 +220,7 @@ func TestRunTargetProgressLoop_CtxCancelExitsImmediately(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runTargetProgressLoop(ctx, done, read, nil, commit, onFatal, nil)
+	go runTargetProgressLoop(ctx, done, read, commit, onFatal, nil)
 
 	cancel()
 	select {
@@ -239,7 +239,7 @@ func TestRunTargetProgressLoop_NilOnFatalDoesNotPanic(t *testing.T) {
 	commit := func(uint64) error { return nil }
 
 	done := make(chan struct{})
-	go runTargetProgressLoop(context.Background(), done, read, nil, commit, nil, nil)
+	go runTargetProgressLoop(context.Background(), done, read, commit, nil, nil)
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -298,7 +298,7 @@ func TestRunTargetProgressLoop_TracksCommits(t *testing.T) {
 	tracker := &recordingCommitTracker{}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go runTargetProgressLoop(ctx, done, read, nil, commit, func() {}, tracker)
+	go runTargetProgressLoop(ctx, done, read, commit, func() {}, tracker)
 
 	require.Eventually(t, func() bool { return len(tracker.snapshot()) >= 2 },
 		time.Second, time.Millisecond)
@@ -762,7 +762,7 @@ func TestTarget_RecoverFromFatalErrorClearsRecoveringOnRebuildFailure(t *testing
 		Scheme:   scheme,
 		NodeName: "node-a",
 		targets:  map[types.NamespacedName]*targetEntry{key: entry},
-		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider, string) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
 			return nil, nil, "", rebuildErr
 		},
 	}
@@ -819,7 +819,7 @@ func TestTarget_RecoverFromFatalErrorCancelsRunningProgressLoop(t *testing.T) {
 		Scheme:   scheme,
 		NodeName: "node-a",
 		targets:  map[types.NamespacedName]*targetEntry{key: entry},
-		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider, string) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
 			return nil, nil, "", rebuildErr
 		},
 	}
@@ -1073,6 +1073,36 @@ func TestRunFlusher_NeverHandshook_StaleSource_DoesNotTrigger(t *testing.T) {
 
 	assert.Equal(t, uint32(0), f.entry.recoveryAttempts.Load(),
 		"pre-open source activity must not accumulate recovery attempts")
+}
+
+// A source whose initiator cannot reach the target transfers nothing,
+// so lastSentAt stays where the previous fabric side left it, and the
+// source says so with TransfersNotLanding. sourceIsDelivering counts
+// that as a source trying to deliver; the watchdog has to act on it
+// at the re-check it makes after taking the recovery gate as well as
+// at the first look, or the spawn the first look asks for is dropped
+// on every tick and the mirror waits forever.
+func TestRunFlusher_NeverHandshook_TransfersNotLanding_TriggersRecovery(t *testing.T) {
+	f := newTargetWatchdogFixture(t, 4)
+	var current mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, f.c.Get(context.Background(), f.key, &current))
+	current.Status.LastSentAt = &metav1.Time{Time: time.Now().Add(-2 * time.Hour)}
+	current.Status.Conditions = []metav1.Condition{{
+		Type:               mxlv1alpha1.ConditionTypeSourceProgress,
+		Status:             metav1.ConditionFalse,
+		Reason:             mxlv1alpha1.ReasonTransfersNotLanding,
+		LastTransitionTime: metav1.Now(),
+	}}
+	require.NoError(t, f.c.Status().Update(context.Background(), &current))
+	f.startFlusher(t)
+	defer f.stopFlusher(t)
+
+	select {
+	case <-f.spawnCh:
+	case <-time.After(time.Second):
+		t.Fatal("a source reporting TransfersNotLanding into a fabric side " +
+			"that never committed did not get the target set up again")
+	}
 }
 
 func TestRunFlusher_CommitDisarmsWatchdog(t *testing.T) {
@@ -1584,7 +1614,7 @@ func TestTarget_RecoveryCapsFatalDrivenRebuilds(t *testing.T) {
 		TeardownGrace: 2 * time.Second,
 		targets:       map[types.NamespacedName]*targetEntry{key: entry},
 		attempts:      attemptTable[targetOpenInputs]{},
-		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider, string) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
 			rebuilt <- struct{}{}
 			return &fabrics.Target{}, nil, "info-2", nil
 		},
@@ -1673,7 +1703,7 @@ func TestTarget_RecoveryDropsEntryWhenTargetInfoPublishFails(t *testing.T) {
 		TeardownGrace: 2 * time.Second,
 		targets:       map[types.NamespacedName]*targetEntry{key: entry},
 		attempts:      attemptTable[targetOpenInputs]{},
-		openFabricSideFn: func(*mxl.Writer, fabrics.Provider) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
+		openFabricSideFn: func(*mxl.Writer, fabrics.Provider, string) (*fabrics.Target, *fabrics.TargetInfo, string, error) {
 			return &fabrics.Target{}, nil, "info-2", nil
 		},
 	}
@@ -1700,4 +1730,53 @@ func TestTarget_RecoveryDropsEntryWhenTargetInfoPublishFails(t *testing.T) {
 		return got.Status.Phase == mxlv1alpha1.MxlFlowMirrorFailed
 	}, 5*time.Second, 50*time.Millisecond,
 		"the dropped entry must publish Failed so the stale prior state does not stand")
+}
+
+// A connection-based initiator whose connection fails just after it is
+// set up goes to its done state and never dials again, and its source
+// keeps transferring to the other targets of the shared initiator, so
+// lastSentAt keeps moving for this mirror too. The target is the only
+// side that sees nothing arrive, and it has to set up again well before
+// the stuck-handshake window: that window is sized for a handshake
+// that is still being retried, not for one that has been abandoned.
+//
+// The short window counts from the first tick that saw the source
+// sending, not from the fabric open, so a target that waited a long
+// time for its first initiator is not rebuilt the moment one arrives.
+func TestRunFlusher_SendingIntoSilence_SetsTheTargetUpAgain(t *testing.T) {
+	f := newTargetWatchdogFixture(t, 4)
+	f.r.StuckHandshakeAfter = 2 * time.Hour
+	f.r.SendingIntoSilenceAfter = 300 * time.Millisecond
+	f.stampSourceActivity(t, time.Now())
+	f.startFlusher(t)
+	defer f.stopFlusher(t)
+
+	select {
+	case <-f.spawnCh:
+		t.Fatal("the target was set up again before the source had been " +
+			"seen sending for the sending-into-silence window")
+	case <-time.After(150 * time.Millisecond):
+	}
+	select {
+	case <-f.spawnCh:
+	case <-time.After(time.Second):
+		t.Fatal("a source sending into a fabric side that never committed " +
+			"did not get the target set up again inside the stuck-handshake window")
+	}
+}
+
+// The short window is for a source that sends. One with nothing to
+// send leaves the target alone however long it waits.
+func TestRunFlusher_SendingIntoSilence_IdleSource_DoesNotTrigger(t *testing.T) {
+	f := newTargetWatchdogFixture(t, 4)
+	f.r.StuckHandshakeAfter = 2 * time.Hour
+	f.r.SendingIntoSilenceAfter = time.Millisecond
+	f.startFlusher(t)
+	defer f.stopFlusher(t)
+
+	select {
+	case <-f.spawnCh:
+		t.Fatal("the target was set up again for a source that sent nothing")
+	case <-time.After(200 * time.Millisecond):
+	}
 }

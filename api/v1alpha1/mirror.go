@@ -14,6 +14,13 @@ import "strings"
 // created is the mirror the other finds. Computing it here keeps
 // that agreement from depending on two copies staying in step.
 func MirrorName(flowID, targetNode string) string {
+	return MirrorNameFor(FlowRef{ID: flowID}, targetNode)
+}
+
+// MirrorNameFor is MirrorName for a flow in any domain. A flow in the
+// primary domain gets the name it always had.
+func MirrorNameFor(ref FlowRef, targetNode string) string {
+	flowID := ref.Name()
 	joined := strings.ToLower(flowID + "--" + targetNode)
 	var b strings.Builder
 	b.Grow(len(joined))

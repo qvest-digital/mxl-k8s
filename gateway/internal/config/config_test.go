@@ -227,7 +227,7 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-func TestFromFlags_PacingDefaults(t *testing.T) {
+func TestFromFlags_PlacementSettings(t *testing.T) {
 	t.Setenv("NODE_NAME", "n1")
 	t.Setenv("MXL_DOMAIN", "/d")
 	t.Setenv("POD_IP", "")
@@ -235,57 +235,63 @@ func TestFromFlags_PacingDefaults(t *testing.T) {
 
 	c, err := FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), nil)
 	require.NoError(t, err)
-	assert.Negative(t, c.PacingFraction,
-		"an unset --pacing-fraction must arrive negative, which is how pacing is "+
-			"turned off, and not as zero: the reconciler reads zero as 'not "+
-			"configured' and would substitute its own default")
-	assert.Equal(t, 8, c.PacingChunks)
-	require.NoError(t, c.Validate())
-}
+	assert.Empty(t, c.PortCapacities)
+	assert.Empty(t, c.Budgets, "shared budgets are off unless configured")
+	assert.Zero(t, c.MaxUtilizationPercent)
+	assert.Equal(t, 10*time.Second, c.PlacementWait)
 
-func TestFromFlags_PacingRoundTrips(t *testing.T) {
-	t.Setenv("NODE_NAME", "n1")
-	t.Setenv("MXL_DOMAIN", "/d")
-	t.Setenv("POD_IP", "")
-	t.Setenv("KUBECONFIG", "")
-
-	c, err := FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), []string{
-		"--pacing-fraction=0.75",
-		"--pacing-chunks=16",
+	c, err = FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), []string{
+		"--fabric-port-capacity=192.0.2.0/25=25G,fab1=10G",
+		"--fabric-shared-budget=nic=40G,host=60G:combined",
+		"--fabric-max-utilization=70",
+		"--placement-wait=3s",
 	})
 	require.NoError(t, err)
-	assert.InDelta(t, 0.75, c.PacingFraction, 1e-9)
-	assert.Equal(t, 16, c.PacingChunks)
-	require.NoError(t, c.Validate())
+	require.Len(t, c.PortCapacities, 2)
+	assert.Equal(t, int64(25_000_000_000), c.PortCapacities[0].Bits)
+	require.Len(t, c.Budgets, 2)
+	assert.Equal(t, "ingress", string(c.Budgets[0].Mode))
+	assert.Equal(t, "combined", string(c.Budgets[1].Mode))
+	assert.Equal(t, int32(70), c.MaxUtilizationPercent)
+	assert.Equal(t, 3*time.Second, c.PlacementWait)
+
+	for flagName, arg := range map[string]string{
+		"--fabric-port-capacity":   "--fabric-port-capacity=fab0",
+		"--fabric-shared-budget":   "--fabric-shared-budget=rack=1G",
+		"--fabric-max-utilization": "--fabric-max-utilization=120",
+		"--placement-wait":         "--placement-wait=-1s",
+	} {
+		_, err := FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), []string{arg})
+		require.Error(t, err, arg)
+		assert.Contains(t, err.Error(), flagName)
+	}
 }
 
-func TestValidate_PacingFractionMustStayBelowOne(t *testing.T) {
-	// At or above 1 a grain is spread over its whole interval or more,
-	// so its transmission runs into the next grain's and the mirror
-	// falls permanently behind. Disabling is spelled with a negative
-	// value instead, which keeps zero meaning "unset".
-	for _, f := range []float64{1, 1.5, 2} {
-		c := &Config{
-			NodeName:       "n1",
-			DomainPath:     "/d",
-			Providers:      []fabrics.Provider{fabrics.ProviderTCP},
-			KubeAPIQPS:     50,
-			KubeAPIBurst:   100,
-			PacingFraction: f,
+// Only flow mode places per flow, and it needs mxlfs; off and node leave
+// the gateway as it was.
+func TestFromFlags_MxlfsNumaMode(t *testing.T) {
+	t.Setenv("NODE_NAME", "")
+	t.Setenv("MXL_DOMAIN", "")
+	t.Setenv("KUBECONFIG", "")
+	for _, tc := range []struct {
+		args      []string
+		flow      bool
+		wantError string
+	}{
+		{args: nil},
+		{args: []string{"--mxlfs-numa-placement-mode=off", "--mxlfs"}},
+		{args: []string{"--mxlfs-numa-placement-mode=node", "--mxlfs"}},
+		{args: []string{"--mxlfs-numa-placement-mode=flow", "--mxlfs"}, flow: true},
+		{args: []string{"--mxlfs-numa-placement-mode=flow"}, wantError: "needs --mxlfs"},
+		{args: []string{"--mxlfs-numa-placement-mode=nic", "--mxlfs"}, wantError: "not one of off, node, flow"},
+	} {
+		args := append([]string{"--node-name=n", "--domain-path=/run/mxl/domain"}, tc.args...)
+		c, err := FromFlags(flag.NewFlagSet("g", flag.ContinueOnError), args)
+		if tc.wantError != "" {
+			require.ErrorContains(t, err, tc.wantError, "%v", tc.args)
+			continue
 		}
-		assert.Errorf(t, c.Validate(), "fraction %v must be rejected", f)
+		require.NoError(t, err, "%v", tc.args)
+		require.Equal(t, tc.flow, c.FlowPlacement(), "%v", tc.args)
 	}
-}
-
-func TestValidate_NegativePacingFractionDisables(t *testing.T) {
-	c := &Config{
-		NodeName:       "n1",
-		DomainPath:     "/d",
-		Providers:      []fabrics.Provider{fabrics.ProviderTCP},
-		KubeAPIQPS:     50,
-		KubeAPIBurst:   100,
-		PacingFraction: -1,
-	}
-	assert.NoError(t, c.Validate(),
-		"a negative fraction is how an operator turns pacing off")
 }

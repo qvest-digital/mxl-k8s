@@ -1,0 +1,9 @@
+# mxlfs on every domain, with the CSI plugin and the exporter that wait
+# for it.
+mxlfs:
+  enabled: true
+agent:
+  csi:
+    enabled: true
+exporter:
+  enabled: true

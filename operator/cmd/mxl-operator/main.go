@@ -2,15 +2,20 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
+	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -20,7 +25,9 @@ import (
 	"github.com/qvest-digital/mxl-k8s/operator/internal/leasegc"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/mirror"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/nodecaps"
+	"github.com/qvest-digital/mxl-k8s/operator/internal/placement"
 	"github.com/qvest-digital/mxl-k8s/operator/internal/receiver"
+	"github.com/qvest-digital/mxl-k8s/operator/internal/redundancyset"
 )
 
 var (
@@ -39,6 +46,9 @@ func main() {
 		probeAddr   string
 		leaderElect bool
 		gcGrace     time.Duration
+		setMirrorNS string
+		mxlfs       bool
+		place       placementFlags
 	)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080",
 		"The address the metric endpoint binds to.")
@@ -51,9 +61,22 @@ func main() {
 			"no claim or no source, before it is deleted. Has to outlast a "+
 			"producer or consumer pod rolling over.")
 
+	flag.BoolVar(&mxlfs, "mxlfs", false,
+		"Reconcile MxlFlowRedundancySets, which need mxlfs domains on the nodes "+
+			"that read a set's output.")
+	flag.StringVar(&setMirrorNS, "redundancy-mirror-namespace", "",
+		"Namespace for the member mirrors of MxlFlowRedundancySets. Empty is the "+
+			"operator's own namespace.")
+
+	place.bind(flag.CommandLine)
+
 	zapOpts := zap.Options{Development: false}
 	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
+	if err := place.validate(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -68,10 +91,55 @@ func main() {
 		os.Exit(1)
 	}
 
-	reconcilers := []struct {
-		name  string
-		setup func(ctrl.Manager) error
-	}{
+	if mxlfs {
+		if err := requireKind(mgr.GetRESTMapper(), "MxlFlowRedundancySet"); err != nil {
+			setupLog.Error(err, "--mxlfs needs the redundancy set CRD")
+			os.Exit(1)
+		}
+	}
+	for _, rc := range reconcilers(mgr, gcGrace, mxlfs, setMirrorNS, place) {
+		if err := rc.setup(mgr); err != nil {
+			setupLog.Error(err, "failed to set up reconciler", "kind", rc.name)
+			os.Exit(1)
+		}
+	}
+
+	metrics.Registry.MustRegister(&placement.StatusCollector{
+		Reader:            mgr.GetCache(),
+		Elected:           mgr.Elected(),
+		Log:               ctrl.Log.WithName("placement-metrics"),
+		Settings:          place.settings(),
+		OverheadPercent:   int32(place.overheadPercent),
+		ProvisionalDemand: place.provisional,
+		DemandWait:        place.demandWait,
+		RedundancySets:    mxlfs,
+	})
+
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		setupLog.Error(err, "failed to register healthz check")
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		setupLog.Error(err, "failed to register readyz check")
+		os.Exit(1)
+	}
+
+	setupLog.Info("starting manager")
+	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		setupLog.Error(err, "manager exited with error")
+		os.Exit(1)
+	}
+}
+
+type reconciler struct {
+	name  string
+	setup func(ctrl.Manager) error
+}
+
+// reconcilers are the controllers the operator runs. MxlFlowRedundancySet
+// is among them only with mxlfs.
+func reconcilers(mgr ctrl.Manager, gcGrace time.Duration, mxlfs bool, setMirrorNS string, place placementFlags) []reconciler {
+	rs := []reconciler{
 		{"MxlDomain", (&domain.Reconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager},
 		{"MxlFlow", (&flow.Reconciler{
 			Client:      mgr.GetClient(),
@@ -81,12 +149,13 @@ func main() {
 			GracePeriod: gcGrace,
 		}).SetupWithManager},
 		{"MxlFlowMirror", (&mirror.Reconciler{
-			Client:      mgr.GetClient(),
-			APIReader:   mgr.GetAPIReader(),
-			Scheme:      mgr.GetScheme(),
-			Recorder:    mgr.GetEventRecorderFor("mxlflowmirror-controller"),
-			Lease:       &leasecheck.Checker{Client: mgr.GetClient()},
-			GracePeriod: gcGrace,
+			Client:         mgr.GetClient(),
+			APIReader:      mgr.GetAPIReader(),
+			Scheme:         mgr.GetScheme(),
+			Recorder:       mgr.GetEventRecorderFor("mxlflowmirror-controller"),
+			Lease:          &leasecheck.Checker{Client: mgr.GetClient()},
+			GracePeriod:    gcGrace,
+			RedundancySets: mxlfs,
 		}).SetupWithManager},
 		{"OriginLease", (&leasegc.Reconciler{
 			Client: mgr.GetClient(),
@@ -105,25 +174,43 @@ func main() {
 			Recorder: mgr.GetEventRecorderFor("mxlnodecapabilities-controller"),
 		}).SetupWithManager},
 	}
-	for _, rc := range reconcilers {
-		if err := rc.setup(mgr); err != nil {
-			setupLog.Error(err, "failed to set up reconciler", "kind", rc.name)
-			os.Exit(1)
-		}
+	rs = append(rs, reconciler{"Placement", (&placement.Reconciler{
+		Client:            mgr.GetClient(),
+		Settings:          place.settings(),
+		OverheadPercent:   int32(place.overheadPercent),
+		ProvisionalDemand: place.provisional,
+		DemandWait:        place.demandWait,
+		RedundancySets:    mxlfs,
+	}).SetupWithManager})
+	if mxlfs {
+		rs = append(rs, reconciler{"MxlFlowRedundancySet", (&redundancyset.Reconciler{
+			Client:           mgr.GetClient(),
+			Namespace:        ownNamespace(setMirrorNS),
+			GatewayNamespace: ownNamespace(""),
+			Lease:            &leasecheck.Checker{Client: mgr.GetClient()},
+		}).SetupWithManager})
 	}
+	return rs
+}
 
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "failed to register healthz check")
-		os.Exit(1)
+// requireKind fails when the API server does not serve kind: a
+// controller for it would otherwise wait for its cache without end.
+func requireKind(mapper meta.RESTMapper, kind string) error {
+	gk := schema.GroupKind{Group: mxlv1alpha1.GroupVersion.Group, Kind: kind}
+	if _, err := mapper.RESTMapping(gk, mxlv1alpha1.GroupVersion.Version); err != nil {
+		return fmt.Errorf("%s is not served (is its CRD installed?): %w", gk, err)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "failed to register readyz check")
-		os.Exit(1)
-	}
+	return nil
+}
 
-	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		setupLog.Error(err, "manager exited with error")
-		os.Exit(1)
+// ownNamespace is ns, or the namespace of the operator's service account.
+func ownNamespace(ns string) string {
+	if ns != "" {
+		return ns
 	}
+	b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	if err != nil {
+		return "default"
+	}
+	return strings.TrimSpace(string(b))
 }

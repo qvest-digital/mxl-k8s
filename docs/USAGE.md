@@ -71,7 +71,22 @@ prerequisite, not a suggestion.
   chart does not provision this today. The KIND demo relies on
   Kubernetes `hostPath` with `DirectoryOrCreate`. A production
   deployment should back the directory with a `tmpfs` mount, via
-  `systemd-tmpfiles.d(5)` or a small node-init DaemonSet.
+  `systemd-tmpfiles.d(5)` or a small node-init DaemonSet, or run the
+  chart with `mxlfs.enabled=true`: the agent then mounts an
+  [mxlfs](https://github.com/danielclasen/mxlfs) on every domain
+  directory itself, which needs the mxlfs kernel module on the node.
+  mxlfs adds placeholders for flows a node does not hold, so a consumer
+  needs neither the shim nor an `MxlReceiver` to get a flow mirrored,
+  and `MxlFlowRedundancySet`s. The chart's values reference describes
+  what it changes.
+  With mxlfs, MXL pods take the domain through the agent's CSI volume
+  (`agent.csi.enabled`, driver `mxl.qvest-digital.com`, volume
+  attributes `domain` and `access`). The agent refuses to publish it
+  until it has mounted the domain or left it plain. A pod that mounts
+  the domain directory as a `hostPath` can start before the agent, as
+  after a node restart, and create a flow in the plain directory; the
+  agent then leaves that domain plain and records a `MxlfsUnavailable`
+  warning event on the Node.
 - Routable inter-node networking on whatever interface the
   libfabric endpoints bind to. The gateway runs `hostNetwork`, so
   the address it publishes in `MxlFlowMirror.status.targetInfo` is
@@ -102,7 +117,27 @@ That installs:
   one Pod per node;
 - the five CRDs (`MxlFlow`, `MxlReceiver`, `MxlFlowMirror`,
   `MxlDomain`, `MxlNodeCapabilities`);
-- ClusterRoles and ClusterRoleBindings for the above.
+- ClusterRoles and ClusterRoleBindings for the above;
+- one `MxlDomain` per entry in `domains` (by default `default`, in
+  the `domain` directory the agent and gateway watch).
+
+### MXL domain identity
+
+Every `MxlDomain` carries an id, a lowercase UUID. The agent writes it
+into `domain_def.json` at the root of the domain directory on every
+node it selects, which is where BCP-007-03 has a media function read
+the identity it publishes as `mxl_domain_id`. The id is the same on
+every node: mxl-k8s mirrors a flow to whichever node opens it, so the
+per-node directories behave as one store.
+
+```sh
+kubectl get mxldomains
+kubectl get mxldomain default -o jsonpath='{.spec.id}'
+```
+
+The chart keeps the id of an existing object and generates one on
+first install; pin it in `domains[].id` where it has to be known ahead
+of time. Neither the id nor the directory can be changed afterwards.
 
 See [`charts/mxl-k8s/README.md`](../charts/mxl-k8s/README.md) for the
 full values reference, override examples (RDMA, private registry,

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -45,18 +46,59 @@ type Publisher struct {
 	DomainPath string
 	NodeName   string
 
+	// Domain is the MxlDomain whose directory DomainPath is. Empty is
+	// the primary domain, whose flows keep the object names they had
+	// before domains existed. The same flow id in another domain is
+	// another flow, so every object this publisher touches is named
+	// for the pair.
+	Domain string
+
 	// Lease publishes a coordination.k8s.io Lease per Origin flow so
 	// the operator and dispatcher can skip Origin locations whose
 	// owner has stopped renewing. Nil disables Lease publication --
 	// existing tests that don't care about Leases continue to work.
 	Lease LeaseRenewer
 
+	// IsOutput reports whether a flow is a redundancy set's output, which
+	// is not published as a location. Nil publishes every flow. A flow
+	// it cannot answer for is not published; the promote pass of
+	// RunLocalRescan asks again while a writer holds the flow.
+	IsOutput func(ctx context.Context, domain, flowID string) (bool, error)
+
 	// WriterAttached reports whether a writer still holds the flow's
 	// directory on this node. Nil takes the flock probe in
 	// agent/internal/flowlock, which is libmxl's own test; tests
 	// inject a closure so they need no domain on disk.
 	WriterAttached func(flowID string) (bool, error)
+
+	// Producer reports whether a pid holding a writer's lock on a flow
+	// is a producer's: a process in a pod other than mxl-k8s's own. A
+	// producer among the writers makes the node Origin even in a
+	// directory a mirror names this node the target of. That is the
+	// evidence the mirror inference lacks once a producer has taken over
+	// the copy a mirror was filling, which on mxlfs it does with no shim
+	// to report the attach. Nil, as off mxlfs, leaves the inference as
+	// it is.
+	Producer func(ctx context.Context, pid int32) bool
+
+	// Ours reports whether a pid holding a writer's lock on a flow is
+	// mxl-k8s's own: a process in one of its pods. A flow whose writers
+	// are all its own is no producer's, whatever directory it is in. Nil,
+	// as off mxlfs, makes no writer its own.
+	Ours func(ctx context.Context, pid int32) bool
+
+	// ReadLocks reads the node's lock table for Producer and Ours to be
+	// asked about. Nil reads /proc/locks through agent/internal/flowlock.
+	ReadLocks func() (flowlock.Locks, error)
 }
+
+// ref is the flow a directory id names in this publisher's domain.
+func (p *Publisher) ref(flowID string) mxlv1alpha1.FlowRef {
+	return mxlv1alpha1.FlowRef{Domain: p.Domain, ID: flowID}
+}
+
+// key is the MxlFlow object name, and the Lease key, for a flow id.
+func (p *Publisher) key(flowID string) string { return p.ref(flowID).Name() }
 
 // writerAttached runs the configured probe, defaulting to the flock
 // test. An error reports a writer attached, so a probe that cannot
@@ -67,6 +109,61 @@ func (p *Publisher) writerAttached(flowID string) (bool, error) {
 		return p.WriterAttached(flowID)
 	}
 	return flowlock.WriterAttached(p.DomainPath, flowID)
+}
+
+// readLocks is the lock table producerWrites and onlyOursWrite read,
+// read only where a Producer or Ours can ask about it. Unreadable, it
+// holds no writer, which leaves the mirror inference as it is.
+func (p *Publisher) readLocks(ctx context.Context) flowlock.Locks {
+	if p.Producer == nil && p.Ours == nil {
+		return nil
+	}
+	read := p.ReadLocks
+	if read == nil {
+		read = flowlock.ReadLocks
+	}
+	locks, err := read()
+	if err != nil {
+		log.FromContext(ctx).Error(err, "read the node's locks; no producer is found on this pass")
+		return nil
+	}
+	return locks
+}
+
+// producerWrites reports whether a producer holds a writer's lock on
+// the flow.
+func (p *Publisher) producerWrites(ctx context.Context, locks flowlock.Locks, flowID string) bool {
+	if p.Producer == nil {
+		return false
+	}
+	pids, err := locks.WriterPIDs(p.DomainPath, flowID)
+	if err != nil {
+		return false
+	}
+	for _, pid := range pids {
+		if p.Producer(ctx, pid) {
+			return true
+		}
+	}
+	return false
+}
+
+// onlyOursWrite reports whether the flow has writers and every one is
+// mxl-k8s's own.
+func (p *Publisher) onlyOursWrite(ctx context.Context, locks flowlock.Locks, flowID string) bool {
+	if p.Ours == nil || locks == nil {
+		return false
+	}
+	pids, err := locks.WriterPIDs(p.DomainPath, flowID)
+	if err != nil || len(pids) == 0 {
+		return false
+	}
+	for _, pid := range pids {
+		if !p.Ours(ctx, pid) {
+			return false
+		}
+	}
+	return true
 }
 
 // FlowIDFromDirName extracts the flow UUID from a `<uuid>.mxl-flow`
@@ -83,7 +180,7 @@ func FlowIDFromDirName(name string) (string, bool) {
 }
 
 // PublishAppeared loads flow_def.json from a freshly observed flow
-// directory and writes an MxlFlow describing it. status.locations
+// directory and, for an Origin, writes an MxlFlow describing it. status.locations
 // for this node is set to Origin when the agent saw the directory
 // before any MxlFlowMirror claims this node as target, otherwise to
 // Ready (the gateway target reconciler created the local copy as a
@@ -98,6 +195,27 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 		l.V(1).Info("ignoring non-flow entry", "name", dirName)
 		return nil
 	}
+	// A placeholder only lists the flow here; nothing feeds it until a
+	// mirror fills it or a local writer takes it over, and either removes
+	// the marker, which brings the directory back through here.
+	if mxlv1alpha1.IsPlaceholder(p.DomainPath, flowID) {
+		l.V(1).Info("ignoring placeholder", "flowID", flowID)
+		return nil
+	}
+	// A redundancy set's output is merged on each node it is read on and
+	// is never a location other nodes mirror from.
+	if p.IsOutput != nil {
+		isOutput, err := p.IsOutput(ctx, p.Domain, flowID)
+		if err != nil {
+			// No retry needed here: promoteStaleLocalOrigins calls this
+			// again on every rescan tick for a held flow with no MxlFlow.
+			return fmt.Errorf("look up redundancy set outputs for %s: %w", flowID, err)
+		}
+		if isOutput {
+			l.V(1).Info("ignoring redundancy set output", "flowID", flowID)
+			return nil
+		}
+	}
 
 	defPath := filepath.Join(p.DomainPath, dirName, FlowDefName)
 	raw, err := os.ReadFile(defPath)
@@ -106,26 +224,6 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	}
 	if !json.Valid(raw) {
 		return fmt.Errorf("%s: not valid JSON", defPath)
-	}
-
-	now := metav1.Now()
-	desired := &mxlv1alpha1.MxlFlow{
-		ObjectMeta: metav1.ObjectMeta{Name: flowID},
-		Spec: mxlv1alpha1.MxlFlowSpec{
-			ID:         flowID,
-			Definition: runtime.RawExtension{Raw: raw},
-		},
-	}
-
-	if err := p.Client.Create(ctx, desired); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create MxlFlow: %w", err)
-		}
-		// Already there -- leave spec alone (writers may have richer
-		// metadata than us), just refresh our location entry.
-		l.V(1).Info("MxlFlow already exists", "flowID", flowID)
-	} else {
-		l.Info("created MxlFlow", "flowID", flowID)
 	}
 
 	attached, err := p.writerAttached(flowID)
@@ -149,14 +247,70 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	// Origin unless a mirror explains the copy. The writer above is
 	// attached either way; a mirror naming this node as its target is
 	// the evidence that the writer is the gateway's rather than a
-	// local producer's.
+	// local producer's, unless Producer finds a producer among the
+	// writers.
 	phase := mxlv1alpha1.MxlFlowLocationOrigin
+	locks := p.readLocks(ctx)
 	isMirror, err := p.isMirrorTarget(ctx, flowID)
 	if err != nil {
 		l.Error(err, "list MxlFlowMirrors; defaulting to Origin", "flowID", flowID)
-	} else if isMirror {
+	} else if isMirror && !p.producerWrites(ctx, locks, flowID) {
 		phase = mxlv1alpha1.MxlFlowLocationReady
 	}
+	// A directory no mirror targets whose only writers are mxl-k8s's own
+	// is the gateway's. On mxlfs that is a placeholder the gateway is
+	// replacing with one of the flow's current geometry; the checks above
+	// can span its steps, finding no marker once the old one is gone, the
+	// old definition, and then the new placeholder's writer. Published as
+	// Origin, the old definition would overwrite the producer's.
+	if phase == mxlv1alpha1.MxlFlowLocationOrigin && p.onlyOursWrite(ctx, locks, flowID) {
+		l.V(1).Info("flow directory has only mxl-k8s's own writers", "flowID", flowID)
+		return p.markStale(ctx, flowID)
+	}
+
+	// Only the Origin creates the MxlFlow. Any other copy holds the
+	// definition the object had when the copy was made, so a copy that
+	// recreated a deleted object would bring back a geometry the
+	// producer may since have changed, and a mirror built from it would
+	// recreate the stale copy in turn.
+	if phase == mxlv1alpha1.MxlFlowLocationOrigin {
+		desired := &mxlv1alpha1.MxlFlow{
+			ObjectMeta: metav1.ObjectMeta{Name: p.key(flowID)},
+			Spec: mxlv1alpha1.MxlFlowSpec{
+				ID:         flowID,
+				Domain:     p.Domain,
+				Definition: runtime.RawExtension{Raw: raw},
+			},
+		}
+		if err := p.Client.Create(ctx, desired); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("create MxlFlow: %w", err)
+			}
+			l.V(1).Info("MxlFlow already exists", "flowID", flowID)
+		} else {
+			l.Info("created MxlFlow", "flowID", flowID)
+		}
+	}
+
+	// The object outlives its directory: a producer that comes back in
+	// a different format publishes a new flow directory under the same
+	// name, and Create above leaves the spec of an MxlFlow that already
+	// exists untouched. The object then describes a format
+	// nothing produces any more, and every consumer reading it -- a
+	// compositor sizing its tiles, an NMOS registry, a UI -- is told
+	// the wrong one. Only the Origin refreshes it: a mirror target's
+	// copy is not authoritative about what the flow is. It does so
+	// before claiming Origin, since placeholders and redundancy-set
+	// mirrors elsewhere are built from the definition the moment the
+	// Origin appears.
+	refreshed := phase == mxlv1alpha1.MxlFlowLocationOrigin
+	if refreshed {
+		if err := p.refreshDefinition(ctx, flowID, raw); err != nil {
+			l.Error(err, "refresh flow definition", "flowID", flowID)
+		}
+	}
+
+	now := metav1.Now()
 	// The phase actually written, not the one asked for: upsertLocation
 	// refuses to demote an Origin this node already claimed, so a
 	// mirror-target inference can come back out as Origin.
@@ -167,11 +321,74 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	// Only the producer side renews a Lease; a mirror target's local
 	// copy is not authoritative and must not claim Origin liveness.
 	if written == mxlv1alpha1.MxlFlowLocationOrigin && p.Lease != nil {
-		if err := p.Lease.Renew(ctx, flowID); err != nil {
+		if err := p.Lease.Renew(ctx, p.key(flowID)); err != nil {
 			l.Error(err, "renew origin lease", "flowID", flowID)
 		}
 	}
+	// A copy inferred to be a mirror target can come back out as the
+	// Origin this node already held.
+	if written == mxlv1alpha1.MxlFlowLocationOrigin && !refreshed {
+		if err := p.refreshDefinition(ctx, flowID, raw); err != nil {
+			l.Error(err, "refresh flow definition", "flowID", flowID)
+		}
+	}
 	return nil
+}
+
+// refreshDefinition folds the on-disk definition into the MxlFlow's
+// spec. The file is authoritative for every key it carries -- libmxl
+// writes it whenever it publishes the flow -- while keys the
+// object has and the file does not are left alone, because the
+// operator or another writer may hold a richer definition than the
+// agent can see. A no-op in the common case, so this costs one Get per
+// observation and an Update only on a real change.
+func (p *Publisher) refreshDefinition(ctx context.Context, flowID string, def []byte) error {
+	var fromDisk map[string]json.RawMessage
+	if err := json.Unmarshal(def, &fromDisk); err != nil {
+		return fmt.Errorf("parse on-disk definition: %w", err)
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var flow mxlv1alpha1.MxlFlow
+		if err := p.Client.Get(ctx, types.NamespacedName{Name: p.key(flowID)}, &flow); err != nil {
+			return err
+		}
+		merged := map[string]json.RawMessage{}
+		if raw := flow.Spec.Definition.Raw; len(raw) > 0 {
+			if err := json.Unmarshal(raw, &merged); err != nil {
+				// Not an object we can merge into: the file wins whole.
+				merged = nil
+			}
+		}
+		if merged == nil {
+			merged = map[string]json.RawMessage{}
+		}
+		for k, v := range fromDisk {
+			merged[k] = v
+		}
+		out, err := json.Marshal(merged)
+		if err != nil {
+			return fmt.Errorf("marshal merged definition: %w", err)
+		}
+		// Compared by content: the API server hands the definition back
+		// with its keys sorted at every level, the file keeps libmxl's
+		// order, and an Update for that alone wakes every watcher of the
+		// spec on every observation.
+		if sameJSON(flow.Spec.Definition.Raw, out) {
+			return nil
+		}
+		flow.Spec.Definition = runtime.RawExtension{Raw: out}
+		return p.Client.Update(ctx, &flow)
+	})
+}
+
+// sameJSON reports whether a and b hold the same JSON value, whatever
+// their key order or spacing.
+func sameJSON(a, b []byte) bool {
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	return reflect.DeepEqual(x, y)
 }
 
 // isMirrorTarget reports whether any MxlFlowMirror in the cluster
@@ -185,7 +402,7 @@ func (p *Publisher) isMirrorTarget(ctx context.Context, flowID string) (bool, er
 	}
 	for i := range mirrors.Items {
 		m := &mirrors.Items[i]
-		if m.Spec.FlowID == flowID && m.Spec.TargetNode == p.NodeName {
+		if m.Ref() == p.ref(flowID) && m.Spec.TargetNode == p.NodeName {
 			return true, nil
 		}
 	}
@@ -209,7 +426,7 @@ func (p *Publisher) ClaimOrigin(ctx context.Context, flowID string) error {
 	l := log.FromContext(ctx).WithName("flowpublisher")
 
 	var flow mxlv1alpha1.MxlFlow
-	if err := p.Client.Get(ctx, types.NamespacedName{Name: flowID}, &flow); err != nil {
+	if err := p.Client.Get(ctx, types.NamespacedName{Name: p.key(flowID)}, &flow); err != nil {
 		if apierrors.IsNotFound(err) {
 			// No MxlFlow yet: the directory this producer attached to
 			// is on disk, so the fanotify pass will publish it and the
@@ -231,7 +448,7 @@ func (p *Publisher) ClaimOrigin(ctx context.Context, flowID string) error {
 	l.Info("claimed Origin for locally attached producer", "flowID", flowID)
 
 	if p.Lease != nil {
-		if err := p.Lease.Renew(ctx, flowID); err != nil {
+		if err := p.Lease.Renew(ctx, p.key(flowID)); err != nil {
 			l.Error(err, "renew origin lease after claim", "flowID", flowID)
 		}
 	}
@@ -261,7 +478,7 @@ func (p *Publisher) markStale(ctx context.Context, flowID string) error {
 		return err
 	}
 	if p.Lease != nil {
-		if err := p.Lease.Release(ctx, flowID); err != nil {
+		if err := p.Lease.Release(ctx, p.key(flowID)); err != nil {
 			log.FromContext(ctx).WithName("flowpublisher").
 				Error(err, "release origin lease", "flowID", flowID)
 		}
@@ -285,13 +502,14 @@ func (p *Publisher) markStale(ctx context.Context, flowID string) error {
 //
 // Returns the phase this node's location carries once the update
 // lands, which is not always the one asked for -- see the Ready over
-// Origin guard below. An absent MxlFlow returns the empty phase.
+// Origin guard below. An absent MxlFlow, or a Stale for a node the
+// flow does not list, returns the empty phase and writes nothing.
 func (p *Publisher) upsertLocation(ctx context.Context, flowID string, phase mxlv1alpha1.MxlFlowLocationPhase, observed, appeared *metav1.Time) (mxlv1alpha1.MxlFlowLocationPhase, error) {
 	written := phase
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		written = phase
 		var obj mxlv1alpha1.MxlFlow
-		if err := p.Client.Get(ctx, types.NamespacedName{Name: flowID}, &obj); err != nil {
+		if err := p.Client.Get(ctx, types.NamespacedName{Name: p.key(flowID)}, &obj); err != nil {
 			if apierrors.IsNotFound(err) {
 				written = ""
 				return nil
@@ -335,6 +553,14 @@ func (p *Publisher) upsertLocation(ctx context.Context, flowID string, phase mxl
 			}
 		}
 		if !found {
+			// Stale demotes a copy the flow lists. A node it does not
+			// list has none to demote: on mxlfs, a placeholder the
+			// gateway creates on a node without a copy arrives here as
+			// a vanish (mxlfswatch.MarkerChanged).
+			if stale {
+				written = ""
+				return nil
+			}
 			loc := mxlv1alpha1.MxlFlowLocation{
 				NodeName:     p.NodeName,
 				Phase:        phase,
@@ -422,7 +648,7 @@ func (p *Publisher) ReleaseAll(ctx context.Context) error {
 	}
 	l := log.FromContext(ctx).WithName("flowpublisher.release")
 	for id := range ids {
-		if err := p.Lease.Release(ctx, id); err != nil {
+		if err := p.Lease.Release(ctx, p.key(id)); err != nil {
 			l.Error(err, "release lease on shutdown", "flowID", id)
 		}
 	}
@@ -442,7 +668,7 @@ func (p *Publisher) localFlowIDs() (map[string]struct{}, error) {
 			continue
 		}
 		id, ok := FlowIDFromDirName(e.Name())
-		if !ok {
+		if !ok || mxlv1alpha1.IsPlaceholder(p.DomainPath, id) {
 			continue
 		}
 		out[id] = struct{}{}
@@ -466,6 +692,10 @@ func (p *Publisher) demoteVanishedLocalOrigins(ctx context.Context, held map[str
 	}
 	for i := range flows.Items {
 		flow := &flows.Items[i]
+		if flow.Spec.Domain != p.Domain {
+			// Another domain's publisher owns that flow's location.
+			continue
+		}
 		if _, present := held[flow.Spec.ID]; present {
 			continue
 		}
@@ -480,7 +710,7 @@ func (p *Publisher) demoteVanishedLocalOrigins(ctx context.Context, held map[str
 				log.FromContext(ctx).Error(err, "demote vanished local origin failed", "flowID", flow.Spec.ID)
 			}
 			if p.Lease != nil {
-				if err := p.Lease.Release(ctx, flow.Spec.ID); err != nil {
+				if err := p.Lease.Release(ctx, p.key(flow.Spec.ID)); err != nil {
 					log.FromContext(ctx).Error(err, "release vanished origin lease", "flowID", flow.Spec.ID)
 				}
 			}
@@ -507,9 +737,23 @@ func (p *Publisher) localLocationHealthy(flow *mxlv1alpha1.MxlFlow) bool {
 	return false
 }
 
+// producerTookOver reports a location of this node that is not Origin
+// although a local producer writes the flow: a producer that opened the
+// copy a mirror was filling. Nothing in the domain changes when it
+// does, so no event publishes it.
+func (p *Publisher) producerTookOver(ctx context.Context, locks flowlock.Locks, flow *mxlv1alpha1.MxlFlow) bool {
+	for _, loc := range flow.Status.Locations {
+		if loc.NodeName == p.NodeName {
+			return loc.Phase != mxlv1alpha1.MxlFlowLocationOrigin && p.producerWrites(ctx, locks, flow.Spec.ID)
+		}
+	}
+	return false
+}
+
 // promoteStaleLocalOrigins re-publishes any on-disk flow whose
 // location entry for this node is unhealthy per localLocationHealthy
-// -- missing, Stale, or timestamp-less. It is the symmetric repair to
+// -- missing, Stale, or timestamp-less -- or that a local producer
+// writes while it reads other than Origin. It is the symmetric repair to
 // demoteVanishedLocalOrigins: that function heals a location that
 // outlived its directory, this one heals a directory whose location
 // never landed or got stuck, most commonly a status-update conflict
@@ -525,9 +769,11 @@ func (p *Publisher) localLocationHealthy(flow *mxlv1alpha1.MxlFlow) bool {
 // per rescan interval.
 func (p *Publisher) promoteStaleLocalOrigins(ctx context.Context, onDisk map[string]struct{}) error {
 	l := log.FromContext(ctx).WithName("flowpublisher.promote")
+	// One read of the node's locks for the whole pass.
+	locks := p.readLocks(ctx)
 	for id := range onDisk {
 		var flow mxlv1alpha1.MxlFlow
-		err := p.Client.Get(ctx, types.NamespacedName{Name: id}, &flow)
+		err := p.Client.Get(ctx, types.NamespacedName{Name: p.key(id)}, &flow)
 		switch {
 		case apierrors.IsNotFound(err):
 			// No MxlFlow yet; PublishAppeared below creates it.
@@ -535,7 +781,7 @@ func (p *Publisher) promoteStaleLocalOrigins(ctx context.Context, onDisk map[str
 			l.Error(err, "get MxlFlow for promote pass", "flowID", id)
 			continue
 		default:
-			if p.localLocationHealthy(&flow) {
+			if p.localLocationHealthy(&flow) && !p.producerTookOver(ctx, locks, &flow) {
 				continue
 			}
 		}
@@ -592,7 +838,7 @@ func (p *Publisher) RunRenewLoop(ctx context.Context, interval time.Duration) {
 				if _, ok := origins[id]; !ok {
 					continue
 				}
-				if err := p.Lease.Renew(ctx, id); err != nil {
+				if err := p.Lease.Renew(ctx, p.key(id)); err != nil {
 					l.Error(err, "renew lease", "flowID", id)
 				}
 			}
@@ -621,10 +867,13 @@ func (p *Publisher) localOrigins(ctx context.Context) (map[string]struct{}, erro
 	out := make(map[string]struct{}, len(flows.Items))
 	for i := range flows.Items {
 		f := &flows.Items[i]
+		if f.Spec.Domain != p.Domain {
+			continue
+		}
 		for _, loc := range f.Status.Locations {
 			if loc.NodeName == p.NodeName {
 				if loc.Phase == mxlv1alpha1.MxlFlowLocationOrigin {
-					out[f.Name] = struct{}{}
+					out[f.Spec.ID] = struct{}{}
 				}
 				break
 			}
@@ -691,7 +940,7 @@ func (p *Publisher) refreshLocalObservations(ctx context.Context, onDisk map[str
 	for id := range onDisk {
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			var flow mxlv1alpha1.MxlFlow
-			if err := p.Client.Get(ctx, types.NamespacedName{Name: id}, &flow); err != nil {
+			if err := p.Client.Get(ctx, types.NamespacedName{Name: p.key(id)}, &flow); err != nil {
 				if apierrors.IsNotFound(err) {
 					return nil
 				}

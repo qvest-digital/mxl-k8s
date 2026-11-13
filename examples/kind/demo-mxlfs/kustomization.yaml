@@ -1,0 +1,10 @@
+# The demo workload as `MXLFS=1 make kind-up` applies it: the demo of
+# ../demo with the domain delivered through the agent's CSI volume.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../demo
+
+components:
+  - ../csi-domain

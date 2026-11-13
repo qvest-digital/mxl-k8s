@@ -52,6 +52,10 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.mxlfs.enabled }}
+      initContainers:
+        {{- include "mxlk8s.mxlfs.waitContainer" (dict "Context" . "root" .Values.exporter.hostPath.run) | nindent 8 }}
+      {{- end }}
       containers:
         - name: exporter
           image: {{ include "mxlk8s.image" (dict "Context" . "image" .Values.exporter.image) }}
@@ -61,6 +65,9 @@ spec:
             # Kept out of .flags so one value drives both the flag and
             # the ClusterRole that makes it usable.
             - --topology={{ .Values.exporter.topology.enabled }}
+            {{- if .Values.mxlfs.numa.metrics.enabled }}
+            - --mxlfs-numa-metrics
+            {{- end }}
             {{- with .Values.exporter.args }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -97,6 +104,10 @@ spec:
             - name: mxl-run
               mountPath: {{ .Values.exporter.hostPath.run }}
               readOnly: true
+              {{- if .Values.mxlfs.enabled }}
+              # The agent mounts each domain below it as it appears.
+              mountPropagation: HostToContainer
+              {{- end }}
             {{- with .Values.exporter.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -19,7 +19,13 @@ MIRROR_TIMEOUT_SECS="${MIRROR_TIMEOUT_SECS:-180}"
 PROBE_TIMEOUT_SECS="${PROBE_TIMEOUT_SECS:-30}"
 
 log()  { printf '\n=== %s ===\n' "$*" >&2; }
-fail() { echo "FAIL: $*" >&2; exit 1; }
+# fail snapshots the case before exiting, so the snapshot runs ahead
+# of the case's EXIT trap deleting its pods and objects.
+fail() {
+  echo "FAIL: $*" >&2
+  snapshot_case "${KIND_CASE_NAME:-}" "${KIND_CASE_START:-}" || true
+  exit 1
+}
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"; }
 
 # wait_phase <resource> <jsonpath> <regex> <timeout-secs>
@@ -113,6 +119,36 @@ resolve_pod() {
   echo "$pod"
 }
 
+# agent_runs_mxlfs -- whether the agent serves the node domains from
+# mxlfs (mxlfs.enabled).
+agent_runs_mxlfs() {
+  "${KUBECTL[@]}" -n "$NAMESPACE" get daemonset mxl-k8s-agent \
+      -o 'jsonpath={.spec.template.spec.containers[?(@.name=="agent")].args}' \
+    | grep -q -- '"--mxlfs"'
+}
+
+# demo_manifest <examples/tcp-demo manifest> -- prints the path of that
+# demo pod as this cluster runs it: the file itself, or, where the agent
+# runs with --mxlfs, the pod with its domain through the agent's CSI
+# volume (examples/kind/csi-domain), rendered under $KIND_DIAG_DIR.
+demo_manifest() {
+  local src="$1" dir
+  if ! agent_runs_mxlfs; then
+    echo "$src"
+    return 0
+  fi
+  # kustomize takes a component only by a relative path.
+  dir="${KIND_DIAG_DIR}/manifests/$(basename "$src" .yaml)"
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  cp "$src" "$dir/pod-in.yaml"
+  cp -R "$(dirname "$KIND_TEST_LIB")/../../../examples/kind/csi-domain" "$dir/csi-domain"
+  printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - pod-in.yaml\ncomponents:\n  - csi-domain\n' \
+    > "$dir/kustomization.yaml"
+  "${KUBECTL[@]}" kustomize "$dir" > "$dir/pod.yaml"
+  echo "$dir/pod.yaml"
+}
+
 # collect_diagnostics
 # Dumps cluster state and component logs into $KIND_DIAG_DIR. Called
 # by run.sh once at the end of the suite if any case failed, so the
@@ -129,17 +165,111 @@ collect_diagnostics() {
       mxldomains,mxlflows,mxlflowmirrors,mxlreceivers,mxlnodecapabilities \
       -o yaml \
       > "$KIND_DIAG_DIR/mxl-resources.yaml" 2>&1 || true
-  for app in mxl-k8s-operator mxl-k8s-agent mxl-k8s-gateway mxl-k8s-exporter; do
+  for app in mxl-k8s-agent mxl-k8s-exporter; do
     "${KUBECTL[@]}" -n "$NAMESPACE" logs \
         -l "app.kubernetes.io/name=${app}" \
         --all-containers --prefix --tail=400 \
         > "$KIND_DIAG_DIR/${app}.log"       2>&1 || true
+  done
+  # The operator and gateways in full, and per pod the container a
+  # restart replaced: a case failing mid-suite is otherwise past the
+  # tail, or in a log the restart discarded.
+  local pod
+  for app in mxl-k8s-operator mxl-k8s-gateway; do
+    "${KUBECTL[@]}" -n "$NAMESPACE" logs \
+        -l "app.kubernetes.io/name=${app}" \
+        --all-containers --prefix --tail=-1 \
+        > "$KIND_DIAG_DIR/${app}.log"       2>&1 || true
+    for pod in $("${KUBECTL[@]}" -n "$NAMESPACE" get pods \
+                   -l "app.kubernetes.io/name=${app}" -o name 2>/dev/null); do
+      "${KUBECTL[@]}" -n "$NAMESPACE" logs "$pod" \
+          --all-containers --prefix --previous \
+          > "$KIND_DIAG_DIR/${app}-${pod#pod/}.previous.log" 2>&1 || true
+    done
   done
   for pod in mxl-tcp-demo-writer mxl-tcp-demo-reader \
              mxl-tcp-demo-audio-writer mxl-tcp-demo-audio-reader; do
     "${KUBECTL[@]}" -n "$NAMESPACE" logs "pod/${pod}" \
         --all-containers --prefix --tail=400 \
         > "$KIND_DIAG_DIR/${pod}.log"       2>&1 || true
+  done
+}
+
+# snapshot_case <case-name> <case-start>
+# Dumps the state around one failing case into
+# $KIND_DIAG_DIR/cases/<case-name>/, with logs limited to the case
+# window (<case-start>, RFC3339). Later cases restart the gateways and
+# agents, and a restart keeps only the last terminated container, so
+# collect_diagnostics at the end of the suite no longer holds the logs
+# of the window. run.sh passes KIND_CASE_NAME and KIND_CASE_START to
+# each case, and fail calls this before the case's EXIT trap runs.
+# run.sh calls it again after a case exits non-zero, which covers a
+# case that failed without fail; the marker file keeps it to one
+# snapshot per case, including when fail ran in a subshell. A no-op
+# without a case name.
+snapshot_case() {
+  local name="$1" start="$2"
+  [ -n "$name" ] || return 0
+  local dir="${KIND_DIAG_DIR}/cases/${name}"
+  local runtime="${CONTAINER_RUNTIME:-docker}"
+  local since=() app pod line ctr restarts node
+  [ -e "$dir/.snapshot" ] && return 0
+  mkdir -p "$dir" || return 0
+  : > "$dir/.snapshot"
+  [ -n "$start" ] && since=(--since-time="$start")
+  echo "snapshot: ${dir}" >&2
+
+  "${KUBECTL[@]}" get mxlflowmirrors,mxlflows,mxlreceivers -A -o yaml \
+      > "$dir/mxl-resources.yaml" 2>&1 || true
+  "${KUBECTL[@]}" get events -A --sort-by=.lastTimestamp \
+      > "$dir/events.txt" 2>&1 || true
+  "${KUBECTL[@]}" -n "$NAMESPACE" get pods -o wide \
+      > "$dir/pods.txt" 2>&1 || true
+
+  # Control-plane components: every container of every pod, and the
+  # container a restart replaced, since the case started.
+  for app in mxl-k8s-operator mxl-k8s-agent mxl-k8s-gateway; do
+    for pod in $("${KUBECTL[@]}" -n "$NAMESPACE" get pods \
+                   -l "app.kubernetes.io/name=${app}" \
+                   -o 'jsonpath={.items[*].metadata.name}' 2>/dev/null); do
+      "${KUBECTL[@]}" -n "$NAMESPACE" logs "pod/${pod}" \
+          --all-containers --prefix --timestamps ${since[@]+"${since[@]}"} \
+          > "$dir/${pod}.log" 2>&1 || true
+      for line in $("${KUBECTL[@]}" -n "$NAMESPACE" get "pod/${pod}" -o \
+                      'jsonpath={range .status.containerStatuses[*]}{.name}{"="}{.restartCount}{" "}{end}' \
+                      2>/dev/null); do
+        ctr="${line%%=*}"
+        restarts="${line#*=}"
+        [ "$restarts" = "0" ] && continue
+        "${KUBECTL[@]}" -n "$NAMESPACE" logs "pod/${pod}" -c "$ctr" \
+            --previous --prefix --timestamps ${since[@]+"${since[@]}"} \
+            > "$dir/${pod}.${ctr}.previous.log" 2>&1 || true
+      done
+    done
+  done
+
+  # Pods no DaemonSet or ReplicaSet owns: the ones the cases create.
+  "${KUBECTL[@]}" -n "$NAMESPACE" get pods -o \
+      'jsonpath={range .items[*]}{.metadata.name}{"|"}{.metadata.ownerReferences[*].kind}{"\n"}{end}' \
+      2>/dev/null \
+  | while IFS='|' read -r pod kinds; do
+      [ -n "$pod" ] || continue
+      case " ${kinds} " in
+        *" DaemonSet "*|*" ReplicaSet "*) continue ;;
+      esac
+      "${KUBECTL[@]}" -n "$NAMESPACE" logs "pod/${pod}" \
+          --all-containers --prefix --timestamps ${since[@]+"${since[@]}"} \
+          > "$dir/${pod}.log" 2>&1 || true
+    done
+
+  # The domain directory and its flow directories on each worker node,
+  # through the node container as case 85 reaches it.
+  for node in $("${KUBECTL[@]}" get nodes \
+                  -l '!node-role.kubernetes.io/control-plane' \
+                  -o 'jsonpath={.items[*].metadata.name}' 2>/dev/null); do
+    # shellcheck disable=SC2016 # $1 expands in the node's sh
+    "$runtime" exec "$node" sh -c 'ls -li "$1" "$1"/*.mxl-flow' sh /run/mxl/domain \
+        > "$dir/domain-${node}.txt" 2>&1 || true
   done
 }
 

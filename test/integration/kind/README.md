@@ -20,6 +20,11 @@ test/integration/kind/
     40-frames-flowing.sh
 ```
 
+`make kind-up` attaches every node to a second network and runs the
+gateways with both networks as fabric CIDRs, so each node offers two
+tcp fabric interfaces (case 31). `FABRIC_PORTS=1 make kind-up` keeps
+one, and case 31 then skips.
+
 ## Usage
 
 ```sh
@@ -43,6 +48,7 @@ Tunables (all optional, environment variables):
 | `MIRROR_TIMEOUT_SECS` | `180` | MxlFlowMirror Ready / reader Ready wait |
 | `PROBE_TIMEOUT_SECS` | `30` | Per-port-forward startup wait |
 | `FRAMES_WINDOW_SECS` | `5` | Case 40 sample window |
+| `PLACEMENT_TIMEOUT_SECS` | `60` | Case 31 wait for a mirror to be placed and bound |
 | `CLAIM_TIMEOUT_SECS` | `90` | Case 55 wait for the relocated producer's Origin claim |
 | `SELF_MIRROR_TIMEOUT_SECS` | `90` | Case 55 wait for the self-targeted mirror to go |
 | `SURVIVAL_SETTLE_SECS` | `10` | Case 55 settle window before asserting the flow outlived the teardown |
@@ -50,9 +56,14 @@ Tunables (all optional, environment variables):
 | `EXPORTER_WINDOW_SECS` | `6` | Case 47 head-index sample window |
 | `EXPORTER_DISCOVER_TIMEOUT_SECS` | `60` | Case 47 wait for the exporter to list the demo flow |
 | `EXPORTER_METRICS_PORT` | `8080` | Case 47 exporter metrics container port |
+| `REPLICATION_WINDOW_SECS` | `6` | Case 49 window the OK read count has to grow in |
+| `GATEWAY_METRICS_PORT` | `8080` | Case 49 gateway metrics container port |
 | `MONITORING_NAMESPACE` | `monitoring` | Namespace case 48 reads Prometheus and Grafana from |
 | `SCRAPE_TIMEOUT_SECS` | `90` | Case 48 wait for the first exporter samples to reach Prometheus |
 | `GRAFANA_AUTH` | `admin:admin` | Case 48 Grafana API credentials |
+| `IDLE_PAUSE_SETTLE_SECS` | `30` | Case 63 time a paused producer is left before each gateway restart |
+| `IDLE_RESUME_TIMEOUT_SECS` | `60` | Case 63 wait for a grain on the target after the producer resumes |
+| `MXLFS_SET_WINDOW_SECS` | `10` | Case 90 time the redundancy set output is read after its local member goes away |
 | `KIND_DIAG_DIR` | `$PWD/kind-diagnostics` | Where failure diagnostics land |
 | `CASE_GLOB` | `cases/*.sh` | Case selection glob |
 
@@ -67,6 +78,29 @@ into `$KIND_DIAG_DIR`:
 - `mxl-resources.yaml` -- full `mxl.qvest-digital.com` resource dump
 - `<component>.log` -- last 400 lines per control-plane component
 - `cases/<case>.log` -- raw stdout/stderr of each case
+
+A failing case is also snapshotted on its own, before the next case
+runs, into `cases/<case>/`. `fail` takes the snapshot before the
+case's `EXIT` trap removes its pods and objects; `run.sh` takes it
+after a case that exited non-zero without `fail`. Logs cover the case
+window only (`--since-time` at the case start):
+
+- `<pod>.log` -- operator, agent and gateway pods, all containers,
+  with timestamps
+- `<pod>.<container>.previous.log` -- the container a restart
+  replaced, for each container with a restart
+- `<pod>.log` -- every pod in the demo namespace that no DaemonSet
+  or ReplicaSet owns, which includes the pods the case created
+- `pods.txt` -- `kubectl get pods -o wide` in the demo namespace
+- `mxl-resources.yaml` -- MxlFlowMirrors, MxlFlows and MxlReceivers
+- `events.txt` -- events in all namespaces sorted by `lastTimestamp`
+- `domain-<node>.txt` -- `ls -li` of `/run/mxl/domain` and its
+  `*.mxl-flow` directories on each worker node, read through
+  `$CONTAINER_RUNTIME exec` (default `docker`)
+
+A pod the case itself deletes during its window, such as a gateway or
+agent pod replaced by a rollout the case triggers, has no log in the
+snapshot: only pods that exist when the snapshot runs are read.
 
 The `kind-integration` GitHub Actions job uploads the directory as
 an artifact named `kind-diagnostics-<run-id>` on failure.

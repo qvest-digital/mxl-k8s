@@ -49,7 +49,7 @@ func TestEnsureMirror_TerminatingMirrorNotReused(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "consumer", UID: "uid-3"},
 	}
 
-	got, err := d.ensureMirror(context.Background(), flowID, "n-src", pod)
+	got, err := d.ensureMirror(context.Background(), mxlv1alpha1.FlowRef{ID: flowID}, "n-src", pod)
 	require.Error(t, err,
 		"a terminating mirror is not a usable mirror; the shim has to retry "+
 			"rather than block on an object that cannot become Ready")
