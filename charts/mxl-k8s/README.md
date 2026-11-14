@@ -52,7 +52,7 @@ its later pages follow it.
 <!-- x-release-please-start-version -->
 ```sh
 helm install mxl oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
-  --version 1.1.0-rc.50 \
+  --version 1.1.0-rc.51 \
   --namespace mxl-system --create-namespace
 ```
 <!-- x-release-please-end -->
@@ -67,7 +67,7 @@ apply the chart's CRDs before enabling mxlfs:
 <!-- x-release-please-start-version -->
 ```sh
 helm show crds oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
-  --version 1.1.0-rc.50 | kubectl apply --server-side -f -
+  --version 1.1.0-rc.51 | kubectl apply --server-side -f -
 ```
 <!-- x-release-please-end -->
 
@@ -98,7 +98,7 @@ spec:
   chart:
     spec:
       chart: mxl-k8s
-      version: "1.1.0-rc.50"
+      version: "1.1.0-rc.51"
       sourceRef:
         kind: HelmRepository
         name: mxl-k8s
