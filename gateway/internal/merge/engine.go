@@ -189,9 +189,9 @@ type Engine struct {
 	reported []report
 	now      func() time.Time // a seam for tests; nil is time.Now
 	// lastHead and pending are, per member, the head follow last saw and
-	// the advance it holds back; guarded by mu.
+	// the advances it holds back, oldest first; guarded by mu.
 	lastHead []uint64
-	pending  []pendingHead
+	pending  [][]pendingHead
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -830,7 +830,7 @@ func (e *Engine) take(member int, r *memberRing) error {
 		e.reported[member] = report{}
 	}
 	if e.lastHead != nil {
-		e.lastHead[member], e.pending[member] = 0, pendingHead{}
+		e.lastHead[member], e.pending[member] = 0, nil
 	}
 	if e.disc != nil {
 		for k, m := range e.grainMem[member] {
@@ -926,7 +926,9 @@ func (e *Engine) run(ctx context.Context) {
 			err = e.apply(sel)
 		} else {
 			e.mu.Lock()
-			e.follow(now)
+			if due := e.follow(now); due > 0 {
+				timeout = min(timeout, due)
+			}
 			var sel []PageSelect
 			sel, head, wait = e.audio.Step(now)
 			sel = append(sel, e.audio.Retire(mxl.CurrentIndex(e.mxlRate()))...)
@@ -1072,15 +1074,12 @@ type report struct {
 // four passes of the loop.
 const minFedWindow = 4 * maxSleep
 
-// minQuietHorizon is the least time after its last report that a member
-// that is not fed counts as a mirror gone quiet rather than a ring
-// written locally; see quietWindow and follow.
-const minQuietHorizon = time.Second
-
-// followDelay is how long follow holds back the advance of a mirror gone
+// followDelay is how long follow holds back each advance of a mirror gone
 // quiet before counting it: one pass. The gateway reports a commit from
 // the goroutine that made it, right after it, so a report that is coming
-// comes within that, whatever the flow's rate.
+// comes within that, whatever the flow's rate. The loop wakes when the
+// oldest held advance falls due, so each counts about followDelay after
+// it was seen.
 const followDelay = maxSleep
 
 // pendingHead is a head follow saw and has not counted yet.
@@ -1092,43 +1091,71 @@ type pendingHead struct {
 // follow counts, for every member the gateway does not feed, what its
 // head advanced by as committed, from where it was last seen or last
 // reported, whichever is later. The first look at a ring only notes its
-// head. now is the time of the pass.
+// head. now is the time of the pass. It returns how long until the oldest
+// advance it holds back falls due, or zero when it holds none.
 //
-// A member reported within its quietWindow may be a mirror that was only
-// quiet, with a batch lost: libmxl wakes the loop on the mirror's next
-// commit, and the loop can look before the gateway reports that commit,
-// when a head moved over the lost batch would count it as arrived. Such
-// a member's advance counts only once it has stood unreported for
-// followDelay, and a report before then makes the member fed again. A
-// member not reported that recently, a local producer, counts at once.
-func (e *Engine) follow(now time.Time) {
+// A member the gateway reported since its ring was taken may be a mirror
+// that was only quiet, with a batch lost: libmxl wakes the loop on the
+// mirror's next commit, and the loop can look before the gateway reports
+// that commit, when a head moved over the lost batch would count it as
+// arrived. Each advance of such a member counts only once it has stood
+// unreported for followDelay, up to the head seen then, and a report
+// before then makes the member fed again. How long it was quiet does not
+// tell: one producer's index resumes at the clock, past the lost batch by
+// however long it was quiet, another's where it left off. Neither does
+// how far the head moved. So this holds however long the member was
+// quiet, at a cost of followDelay for a producer that took over a
+// mirror's ring. A member never reported since its ring was taken, a
+// local producer, counts at once.
+//
+// While an advance is held, the samples at the output's head may be in
+// it, and the policy is told not to publish them as silence until it is
+// counted: a member that took over a mirror's ring holds samples a lost
+// batch of another member needs for followDelay before they count.
+func (e *Engine) follow(now time.Time) (due time.Duration) {
 	if e.lastHead == nil {
-		e.lastHead, e.pending = make([]uint64, len(e.members)), make([]pendingHead, len(e.members))
+		e.lastHead, e.pending = make([]uint64, len(e.members)), make([][]pendingHead, len(e.members))
 	}
 	fedAt := e.clock()
+	e.audio.Held = e.audio.Held[:0]
 	for i, m := range e.members {
 		if e.fed(i, fedAt) {
-			e.pending[i] = pendingHead{}
+			e.pending[i] = e.pending[i][:0]
 			continue
 		}
 		from := max(e.lastHead[i], e.audio.evHead[i])
 		h := m.head()
 		upto := h
-		if e.reported != nil && !e.reported[i].at.IsZero() && fedAt.Sub(e.reported[i].at) < e.quietWindow(i) {
-			p := &e.pending[i]
+		if e.reported != nil && !e.reported[i].at.IsZero() {
+			q := e.pending[i]
 			upto = 0
-			if p.head != 0 && now.Sub(p.seen) >= followDelay {
-				upto, p.head = min(p.head, h), 0
+			k := 0
+			for ; k < len(q) && now.Sub(q[k].seen) >= followDelay; k++ {
+				upto = max(upto, min(q[k].head, h))
 			}
-			if p.head == 0 && h > max(from, upto) {
-				p.head, p.seen = h, now
+			q = append(q[:0], q[k:]...)
+			last := max(from, upto)
+			if len(q) > 0 {
+				last = max(last, q[len(q)-1].head)
 			}
+			if h > last {
+				q = append(q, pendingHead{head: h, seen: now})
+			}
+			e.pending[i] = q
 		}
 		if from != 0 && upto > from {
 			e.audio.Committed(i, from, upto)
 		}
 		e.lastHead[i] = max(e.lastHead[i], upto)
+		if q := e.pending[i]; len(q) > 0 {
+			counted := max(e.lastHead[i], e.audio.evHead[i])
+			e.audio.Held = append(e.audio.Held, Span{From: counted, To: q[len(q)-1].head})
+			if d := max(followDelay-now.Sub(q[0].seen), time.Millisecond); due == 0 || d < due {
+				due = d
+			}
+		}
 	}
+	return due
 }
 
 // fed reports whether the gateway reports member i's arrivals: it reported
@@ -1148,14 +1175,6 @@ func (e *Engine) fed(i int, now time.Time) bool {
 // fedWindow is how long member i counts as fed after its last report.
 func (e *Engine) fedWindow(i int) time.Duration {
 	return max(4*e.reported[i].span, minFedWindow)
-}
-
-// quietWindow is how long after its last report member i, once no longer
-// fed, counts as a mirror gone quiet: four of its fed windows, and at
-// least minQuietHorizon, so a mirror writing long batches still gets a
-// window past its fed one.
-func (e *Engine) quietWindow(i int) time.Duration {
-	return max(4*e.fedWindow(i), minQuietHorizon)
 }
 
 // setRate sets the rate of an engine built without Start.

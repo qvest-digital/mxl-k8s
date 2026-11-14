@@ -1058,9 +1058,9 @@ func (r *rig) start() {
 }
 
 // advance moves the rig's clock past any window a report keeps a member
-// fed for, and not past minQuietHorizon. A rig with no rate counts no
-// report as lasting any time, so its fed window is minFedWindow.
-func (r *rig) advance() { r.clock.Add(int64(minQuietHorizon / 4)) }
+// fed for. A rig with no rate counts no report as lasting any time, so
+// its fed window is minFedWindow.
+func (r *rig) advance() { r.clock.Add(int64(4 * minFedWindow)) }
 
 // replace puts a fresh ring, written by nobody yet, in member's place,
 // as Replace does for a restarted producer, and returns its header.
@@ -1336,20 +1336,40 @@ func TestEngineDoesNotCountAQuietMirrorsGapFromItsHead(t *testing.T) {
 			r.e.mu.Lock()
 			r.e.follow(t0)
 			r.e.mu.Unlock()
-			r.e.Committed(1, rigBase+2*n, rigBase+3*n)
-			r.e.mu.Lock()
-			defer r.e.mu.Unlock()
-			r.e.follow(t0.Add(2 * followDelay))
-			p := (rigBase + n) / PageSamples
-			require.False(t, r.whole(1, p), "a gap after a quiet spell was counted from the head: %+v",
-				r.e.audio.cov[1][p%rigPages])
+			r.requireLostBatchNotCounted(t0, n, rigBase+3*n)
 		})
 	}
 }
 
+// requireLostBatchNotCounted checks, for member b that reported up to
+// rigBase+n and whose head the loop has just seen at h past a lost batch
+// [rigBase+n, rigBase+2n), that the loop held the advance back, then that
+// the report of b's last batch [h-n, h) leaves the lost batch uncounted.
+// A page smaller than three batches stays partial whether or not the gap
+// counted, so the counted range is checked directly, not page wholeness.
+func (r *rig) requireLostBatchNotCounted(t0 time.Time, n, h uint64) {
+	r.t.Helper()
+	r.e.mu.Lock()
+	require.Equal(r.t, rigBase+n, r.e.audio.evHead[1], "the advance over a lost batch counted before a report could come")
+	r.e.mu.Unlock()
+	r.e.Committed(1, h-n, h)
+	r.e.mu.Lock()
+	defer r.e.mu.Unlock()
+	r.e.follow(t0.Add(2 * followDelay))
+	require.Equal(r.t, h, r.e.audio.evHead[1], "the report of the last batch did not count")
+	p := (rigBase + n) / PageSamples
+	c := r.e.audio.cov[1][p%rigPages]
+	require.False(r.t, c.valid && c.n == p && !c.broken && c.to > rigBase+n,
+		"the lost batch was counted from the head: %+v", c)
+	for q := p + 1; q < (h-n)/PageSamples; q++ {
+		c := r.e.audio.cov[1][q%rigPages]
+		require.False(r.t, c.valid && c.n == q, "page %d, which b never reported, counted: %+v", q, c)
+	}
+}
+
 // A mirror that stays quiet is followed once its advance has stood
-// unreported for followDelay; a member never reported, at once; and a
-// mirror quiet past its quiet window, at once again.
+// unreported for followDelay, however long it was quiet; a member never
+// reported, at once.
 func TestEngineFollowsAQuietMirrorLateAndALocalRingAtOnce(t *testing.T) {
 	for _, c := range batchCases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1371,11 +1391,13 @@ func TestEngineFollowsAQuietMirrorLateAndALocalRingAtOnce(t *testing.T) {
 			r.e.follow(t0.Add(followDelay))
 			require.Equal(t, rigBase+2*n, r.e.audio.evHead[1], "a quiet mirror's advance never counted")
 
-			r.clock.Add(int64(r.e.quietWindow(1)))
+			r.clock.Add(int64(10 * time.Minute))
 			setHead(b, rigBase+3*n)
 			r.e.follow(t0.Add(followDelay))
-			require.Equal(t, rigBase+3*n, r.e.audio.evHead[1],
-				"a member quiet past its quiet window was still held back")
+			require.Equal(t, rigBase+2*n, r.e.audio.evHead[1],
+				"a member quiet for ten minutes was counted at once")
+			r.e.follow(t0.Add(2 * followDelay))
+			require.Equal(t, rigBase+3*n, r.e.audio.evHead[1], "a long-quiet mirror's advance never counted")
 		})
 	}
 }
@@ -1425,4 +1447,242 @@ func TestEngineDoesNotCountAReplacedRingFromTheOldHead(t *testing.T) {
 			})
 		}
 	}
+}
+
+// A mirror can lose a batch and then stay quiet for any time, and its
+// index can resume at the clock, past the gap by however long it was
+// quiet, or where it left off, as a producer whose output continues from
+// its own position does. Neither the time nor the distance tells a lost
+// batch from a local producer's advance, so the advance is held back for
+// a report in every combination, at every rate.
+func TestEngineHoldsBackAQuietMirrorHoweverLongAndFar(t *testing.T) {
+	for _, c := range batchCases {
+		for _, quiet := range []time.Duration{0, 10 * time.Second, 10 * time.Minute} {
+			for _, far := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s, quiet %v past the fed window, index at the clock %v", c.name, quiet, far), func(t *testing.T) {
+					r := newRig(t).at(c)
+					b, n := r.e.members[1], c.batch
+					setHead(b, rigBase+n)
+					r.e.Committed(1, rigBase, rigBase+n)
+					r.clock.Add(int64(r.e.fedWindow(1) + quiet))
+					h := uint64(rigBase + 3*n)
+					if far {
+						// Resumed at the clock: many pages on, inside the
+						// rig's ring of rigPages pages.
+						h = (rigBase+2*n)/PageSamples*PageSamples + 20*PageSamples + n
+					}
+					t0 := time.Now()
+					setHead(b, h)
+					r.e.mu.Lock()
+					r.e.follow(t0)
+					r.e.mu.Unlock()
+					r.requireLostBatchNotCounted(t0, n, h)
+				})
+			}
+		}
+	}
+}
+
+// Each advance a quiet mirror makes is counted followDelay after it was
+// seen, up to the head seen then: a head that moved on since, over a
+// batch the mirror lost, does not count with it. The report of the batch
+// after the lost one comes after that pass.
+func TestEngineCountsAHeldAdvanceOnlyUpToTheHeadSeen(t *testing.T) {
+	for _, c := range batchCases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t).at(c)
+			b, n := r.e.members[1], c.batch
+			setHead(b, rigBase+n)
+			r.e.Committed(1, rigBase, rigBase+n)
+			r.clock.Add(int64(r.e.fedWindow(1)))
+			t0 := time.Now()
+			r.e.mu.Lock()
+			defer r.e.mu.Unlock()
+			setHead(b, rigBase+2*n)
+			r.e.follow(t0)
+			setHead(b, rigBase+4*n) // the batch [+2n, +3n) is lost
+			r.e.follow(t0.Add(followDelay / 2))
+			r.e.follow(t0.Add(followDelay))
+			require.Equal(t, rigBase+2*n, r.e.audio.evHead[1],
+				"an advance counted past the head seen when it was held")
+			r.e.mu.Unlock()
+			r.e.Committed(1, rigBase+3*n, rigBase+4*n)
+			r.e.mu.Lock()
+			r.e.follow(t0.Add(3 * followDelay))
+			require.Equal(t, rigBase+4*n, r.e.audio.evHead[1])
+			p := (rigBase + 2*n) / PageSamples
+			cv := r.e.audio.cov[1][p%rigPages]
+			require.False(t, cv.valid && cv.n == p && !cv.broken && cv.to > rigBase+2*n,
+				"the lost batch was counted: %+v", cv)
+			for q := p + 1; q < (rigBase+3*n)/PageSamples; q++ {
+				cv := r.e.audio.cov[1][q%rigPages]
+				require.False(t, cv.valid && cv.n == q, "page %d, inside the lost batch, counted: %+v", q, cv)
+			}
+		})
+	}
+}
+
+// A producer that took over a mirror's ring is never reported again, so
+// each of its advances is held for followDelay. When the other member
+// loses a batch, the samples are the held member's: the output must wait
+// for them rather than publish silence once the skew budget runs out,
+// with a budget shorter than followDelay and one far shorter than it,
+// under which several of the held member's advances queue at once.
+//
+// Where half a batch period is shorter than followDelay, B commits half a
+// period after A, so B's advance is still held when A's next batch makes
+// the lost one due, even at a period close to followDelay. At longer
+// periods B commits with A: B's advance would otherwise be counted before
+// A's next batch, B's own next batch not yet written, and a page A
+// resumes in the middle of is not A's whole, so its remainder would go
+// out as silence because B is late, not because anything is held.
+func TestEngineWaitsForAHeldMemberRatherThanPublishSilence(t *testing.T) {
+	for _, skew := range []time.Duration{20 * time.Millisecond, 5 * time.Millisecond} {
+		for _, c := range batchCases {
+			t.Run(fmt.Sprintf("%s, skew %v", c.name, skew), func(t *testing.T) {
+				r := newRig(t).at(c)
+				a, b, n := r.e.members[0], r.e.members[1], c.batch
+				r.e.audio.Skew = uint64(skew.Seconds() * float64(c.rate))
+				// B was a mirror; its producer then took over the ring.
+				setHead(b, rigBase)
+				r.e.Committed(1, rigBase-n, rigBase)
+				r.e.Committed(0, rigBase-n, rigBase)
+				setHead(a, rigBase)
+				r.clock.Add(int64(r.e.fedWindow(1)))
+				const lost = 3
+				now := time.Now()
+				r.e.mu.Lock()
+				defer r.e.mu.Unlock()
+				r.e.follow(now)
+				// A pass each half period: A commits at odd passes, B at
+				// the next one, or with A where it is not offset.
+				step := c.period() / 2
+				offset := step < followDelay
+				// The pages of A's lost batch, checked once the head first
+				// passes it: a page nothing served before maps to silence
+				// already, so picking silence there selects nothing.
+				lostFrom, lostTo := rigBase+uint64(lost-1)*n, rigBase+uint64(lost)*n
+				checked := false
+				passes := 2 * (lost + 6 + int(4*followDelay/c.period()))
+				for k := 1; k <= passes; k++ {
+					now = now.Add(step)
+					r.clock.Add(int64(step))
+					h := rigBase + uint64((k+1)/2)*n
+					if k%2 == 1 {
+						setHead(a, h)
+						if !offset {
+							setHead(b, h)
+						}
+						r.e.mu.Unlock()
+						if (k+1)/2 != lost {
+							r.e.Committed(0, h-n, h) // A, a mirror, loses one batch
+						}
+						r.e.mu.Lock()
+					} else if offset {
+						setHead(b, h)
+					}
+					r.e.reported[0].at = r.e.clock() // A stays fed throughout
+					r.e.follow(now)
+					sel, _, _ := r.e.audio.Step(now)
+					for _, s := range sel {
+						require.NotEqual(t, r.e.audio.Silence, s.Source,
+							"pass %d published page %d as silence while B held its samples", k, s.Page)
+					}
+					if !checked && r.e.audio.Head >= lostTo {
+						checked = true
+						for q := lostFrom / PageSamples; q*PageSamples < lostTo; q++ {
+							require.NotEqual(t, r.e.audio.Silence, r.e.audio.Current[q%rigPages],
+								"page %d of A's lost batch went out as silence while B held it", q)
+						}
+					}
+				}
+				require.True(t, checked, "the output never got past A's lost batch")
+				require.GreaterOrEqual(t, r.e.audio.Head, rigBase+uint64(lost+1)*n,
+					"the output never got past A's lost batch")
+			})
+		}
+	}
+}
+
+// What the policy is told is held is rebuilt each pass: a span left
+// over from an advance since counted would keep the output from
+// publishing silence that no member holds anything for.
+func TestEngineHeldIsRebuiltEachPass(t *testing.T) {
+	for _, c := range batchCases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t).at(c)
+			a, b, n := r.e.members[0], r.e.members[1], c.batch
+			setHead(b, rigBase)
+			r.e.Committed(1, rigBase-n, rigBase)
+			r.clock.Add(int64(r.e.fedWindow(1)))
+			setHead(a, rigBase)
+			now := time.Now()
+			r.e.mu.Lock()
+			defer r.e.mu.Unlock()
+			for k := 1; k <= 50; k++ {
+				now = now.Add(c.period())
+				setHead(a, rigBase+uint64(k)*n)
+				setHead(b, rigBase+uint64(k)*n)
+				r.e.follow(now)
+				require.LessOrEqual(t, len(r.e.audio.Held), len(r.e.members), "pass %d", k)
+			}
+			// B stops; once its last advance counts, nothing is held.
+			r.e.follow(now.Add(followDelay))
+			require.Empty(t, r.e.audio.Held, "a counted advance is still held")
+			require.False(t, r.e.audio.held(rigBase+n), "a stale span still blocks silence")
+		})
+	}
+}
+
+// The loop wakes when a held advance falls due. Woken for another member
+// in between, it would otherwise count the advance only at the first pass
+// after it fell due: with another member waking it every 19ms, at about
+// twice followDelay rather than once. Scheduling only ever adds delay, so
+// the least lag over several advances shows which it is. It runs without
+// mxlfs: the loop reads the members' headers.
+func TestEngineLoopCountsAHeldAdvanceWhenDue(t *testing.T) {
+	r := newRig(t)
+	a, b := r.e.members[0], r.e.members[1]
+	setHead(a, rigBase)
+	setHead(b, rigBase)
+	r.e.Committed(1, rigBase-480, rigBase)
+	r.advance()
+	r.start()
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(19 * time.Millisecond):
+			}
+			atomic.AddUint32(a.syncWord(), 1)
+			_, _, _ = unix.Syscall6(unix.SYS_FUTEX, uintptr(unsafe.Pointer(a.syncWord())), futexWake, futexWakeAll, 0, 0, 0)
+		}
+	}()
+	defer func() { close(stop); <-done }()
+	time.Sleep(5 * maxSleep) // the loop's first look notes the heads
+	least := time.Hour
+	for k := uint64(1); k <= 10; k++ {
+		want := rigBase + 480*k
+		set := time.Now()
+		setHead(b, want) // no futex wake: a pass finds it
+		deadline := set.Add(time.Second)
+		for {
+			r.e.mu.Lock()
+			got := r.e.audio.evHead[1]
+			r.e.mu.Unlock()
+			if got == want {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("held advance %d never counted", k)
+			}
+			time.Sleep(200 * time.Microsecond)
+		}
+		least = min(least, time.Since(set))
+	}
+	require.Less(t, least, followDelay+10*time.Millisecond,
+		"a held advance counted a pass late at best: %v", least)
 }
