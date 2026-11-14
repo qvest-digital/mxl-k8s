@@ -322,6 +322,24 @@ location_phases() {
     done
 }
 
+# location_phase_map <node> -- "<flow>=<phase>" per flow listing the
+# node, sorted, so two calls compare as text.
+location_phase_map() {
+  local want="$1" name pairs pair
+  "${KUBECTL[@]}" get mxlflow -o \
+    'jsonpath={range .items[*]}{.metadata.name}{"|"}{range .status.locations[*]}{.nodeName}{"="}{.phase}{","}{end}{"\n"}{end}' \
+  | while IFS='|' read -r name pairs; do
+      [ -n "$name" ] || continue
+      IFS=','
+      for pair in $pairs; do
+        case "$pair" in
+          "${want}="*) echo "${name}=${pair#*=}" ;;
+        esac
+      done
+      unset IFS
+    done | sort
+}
+
 # mirrors_sourced_from <node> -- "<name>=<phase>" per MxlFlowMirror
 # whose spec.sourceNode is the node.
 mirrors_sourced_from() {
