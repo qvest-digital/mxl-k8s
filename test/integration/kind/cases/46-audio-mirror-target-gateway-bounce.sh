@@ -59,6 +59,10 @@ gateway_pod="$(daemonset_pod_on gateway "$reader_node")"
 # What the node's locations read before the bounce, so the case can
 # hand the next one the cluster as it found it.
 phases_before="$(location_phase_map "$reader_node")"
+# The reader's own audio flow lists the node, so an empty map is a failed
+# lookup, against which every later one would compare equal.
+[ -n "$phases_before" ] || fail "no MxlFlow lists a location on ${reader_node}"
+echo "  locations on ${reader_node} before the bounce: $(printf '%s\n' "$phases_before" | tr '\n' ' ')"
 echo "  bouncing ${gateway_pod} on ${reader_node} (target side of the audio mirror)"
 
 "${KUBECTL[@]}" -n "$NAMESPACE" delete "pod/${gateway_pod}" --wait=false \
