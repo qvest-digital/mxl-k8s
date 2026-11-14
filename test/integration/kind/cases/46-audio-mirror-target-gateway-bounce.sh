@@ -56,6 +56,9 @@ reader_node=$("${KUBECTL[@]}" -n "$NAMESPACE" get "pod/${READER_POD}" \
 [ -n "$reader_node" ] || fail "could not resolve ${READER_POD}'s node"
 gateway_pod="$(daemonset_pod_on gateway "$reader_node")"
 [ -n "$gateway_pod" ] || fail "no running gateway pod on ${reader_node}"
+# What the node's locations read before the bounce, so the case can
+# hand the next one the cluster as it found it.
+phases_before="$(location_phase_map "$reader_node")"
 echo "  bouncing ${gateway_pod} on ${reader_node} (target side of the audio mirror)"
 
 "${KUBECTL[@]}" -n "$NAMESPACE" delete "pod/${gateway_pod}" --wait=false \
@@ -92,11 +95,36 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   [ -n "$b" ] || { sleep 2; continue; }
   if [ "$b" -gt "$a" ] && [ $(( b - a )) -ge "$MIN_WINDOW_SAMPLES" ]; then
     echo "  samples resumed at rate after gateway bounce: idx ${a} -> ${b} over ${WINDOW_SECS}s (attempt ${attempt})"
-    exit 0
+    recovered=yes
+    break
   fi
   echo "  attempt ${attempt}: idx ${a:-?} -> ${b:-?} over ${WINDOW_SECS}s, below ${MIN_WINDOW_SAMPLES}; retrying"
   sleep 2
 done
+
+if [ "${recovered:-}" = yes ]; then
+  # The bounce also took down the target of every other mirror into
+  # the node, and the agent marked those locations Stale. A mirror reads
+  # Ready again as soon as its grains flow, but a Stale location the
+  # gateway's writer re-attached to is promoted back only by the agent's
+  # periodic rescan, up to 30s later. Until then the next case would
+  # find the node in a state this one left behind.
+  started=$(date +%s)
+  phases_now=""
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    phases_now="$(location_phase_map "$reader_node")"
+    if [ "$phases_now" = "$phases_before" ]; then
+      echo "  locations on ${reader_node} back as before the bounce after $(( $(date +%s) - started ))s"
+      exit 0
+    fi
+    sleep 2
+  done
+  echo "  locations on ${reader_node} before the bounce:" >&2
+  printf '%s\n' "$phases_before" | sed 's/^/    /' >&2
+  echo "  and now:" >&2
+  printf '%s\n' "$phases_now" | sed 's/^/    /' >&2
+  fail "locations on ${reader_node} did not return to their phases within ${RECOVERY_TIMEOUT_SECS}s of the bounce"
+fi
 
 echo "  last reader logs:" >&2
 "${KUBECTL[@]}" -n "$NAMESPACE" logs "pod/${READER_POD}" --tail=30 >&2 2>/dev/null || true

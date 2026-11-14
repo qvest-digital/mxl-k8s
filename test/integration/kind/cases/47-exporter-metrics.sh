@@ -185,11 +185,22 @@ if [ "$reader_node" = "$writer_node" ]; then
 else
   reader_exp=$(daemonset_pod_on exporter "$reader_node")
   [ -n "$reader_exp" ] || fail "no exporter pod running on ${reader_node}"
-  scrape "$reader_exp" "$WORK_DIR/reader.txt"
-
-  rloc=$(metric_line "$WORK_DIR/reader.txt" mxl_flow_location_info "$VIDEO_FLOW")
+  # Polled as the writer side is: the exporter reports what the
+  # MxlFlow's status says, and a location the agent demoted while a
+  # gateway restarted reads Stale until its next rescan promotes it.
+  deadline=$(( $(date +%s) + DISCOVER_TIMEOUT_SECS ))
+  rloc=""
+  phase=""
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    scrape "$reader_exp" "$WORK_DIR/reader.txt"
+    rloc=$(metric_line "$WORK_DIR/reader.txt" mxl_flow_location_info "$VIDEO_FLOW")
+    phase=$(echo "$rloc" | sed -n 's/.*phase="\([A-Za-z]*\)".*/\1/p')
+    case "$phase" in
+      Ready|Mirroring|Origin) break ;;
+    esac
+    sleep 3
+  done
   [ -n "$rloc" ] || fail "no mxl_flow_location_info for ${VIDEO_FLOW} on ${reader_node}"
-  phase=$(echo "$rloc" | sed -n 's/.*phase="\([A-Za-z]*\)".*/\1/p')
   case "$phase" in
     Ready|Mirroring) echo "   mxl_flow_location_info: ${phase} on ${reader_node}" ;;
     Origin) fail "${reader_node} reports Origin for ${VIDEO_FLOW}; only the writer's node may" ;;
