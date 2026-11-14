@@ -1003,3 +1003,426 @@ func TestEngineRefusesARingOfAnotherDepth(t *testing.T) {
 	require.NotErrorIs(t, err, ErrNotOpened)
 	require.Contains(t, err.Error(), "grains")
 }
+
+// rig runs an engine's loop over two audio members on tmpfs, without
+// mxlfs: the loop reads the members' headers, which tmpfs maps as well.
+// Its clock decides only whether a member counts as fed.
+type rig struct {
+	t      *testing.T
+	e      *Engine
+	clock  atomic.Int64 // nanoseconds
+	cancel context.CancelFunc
+}
+
+const rigPages = 64
+
+// rigBase is where both members start writing, a page boundary.
+const rigBase = 1000 * PageSamples
+
+func newRig(t *testing.T) *rig {
+	t.Helper()
+	r := &rig{t: t}
+	r.clock.Store(time.Unix(1_000_000, 0).UnixNano())
+	e := &Engine{spec: Spec{Members: []string{memberA, memberB}}, audio: NewAudio(2, rigPages, 2),
+		done: make(chan struct{}), replaces: make(chan replaceReq)}
+	e.now = func() time.Time { return time.Unix(0, r.clock.Load()) }
+	e.audio.Skew = 2 * PageSamples
+	e.out, e.outFile = r.header()
+	for range 2 {
+		h, f := r.header()
+		e.members, e.files = append(e.members, h), append(e.files, f)
+	}
+	t.Cleanup(e.release)
+	r.e = e
+	return r
+}
+
+func (r *rig) header() (*header, *os.File) {
+	path := filepath.Join(r.t.TempDir(), "data")
+	require.NoError(r.t, os.WriteFile(path, make([]byte, 4096), 0o644))
+	h, f, err := mapHeader(path, true)
+	require.NoError(r.t, err)
+	return h, f
+}
+
+func setHead(h *header, head uint64) {
+	atomic.StoreUint64((*uint64)(unsafe.Pointer(&h.info.runtime.headIndex)), head)
+}
+
+// start runs the loop until the test ends.
+func (r *rig) start() {
+	ctx, cancel := context.WithCancel(context.Background())
+	r.cancel = cancel
+	go r.e.run(ctx)
+	r.t.Cleanup(func() { cancel(); <-r.e.done })
+}
+
+// advance moves the rig's clock past any window a report keeps a member
+// fed for, and not past minQuietHorizon. A rig with no rate counts no
+// report as lasting any time, so its fed window is minFedWindow.
+func (r *rig) advance() { r.clock.Add(int64(minQuietHorizon / 4)) }
+
+// replace puts a fresh ring, written by nobody yet, in member's place,
+// as Replace does for a restarted producer, and returns its header.
+func (r *rig) replace(member int) *header {
+	h, f := r.header()
+	req := replaceReq{member: member, ring: &memberRing{h: h, f: f}, done: make(chan error, 1)}
+	r.e.replaces <- req
+	require.NoError(r.t, <-req.done)
+	return h
+}
+
+// write moves a and b on together from rigBase, a only up to stopA, b on
+// and on, until the returned stop is called.
+func write(a, b *header, stopA uint64) (stop func()) {
+	quit, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for h := uint64(rigBase); ; h += 480 {
+			if h <= stopA {
+				setHead(a, h)
+			}
+			setHead(b, h)
+			select {
+			case <-quit:
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}()
+	return func() { close(quit); <-done }
+}
+
+// requireServedFromB waits for the output to pass a's stop at stopA, and
+// checks the pages after it came from member b.
+func (r *rig) requireServedFromB(a, b *header, stopA uint64, stop func()) {
+	r.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for r.e.out.head() < stopA+8*PageSamples {
+		if time.Now().After(deadline) {
+			stop()
+			r.t.Fatalf("the output stood still at %d with A at %d, while B kept writing to %d",
+				r.e.out.head(), a.head(), b.head())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	stop()
+	r.e.mu.Lock()
+	defer r.e.mu.Unlock()
+	for n := uint64(stopA/PageSamples + 1); n < stopA/PageSamples+8; n++ {
+		require.Equal(r.t, 1, r.e.audio.Current[n%rigPages], "page %d after A stopped is not B's", n)
+	}
+}
+
+// A member's ring is replaced when its producer restarts, and the new
+// ring need not be written the way the old one was: an engine that ran
+// on another node, its ring a mirror the gateway reported, can come back
+// on this node and write the ring itself, which nothing reports. The
+// output must then follow that member once the other one stops, as it
+// does a member that was local from the start.
+func TestEngineFollowsAReplacedMemberWrittenLocally(t *testing.T) {
+	r := newRig(t)
+	a := r.e.members[0]
+	setHead(r.e.members[1], rigBase+PageSamples)
+	r.e.Committed(1, rigBase, rigBase+PageSamples) // B is a mirror
+	setHead(a, rigBase)
+	r.start()
+	b := r.replace(1)
+	const stopA = rigBase + 20*PageSamples
+	r.requireServedFromB(a, b, stopA, write(a, b, stopA))
+}
+
+// A producer that comes back on the node holding a mirror of its flow
+// opens the mirror's ring and writes on in it: no ring is replaced, and
+// the gateway stops reporting the member. Its head is followed then.
+func TestEngineFollowsAMemberWhoseRingAProducerTookOver(t *testing.T) {
+	r := newRig(t)
+	a, b := r.e.members[0], r.e.members[1]
+	setHead(b, rigBase+PageSamples)
+	r.e.Committed(1, rigBase, rigBase+PageSamples) // B is a mirror
+	setHead(a, rigBase)
+	r.start()
+	r.advance() // no report since: the producer writes B's ring itself
+	const stopA = rigBase + 20*PageSamples
+	r.requireServedFromB(a, b, stopA, write(a, b, stopA))
+}
+
+// The gateway names a flow, not a ring, so a report about a member's old
+// ring can come after the ring was replaced. It must not leave the new
+// ring, which nobody reports, unfollowed.
+func TestEngineFollowsAReplacedMemberDespiteALateReport(t *testing.T) {
+	r := newRig(t)
+	a := r.e.members[0]
+	setHead(r.e.members[1], rigBase+PageSamples)
+	r.e.Committed(1, rigBase, rigBase+PageSamples)
+	setHead(a, rigBase)
+	r.start()
+	b := r.replace(1)
+	r.e.Committed(1, rigBase+PageSamples, rigBase+PageSamples+480) // about the old ring
+	r.advance()
+	const stopA = rigBase + 20*PageSamples
+	r.requireServedFromB(a, b, stopA, write(a, b, stopA))
+}
+
+// Once the gateway reports a replaced member, the loop stops counting
+// from its head: a mirror's head moving over samples it lost would
+// otherwise count them as committed. When the reports stop, it follows
+// the head again.
+func TestEngineStopsFollowingAReplacedMemberOnceReported(t *testing.T) {
+	r := newRig(t)
+	setHead(r.e.members[0], rigBase)
+	r.start()
+	b := r.replace(1)
+	evHead := func() uint64 {
+		r.e.mu.Lock()
+		defer r.e.mu.Unlock()
+		return r.e.audio.evHead[1]
+	}
+	waitFor := func(want uint64, msg string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for evHead() != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: counted to %d, want %d", msg, evHead(), want)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	setHead(b, rigBase)
+	// The loop's first look at the new ring sets where it follows from.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r.e.mu.Lock()
+		seen := r.e.lastHead != nil && r.e.lastHead[1] == rigBase
+		r.e.mu.Unlock()
+		if seen {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the loop never looked at the new ring")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	setHead(b, rigBase+PageSamples)
+	waitFor(rigBase+PageSamples, "not followed before any report")
+
+	setHead(b, rigBase+2*PageSamples)
+	r.e.Committed(1, rigBase+PageSamples, rigBase+2*PageSamples)
+	setHead(b, rigBase+4*PageSamples) // moves on with no report
+	time.Sleep(10 * maxSleep)         // several passes of the loop
+	require.Equal(t, uint64(rigBase+2*PageSamples), evHead(),
+		"the loop counted from the head of a member the gateway reports")
+
+	r.advance()
+	waitFor(rigBase+4*PageSamples, "not followed once the reports stopped")
+	// From the end of the report on, not from where the head was seen
+	// before it: counted again, the reported page would read as broken.
+	r.e.mu.Lock()
+	defer r.e.mu.Unlock()
+	n := uint64(rigBase/PageSamples + 1)
+	c := r.e.audio.cov[1][n%rigPages]
+	require.True(t, c.valid && c.n == n && !c.broken && c.to == rigBase+2*PageSamples,
+		"page %d, reported whole: %+v", n, c)
+}
+
+// batchCase is an audio flow written in batches of one size: per picture
+// at the slowest and fastest grain rates in use, in AAC frames, which at
+// 240 fps span five pictures, and in long batches whose fed and quiet
+// windows outlast the constant floors. A case's ring holds rigPages pages,
+// so a case writes less than that ahead of the oldest page it checks.
+type batchCase struct {
+	name  string
+	rate  int64 // samples per second
+	batch uint64
+}
+
+func (c batchCase) period() time.Duration {
+	return time.Duration(float64(c.batch) * float64(time.Second) / float64(c.rate))
+}
+
+var batchCases = []batchCase{
+	{"per picture at 24000/1001 fps, 48 kHz", 48000, 2002},
+	{"per picture at 50 fps, 48 kHz", 48000, 960},
+	{"per picture at 60000/1001 fps, 48 kHz", 48000, 801},
+	{"per picture at 120 fps, 48 kHz", 48000, 400},
+	{"per picture at 240 fps, 48 kHz", 48000, 200},
+	{"per picture at 240 fps, 44.1 kHz", 44100, 184},
+	{"AAC frames, 48 kHz", 48000, 1024},
+	{"100 ms batches, 96 kHz", 96000, 9600},
+	{"300 ms batches, 48 kHz", 48000, 14400},
+}
+
+func (r *rig) at(c batchCase) *rig {
+	r.e.setRate(mxl.Rational{Num: c.rate, Den: 1})
+	return r
+}
+
+// whole reports whether member m holds page n whole.
+func (r *rig) whole(m int, n uint64) bool {
+	c := r.e.audio.cov[m][n%rigPages]
+	return c.valid && c.n == n && !c.broken && c.to == (n+1)*PageSamples
+}
+
+// A mirror the gateway keeps reporting stays fed, at whatever rate it is
+// reported, and the loop adds nothing from its head: a mirror's head moves
+// over a batch it lost as over one it committed, and only the gateway's
+// reports tell them apart.
+func TestEngineCountsOnlyWhatTheGatewayReportsOfAMirror(t *testing.T) {
+	for _, c := range batchCases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t).at(c)
+			b, n := r.e.members[1], c.batch
+			setHead(r.e.members[0], rigBase)
+			setHead(b, rigBase)
+			r.e.Committed(1, rigBase-n, rigBase)
+			r.start()
+			h := uint64(rigBase)
+			for h < rigBase+4*PageSamples {
+				r.clock.Add(int64(c.period()))
+				setHead(b, h+n)
+				r.e.Committed(1, h, h+n)
+				h += n
+				time.Sleep(time.Millisecond)
+			}
+			// The batch at h is lost: one period on, the head moves over it
+			// and the next one, and the gateway reports only the next one,
+			// after the loop has looked for longer than it holds an advance
+			// back. The member has to count as fed for that period.
+			r.clock.Add(int64(c.period()))
+			setHead(b, h+2*n)
+			time.Sleep(5 * maxSleep)
+			r.e.Committed(1, h+n, h+2*n)
+			r.e.mu.Lock()
+			defer r.e.mu.Unlock()
+			for p := uint64(rigBase / PageSamples); (p+1)*PageSamples <= h; p++ {
+				require.True(t, r.whole(1, p), "page %d of a reported member: %+v", p, r.e.audio.cov[1][p%rigPages])
+			}
+			p := h / PageSamples
+			require.False(t, r.whole(1, p), "a batch the mirror lost was counted from its head: %+v",
+				r.e.audio.cov[1][p%rigPages])
+		})
+	}
+}
+
+// When the gateway starts reporting a member the loop followed by its
+// head, its first report repeats samples the head already covered. Those
+// count once; counted again, the page would read as broken.
+func TestEngineCountsAReportOverlappingTheFollowedHeadOnce(t *testing.T) {
+	r := newRig(t)
+	const x = rigBase
+	setHead(r.e.members[1], x+960)
+	r.e.audio.Committed(1, x, x+480) // what the loop followed
+	r.e.Committed(1, x+240, x+960)   // the gateway's first report
+	c := r.e.audio.cov[1][(x/PageSamples)%rigPages]
+	require.False(t, c.broken, "a report overlapping the followed head broke the page")
+	require.Equal(t, uint64(x+960), c.to)
+}
+
+// A mirror quiet for longer than its fed window may have lost a batch.
+// libmxl wakes the loop on its next commit, and the loop can look before
+// the gateway reports that commit: a head moved over the lost batch must
+// not count it as arrived. follow is called directly here, so the loop's
+// look comes first for certain.
+func TestEngineDoesNotCountAQuietMirrorsGapFromItsHead(t *testing.T) {
+	for _, c := range batchCases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t).at(c)
+			b, n := r.e.members[1], c.batch
+			setHead(b, rigBase+n)
+			r.e.Committed(1, rigBase, rigBase+n)
+			r.clock.Add(int64(r.e.fedWindow(1)))
+			t0 := time.Now()
+			setHead(b, rigBase+3*n) // the batch [+n, +2n) is lost
+			r.e.mu.Lock()
+			r.e.follow(t0)
+			r.e.mu.Unlock()
+			r.e.Committed(1, rigBase+2*n, rigBase+3*n)
+			r.e.mu.Lock()
+			defer r.e.mu.Unlock()
+			r.e.follow(t0.Add(2 * followDelay))
+			p := (rigBase + n) / PageSamples
+			require.False(t, r.whole(1, p), "a gap after a quiet spell was counted from the head: %+v",
+				r.e.audio.cov[1][p%rigPages])
+		})
+	}
+}
+
+// A mirror that stays quiet is followed once its advance has stood
+// unreported for followDelay; a member never reported, at once; and a
+// mirror quiet past its quiet window, at once again.
+func TestEngineFollowsAQuietMirrorLateAndALocalRingAtOnce(t *testing.T) {
+	for _, c := range batchCases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t).at(c)
+			a, b, n := r.e.members[0], r.e.members[1], c.batch
+			setHead(b, rigBase+n)
+			r.e.Committed(1, rigBase, rigBase+n)
+			r.clock.Add(int64(r.e.fedWindow(1)))
+			setHead(a, rigBase)
+			t0 := time.Now()
+			r.e.mu.Lock()
+			defer r.e.mu.Unlock()
+			r.e.follow(t0) // notes a's head
+			setHead(a, rigBase+n)
+			setHead(b, rigBase+2*n)
+			r.e.follow(t0)
+			require.Equal(t, rigBase+n, r.e.audio.evHead[0], "a local ring's advance was held back")
+			require.Equal(t, rigBase+n, r.e.audio.evHead[1], "a quiet mirror's advance counted at once")
+			r.e.follow(t0.Add(followDelay))
+			require.Equal(t, rigBase+2*n, r.e.audio.evHead[1], "a quiet mirror's advance never counted")
+
+			r.clock.Add(int64(r.e.quietWindow(1)))
+			setHead(b, rigBase+3*n)
+			r.e.follow(t0.Add(followDelay))
+			require.Equal(t, rigBase+3*n, r.e.audio.evHead[1],
+				"a member quiet past its quiet window was still held back")
+		})
+	}
+}
+
+// A replaced ring starts over: the head the loop saw of the old one, and
+// an advance it held back, say nothing about the new one, whose pages
+// below its first head nobody wrote. Counted from the old head, they
+// would be selected, and a page mxlfs never backed faults SIGBUS in the
+// output's readers.
+func TestEngineDoesNotCountAReplacedRingFromTheOldHead(t *testing.T) {
+	for _, c := range batchCases {
+		for _, quiet := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, quiet mirror %v", c.name, quiet), func(t *testing.T) {
+				r := newRig(t).at(c)
+				old, n := r.e.members[1], c.batch
+				t0 := time.Now()
+				setHead(old, rigBase)
+				if quiet {
+					r.e.Committed(1, rigBase-n, rigBase)
+					r.clock.Add(int64(r.e.fedWindow(1)))
+				}
+				r.e.mu.Lock()
+				r.e.follow(t0)
+				setHead(old, rigBase+n)
+				r.e.follow(t0) // counted, or held back for a quiet mirror
+				r.e.mu.Unlock()
+
+				h, f := r.header()
+				require.NoError(t, r.e.take(1, &memberRing{h: h, f: f}))
+				y := uint64(rigBase + 5*n)
+				setHead(h, y)
+				r.e.mu.Lock()
+				defer r.e.mu.Unlock()
+				r.e.follow(t0.Add(followDelay))
+				require.Zero(t, r.e.audio.evHead[1], "the new ring was counted from the old one's head")
+				for p := range r.e.audio.cov[1] {
+					require.False(t, r.e.audio.cov[1][p].valid, "slot %d of the new ring counted before it moved", p)
+				}
+				setHead(h, y+n)
+				r.e.follow(t0.Add(followDelay))
+				r.e.follow(t0.Add(2 * followDelay))
+				require.Equal(t, y+n, r.e.audio.evHead[1], "the new ring's advance was not followed")
+				for p := (rigBase + n) / PageSamples; p < y/PageSamples; p++ {
+					c := r.e.audio.cov[1][p%rigPages]
+					require.False(t, c.valid && c.n == p, "page %d, below the new ring's first head, counted: %+v", p, c)
+				}
+			})
+		}
+	}
+}
