@@ -184,7 +184,14 @@ type Engine struct {
 	disc     *Discrete
 	rate     C.mxlRational
 	period   time.Duration // of a grain
-	feeds    []bool        // members the gateway reports arrivals for
+	// reported is, per member, when the gateway last reported an arrival
+	// and how long the range it reported lasts; see fed.
+	reported []report
+	now      func() time.Time // a seam for tests; nil is time.Now
+	// lastHead and pending are, per member, the head follow last saw and
+	// the advance it holds back; guarded by mu.
+	lastHead []uint64
+	pending  []pendingHead
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -570,15 +577,27 @@ func (e *Engine) buildAudio(tmp, src0 string) error {
 // while the engine still maps the old ring. Only samples the mapped
 // ring's own head covers count. A ring nobody wrote may hold no pages on
 // mxlfs, and a page selected to it faults SIGBUS in the output's readers.
+//
+// A member the loop followed by its head until now has counted up to its
+// head already, so a report of samples from before that adds what is new
+// only: counted again, they would read as a gap in the page.
 func (e *Engine) Committed(member int, start, end uint64) {
 	if e.audio == nil {
 		return
 	}
 	e.mu.Lock()
-	if e.feeds == nil {
-		e.feeds = make([]bool, len(e.members))
+	now := e.clock()
+	if e.reported == nil {
+		e.reported = make([]report, len(e.members))
 	}
-	e.feeds[member] = true
+	var span time.Duration
+	if r := e.mxlRate(); r.Num > 0 && end > start {
+		span = time.Duration(float64(end-start) * float64(time.Second) * float64(r.Den) / float64(r.Num))
+	}
+	if !e.fed(member, now) {
+		start = max(start, e.audio.evHead[member])
+	}
+	e.reported[member] = report{at: now, span: span}
 	if end = min(end, e.members[member].head()); end > start {
 		e.audio.Committed(member, start, end)
 	}
@@ -803,6 +822,16 @@ func (e *Engine) take(member int, r *memberRing) error {
 	_ = unix.Munmap(e.members[member].mem)
 	e.files[member].Close()
 	e.members[member], e.files[member] = r.h, r.f
+	// Who reports the new ring's commits is not known yet: a producer
+	// restarted on this node writes it itself where a mirror wrote the old
+	// one. Until the gateway reports again, the loop follows the head. The
+	// new ring's head is no advance over the old one's.
+	if e.reported != nil {
+		e.reported[member] = report{}
+	}
+	if e.lastHead != nil {
+		e.lastHead[member], e.pending[member] = 0, pendingHead{}
+	}
 	if e.disc != nil {
 		for k, m := range e.grainMem[member] {
 			_ = unix.Munmap(m)
@@ -858,16 +887,11 @@ func (e *Engine) selectPages(sel []PageSelect) error {
 func (e *Engine) run(ctx context.Context) {
 	defer close(e.done)
 	waits := make([]futexWaitv, len(e.members))
-	lastHead := make([]uint64, len(e.members))
 	report := time.Now()
 	for ctx.Err() == nil {
 		select {
 		case req := <-e.replaces:
-			err := e.take(req.member, req.ring)
-			if err == nil {
-				lastHead[req.member] = 0 // the new ring's head is no advance
-			}
-			req.done <- err
+			req.done <- e.take(req.member, req.ring)
 		default:
 		}
 		if time.Since(report) >= time.Minute {
@@ -902,16 +926,7 @@ func (e *Engine) run(ctx context.Context) {
 			err = e.apply(sel)
 		} else {
 			e.mu.Lock()
-			// A member the gateway does not feed, a local producer, is
-			// followed by its head: what it advanced by counts as committed.
-			for i, m := range e.members {
-				if h := m.head(); h > lastHead[i] {
-					if lastHead[i] != 0 && !e.fed(i) {
-						e.audio.Committed(i, lastHead[i], h)
-					}
-					lastHead[i] = h
-				}
-			}
+			e.follow(now)
 			var sel []PageSelect
 			sel, head, wait = e.audio.Step(now)
 			sel = append(sel, e.audio.Retire(mxl.CurrentIndex(e.mxlRate()))...)
@@ -1040,8 +1055,120 @@ func (e *Engine) Stalled() (stalled, undecided []string) {
 	return stalled, undecided
 }
 
-// fed reports whether the gateway reports member i's arrivals.
-func (e *Engine) fed(i int) bool { return e.feeds != nil && e.feeds[i] }
+// report is the gateway's last report of a member's arrivals.
+type report struct {
+	at   time.Time
+	span time.Duration // how long the reported samples last
+}
+
+// The windows below hold for any sample rate and batch size. What scales
+// with a flow, the time between two reports of a mirror, is taken from
+// the length of the range the mirror last reported, which is its batch
+// period in time at the flow's own rate. The constant parts bound the
+// engine's own pass interval and the latency of a report, neither of
+// which depends on the flow.
+
+// minFedWindow is the least time a member counts as fed after a report:
+// four passes of the loop.
+const minFedWindow = 4 * maxSleep
+
+// minQuietHorizon is the least time after its last report that a member
+// that is not fed counts as a mirror gone quiet rather than a ring
+// written locally; see quietWindow and follow.
+const minQuietHorizon = time.Second
+
+// followDelay is how long follow holds back the advance of a mirror gone
+// quiet before counting it: one pass. The gateway reports a commit from
+// the goroutine that made it, right after it, so a report that is coming
+// comes within that, whatever the flow's rate.
+const followDelay = maxSleep
+
+// pendingHead is a head follow saw and has not counted yet.
+type pendingHead struct {
+	head uint64
+	seen time.Time
+}
+
+// follow counts, for every member the gateway does not feed, what its
+// head advanced by as committed, from where it was last seen or last
+// reported, whichever is later. The first look at a ring only notes its
+// head. now is the time of the pass.
+//
+// A member reported within its quietWindow may be a mirror that was only
+// quiet, with a batch lost: libmxl wakes the loop on the mirror's next
+// commit, and the loop can look before the gateway reports that commit,
+// when a head moved over the lost batch would count it as arrived. Such
+// a member's advance counts only once it has stood unreported for
+// followDelay, and a report before then makes the member fed again. A
+// member not reported that recently, a local producer, counts at once.
+func (e *Engine) follow(now time.Time) {
+	if e.lastHead == nil {
+		e.lastHead, e.pending = make([]uint64, len(e.members)), make([]pendingHead, len(e.members))
+	}
+	fedAt := e.clock()
+	for i, m := range e.members {
+		if e.fed(i, fedAt) {
+			e.pending[i] = pendingHead{}
+			continue
+		}
+		from := max(e.lastHead[i], e.audio.evHead[i])
+		h := m.head()
+		upto := h
+		if e.reported != nil && !e.reported[i].at.IsZero() && fedAt.Sub(e.reported[i].at) < e.quietWindow(i) {
+			p := &e.pending[i]
+			upto = 0
+			if p.head != 0 && now.Sub(p.seen) >= followDelay {
+				upto, p.head = min(p.head, h), 0
+			}
+			if p.head == 0 && h > max(from, upto) {
+				p.head, p.seen = h, now
+			}
+		}
+		if from != 0 && upto > from {
+			e.audio.Committed(i, from, upto)
+		}
+		e.lastHead[i] = max(e.lastHead[i], upto)
+	}
+}
+
+// fed reports whether the gateway reports member i's arrivals: it reported
+// one within four times the length of the last range it reported, and at
+// least within minFedWindow. A mirror reports each batch it commits, so a
+// member that stopped being reported is written some other way: by a
+// producer restarted on this node into the ring a mirror wrote, which
+// replaces no ring, or into a ring that replaced one, about whose
+// predecessor a report came late. Its head is followed then.
+func (e *Engine) fed(i int, now time.Time) bool {
+	if e.reported == nil || e.reported[i].at.IsZero() {
+		return false
+	}
+	return now.Sub(e.reported[i].at) < e.fedWindow(i)
+}
+
+// fedWindow is how long member i counts as fed after its last report.
+func (e *Engine) fedWindow(i int) time.Duration {
+	return max(4*e.reported[i].span, minFedWindow)
+}
+
+// quietWindow is how long after its last report member i, once no longer
+// fed, counts as a mirror gone quiet: four of its fed windows, and at
+// least minQuietHorizon, so a mirror writing long batches still gets a
+// window past its fed one.
+func (e *Engine) quietWindow(i int) time.Duration {
+	return max(4*e.fedWindow(i), minQuietHorizon)
+}
+
+// setRate sets the rate of an engine built without Start.
+func (e *Engine) setRate(r mxl.Rational) {
+	e.rate = C.mxlRational{numerator: C.int64_t(r.Num), denominator: C.int64_t(r.Den)}
+}
+
+func (e *Engine) clock() time.Time {
+	if e.now != nil {
+		return e.now()
+	}
+	return time.Now()
+}
 
 // Close stops serving and removes the output from the domain.
 func (e *Engine) Close() {
