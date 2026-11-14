@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0-rc.51](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.50...v1.1.0-rc.51) (2026-11-14)
+
+
+### Bug Fixes
+
+* **gateway:** follow a merge member's head while no mirror reports it ([#445](https://github.com/qvest-digital/mxl-k8s/issues/445)) ([e335625](https://github.com/qvest-digital/mxl-k8s/commit/e3356254b1fa48e345ab7778ff51c9dc8ea9e8a6))
+
+
+### Dependencies
+
+* **gomod:** update go modules ([#336](https://github.com/qvest-digital/mxl-k8s/issues/336)) ([7e3f1f3](https://github.com/qvest-digital/mxl-k8s/commit/7e3f1f3a35adf3274ef56a048ddb133a6dbf1413))
+* **tools:** update module sigs.k8s.io/controller-tools to v0.22.0 ([#325](https://github.com/qvest-digital/mxl-k8s/issues/325)) ([d1f0d08](https://github.com/qvest-digital/mxl-k8s/commit/d1f0d08ba48cd6c18853989ba4497798bdab2389))
+
 ## [1.1.0-rc.50](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.49...v1.1.0-rc.50) (2026-11-13)
 
 
