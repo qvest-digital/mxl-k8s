@@ -267,6 +267,11 @@ type Audio struct {
 	Primary int
 	Current []int // source per page slot
 
+	// Held are sample ranges a member holds that are not counted yet and
+	// will be within a pass or two; the head is not published as silence
+	// inside one of them.
+	Held []Span
+
 	cov          [][]coverage
 	evHead       []uint64
 	batch        []uint64 // per member, the range it last committed at once
@@ -317,6 +322,19 @@ func (a *Audio) Committed(member int, start, end uint64) {
 	a.batch[member] = min(end-start, a.Pages*PageSamples/2)
 }
 
+// Span is the samples [From, To).
+type Span struct{ From, To uint64 }
+
+// held reports whether sample s is in a range a member holds uncounted.
+func (a *Audio) held(s uint64) bool {
+	for _, h := range a.Held {
+		if h.From <= s && s < h.To {
+			return true
+		}
+	}
+	return false
+}
+
 // PageSelect is one page slot to point at a source in every channel.
 type PageSelect struct {
 	Page   uint64
@@ -364,7 +382,7 @@ func (a *Audio) Step(now time.Time) (selects []PageSelect, head uint64, wait tim
 			}
 		}
 		if pick < 0 {
-			if lead < a.Head+a.Skew {
+			if lead < a.Head+a.Skew || a.held(a.Head) {
 				break
 			}
 			pick = a.Silence
