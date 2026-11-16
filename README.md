@@ -117,7 +117,7 @@ Helm chart at
 
 ```sh
 helm install mxl oci://ghcr.io/qvest-digital/mxl-k8s/charts/mxl-k8s \
-  --version 1.0.0-rc.13 \
+  --version 1.1.0-rc.24 \
   --namespace mxl-system --create-namespace
 ```
 
