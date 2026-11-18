@@ -410,6 +410,10 @@ func (p *Publisher) isMirrorTarget(ctx context.Context, flowID string) (bool, er
 	return false, nil
 }
 
+// outputLookupBackoff bounds the retries of a failed redundancy set
+// lookup in ClaimOrigin to under two seconds in all.
+var outputLookupBackoff = wait.Backoff{Duration: 250 * time.Millisecond, Factor: 2, Steps: 4}
+
 // ClaimOrigin records this node as the flow's Origin and starts
 // renewing the Lease that says so. Idempotent: a location already
 // reading Origin is left untouched, which matters because the caller
@@ -423,10 +427,6 @@ func (p *Publisher) isMirrorTarget(ctx context.Context, flowID string) (bool, er
 // over -- both look identical from the API. A producer opening a
 // pre-existing flow for writing is the missing evidence, and it
 // arrives here from the shim rather than being inferred.
-// outputLookupBackoff bounds the retries of a failed redundancy set
-// lookup in ClaimOrigin to under two seconds in all.
-var outputLookupBackoff = wait.Backoff{Duration: 250 * time.Millisecond, Factor: 2, Steps: 4}
-
 func (p *Publisher) ClaimOrigin(ctx context.Context, flowID string) error {
 	l := log.FromContext(ctx).WithName("flowpublisher")
 
@@ -454,11 +454,19 @@ func (p *Publisher) ClaimOrigin(ctx context.Context, flowID string) error {
 		// makes the operator refuse its set. It is retried briefly, as
 		// the next chance to claim is a rescan away.
 		var isOutput bool
-		err := retry.OnError(outputLookupBackoff, func(error) bool { return ctx.Err() == nil }, func() error {
-			var err error
-			isOutput, err = p.IsOutput(ctx, p.Domain, flowID)
-			return err
-		})
+		var err error
+		backoff := outputLookupBackoff
+		for {
+			if isOutput, err = p.IsOutput(ctx, p.Domain, flowID); err == nil || backoff.Steps <= 1 {
+				break
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(backoff.Step()):
+				continue
+			}
+			break
+		}
 		if err != nil {
 			return fmt.Errorf("look up redundancy set outputs for %s: %w", flowID, err)
 		}

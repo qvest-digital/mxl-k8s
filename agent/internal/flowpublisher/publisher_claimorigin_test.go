@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -187,4 +188,28 @@ func TestClaimOrigin_RetriesAFailedOutputLookup(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
 	assert.Equal(t, mxlv1alpha1.MxlFlowLocationOrigin, localPhase(t, &got, "n1"))
 	assert.Equal(t, 2, calls)
+}
+
+// The retry sleeps end with the context: a cancelled claim returns the
+// lookup error at once instead of sleeping the backoff out.
+func TestClaimOrigin_OutputLookupRetryHonoursContext(t *testing.T) {
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: ObjectMeta(validFlowID),
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: validFlowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{{NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationStale}},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).WithObjects(flow).Build()
+	lookup := errors.New("apiserver unreachable")
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &Publisher{Client: c, WriterAttached: writerAttached, NodeName: "n1", Lease: &fakeLease{},
+		IsOutput: func(context.Context, string, string) (bool, error) {
+			cancel()
+			return false, lookup
+		}}
+
+	start := time.Now()
+	require.ErrorIs(t, p.ClaimOrigin(ctx, validFlowID), lookup)
+	assert.Less(t, time.Since(start), 200*time.Millisecond)
 }

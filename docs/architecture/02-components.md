@@ -97,9 +97,9 @@ every object at once on every rollout. `--gc-grace-period` (default
   labels nor `status.phase` is consulted: a label can be edited off
   an object, and the phase says whether grains are moving, which is
   a different question from whether anyone wants them to. The same
-  controller repoints `spec.sourceNode` when the
-  flow's origin moves, so a mirror does not spend its life addressing
-  a node the flow has left.
+  controller repoints `spec.sourceNode` when the flow's origin moves,
+  so a mirror does not spend its life addressing a node the flow has
+  left.
 - **`MxlFlow`** is justified by a live copy. `Live` reads True while
   some Origin location holds a renewed Lease, or some surviving
   mirror references the flow. A `Ready` location does not count on

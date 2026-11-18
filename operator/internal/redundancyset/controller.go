@@ -289,12 +289,22 @@ func (r *Reconciler) outputTaken(ctx context.Context, set *mxlv1alpha1.MxlFlowRe
 // generation. From then on a member that goes away, or comes back in
 // another geometry, leaves the output served from the others, and
 // MembersReady reports it.
+//
+// A taken output is reported last, and only for a set that would be
+// Valid otherwise: ReasonOutputTaken then means a producer holding the
+// id is all that keeps the set from being served, which is what the
+// agent and the mirror controller count a set as the output's owner for.
 func validate(set *mxlv1alpha1.MxlFlowRedundancySet, ms []member, taken string) metav1.Condition {
+	c := validateSpecAndMembers(set, ms)
+	if taken != "" && c.Status == metav1.ConditionTrue {
+		return metav1.Condition{Type: ConditionValid, Status: metav1.ConditionFalse, Reason: ReasonOutputTaken, Message: taken}
+	}
+	return c
+}
+
+func validateSpecAndMembers(set *mxlv1alpha1.MxlFlowRedundancySet, ms []member) metav1.Condition {
 	fail := func(reason, msg string) metav1.Condition {
 		return metav1.Condition{Type: ConditionValid, Status: metav1.ConditionFalse, Reason: reason, Message: msg}
-	}
-	if taken != "" {
-		return fail(ReasonOutputTaken, taken)
 	}
 	for _, m := range set.Spec.Members {
 		if m.Domain != set.Spec.Output.Domain {
