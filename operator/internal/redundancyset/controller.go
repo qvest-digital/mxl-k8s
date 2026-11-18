@@ -117,7 +117,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if ready.Status != metav1.ConditionTrue {
 		res = ctrl.Result{RequeueAfter: 10 * time.Second} // a member or its producer is not up
 	}
-	// A Lease lapsing raises no event of its own.
+	// A Lease lapsing raises no event of its own. It does not free the
+	// id (a lapsed Lease is still taken); the requeue only refreshes the
+	// condition message from "produced on" to "lapsed lease".
 	if wait := time.Until(lapses); !lapses.IsZero() && (res.RequeueAfter == 0 || wait < res.RequeueAfter) {
 		res.RequeueAfter = max(wait, time.Second)
 	}

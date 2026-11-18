@@ -2,6 +2,7 @@ package flowpublisher
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -156,4 +157,34 @@ func TestClaimOrigin_RedundancySetOutputIsNotClaimed(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
 	assert.Equal(t, mxlv1alpha1.MxlFlowLocationStale, localPhase(t, &got, "n1"))
 	assert.Empty(t, lease.renewed)
+}
+
+// A set lookup that fails once does not cost a real producer its Origin
+// until the next rescan: ClaimOrigin asks again. Claiming on a failed
+// lookup instead would take the id of a set's output.
+func TestClaimOrigin_RetriesAFailedOutputLookup(t *testing.T) {
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: ObjectMeta(validFlowID),
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: validFlowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{{NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationStale}},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).WithObjects(flow).Build()
+	calls := 0
+	p := &Publisher{Client: c, WriterAttached: writerAttached, NodeName: "n1", Lease: &fakeLease{},
+		IsOutput: func(context.Context, string, string) (bool, error) {
+			calls++
+			if calls == 1 {
+				return false, errors.New("apiserver unreachable")
+			}
+			return false, nil
+		}}
+
+	require.NoError(t, p.ClaimOrigin(context.Background(), validFlowID))
+
+	var got mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
+	assert.Equal(t, mxlv1alpha1.MxlFlowLocationOrigin, localPhase(t, &got, "n1"))
+	assert.Equal(t, 2, calls)
 }
