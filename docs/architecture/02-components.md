@@ -75,7 +75,9 @@ open a writer there, and node departure is already the one signal the
 platform treats as terminal -- it is what separates a departed node
 from a drained one. Only a flow that names no origin while its nodes
 are still present waits, because a producer that is restarting looks
-exactly like that until it republishes. Holding it
+exactly like that until it republishes. A flow whose id an
+`MxlFlowRedundancySet` names as its output does not: the agents
+publish no flow of that id, so no producer republishes it. Holding it
 there rather than in the operator's memory is what makes the grace
 survive an operator restart, which would otherwise reset the timer on
 every object at once on every rollout. `--gc-grace-period` (default
@@ -88,9 +90,9 @@ every object at once on every rollout. `--gc-grace-period` (default
   side that asked. `Sourceable` reads True while the target node
   exists and the flow names an Origin whose Lease is being renewed.
   Losing the claim collects at once, or after the handover window
-  for a requestor pod, as does either node leaving the cluster; only
-  an origin that has not republished waits out
-  `--gc-grace-period`. Neither the creator labels nor `status.phase`
+  for a requestor pod, as does either node leaving the cluster, or a
+  redundancy set taking over the flow's id; only an origin that has
+  not republished waits out `--gc-grace-period`. Neither the creator labels nor `status.phase`
   is consulted: a label
   can be edited off an object, and the phase says whether grains are
   moving, which is a different question from whether anyone wants

@@ -276,6 +276,15 @@ const (
 	// signal the platform already treats as terminal -- it is what
 	// separates a departed node from a drained one.
 	sourceGone
+
+	// sourceReplaced is a flow whose id a redundancy set names as its
+	// output. The agents publish no flow of that id any more and send
+	// every reader of it to the set, so no producer coming back makes
+	// the mirror sourceable again. Its writer on the target node keeps
+	// the gateway there from building the set's output in its place,
+	// so waiting out the grace period keeps the output from the readers
+	// on that node.
+	sourceReplaced
 )
 
 // claim reports whether anything still asks for this mirror.
@@ -403,10 +412,7 @@ func (r *Reconciler) source(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) (
 	var flow mxlv1alpha1.MxlFlow
 	err = r.Get(ctx, types.NamespacedName{Name: m.Ref().Name()}, &flow)
 	if apierrors.IsNotFound(err) {
-		return sourceJudgement{disposition: r.unresolved(ctx, m), judgement: judgement{
-			reason:  mxlv1alpha1.ReasonOriginUnresolved,
-			message: fmt.Sprintf("MxlFlow %s does not exist", m.Ref().Name()),
-		}}, nil
+		return r.unresolved(ctx, m, fmt.Sprintf("MxlFlow %s does not exist", m.Ref().Name()))
 	}
 	if err != nil {
 		return sourceJudgement{}, fmt.Errorf("get MxlFlow %s: %w", m.Ref().Name(), err)
@@ -426,10 +432,7 @@ func (r *Reconciler) source(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) (
 		}}, nil
 	}
 	if !res.Found {
-		return sourceJudgement{disposition: r.unresolved(ctx, m), judgement: judgement{
-			reason:  mxlv1alpha1.ReasonOriginUnresolved,
-			message: "the flow names no Origin location",
-		}}, nil
+		return r.unresolved(ctx, m, "the flow names no Origin location")
 	}
 	return sourceJudgement{
 		judgement: judgement{
@@ -442,24 +445,56 @@ func (r *Reconciler) source(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) (
 	}, nil
 }
 
-// unresolved grades an origin that will not resolve. The node the
-// mirror was last pointed at decides it: one that has left the cluster
-// will never publish again, while one that is still there may be
-// hosting a producer that is only restarting.
-func (r *Reconciler) unresolved(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror) sourceDisposition {
+// unresolved judges a mirror whose origin will not resolve, for the
+// reason given. The node the mirror was last pointed at decides it: one
+// that has left the cluster will never publish again, while one that
+// is still there may be hosting a producer that is only restarting,
+// unless a redundancy set has taken the flow's id over.
+func (r *Reconciler) unresolved(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, message string) (sourceJudgement, error) {
+	j := sourceJudgement{disposition: sourceWait, judgement: judgement{
+		reason:  mxlv1alpha1.ReasonOriginUnresolved,
+		message: message,
+	}}
 	gone, err := r.nodeGone(ctx, m.Spec.SourceNode)
-	if err != nil {
+	switch {
+	case err != nil:
 		// Unable to tell. Waiting is the conservative answer: it costs
 		// a grace period, where guessing wrong the other way costs a
 		// consumer its stream.
 		log.FromContext(ctx).Error(err, "look up source node",
 			"mxlflowmirror", client.ObjectKeyFromObject(m))
-		return sourceWait
+		return j, nil
+	case gone:
+		j.disposition = sourceGone
+		return j, nil
 	}
-	if gone {
-		return sourceGone
+	set, err := r.setOutputting(ctx, m.Ref())
+	if err != nil {
+		return sourceJudgement{}, err
 	}
-	return sourceWait
+	if set != "" {
+		j.disposition = sourceReplaced
+		j.message = fmt.Sprintf("%s; MxlFlowRedundancySet %s serves this id now", message, set)
+	}
+	return j, nil
+}
+
+// setOutputting names the redundancy set whose output is ref, or is
+// empty when none is or sets are off.
+func (r *Reconciler) setOutputting(ctx context.Context, ref mxlv1alpha1.FlowRef) (string, error) {
+	if !r.RedundancySets {
+		return "", nil
+	}
+	var sets mxlv1alpha1.MxlFlowRedundancySetList
+	if err := r.List(ctx, &sets); err != nil {
+		return "", fmt.Errorf("list MxlFlowRedundancySets: %w", err)
+	}
+	for _, s := range sets.Items {
+		if (mxlv1alpha1.FlowRef{Domain: s.Spec.Output.Domain, ID: s.Spec.Output.FlowID}) == ref {
+			return s.Name, nil
+		}
+	}
+	return "", nil
 }
 
 // leaseFreshness adapts the reconciler's LeaseChecker to the callback
@@ -740,9 +775,11 @@ func (r *Reconciler) collect(ctx context.Context, m *mxlv1alpha1.MxlFlowMirror, 
 
 	// A node that has left the cluster is as terminal as a missing
 	// claimant: nothing will publish on it again and no gateway will
-	// open a writer there. Everything else waits, because the flow may
-	// be mid-republish and tearing a working consumer's mirror down
-	// for a producer that is restarting costs it a re-materialization.
+	// open a writer there. A flow whose id a redundancy set took over
+	// has no producer to come back. Everything else waits, because the
+	// flow may be mid-republish and tearing a working consumer's mirror
+	// down for a producer that is restarting costs it a
+	// re-materialization.
 	if src.disposition == sourceWait {
 		grace := r.GracePeriod
 		if grace <= 0 {
@@ -881,8 +918,10 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			builder.WithPredicates(nodeDeletedOnly()),
 		)
 	// A set that stops wanting its output on a node leaves the member
-	// mirrors there unclaimed. Without redundancy sets the kind need not
-	// be served, and a watch on it would never sync.
+	// mirrors there unclaimed, and one naming a flow's id as its output
+	// leaves the mirrors of that flow nothing to wait for. Without
+	// redundancy sets the kind need not be served, and a watch on it
+	// would never sync.
 	if r.RedundancySets {
 		b = b.Watches(
 			&mxlv1alpha1.MxlFlowRedundancySet{},
@@ -947,7 +986,11 @@ func (r *Reconciler) setToMirrors(ctx context.Context, obj client.Object) []reco
 	if !ok {
 		return nil
 	}
+	out := mxlv1alpha1.FlowRef{Domain: set.Spec.Output.Domain, ID: set.Spec.Output.FlowID}
 	return r.mirrorsMatching(ctx, func(m *mxlv1alpha1.MxlFlowMirror) bool {
+		if m.Ref() == out {
+			return true
+		}
 		for _, or := range m.OwnerReferences {
 			if or.Kind == "MxlFlowRedundancySet" && or.UID == set.UID {
 				return true

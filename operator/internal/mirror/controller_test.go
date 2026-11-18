@@ -525,6 +525,75 @@ func TestSource_SourceNodeGone_CollectsAtOnce(t *testing.T) {
 	assert.True(t, mirrorGone(t, c, m.Name))
 }
 
+// outputSet is a redundancy set whose output is the mirrored flow's id.
+func outputSet() *mxlv1alpha1.MxlFlowRedundancySet {
+	s := set("set-uid")
+	s.Spec.Output = mxlv1alpha1.RedundancyFlowRef{FlowID: flowID}
+	return s
+}
+
+// staleFlow is the flow as the agent leaves it once its producer has
+// stopped: the location demoted, the object kept for the flow
+// controller to collect.
+func staleFlow() *mxlv1alpha1.MxlFlow {
+	f := flowOriginAt(srcNode)
+	f.Status.Locations[0].Phase = mxlv1alpha1.MxlFlowLocationStale
+	return f
+}
+
+// A producer handing its flow's id to a redundancy set stops writing it.
+// The mirror a reader elsewhere had of that flow then has no source, and
+// none will come back: the agents publish no flow of a set's output id.
+// Its writer on the target node keeps the gateway from building the
+// output there, so waiting the grace period out kept the output from
+// that node's readers for as long.
+func TestSource_IdTakenOverByARedundancySet_CollectsAtOnce(t *testing.T) {
+	for name, flow := range map[string]*mxlv1alpha1.MxlFlow{"flow left": staleFlow(), "flow collected": nil} {
+		t.Run(name, func(t *testing.T) {
+			m := newMirror(withRequestor("consumer", "uid-1"))
+			objs := []client.Object{m, pod("consumer", "uid-1"), outputSet()}
+			if flow != nil {
+				objs = append(objs, flow)
+			}
+			r, c := harness(t, time.Hour, objs...)
+			r.RedundancySets = true
+
+			reconcileOnce(t, r, m.Name)
+			assert.True(t, mirrorGone(t, c, m.Name), "a mirror of a set's output id waited for a producer")
+		})
+	}
+}
+
+// What the set must not take over: a producer still writing the id. Its
+// mirror stays, and so does one whose Origin's Lease lapsed, which an
+// agent that is down leaves while its producer writes on.
+func TestSource_IdOfARedundancySetStillProduced_IsKept(t *testing.T) {
+	for name, fresh := range map[string]map[string]bool{"lease renewed": nil, "lease lapsed": {}} {
+		t.Run(name, func(t *testing.T) {
+			m := newMirror(withRequestor("consumer", "uid-1"))
+			r, c := harness(t, time.Nanosecond, m, flowOriginAt(srcNode), pod("consumer", "uid-1"), outputSet())
+			r.RedundancySets = true
+			r.Lease = &fakeLease{fresh: fresh}
+
+			reconcileOnce(t, r, m.Name)
+			backdate(t, c, m.Name, time.Hour)
+			reconcileOnce(t, r, m.Name)
+			assert.False(t, mirrorGone(t, c, m.Name))
+		})
+	}
+}
+
+// Without redundancy sets no set is read, and a sourceless mirror waits
+// the grace period as any other.
+func TestSource_IdOfASetWithoutRedundancySets_WaitsTheGracePeriod(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	r, c := harness(t, time.Hour, m, staleFlow(), pod("consumer", "uid-1"), outputSet())
+
+	res := reconcileOnce(t, r, m.Name)
+	assert.False(t, mirrorGone(t, c, m.Name))
+	assert.Greater(t, res.RequeueAfter, 59*time.Minute)
+}
+
 // A mirror that is wanted and sourceable is left alone however badly
 // it is doing. Degraded says grains are not moving, which is a
 // data-plane fault the gateway may still recover from -- collecting on
@@ -665,6 +734,17 @@ func TestWatches_EnqueueTheMirrorsASetOwns(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Equal(t, m.Name, got[0].Name)
 	assert.Empty(t, r.setToMirrors(ctx, set("new-uid")), "a set recreated under the name owns nothing")
+}
+
+// A set naming a flow's id as its output changes nothing on the mirrors
+// of that flow, so only the watch on the set has them judged again.
+func TestWatches_EnqueueTheMirrorsOfASetsOutput(t *testing.T) {
+	m := newMirror(withRequestor("consumer", "uid-1"))
+	r, _ := harness(t, time.Hour, m)
+
+	got := r.setToMirrors(context.Background(), outputSet())
+	require.Len(t, got, 1)
+	assert.Equal(t, m.Name, got[0].Name)
 }
 
 func TestPodPredicate_DenyKubeSystem(t *testing.T) {
