@@ -103,7 +103,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	valid := r.validate(ctx, &set, ms)
+	taken, lapses, err := r.outputTaken(ctx, &set)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	valid := validate(&set, ms, taken)
 	ready := membersReady(ms, stalled)
 	served, settling, err := r.outputReady(ctx, nodes)
 	if err != nil {
@@ -112,6 +116,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	res := ctrl.Result{}
 	if ready.Status != metav1.ConditionTrue {
 		res = ctrl.Result{RequeueAfter: 10 * time.Second} // a member or its producer is not up
+	}
+	// A Lease lapsing raises no event of its own.
+	if wait := time.Until(lapses); !lapses.IsZero() && (res.RequeueAfter == 0 || wait < res.RequeueAfter) {
+		res.RequeueAfter = max(wait, time.Second)
 	}
 	// A gateway coming or going raises a pod event; one settling raises
 	// none when it is done.
@@ -245,19 +253,46 @@ func disagreement(ms []member) string {
 	return "members differ in " + strings.Join(keys, "; ")
 }
 
-// validate reports whether the set can be served. The spec is checked
-// every time; the members only until they first agree at a generation.
-// From then on a member that goes away, or comes back in another
-// geometry, leaves the output served from the others, and MembersReady
-// reports it.
-func (r *Reconciler) validate(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet, ms []member) metav1.Condition {
+// outputTaken says why a producer may still write the output's id, and
+// is empty when none can. That is an MxlFlow of the id naming an Origin
+// whose Lease is renewed, or one whose Lease has lapsed, which is also
+// what an agent that is down leaves while its producer writes on. An
+// MxlFlow whose producer has stopped names no Origin: the agent demotes
+// the location and releases the Lease once the writer is gone, while
+// the object stays until the flow controller collects it, minutes
+// later. Counting that object would keep a set taking the id over from
+// a producer down on every node until then. lapses is when the renewed
+// Lease runs out; zero when none is.
+func (r *Reconciler) outputTaken(ctx context.Context, set *mxlv1alpha1.MxlFlowRedundancySet) (taken string, lapses time.Time, err error) {
+	out := mxlv1alpha1.FlowRef{Domain: set.Spec.Output.Domain, ID: set.Spec.Output.FlowID}
+	var existing mxlv1alpha1.MxlFlow
+	if err := r.Get(ctx, types.NamespacedName{Name: out.Name()}, &existing); err != nil {
+		return "", time.Time{}, client.IgnoreNotFound(err)
+	}
+	origin, err := mxlv1alpha1.ResolveOrigin(&existing, r.freshness(ctx))
+	switch {
+	case err != nil:
+		return "", time.Time{}, err
+	case origin.Found:
+		return fmt.Sprintf("output %s is a flow of its own, produced on %s", out.Name(), origin.Node), origin.Deadline, nil
+	case origin.AllStale:
+		return fmt.Sprintf("output %s is a flow of its own, claimed on %s with a lapsed lease",
+			out.Name(), mxlv1alpha1.OriginNode(&existing)), time.Time{}, nil
+	}
+	return "", time.Time{}, nil
+}
+
+// validate reports whether the set can be served. The spec and taken
+// are checked every time; the members only until they first agree at a
+// generation. From then on a member that goes away, or comes back in
+// another geometry, leaves the output served from the others, and
+// MembersReady reports it.
+func validate(set *mxlv1alpha1.MxlFlowRedundancySet, ms []member, taken string) metav1.Condition {
 	fail := func(reason, msg string) metav1.Condition {
 		return metav1.Condition{Type: ConditionValid, Status: metav1.ConditionFalse, Reason: reason, Message: msg}
 	}
-	out := mxlv1alpha1.FlowRef{Domain: set.Spec.Output.Domain, ID: set.Spec.Output.FlowID}
-	var existing mxlv1alpha1.MxlFlow
-	if err := r.Get(ctx, types.NamespacedName{Name: out.Name()}, &existing); err == nil {
-		return fail(ReasonOutputTaken, fmt.Sprintf("output %s is a flow of its own", out.Name()))
+	if taken != "" {
+		return fail(ReasonOutputTaken, taken)
 	}
 	for _, m := range set.Spec.Members {
 		if m.Domain != set.Spec.Output.Domain {

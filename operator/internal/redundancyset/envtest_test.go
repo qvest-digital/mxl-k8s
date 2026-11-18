@@ -136,6 +136,29 @@ func TestRedundancySetAgainstAnAPIServer(t *testing.T) {
 		assert.Equal(t, 2, n)
 	})
 
+	// The output's id is still an MxlFlow, as its agent leaves it once the
+	// producer stopped: the location Stale, the object kept until the flow
+	// controller collects it. The set takes the id over without waiting.
+	t.Run("output left by a stopped producer", func(t *testing.T) {
+		const left = "44444444-4444-4444-8444-444444444444"
+		f := flow(left, video1080, "")
+		require.NoError(t, env.Client.Create(ctx, f))
+		f.Status.Locations = []mxlv1alpha1.MxlFlowLocation{{NodeName: "node-c", Phase: mxlv1alpha1.MxlFlowLocationStale}}
+		require.NoError(t, env.Client.Status().Update(ctx, f))
+		set := newSet()
+		set.Name, set.UID = "takeover", ""
+		set.Spec.Output.FlowID = left
+		require.NoError(t, env.Client.Create(ctx, set))
+
+		r := &Reconciler{Client: env.Client, Namespace: env.NewNamespace(t)}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: set.Name}})
+		require.NoError(t, err)
+		require.NoError(t, env.Client.Get(ctx, types.NamespacedName{Name: set.Name}, set))
+		cond := meta.FindStatusCondition(set.Status.Conditions, ConditionValid)
+		require.NotNil(t, cond)
+		assert.Equal(t, metav1.ConditionTrue, cond.Status, cond.Message)
+	})
+
 	// Each merging gateway applies its own node's entry under a field
 	// manager of its own node, with the payload and manager the api
 	// package builds for it. The entries must merge by node, survive the
