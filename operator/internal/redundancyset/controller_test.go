@@ -3,6 +3,7 @@ package redundancyset
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -171,7 +172,93 @@ func TestRefusesAnOutputThatIsAFlow(t *testing.T) {
 
 	_, cond := reconcile(t, r)
 	assert.Equal(t, ReasonOutputTaken, cond.Reason)
+	assert.Equal(t, "output "+output+" is a flow of its own, produced on node-c", cond.Message)
 	assert.Empty(t, mirrors(t, c))
+}
+
+// leases answers for the Origin Leases by node: renewed until deadline,
+// lapsed, or absent.
+type leases struct {
+	fresh    map[string]bool
+	deadline time.Time
+}
+
+func (l leases) IsFresh(_ context.Context, _, node string) (bool, time.Time, error) {
+	return l.fresh[node], l.deadline, nil
+}
+
+// A producer's Lease is renewed while it writes, so the set is refused
+// until it is not, and looked at again when it could have lapsed: a
+// Lease running out raises no event.
+func TestRefusesAnOutputWhoseProducerHoldsALease(t *testing.T) {
+	r, c := harness(t, newSet("reader"),
+		flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-b"), flow(output, video1080, "node-c"))
+	r.Lease = leases{fresh: map[string]bool{"node-a": true, "node-b": true, "node-c": true},
+		deadline: time.Now().Add(20 * time.Second)}
+
+	res, cond := reconcile(t, r)
+	assert.Equal(t, ReasonOutputTaken, cond.Reason)
+	assert.Empty(t, mirrors(t, c))
+	assert.InDelta(t, 20*time.Second, res.RequeueAfter, float64(2*time.Second))
+}
+
+// An agent that is down stops renewing while its producer may write on;
+// the Origin it claimed is no evidence the id is free.
+func TestRefusesAnOutputClaimedWithALapsedLease(t *testing.T) {
+	r, c := harness(t, newSet("reader"),
+		flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-b"), flow(output, video1080, "node-c"))
+	r.Lease = leases{fresh: map[string]bool{"node-a": true, "node-b": true}}
+
+	_, cond := reconcile(t, r)
+	assert.Equal(t, ReasonOutputTaken, cond.Reason)
+	assert.Equal(t, "output "+output+" is a flow of its own, claimed on node-c with a lapsed lease", cond.Message)
+	assert.Empty(t, mirrors(t, c))
+}
+
+// A producer handing its flow's id over to a set stops writing it, and
+// its agent demotes the location, but the MxlFlow stays until the flow
+// controller collects it, minutes later. The set has to take the id
+// over as soon as the producer is gone rather than when the object is:
+// readers of the id have nothing until it does.
+func TestTakesOverTheIdOfAFlowWhoseProducerStopped(t *testing.T) {
+	r, c := harness(t, newSet("reader"),
+		flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-b"), flow(output, video1080, "node-c"))
+	r.Lease = leases{fresh: map[string]bool{"node-a": true, "node-b": true, "node-c": true}}
+	_, cond := reconcile(t, r)
+	require.Equal(t, ReasonOutputTaken, cond.Reason)
+
+	var f mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: output}, &f))
+	f.Status.Locations[0].Phase = mxlv1alpha1.MxlFlowLocationStale
+	require.NoError(t, c.Update(context.Background(), &f))
+	r.Lease = leases{fresh: map[string]bool{"node-a": true, "node-b": true}}
+
+	_, cond = reconcile(t, r)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status, "a flow nothing produces kept its id from the set")
+	assert.Len(t, mirrors(t, c), 2)
+}
+
+// An MxlFlow left with no location at all names no producer either.
+func TestServesAnOutputWhoseFlowNamesNoLocation(t *testing.T) {
+	r, c := harness(t, newSet("reader"),
+		flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-b"), flow(output, video1080, ""))
+
+	_, cond := reconcile(t, r)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Len(t, mirrors(t, c), 2)
+}
+
+// A set already served turns invalid when a producer starts writing its
+// output's id: the gateways stop building the output over its ring.
+func TestRefusesAnOutputAProducerTakesOverOnceServed(t *testing.T) {
+	r, c := harness(t, newSet("reader"),
+		flow(memberA, video1080, "node-a"), flow(memberB, video1080, "node-b"))
+	_, cond := reconcile(t, r)
+	require.Equal(t, metav1.ConditionTrue, cond.Status)
+
+	require.NoError(t, c.Create(context.Background(), flow(output, video1080, "node-c")))
+	_, cond = reconcile(t, r)
+	assert.Equal(t, ReasonOutputTaken, cond.Reason)
 }
 
 // membersReady is the set's MembersReady condition.
