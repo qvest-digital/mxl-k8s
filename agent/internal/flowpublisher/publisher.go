@@ -440,6 +440,20 @@ func (p *Publisher) ClaimOrigin(ctx context.Context, flowID string) error {
 			return nil
 		}
 	}
+	// A redundancy set's output is claimed no more than it is published:
+	// the operator takes the id over for the set once no Origin holds
+	// it, and a producer attaching to the old flow's directory before
+	// the object is collected would take it back from the set.
+	if p.IsOutput != nil {
+		isOutput, err := p.IsOutput(ctx, p.Domain, flowID)
+		if err != nil {
+			return fmt.Errorf("look up redundancy set outputs for %s: %w", flowID, err)
+		}
+		if isOutput {
+			l.Info("not claiming Origin of a redundancy set output", "flowID", flowID)
+			return nil
+		}
+	}
 
 	now := metav1.Now()
 	if _, err := p.upsertLocation(ctx, flowID, mxlv1alpha1.MxlFlowLocationOrigin, &now, &now); err != nil {

@@ -278,9 +278,10 @@ const (
 	sourceGone
 
 	// sourceReplaced is a flow whose id a redundancy set names as its
-	// output. The agents publish no flow of that id any more and send
-	// every reader of it to the set, so no producer coming back makes
-	// the mirror sourceable again. Its writer on the target node keeps
+	// output. On mxlfs, where a set is merged, the agents neither
+	// publish nor claim an Origin of that id and send every reader of
+	// it to the set, so no producer coming back makes the mirror
+	// sourceable again. Its writer on the target node keeps
 	// the gateway there from building the set's output in its place,
 	// so waiting out the grace period keeps the output from the readers
 	// on that node.

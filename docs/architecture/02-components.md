@@ -76,8 +76,9 @@ platform treats as terminal -- it is what separates a departed node
 from a drained one. Only a flow that names no origin while its nodes
 are still present waits, because a producer that is restarting looks
 exactly like that until it republishes. A flow whose id an
-`MxlFlowRedundancySet` names as its output does not: the agents
-publish no flow of that id, so no producer republishes it. Holding it
+`MxlFlowRedundancySet` names as its output does not: on mxlfs, where
+a set is merged, the agents neither publish nor claim an Origin of
+that id, so no producer republishes it. Holding it
 there rather than in the operator's memory is what makes the grace
 survive an operator restart, which would otherwise reset the timer on
 every object at once on every rollout. `--gc-grace-period` (default

@@ -128,3 +128,32 @@ func TestClaimOrigin_UnknownFlowIsSkipped(t *testing.T) {
 	err := c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got)
 	assert.Error(t, err, "ClaimOrigin must not conjure an MxlFlow it never saw")
 }
+
+// A producer attaching to the directory of a flow whose id a redundancy
+// set has taken over, before the old MxlFlow is collected, is no Origin:
+// claiming one would make the operator refuse the set again, after the
+// readers' mirrors of the old flow were collected for it.
+func TestClaimOrigin_RedundancySetOutputIsNotClaimed(t *testing.T) {
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: ObjectMeta(validFlowID),
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: validFlowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{{NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationStale}},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(flow).
+		Build()
+	lease := &fakeLease{}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, NodeName: "n1", Lease: lease,
+		IsOutput: func(context.Context, string, string) (bool, error) { return true, nil }}
+
+	require.NoError(t, p.ClaimOrigin(context.Background(), validFlowID))
+
+	var got mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
+	assert.Equal(t, mxlv1alpha1.MxlFlowLocationStale, localPhase(t, &got, "n1"))
+	assert.Empty(t, lease.renewed)
+}
