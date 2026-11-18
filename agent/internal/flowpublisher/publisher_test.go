@@ -656,3 +656,53 @@ func TestPublisher_ReleasesLeaseOnVanished(t *testing.T) {
 			"flow vanishes so consumers stop treating the now-Stale Origin "+
 			"as a fresh source")
 }
+
+// chanLease reports each Renew on a channel, so a test can wait for the
+// renew loop's goroutine without sharing memory with it.
+type chanLease struct{ renewed chan string }
+
+func (l chanLease) Renew(_ context.Context, flowID string) error {
+	select {
+	case l.renewed <- flowID:
+	default:
+	}
+	return nil
+}
+
+func (chanLease) Release(context.Context, string) error { return nil }
+
+// A producer of a redundancy set's output id that never stopped keeps its
+// Lease renewed whatever IsOutput says. The set stays refused for as long
+// as the Lease is fresh, which is what protects the live producer: skipping
+// the output here would hand its id to the set within one Lease duration.
+func TestRunRenewLoop_RenewsAnOriginWhoseIdASetNamesAsOutput(t *testing.T) {
+	domain := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(domain, validFlowID+".mxl-flow"), 0o755))
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: ObjectMeta(validFlowID),
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: validFlowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{{NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationOrigin}},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(flow).
+		Build()
+	lease := chanLease{renewed: make(chan string, 1)}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1", Lease: lease,
+		IsOutput: func(context.Context, string, string) (bool, error) { return true, nil }}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); p.RunRenewLoop(ctx, 5*time.Millisecond) }()
+	defer func() { cancel(); <-done }()
+
+	select {
+	case id := <-lease.renewed:
+		assert.Equal(t, validFlowID, id)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the Lease of a held Origin whose id a set names as output was not renewed")
+	}
+}

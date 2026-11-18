@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -59,6 +61,21 @@ func (s *Sets) used(name string) {
 	s.lastUsed[name] = s.clock()
 }
 
+// reasonOutputTaken is the operator's reason for refusing a set whose
+// output id a live producer still holds. Such a set still counts as the
+// output's owner: the handover to it completes once the producer is gone.
+const reasonOutputTaken = "OutputIsAFlow"
+
+// serves reports whether the set is, or is about to be, the one that
+// serves its output: it is Valid, has not been judged yet, or is refused
+// only because a producer still holds the id. A set refused for any other
+// reason serves nothing, so it must not keep a producer of that id from
+// being published.
+func serves(set *mxlv1alpha1.MxlFlowRedundancySet) bool {
+	c := meta.FindStatusCondition(set.Status.Conditions, mxlv1alpha1.ConditionTypeValid)
+	return c == nil || c.Status != metav1.ConditionFalse || c.Reason == reasonOutputTaken
+}
+
 // outputOf returns the set whose output is flow id in domain.
 func (s *Sets) outputOf(ctx context.Context, domain, id string) (*mxlv1alpha1.MxlFlowRedundancySet, error) {
 	var list mxlv1alpha1.MxlFlowRedundancySetList
@@ -67,14 +84,15 @@ func (s *Sets) outputOf(ctx context.Context, domain, id string) (*mxlv1alpha1.Mx
 	}
 	for i := range list.Items {
 		o := list.Items[i].Spec.Output
-		if o.FlowID == id && o.Domain == domain {
+		if o.FlowID == id && o.Domain == domain && serves(&list.Items[i]) {
 			return &list.Items[i], nil
 		}
 	}
 	return nil, nil
 }
 
-// IsOutput reports whether flow id in domain is a set's output. A lookup
+// IsOutput reports whether flow id in domain is the output of a set that
+// serves it (see serves). A lookup
 // that fails is an error, not "no": an MxlFlow published for an output
 // makes the operator refuse its set, which stops the merge on every node
 // until the object is collected.

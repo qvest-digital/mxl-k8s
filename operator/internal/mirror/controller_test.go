@@ -564,6 +564,30 @@ func TestSource_IdTakenOverByARedundancySet_CollectsAtOnce(t *testing.T) {
 	}
 }
 
+// A set refused for a reason of its own serves nothing: collecting the
+// mirror for it would leave the id unserved once its producer restarts.
+// One refused only because a producer holds the id is the handover.
+func TestSource_IdOfASetRefusedForAnotherReason_WaitsTheGracePeriod(t *testing.T) {
+	for reason, collected := range map[string]bool{
+		"MemberInOtherDomain": false,
+		"MembersMisaligned":   false,
+		"OutputIsAFlow":       true,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			s := outputSet()
+			s.Status.Conditions = []metav1.Condition{{
+				Type: mxlv1alpha1.ConditionTypeValid, Status: metav1.ConditionFalse, Reason: reason,
+			}}
+			m := newMirror(withRequestor("consumer", "uid-1"))
+			r, c := harness(t, time.Hour, m, staleFlow(), pod("consumer", "uid-1"), s)
+			r.RedundancySets = true
+
+			reconcileOnce(t, r, m.Name)
+			assert.Equal(t, collected, mirrorGone(t, c, m.Name))
+		})
+	}
+}
+
 // What the set must not take over: a producer still writing the id. Its
 // mirror stays, and so does one whose Origin's Lease lapsed, which an
 // agent that is down leaves while its producer writes on.

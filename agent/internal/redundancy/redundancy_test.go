@@ -209,3 +209,33 @@ func TestIsOutputReportsAFailedLookup(t *testing.T) {
 	_, err := s.IsOutput(context.Background(), "", out)
 	require.Error(t, err)
 }
+
+// A set refused for a reason of its own serves nothing, so a producer of
+// its output id is published as any flow. Only a set that is Valid, not
+// judged yet, or refused because a producer still holds the id counts: the
+// last is the handover in progress.
+func TestIsOutputCountsOnlySetsThatServe(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cond *metav1.Condition
+		want bool
+	}{
+		"not judged yet":      {nil, true},
+		"valid":               {&metav1.Condition{Status: metav1.ConditionTrue, Reason: "MembersAligned"}, true},
+		"output taken":        {&metav1.Condition{Status: metav1.ConditionFalse, Reason: "OutputIsAFlow"}, true},
+		"member in other dom": {&metav1.Condition{Status: metav1.ConditionFalse, Reason: "MemberInOtherDomain"}, false},
+		"members misaligned":  {&metav1.Condition{Status: metav1.ConditionFalse, Reason: "MembersMisaligned"}, false},
+		"no member yet":       {&metav1.Condition{Status: metav1.ConditionFalse, Reason: "MemberMissing"}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, set := newSets(t, "node-a")
+			if tc.cond != nil {
+				tc.cond.Type = mxlv1alpha1.ConditionTypeValid
+				set.Status.Conditions = []metav1.Condition{*tc.cond}
+				require.NoError(t, s.Client.Status().Update(context.Background(), set))
+			}
+			got, err := s.IsOutput(context.Background(), "", out)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}

@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -409,6 +410,10 @@ func (p *Publisher) isMirrorTarget(ctx context.Context, flowID string) (bool, er
 	return false, nil
 }
 
+// outputLookupBackoff bounds the retries of a failed redundancy set
+// lookup in ClaimOrigin to under two seconds in all.
+var outputLookupBackoff = wait.Backoff{Duration: 250 * time.Millisecond, Factor: 2, Steps: 4}
+
 // ClaimOrigin records this node as the flow's Origin and starts
 // renewing the Lease that says so. Idempotent: a location already
 // reading Origin is left untouched, which matters because the caller
@@ -445,7 +450,23 @@ func (p *Publisher) ClaimOrigin(ctx context.Context, flowID string) error {
 	// it, and a producer attaching to the old flow's directory before
 	// the object is collected would take it back from the set.
 	if p.IsOutput != nil {
-		isOutput, err := p.IsOutput(ctx, p.Domain, flowID)
+		// A failed lookup is not "no": claiming the id of an output
+		// makes the operator refuse its set. It is retried briefly, as
+		// the next chance to claim is a rescan away.
+		var isOutput bool
+		var err error
+		backoff := outputLookupBackoff
+		for {
+			if isOutput, err = p.IsOutput(ctx, p.Domain, flowID); err == nil || backoff.Steps <= 1 {
+				break
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(backoff.Step()):
+				continue
+			}
+			break
+		}
 		if err != nil {
 			return fmt.Errorf("look up redundancy set outputs for %s: %w", flowID, err)
 		}

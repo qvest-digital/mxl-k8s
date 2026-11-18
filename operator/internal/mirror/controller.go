@@ -480,8 +480,9 @@ func (r *Reconciler) unresolved(ctx context.Context, m *mxlv1alpha1.MxlFlowMirro
 	return j, nil
 }
 
-// setOutputting names the redundancy set whose output is ref, or is
-// empty when none is or sets are off.
+// setOutputting names the redundancy set that serves ref as its output
+// or is waiting to (Valid, not judged yet, or refused as OutputIsAFlow),
+// or is empty when none is or sets are off.
 func (r *Reconciler) setOutputting(ctx context.Context, ref mxlv1alpha1.FlowRef) (string, error) {
 	if !r.RedundancySets {
 		return "", nil
@@ -491,7 +492,14 @@ func (r *Reconciler) setOutputting(ctx context.Context, ref mxlv1alpha1.FlowRef)
 		return "", fmt.Errorf("list MxlFlowRedundancySets: %w", err)
 	}
 	for _, s := range sets.Items {
-		if (mxlv1alpha1.FlowRef{Domain: s.Spec.Output.Domain, ID: s.Spec.Output.FlowID}) == ref {
+		if (mxlv1alpha1.FlowRef{Domain: s.Spec.Output.Domain, ID: s.Spec.Output.FlowID}) != ref {
+			continue
+		}
+		// A set refused for another reason serves nothing; collecting the
+		// mirror for it would leave a restarting producer's id unserved.
+		// One refused only because a producer holds the id is the handover.
+		c := meta.FindStatusCondition(s.Status.Conditions, mxlv1alpha1.ConditionTypeValid)
+		if c == nil || c.Status != metav1.ConditionFalse || c.Reason == "OutputIsAFlow" {
 			return s.Name, nil
 		}
 	}

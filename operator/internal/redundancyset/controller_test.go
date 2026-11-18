@@ -176,6 +176,27 @@ func TestRefusesAnOutputThatIsAFlow(t *testing.T) {
 	assert.Empty(t, mirrors(t, c))
 }
 
+// OutputIsAFlow means a producer holding the id is all that keeps the set
+// from being served: the agent and the mirror controller count a set with
+// that reason as the output's owner. A set with another defect reports the
+// defect, so it does not count while a producer runs.
+func TestAnOutputThatIsAFlowDoesNotHideAnotherDefect(t *testing.T) {
+	s := newSet("reader")
+	s.Spec.Members[1].Domain = "studio"
+	r, _ := harness(t, s, flow(memberA, video1080, "node-a"), flow(output, video1080, "node-c"))
+
+	_, cond := reconcile(t, r)
+	assert.Equal(t, ReasonOtherDomain, cond.Reason)
+}
+
+// The agent's redundancy.go and the mirror controller each carry this
+// reason as a literal, as it cannot move into the api module without a
+// release. Renaming it must fail here, not stop them counting the sets
+// that are handing an id over.
+func TestReasonOutputTakenIsWhatTheAgentAndTheMirrorControllerMatch(t *testing.T) {
+	assert.Equal(t, "OutputIsAFlow", ReasonOutputTaken)
+}
+
 // leases answers for the Origin Leases by node: renewed until deadline,
 // lapsed, or absent.
 type leases struct {
