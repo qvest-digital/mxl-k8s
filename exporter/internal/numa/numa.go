@@ -9,6 +9,7 @@
 package numa
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -139,16 +140,28 @@ func (c *Collector) scanDomain(path string) (snapshot, error) {
 	return s, nil
 }
 
-// flow sums the pages of a flow's ring files; a flow torn down mid-scan
-// is left out.
+// flow sums the pages of a flow's ring files, every grain file of a
+// discrete flow or the channels file of a continuous one; a flow torn
+// down mid-scan is left out. The flow's directory is looked up by name
+// once, just after the scan listed it, and its files are opened in it:
+// on mxlfs a lookup through a flow directory that went mid-scan waits
+// for it to come back, once per file.
 func (c *Collector) flow(flowDir string) (flowPages, error) {
-	files, err := mxlfs.RingFiles(flowDir)
+	root, err := os.OpenRoot(flowDir)
 	if err != nil {
 		return flowPages{}, err
 	}
+	defer root.Close()
+	files, err := fs.Glob(root.FS(), "grains/data.*")
+	if err != nil {
+		return flowPages{}, err
+	}
+	if len(files) == 0 {
+		files = []string{"channels"}
+	}
 	var fp flowPages
-	for _, path := range files {
-		f, err := os.Open(path)
+	for _, name := range files {
+		f, err := root.Open(name)
 		if err != nil {
 			return flowPages{}, err
 		}

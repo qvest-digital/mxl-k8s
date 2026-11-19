@@ -4,16 +4,16 @@
 package domain
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/qvest-digital/go-mxl/mxl"
+	"golang.org/x/sys/unix"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -183,7 +183,15 @@ func (d *Domain) openReader(e *entry) {
 	if e.reader != nil {
 		return
 	}
-	r, err := d.inst.NewReader(e.id)
+	// The domain was listed before every flow's size was walked, which
+	// leaves time for a flow to go. libmxl looks the flow up by name, and
+	// on mxlfs a lookup of a flow directory that is not there waits for
+	// it to appear, with d.mu held, so the flow is listed again first.
+	if !listed(d.path, e.id) {
+		e.openAttempt = false
+		return
+	}
+	r, err := newReader(d.inst, e.id)
 	if err != nil {
 		e.openAttempt = false
 		return
@@ -195,6 +203,21 @@ func (d *Domain) openReader(e *entry) {
 			e.def = def
 		}
 	}
+}
+
+// newReader is libmxl's lookup of a flow by name; tests replace it.
+var newReader = (*mxl.Instance).NewReader
+
+// listed reports whether the domain at dir has an entry for flow id,
+// reading the directory rather than looking the flow's name up.
+func listed(dir, id string) bool {
+	f, err := os.Open(dir)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	names, _ := f.Readdirnames(-1)
+	return slices.Contains(names, id+flowDirSuffix)
 }
 
 // minActivityWindow floors the window derived from a flow's cadence.
@@ -342,7 +365,12 @@ func (d *Domain) SizeBytes() uint64 {
 // listFlows returns the flow ids present in the domain and the on-disk
 // size of each.
 func (d *Domain) listFlows() (map[string]struct{}, map[string]uint64, error) {
-	dirents, err := os.ReadDir(d.path)
+	dir, err := os.Open(d.path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read domain %q: %w", d.path, err)
+	}
+	defer dir.Close()
+	dirents, err := dir.ReadDir(-1)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read domain %q: %w", d.path, err)
 	}
@@ -359,35 +387,39 @@ func (d *Domain) listFlows() (map[string]struct{}, map[string]uint64, error) {
 			continue
 		}
 		ids[id] = struct{}{}
-		sizes[id] = dirSize(filepath.Join(d.path, de.Name()))
+		sizes[id] = dirSize(dir, de.Name())
 	}
 	return ids, sizes, nil
 }
 
-// dirSize sums the apparent size of every regular file under root. A
-// file that vanishes mid-walk is skipped rather than failing the walk:
-// flows are created and torn down while this runs.
-func dirSize(root string) uint64 {
+// dirSize sums the apparent size of every regular file in the directory
+// name in parent and below it. name is looked up once, just after the
+// listing returned it, and everything below is read in the directories
+// opened: on mxlfs a lookup through a flow directory that went mid-walk
+// waits for it to come back, once per file. A file that vanishes
+// mid-walk is skipped rather than failing the walk: flows are created
+// and torn down while this runs.
+func dirSize(parent *os.File, name string) uint64 {
+	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return 0
+	}
+	dir := os.NewFile(uintptr(fd), filepath.Join(parent.Name(), name))
+	defer dir.Close()
+	names, _ := dir.Readdirnames(-1)
 	var total uint64
-	_ = filepath.WalkDir(root, func(_ string, de fs.DirEntry, err error) error {
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil
-			}
-			return err
+	for _, n := range names {
+		var st unix.Stat_t
+		if unix.Fstatat(fd, n, &st, unix.AT_SYMLINK_NOFOLLOW) != nil {
+			continue
 		}
-		if de.IsDir() {
-			return nil
+		switch st.Mode & unix.S_IFMT {
+		case unix.S_IFDIR:
+			total += dirSize(dir, n)
+		case unix.S_IFREG:
+			total += uint64(st.Size)
 		}
-		info, err := de.Info()
-		if err != nil {
-			return nil
-		}
-		if info.Mode().IsRegular() {
-			total += uint64(info.Size())
-		}
-		return nil
-	})
+	}
 	return total
 }
 
