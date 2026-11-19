@@ -256,12 +256,25 @@ type coverage struct {
 // primary has a gap or is late beyond Tolerance, and the silence source
 // when no member holds it whole within Skew samples of the leading
 // member.
+//
+// libmxl fills the samples a writer skips with zeros on its next commit
+// and moves the head over them, so a gap in a member's writes arrives as
+// a committed run of zeros. With Zeros set, a member whose committed
+// samples at the head start such a run counts as not holding them while
+// another member holds samples that are not, or may yet within Tolerance:
+// one within Skew of the head that has not committed it. Where every
+// member holds zeros, as in digital silence, they are served as before.
 type Audio struct {
 	Pages     uint64 // pages per channel ring
 	Skew      uint64 // in samples
 	Tolerance time.Duration
 	Silence   int
 	Ahead     uint64 // samples the clock advances between two passes
+
+	// Zeros returns the first sample in [from, to) at which member m holds
+	// a run of zeros on every channel, or to when it holds none. It is
+	// asked only of samples m committed. Nil reads no samples.
+	Zeros func(m int, from, to uint64) uint64
 
 	Head    uint64 // published head: the exclusive end of the samples
 	Primary int
@@ -278,6 +291,10 @@ type Audio struct {
 	started      bool
 	waitingPage  uint64
 	waitingSince time.Time
+	// zeroWait and zeroSince: zeros at the head are waiting, or have
+	// waited, for another member to commit those samples, and since when.
+	zeroWait  bool
+	zeroSince time.Time
 }
 
 // NewAudio returns a policy for members rings of pages pages each.
@@ -357,6 +374,11 @@ func (a *Audio) Step(now time.Time) (selects []PageSelect, head uint64, wait tim
 			if c.valid && c.n == n && !c.broken {
 				upto[m] = c.to
 			}
+		}
+		if wait := a.zeros(n, a.Current[p], upto, now); wait > 0 {
+			return selects, a.Head, wait
+		}
+		for m := range a.cov {
 			if upto[m] <= a.Head {
 				continue
 			}
@@ -398,6 +420,85 @@ func (a *Audio) Step(now time.Time) (selects []PageSelect, head uint64, wait tim
 	return selects, a.Head, 0
 }
 
+// zeros applies Zeros to upto, what each member holds of page n at the
+// head. A member holding zeros further on holds only up to them for now.
+// One holding zeros at the head holds nothing while another member holds
+// more than zeros there, and neither does one whose zeros lie under the
+// samples of the page already published from cur, which holds none: the
+// page would show them in their place. While no member holds more than
+// zeros but one within Skew of the head has not committed it, it returns
+// how long to wait for that one: at most Tolerance over a stretch of
+// zeros, however many pages it spans, so a member that does not come
+// delays the output once.
+func (a *Audio) zeros(n uint64, cur int, upto []uint64, now time.Time) time.Duration {
+	if a.Zeros == nil {
+		return 0
+	}
+	start := n * PageSamples
+	clean := false
+	if cur >= 0 && cur < len(a.cov) && start < a.Head {
+		c := a.cov[cur][n%a.Pages]
+		clean = c.valid && c.n == n && !c.broken && c.to >= a.Head && a.Zeros(cur, start, a.Head) == a.Head
+	}
+	content, zero, coming := false, false, false
+	bad := make([]bool, len(a.cov))
+	for m := range a.cov {
+		switch {
+		case upto[m] > a.Head:
+			z := a.Zeros(m, a.Head, upto[m])
+			if z == a.Head || (clean && m != cur && a.Zeros(m, start, a.Head) < a.Head) {
+				bad[m], zero = true, true
+			} else {
+				upto[m], content = z, true
+			}
+		case a.evHead[m] <= a.Head && a.evHead[m]+a.Skew > a.Head:
+			coming = true
+		}
+	}
+	if !zero || content || !coming {
+		a.zeroWait = false
+	}
+	if !zero {
+		return 0
+	}
+	if !content && coming {
+		if !a.zeroWait {
+			a.zeroWait, a.zeroSince = true, now
+		}
+		if d := now.Sub(a.zeroSince); d < a.Tolerance {
+			return a.Tolerance - d
+		}
+	}
+	if content {
+		for m := range bad {
+			if bad[m] {
+				upto[m] = 0
+			}
+		}
+	}
+	return 0
+}
+
+// whole returns, of the members holding page slot p's page whole from its
+// start to end, in member order, the first that holds no zeros there, or
+// the first of them when all do; ok reports whether any holds it.
+func (a *Audio) whole(p uint64, n, end uint64, holds func(m int) bool) (to int, ok bool) {
+	to = -1
+	for m := range a.cov {
+		c := a.cov[m][p]
+		if !c.valid || c.n != n || c.broken || c.to < end || !holds(m) {
+			continue
+		}
+		if a.Zeros == nil || a.Zeros(m, n*PageSamples, end) == end {
+			return m, true
+		}
+		if to < 0 {
+			to = m
+		}
+	}
+	return to, to >= 0
+}
+
 // Drop returns the page selects that move every page member m serves to
 // another member that holds it whole, or to silence, before m's ring is
 // replaced by one that holds none of them. It forgets what m committed.
@@ -412,12 +513,8 @@ func (a *Audio) Drop(m int) (selects []PageSelect) {
 			last := (a.Head - 1) / PageSamples
 			if back := (last%a.Pages + a.Pages - uint64(p)) % a.Pages; last >= back {
 				n := last - back
-				for o := range a.cov {
-					c := a.cov[o][p]
-					if o != m && c.valid && c.n == n && !c.broken && c.to >= min((n+1)*PageSamples, a.Head) {
-						to = o
-						break
-					}
+				if o, ok := a.whole(uint64(p), n, min((n+1)*PageSamples, a.Head), func(o int) bool { return o != m }); ok {
+					to = o
 				}
 			}
 		}
@@ -466,12 +563,8 @@ func (a *Audio) Retire(due uint64) (selects []PageSelect) {
 			continue
 		}
 		to := a.Silence
-		for m := range a.cov {
-			c := a.cov[m][p]
-			if m != cur && c.valid && c.n == n && !c.broken && c.to >= min((n+1)*PageSamples, a.Head) && first >= reach(m) {
-				to = m
-				break
-			}
+		if m, ok := a.whole(p, n, min((n+1)*PageSamples, a.Head), func(m int) bool { return m != cur && first >= reach(m) }); ok {
+			to = m
 		}
 		a.Current[p] = to
 		selects = append(selects, PageSelect{Page: p, Source: to})

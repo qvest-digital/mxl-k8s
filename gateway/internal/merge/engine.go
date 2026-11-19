@@ -180,10 +180,15 @@ type Engine struct {
 	views    []*os.File // one per grain slot, or the channels file
 	grains   [][]*C.mxlGrainInfo
 	grainMem [][][]byte // per member, per slot
-	audio    *Audio
-	disc     *Discrete
-	rate     C.mxlRational
-	period   time.Duration // of a grain
+	// chanMem is, per member of an audio output, its channels file mapped
+	// read-only for zeroRun; zeroRun is the samples of zeros, 1 ms, that
+	// read as a gap a writer left.
+	chanMem [][]byte
+	zeroRun uint64
+	audio   *Audio
+	disc    *Discrete
+	rate    C.mxlRational
+	period  time.Duration // of a grain
 	// reported is, per member, when the gateway last reported an arrival
 	// and how long the range it reported lasts; see fed.
 	reported []report
@@ -550,6 +555,11 @@ func (e *Engine) buildAudio(tmp, src0 string) error {
 		}
 		defer f.Close()
 		srcs = append(srcs, f)
+		mem, err := mapChannels(f, size)
+		if err != nil {
+			return err
+		}
+		e.chanMem = append(e.chanMem, mem)
 	}
 	srcs = append(srcs, sil)
 	v, err := view(filepath.Join(tmp, "channels"), size, srcs)
@@ -565,7 +575,54 @@ func (e *Engine) buildAudio(tmp, src0 string) error {
 	e.audio.Skew = uint64(e.spec.Skew.Seconds() * float64(e.rate.numerator) / float64(e.rate.denominator))
 	e.audio.Tolerance = ToleranceFor(e.spec.Skew)
 	e.audio.Ahead = uint64(maxSleep.Seconds()*float64(e.rate.numerator)/float64(e.rate.denominator)) + 1
+	e.zeroRun = max(uint64(time.Millisecond.Seconds()*float64(e.rate.numerator)/float64(e.rate.denominator)), 1)
+	e.audio.Zeros = e.zeros
 	return nil
+}
+
+// mapChannels maps an audio ring's channels file read-only. Only samples
+// a member committed are read through it: a page of a lazily held ring
+// that nobody wrote may not exist, and reading it faults.
+func mapChannels(f *os.File, size int64) ([]byte, error) {
+	mem, err := unix.Mmap(int(f.Fd()), 0, int(size), unix.PROT_READ, unix.MAP_SHARED)
+	if err != nil {
+		return nil, fmt.Errorf("map %s: %w", f.Name(), err)
+	}
+	return mem, nil
+}
+
+// zeros is Audio.Zeros over the members' mapped channels.
+func (e *Engine) zeros(m int, from, to uint64) uint64 {
+	channels, length := e.members[0].continuous()
+	return zeroRunStart(e.chanMem[m], uint64(channels), uint64(length), from, to, e.zeroRun)
+}
+
+// zeroRunStart returns the first sample in [from, to) that starts a run
+// of at least run samples whose 32-bit words are 0 on every channel of
+// mem, channels rings of length samples each, or to when there is none.
+// libmxl fills a skipped range with zero bytes; a run that reaches to
+// shorter than run is not counted.
+func zeroRunStart(mem []byte, channels, length, from, to, run uint64) uint64 {
+	words := unsafe.Slice((*uint32)(unsafe.Pointer(unsafe.SliceData(mem))), uint64(len(mem))/4)
+	var n uint64
+	for s := from; s < to; s++ {
+		off := s % length
+		zero := true
+		for c := range channels {
+			if words[c*length+off] != 0 {
+				zero = false
+				break
+			}
+		}
+		if !zero {
+			n = 0
+			continue
+		}
+		if n++; n >= run {
+			return s + 1 - n
+		}
+	}
+	return to
 }
 
 // Committed reports that member committed samples [start, end) of an
@@ -641,11 +698,12 @@ type replaceReq struct {
 
 // memberRing is a member's ring, opened for the engine to take.
 type memberRing struct {
-	h    *header
-	f    *os.File
-	ino  uint64
-	srcs []*os.File // the grain files or the channels file, one per view
-	mems [][]byte   // the mapped grain headers of a discrete ring
+	h     *header
+	f     *os.File
+	ino   uint64
+	srcs  []*os.File // the grain files or the channels file, one per view
+	mems  [][]byte   // the mapped grain headers of a discrete ring
+	chans []byte     // the mapped channels of an audio ring
 }
 
 // close releases what the engine did not take: the source files always,
@@ -659,6 +717,9 @@ func (r *memberRing) close(taken bool) {
 	}
 	for _, m := range r.mems {
 		_ = unix.Munmap(m)
+	}
+	if r.chans != nil {
+		_ = unix.Munmap(r.chans)
 	}
 	if r.h != nil {
 		_ = unix.Munmap(r.h.mem)
@@ -749,6 +810,10 @@ func (e *Engine) openRing(member int) (_ *memberRing, err error) {
 			return nil, err
 		}
 		r.srcs = append(r.srcs, s)
+		channels, length := r.h.continuous()
+		if r.chans, err = mapChannels(s, int64(channels)*int64(length)*4); err != nil {
+			return nil, err
+		}
 		return r, nil
 	}
 	for slot := range e.views {
@@ -838,6 +903,9 @@ func (e *Engine) take(member int, r *memberRing) error {
 			e.grains[member][k] = (*C.mxlGrainInfo)(unsafe.Pointer(&r.mems[k][0]))
 		}
 		e.grainMem[member] = r.mems
+	} else if e.chanMem != nil { // nil on an engine that reads no samples
+		_ = unix.Munmap(e.chanMem[member])
+		e.chanMem[member] = r.chans
 	}
 	r.close(true)
 	e.log.Info("replaced a member's ring", "member", e.spec.Members[member], "inode", r.ino)
@@ -1210,6 +1278,9 @@ func (e *Engine) release() {
 		for _, m := range ms {
 			_ = unix.Munmap(m)
 		}
+	}
+	for _, m := range e.chanMem {
+		_ = unix.Munmap(m)
 	}
 	for _, m := range e.members {
 		_ = unix.Munmap(m.mem)

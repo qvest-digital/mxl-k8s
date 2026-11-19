@@ -1,8 +1,10 @@
 package merge
 
 import (
+	"math"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/stretchr/testify/require"
 )
@@ -719,4 +721,233 @@ func TestAudioDropWaitsForTheNewRingAsALatePrimary(t *testing.T) {
 	_, head, _ = a.Step(now.Add(wait))
 	require.Equal(t, uint64(24*PageSamples), head)
 	require.Equal(t, 1, a.Primary)
+}
+
+// samples holds audio members' channel rings as the engine maps them, so
+// Audio.Zeros reads what the members wrote.
+type samples struct {
+	channels, length uint64
+	mem              [][]byte
+}
+
+func newSamples(members int, channels, pages uint64) *samples {
+	s := &samples{channels: channels, length: pages * PageSamples}
+	for range members {
+		s.mem = append(s.mem, make([]byte, channels*s.length*4))
+	}
+	return s
+}
+
+// content is a sample value that is never zero.
+func content(i uint64) float32 { return float32(i%997+1) / 1000 }
+
+// write puts v(i) on every channel of member m for samples [from, to).
+func (s *samples) write(m int, from, to uint64, v func(uint64) float32) {
+	words := unsafe.Slice((*uint32)(unsafe.Pointer(&s.mem[m][0])), len(s.mem[m])/4)
+	for i := from; i < to; i++ {
+		for c := range s.channels {
+			words[c*s.length+i%s.length] = math.Float32bits(v(i))
+		}
+	}
+}
+
+func (s *samples) zeros(m int, from, to uint64) uint64 {
+	return zeroRunStart(s.mem[m], s.channels, s.length, from, to, 48)
+}
+
+func zero(uint64) float32 { return 0 }
+
+// A writer that skips a range has libmxl fill it with zeros on its next
+// commit, under its head: a member's gap arrives as committed silence.
+// While another member holds the same samples, they are served from it,
+// the page where the primary resumes mid-page included, whose published
+// part the primary holds as zeros. The primary stays the primary.
+func TestAudioServesAMemberWithContentOverAZeroFilledGap(t *testing.T) {
+	const batch = 480
+	a := NewAudio(2, 38, 2)
+	a.Skew, a.Tolerance = 2048, ToleranceFor(40*time.Millisecond)
+	s := newSamples(2, 2, 38)
+	a.Zeros = s.zeros
+	gap := func(i uint64) bool { return i >= 100*batch && i < 105*batch } // 48000 to 50400
+	shown := map[uint64]int{}
+	now := time.Unix(0, 0)
+	for b := uint64(10); b < 200; b++ {
+		from, to := b*batch, (b+1)*batch
+		s.write(1, from, to, content)
+		s.write(0, from, to, func(i uint64) float32 {
+			if gap(i) {
+				return 0
+			}
+			return content(i)
+		})
+		a.Committed(0, from, to)
+		a.Committed(1, from, to)
+		now = now.Add(10 * time.Millisecond)
+		before := a.Head
+		_, head, _ := a.Step(now)
+		for i := before; i < head; i++ {
+			shown[i] = a.Current[(i/PageSamples)%a.Pages]
+		}
+	}
+	require.Equal(t, uint64(200*batch), a.Head)
+	require.Equal(t, 0, a.Primary, "the primary was replaced")
+	for i := uint64(11 * batch); i < 200*batch; i++ {
+		src, ok := shown[i]
+		require.True(t, ok, "sample %d never published", i)
+		if gap(i) {
+			require.Equal(t, 1, src, "sample %d of the gap shown from member %d", i, src)
+		}
+	}
+	// The pages after the one the gap ends in are the primary's again.
+	require.Equal(t, 0, shown[51*PageSamples])
+	require.Equal(t, 1, shown[50400], "the page the primary resumed in moved back to its zeros")
+}
+
+// The zero-filled range usually arrives before the same samples from a
+// member that commits them later, as a replica holding blocks for
+// evidence does. A member within Skew of the head that has not committed
+// them is waited for up to Tolerance; past that, the zeros are served,
+// and the head does not stall.
+func TestAudioWaitsForAMemberBehindAZeroFilledRange(t *testing.T) {
+	setup := func() (*Audio, *samples, time.Time) {
+		a := NewAudio(2, 38, 2)
+		a.Skew, a.Tolerance = 2048, ToleranceFor(40*time.Millisecond)
+		s := newSamples(2, 2, 38)
+		a.Zeros = s.zeros
+		for m := range 2 {
+			s.write(m, 10*PageSamples, 20*PageSamples, content)
+			a.Committed(m, 10*PageSamples, 20*PageSamples)
+		}
+		now := time.Unix(0, 0)
+		_, head, _ := a.Step(now)
+		require.Equal(t, uint64(20*PageSamples), head)
+		// The primary's gap, filled with zeros, and its next batch.
+		s.write(0, 20*PageSamples, 22*PageSamples, zero)
+		s.write(0, 22*PageSamples, 23*PageSamples, content)
+		a.Committed(0, 20*PageSamples, 23*PageSamples)
+		sel, head, wait := a.Step(now)
+		require.Empty(t, sel)
+		require.Equal(t, uint64(20*PageSamples), head, "the zeros were published before the other member could arrive")
+		require.Equal(t, a.Tolerance, wait)
+		return a, s, now
+	}
+
+	t.Run("it arrives within the tolerance", func(t *testing.T) {
+		a, s, now := setup()
+		s.write(1, 20*PageSamples, 23*PageSamples, content)
+		a.Committed(1, 20*PageSamples, 23*PageSamples)
+		_, head, _ := a.Step(now.Add(a.Tolerance / 2))
+		require.Equal(t, uint64(23*PageSamples), head)
+		require.Equal(t, []int{1, 1, 0}, a.Current[20:23])
+		require.Equal(t, 0, a.Primary)
+	})
+	t.Run("it does not", func(t *testing.T) {
+		a, _, now := setup()
+		_, head, _ := a.Step(now.Add(a.Tolerance))
+		require.Equal(t, uint64(23*PageSamples), head)
+		require.Equal(t, []int{0, 0, 0}, a.Current[20:23])
+	})
+}
+
+// Digital silence on every member is content like any other: nothing is
+// waited for and no page moves off the primary.
+func TestAudioServesSilenceOnEveryMemberFromThePrimary(t *testing.T) {
+	const batch = 480
+	a := NewAudio(2, 38, 2)
+	a.Skew, a.Tolerance = 2048, ToleranceFor(40*time.Millisecond)
+	s := newSamples(2, 2, 38)
+	a.Zeros = s.zeros
+	now := time.Unix(0, 0)
+	selects := 0
+	for b := uint64(10); b < 200; b++ {
+		v := content
+		if b >= 50 && b < 150 {
+			v = zero
+		}
+		for m := range 2 {
+			s.write(m, b*batch, (b+1)*batch, v)
+			a.Committed(m, b*batch, (b+1)*batch)
+		}
+		now = now.Add(10 * time.Millisecond)
+		sel, head, wait := a.Step(now)
+		require.Zero(t, wait, "batch %d waited", b)
+		require.Equal(t, (b+1)*batch, head, "batch %d", b)
+		for _, p := range sel {
+			require.Equal(t, 0, p.Source, "batch %d moved page %d", b, p.Page)
+		}
+		selects += len(sel)
+	}
+	require.Equal(t, 0, a.Primary)
+	require.LessOrEqual(t, selects, len(a.Current), "a page moved more than once")
+}
+
+// Drop moves a page to a member that holds it without zeros where
+// another holds it with them.
+func TestAudioDropPrefersAMemberWithoutZeros(t *testing.T) {
+	a := NewAudio(3, 38, 3)
+	a.Skew = 2048
+	s := newSamples(3, 2, 38)
+	a.Zeros = s.zeros
+	for m := range 3 {
+		s.write(m, 10*PageSamples, 41*PageSamples, content)
+		a.Committed(m, 10*PageSamples, 41*PageSamples)
+	}
+	s.write(1, 30*PageSamples+100, 31*PageSamples, zero)
+	_, head, _ := a.Step(time.Unix(0, 0))
+	require.Equal(t, uint64(41*PageSamples), head)
+
+	sel := a.Drop(0)
+	require.Len(t, sel, 31)
+	for _, p := range sel {
+		want := 1
+		if p.Page == 30 {
+			want = 2
+		}
+		require.Equal(t, want, p.Source, "page slot %d", p.Page)
+	}
+}
+
+func TestZeroRunStartFindsTheFirstRunOnEveryChannel(t *testing.T) {
+	s := newSamples(1, 2, 2)
+	s.write(0, 0, 2*PageSamples, content)
+	// A zero on one channel only is not a run; on both, 47 samples are
+	// too short, 48 are one.
+	words := unsafe.Slice((*uint32)(unsafe.Pointer(&s.mem[0][0])), len(s.mem[0])/4)
+	for i := uint64(100); i < 300; i++ {
+		words[i] = 0
+	}
+	s.write(0, 400, 447, zero)
+	s.write(0, 600, 648, zero)
+	require.Equal(t, uint64(600), s.zeros(0, 0, 2*PageSamples))
+	require.Equal(t, uint64(2*PageSamples), s.zeros(0, 601, 2*PageSamples), "a run counts from where the range starts")
+	require.Equal(t, uint64(640), s.zeros(0, 0, 640), "a run cut short by the range is none")
+	// Across the ring's end.
+	s.write(0, 2*PageSamples-20, 2*PageSamples+40, zero)
+	require.Equal(t, uint64(2*PageSamples-20), s.zeros(0, PageSamples, 3*PageSamples))
+}
+
+// The cost of Audio.Zeros over one page of 1024 samples, the most one
+// pass reads per member and page: content, where the first channel ends
+// each sample's check, and silence on every channel, where a run ends
+// the scan after 48 samples.
+func BenchmarkZeroRunStartPage(b *testing.B) {
+	for _, tc := range []struct {
+		name     string
+		channels uint64
+		v        func(uint64) float32
+	}{
+		{"content/2ch", 2, content},
+		{"content/16ch", 16, content},
+		{"silence/2ch", 2, zero},
+		{"silence/16ch", 16, zero},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			s := newSamples(1, tc.channels, 38)
+			s.write(0, 0, 38*PageSamples, tc.v)
+			for i := 0; b.Loop(); i++ {
+				p := uint64(i%38) * PageSamples
+				s.zeros(0, p, p+PageSamples)
+			}
+		})
+	}
 }
