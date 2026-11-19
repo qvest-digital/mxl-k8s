@@ -305,6 +305,56 @@ Call as: include "mxlk8s.mxlfs.moduleWaitContainer" .
 {{- end -}}
 
 {{/*
+Init container holding a gateway until /sys/class/infiniband holds a
+device with an ACTIVE port, of driver .wait.driver when that is set,
+for at most .wait.seconds. It exits 0 either way. An active port is
+what the gateway's own sysfs cross-check counts as a usable device. The
+container reads the sysfs the runtime mounts, as the gateway container
+does, and shares its network namespace, so it sees the same devices.
+Call as: include "mxlk8s.gateway.rdmaWaitContainer" (dict "Context" $ctx "wait" $g.rdma.wait)
+*/}}
+{{- define "mxlk8s.gateway.rdmaWaitContainer" -}}
+- name: wait-for-rdma
+  image: {{ .Context.Values.mxlfs.waitImage }}
+  command:
+    - sh
+    - -c
+    - |
+      end=$(($(date +%s) + $0))
+      while :; do
+        for d in "$1"/*; do
+          [ -e "$d" ] || continue
+          if [ -n "$2" ]; then
+            l=$(readlink "$d/device/driver")
+            [ "${l##*/}" = "$2" ] || continue
+          fi
+          if grep -qiE ':[[:space:]]*active[[:space:]]*$' "$d"/ports/*/state 2>/dev/null; then
+            exit 0
+          fi
+        done
+        if [ "$(date +%s)" -ge "$end" ]; then
+          echo "no RDMA device${2:+ of driver $2} with an active port in $1 after $0s" >&2
+          exit 0
+        fi
+        sleep 1
+      done
+    - {{ int .wait.seconds | quote }}
+    - /sys/class/infiniband
+    {{- with .wait.driver }}
+    - {{ . | quote }}
+    {{- end }}
+  {{- with .Context.Values.mxlfs.waitResources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+{{- end -}}
+
+{{/*
 The NUMA placement mode in effect: off, node or flow. Empty is off. A
 mode other than off needs mxlfs.enabled, as only an mxlfs domain has a
 numa_node= or per-file placement.

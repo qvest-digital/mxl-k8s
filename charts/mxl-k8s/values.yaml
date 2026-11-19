@@ -229,8 +229,9 @@ mxlfs:
   # when the bound passes, and the agent then starts as it would
   # without it. 0 starts the agent at once.
   moduleWaitSeconds: 0
-  # -- Image of the init containers that wait for mxlfs.ready and for
-  # the mxlfs module. Needs a POSIX sh, test, sleep, date and awk.
+  # -- Image of the init containers that wait for mxlfs.ready, for the
+  # mxlfs module and for an RDMA device (gateway.rdma.wait). Needs a
+  # POSIX sh, test, sleep, date, awk, grep and readlink.
   waitImage: busybox:1.38
   # -- Resources of those init containers.
   waitResources:
@@ -968,6 +969,28 @@ gateway:
     # which is why a cluster with mixed hardware needs
     # `gateway.variants` rather than one DaemonSet.
     resourceName: ""
+    wait:
+      # @schema
+      # type: integer
+      # minimum: 0
+      # @schema
+      # -- Seconds the gateway waits at start, in an init container, for
+      # a device under /sys/class/infiniband with an ACTIVE port,
+      # checked once a second. Only consulted when rdma.enabled is set.
+      # libfabric fixes a provider's device list when the gateway first
+      # enumerates, so a gateway that starts before its device is usable
+      # advertises no RDMA for the life of the process, and every mirror
+      # created meanwhile resolves to tcp. A driver loaded after the pod
+      # starts, as by the Kernel Module Management operator, which loads
+      # it from a pod of its own once the kubelet runs, has to bind
+      # before then. The init container exits 0 when the bound passes,
+      # and the gateway then starts as it would without it. 0 starts the
+      # gateway at once.
+      seconds: 0
+      # -- Kernel driver the device has to be bound to, the basename of
+      # its device/driver link, as efa for the AWS Elastic Fabric
+      # Adapter. Empty accepts any device.
+      driver: ""
   serviceAccount:
     create: true
     name: ""
@@ -1101,6 +1124,8 @@ gateway:
         enabled: true
         mountInfiniband: false
         resourceName: vpc.amazonaws.com/efa
+        wait:
+          driver: efa
     # Nodes with no fabric device. Needs no resource request, so it
     # schedules anywhere its placement allows.
     tcp:

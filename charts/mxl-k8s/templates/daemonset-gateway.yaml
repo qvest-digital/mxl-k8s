@@ -113,10 +113,14 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or $ctx.Values.mxlfs.enabled $g.initContainers }}
+      {{- $rdmaWait := and $g.rdma.enabled (gt (int $g.rdma.wait.seconds) 0) }}
+      {{- if or $ctx.Values.mxlfs.enabled $rdmaWait $g.initContainers }}
       initContainers:
         {{- if $ctx.Values.mxlfs.enabled }}
         {{- include "mxlk8s.mxlfs.waitContainer" (dict "Context" $ctx "root" (dir $g.hostPath.domain)) | nindent 8 }}
+        {{- end }}
+        {{- if $rdmaWait }}
+        {{- include "mxlk8s.gateway.rdmaWaitContainer" (dict "Context" $ctx "wait" $g.rdma.wait) | nindent 8 }}
         {{- end }}
         {{- with $g.initContainers }}
         {{- toYaml . | nindent 8 }}
