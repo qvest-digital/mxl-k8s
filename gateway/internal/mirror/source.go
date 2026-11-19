@@ -37,6 +37,7 @@ import (
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/mxlfs"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/numaplace"
 )
 
@@ -1043,6 +1044,47 @@ func originRotated(baseline, observed *time.Time, openedAt time.Time) bool {
 	return !observed.Before(openedAt.Truncate(time.Second))
 }
 
+// flowActive is libmxl's own answer to whether a flow has a live
+// writer, not an inference from a stalled head. A flow the domain does
+// not list has none and is not looked up: libmxl looks the flow up by
+// name, and on mxlfs a lookup of a flow directory that is not there
+// waits for it to appear.
+func (r *SourceReconciler) flowActive(ref mxlv1alpha1.FlowRef) (bool, error) {
+	handles, err := r.Domains.For(context.Background(), ref.Domain)
+	if err != nil {
+		return false, err
+	}
+	inst := handles.MXL()
+	if inst == nil {
+		return false, fmt.Errorf("mxl instance closed")
+	}
+	if err := requireListed(handles.DomainPath(), ref.ID); err != nil {
+		return false, err
+	}
+	return isFlowActive(inst, ref.ID)
+}
+
+// requireListed returns mxl.ErrFlowNotFound, as libmxl does for a flow
+// that is not there, when the domain does not list flow id, so libmxl
+// is asked about a flow by name only once the listing has returned it.
+func requireListed(domain, id string) error {
+	listed, err := mxlfs.Listed(domain, id)
+	if err != nil {
+		return fmt.Errorf("list %s: %w", domain, err)
+	}
+	if !listed {
+		return mxl.ErrFlowNotFound
+	}
+	return nil
+}
+
+// isFlowActive and newReader are libmxl's lookups of a flow by name;
+// tests replace them.
+var (
+	isFlowActive = (*mxl.Instance).IsFlowActive
+	newReader    = (*mxl.Instance).NewReader
+)
+
 // libmxlOpener is the production initiatorOpener. The fields are the
 // subset of SourceReconciler state the open path reads.
 type libmxlOpener struct {
@@ -1067,7 +1109,10 @@ func (o *libmxlOpener) open(key sourceKey) (*sharedSource, error) {
 	}
 
 	start := time.Now()
-	reader, err := mxlInst.NewReader(key.flowID)
+	if err := requireListed(handles.DomainPath(), key.flowID); err != nil {
+		return nil, fmt.Errorf("NewReader: %w", err)
+	}
+	reader, err := newReader(mxlInst, key.flowID)
 	if err != nil {
 		return nil, fmt.Errorf("NewReader: %w", err)
 	}
@@ -1117,12 +1162,15 @@ func (o *libmxlOpener) attach(s *sharedSource, targetInfoStr string, e *sourceEn
 	if mxlInst == nil {
 		return nil, fmt.Errorf("mxl instance closed")
 	}
+	if err := requireListed(s.handles.DomainPath(), s.key.flowID); err != nil {
+		return nil, fmt.Errorf("NewReader: %w", err)
+	}
 	iface, err := resolveInterface(fabInst, o.Selector, s.key.provider, e.wantInterface)
 	if err != nil {
 		return nil, err
 	}
 	e.boundInterface = iface.Address.Node
-	reader, err := mxlInst.NewReader(s.key.flowID)
+	reader, err := newReader(mxlInst, s.key.flowID)
 	if err != nil {
 		return nil, fmt.Errorf("NewReader: %w", err)
 	}
@@ -2134,18 +2182,7 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 	}
 	if r.writerLiveFn == nil {
-		// libmxl's own answer, not an inference from a stalled head.
-		r.writerLiveFn = func(ref mxlv1alpha1.FlowRef) (bool, error) {
-			handles, err := r.Domains.For(context.Background(), ref.Domain)
-			if err != nil {
-				return false, err
-			}
-			inst := handles.MXL()
-			if inst == nil {
-				return false, fmt.Errorf("mxl instance closed")
-			}
-			return inst.IsFlowActive(ref.ID)
-		}
+		r.writerLiveFn = r.flowActive
 	}
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),

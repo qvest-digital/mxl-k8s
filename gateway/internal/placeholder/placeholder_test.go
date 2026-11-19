@@ -175,6 +175,38 @@ func TestLocalWriterWins(t *testing.T) {
 	require.DirExists(t, flowDir(h), "giving the flow up to the local writer removed it")
 }
 
+// The local-writer check runs every Period, and every mirror filling or
+// releasing a placeholder takes m.mu. A placeholder whose directory went
+// under its writer is not looked up, and no writer is counted under
+// m.mu: on mxlfs a lookup of a flow that is not there waits for it to
+// come back, and under m.mu every mirror would wait with it.
+func TestLocalWriterCheckLooksUpOnlyListedFlowsOutsideTheLock(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	reconcileFlow(t, m)
+	var looked []string
+	saved := foreignWriters
+	t.Cleanup(func() { foreignWriters = saved })
+	foreignWriters = func(path string) (int, error) {
+		looked = append(looked, path)
+		if !m.mu.TryLock() {
+			t.Error("writers counted under m.mu")
+		} else {
+			m.mu.Unlock()
+		}
+		return saved(path)
+	}
+
+	m.CheckLocalWriters(logr.Discard())
+	require.Equal(t, []string{filepath.Join(flowDir(h), "data")}, looked)
+
+	looked = nil
+	require.NoError(t, os.Rename(flowDir(h), filepath.Join(h.dir, ".gone")))
+	m.CheckLocalWriters(logr.Discard())
+	require.Empty(t, looked, "a flow the listing did not return was looked up by name")
+	require.Equal(t, []string{flowID}, m.Held())
+}
+
 func TestFlowAProcessHereWritesGetsNoPlaceholder(t *testing.T) {
 	h := newDomain(t)
 	require.NoError(t, os.MkdirAll(flowDir(h), 0o755))

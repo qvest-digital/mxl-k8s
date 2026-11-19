@@ -2,6 +2,8 @@ package placeholder
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/qvest-digital/go-mxl/mxl"
@@ -94,6 +96,35 @@ func TestLeftoverOfOtherHintsIsReplaced(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, w.Detach())
 	m := newManager(t, h, audioFlow(960, 480))
+
+	reconcileAudio(t, m)
+
+	require.Equal(t, []string{audioID}, m.Held())
+	assert.Equal(t, Hints{Sync: 960, Commit: 480}, onDiskHints(t, h))
+}
+
+// Closing the writer opened on a leftover of other hints deletes the
+// flow, as nothing else holds it, and on mxlfs a lookup of the deleted
+// flow waits for it to come back, holding every placeholder's
+// Reconcile. What is left of the flow is looked up only once the
+// domain lists it.
+func TestReplacingALeftoverOfOtherHintsLooksUpOnlyAListedFlow(t *testing.T) {
+	h := newDomain(t)
+	other, err := mxl.NewInstance(h.dir, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = other.Close() })
+	w, _, err := other.NewWriter(audioDef)
+	require.NoError(t, err)
+	require.NoError(t, w.Detach())
+	m := newManager(t, h, audioFlow(960, 480))
+	saved := writers
+	t.Cleanup(func() { writers = saved })
+	writers = func(path string) (int, error) {
+		if _, err := os.Stat(filepath.Dir(path)); os.IsNotExist(err) {
+			t.Errorf("looked up %s, which does not exist", path)
+		}
+		return saved(path)
+	}
 
 	reconcileAudio(t, m)
 

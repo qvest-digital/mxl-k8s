@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -305,8 +306,16 @@ func (e *Engine) build() error {
 			_ = os.RemoveAll(tmp)
 		}
 	}()
-	src0 := flowDir(e.spec.DomainDir, e.spec.Members[0])
-	def, err := os.ReadFile(filepath.Join(src0, "flow_def.json"))
+	// Every member file is opened in the member directory Start holds
+	// open, not looked up by the member's name: the directory may have
+	// been replaced or removed since, and on mxlfs a lookup of a flow
+	// directory that is not there waits for it to appear.
+	f, err := openIn(e.dirs[0], "flow_def.json")
+	if err != nil {
+		return err
+	}
+	def, err := io.ReadAll(f)
+	f.Close()
 	if err != nil {
 		return err
 	}
@@ -324,9 +333,9 @@ func (e *Engine) build() error {
 		return err
 	}
 	if e.members[0].format() == formatAudio {
-		err = e.buildAudio(tmp, src0)
+		err = e.buildAudio(tmp)
 	} else {
-		err = e.buildDiscrete(tmp, src0)
+		err = e.buildDiscrete(tmp)
 	}
 	if err != nil {
 		return err
@@ -474,9 +483,14 @@ func mapGrainInfo(f *os.File) ([]byte, error) {
 	return unix.Mmap(int(f.Fd()), 0, int(C.sizeof_mxlGrainInfo), unix.PROT_READ, unix.MAP_SHARED)
 }
 
-func (e *Engine) buildDiscrete(tmp, src0 string) error {
+func (e *Engine) buildDiscrete(tmp string) error {
 	grains := uint(e.members[0].discrete())
-	st, err := os.Stat(filepath.Join(src0, "grains", "data.0"))
+	g0, err := openIn(e.dirs[0], filepath.Join("grains", "data.0"))
+	if err != nil {
+		return err
+	}
+	defer g0.Close()
+	st, err := g0.Stat()
 	if err != nil {
 		return err
 	}
@@ -490,7 +504,7 @@ func (e *Engine) buildDiscrete(tmp, src0 string) error {
 	if err := allocate(inv, size); err != nil {
 		return err
 	}
-	tmpl, err := os.ReadFile(filepath.Join(src0, "grains", "data.0"))
+	tmpl, err := io.ReadAll(g0)
 	if err != nil {
 		return err
 	}
@@ -509,8 +523,8 @@ func (e *Engine) buildDiscrete(tmp, src0 string) error {
 	e.grainMem = make([][][]byte, len(e.members))
 	for slot := uint(0); slot < grains; slot++ {
 		var srcs []*os.File
-		for m, id := range e.spec.Members {
-			f, err := os.Open(filepath.Join(flowDir(e.spec.DomainDir, id), "grains", fmt.Sprintf("data.%d", slot)))
+		for m := range e.spec.Members {
+			f, err := openIn(e.dirs[m], filepath.Join("grains", fmt.Sprintf("data.%d", slot)))
 			if err != nil {
 				return err
 			}
@@ -546,7 +560,7 @@ func (e *Engine) buildDiscrete(tmp, src0 string) error {
 	return nil
 }
 
-func (e *Engine) buildAudio(tmp, src0 string) error {
+func (e *Engine) buildAudio(tmp string) error {
 	channels, length := e.members[0].continuous()
 	if length%PageSamples != 0 {
 		return fmt.Errorf("channel buffer of %d samples is not whole pages", length)

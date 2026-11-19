@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -47,6 +48,7 @@ import (
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
+	"github.com/qvest-digital/mxl-k8s/gateway/internal/mxlfs"
 )
 
 // MarkerDir is the directory in a domain that holds the placeholder
@@ -251,7 +253,7 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	// exists at all is read from the directory: a path walk into a
 	// missing flow on mxlfs waits for it and posts it as wanted, under
 	// the gateway's pid, which the agent would mirror.
-	exists, err := Present(domain, e.id)
+	exists, err := mxlfs.Listed(domain, e.id)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -264,7 +266,7 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 		// writes is tried again once it is released.
 		dir := filepath.Dir(m.dataPath(e))
 		if def, err := onDiskDefinition(dir); err != nil || !SameGeometry(def, flow.Spec.Definition.Raw) {
-			if n, err := flowlocks.Writers(m.dataPath(e)); err != nil || n > 0 {
+			if n, err := writers(m.dataPath(e)); err != nil || n > 0 {
 				return reconcile.Result{RequeueAfter: m.period()}, err
 			}
 			if err := os.RemoveAll(dir); err != nil {
@@ -292,15 +294,24 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	hints := HintsOf(&flow)
 	w, created, err := inst.NewWriterOpts(string(flow.Spec.Definition.Raw), hints.Options())
 	if err == nil && !created && hints.Differ(w.Config()) {
+		// The close deletes the flow when no other writer holds it, and a
+		// lookup of the deleted flow would wait for it to come back.
 		_ = w.Close()
-		n, werr := flowlocks.Writers(m.dataPath(e))
-		if werr != nil || n > 0 {
+		listed, werr := mxlfs.Listed(domain, e.id)
+		if werr != nil {
 			_ = os.Remove(MarkerPath(domain, e.id))
-			return reconcile.Result{RequeueAfter: m.period()}, werr
+			return reconcile.Result{}, werr
 		}
-		if err := os.RemoveAll(filepath.Dir(m.dataPath(e))); err != nil {
-			_ = os.Remove(MarkerPath(domain, e.id))
-			return reconcile.Result{}, err
+		if listed {
+			n, werr := writers(m.dataPath(e))
+			if werr != nil || n > 0 {
+				_ = os.Remove(MarkerPath(domain, e.id))
+				return reconcile.Result{RequeueAfter: m.period()}, werr
+			}
+			if err := os.RemoveAll(filepath.Dir(m.dataPath(e))); err != nil {
+				_ = os.Remove(MarkerPath(domain, e.id))
+				return reconcile.Result{}, err
+			}
 		}
 		w, created, err = inst.NewWriterOpts(string(flow.Spec.Definition.Raw), hints.Options())
 	}
@@ -415,23 +426,12 @@ func (m *Manager) clearStaleMarkers(domain string) error {
 	return nil
 }
 
-// foreignWriters is flowlocks.ForeignWriters; tests replace it.
-var foreignWriters = flowlocks.ForeignWriters
-
-// Present reports whether domain holds a directory for flow id, without
-// a lookup of the flow's own name.
-func Present(domain, id string) (bool, error) {
-	entries, err := os.ReadDir(domain)
-	if err != nil {
-		return false, err
-	}
-	for _, d := range entries {
-		if d.Name() == id+".mxl-flow" {
-			return true, nil
-		}
-	}
-	return false, nil
-}
+// foreignWriters is flowlocks.ForeignWriters and writers
+// flowlocks.Writers; tests replace them.
+var (
+	foreignWriters = flowlocks.ForeignWriters
+	writers        = flowlocks.Writers
+)
 
 // hasOrigin reports whether a producer publishes the flow, which is what
 // makes the MxlFlow's definition the geometry it is written in.
@@ -553,22 +553,33 @@ func (m *Manager) Unfilled(domain, id string) {
 // CheckLocalWriters gives up every held placeholder some other process
 // on this node has opened as a writer: the local writer wins.
 func (m *Manager) CheckLocalWriters(l logr.Logger) {
+	// Counted outside m.mu, which every mirror filling or releasing a
+	// placeholder takes, and only for a flow the domain lists: the
+	// directory can go under the placeholder's writer, and on mxlfs a
+	// lookup of a flow that is not there waits for it to come back.
 	m.mu.Lock()
+	held := maps.Clone(m.held)
+	m.mu.Unlock()
 	var taken []string
-	for name, e := range m.held {
+	for name, e := range held {
+		if ok, err := mxlfs.Listed(e.domain, e.id); err != nil || !ok {
+			continue
+		}
 		if n, err := foreignWriters(m.dataPath(e)); err == nil && n > 0 {
 			taken = append(taken, name)
 		}
 	}
-	m.mu.Unlock()
 	for _, name := range taken {
 		m.mu.Lock()
 		e := m.held[name]
-		delete(m.held, name)
-		m.mu.Unlock()
-		if e == nil {
+		// A placeholder replaced since it was counted is not the one a
+		// local writer took over.
+		if e != held[name] {
+			m.mu.Unlock()
 			continue
 		}
+		delete(m.held, name)
+		m.mu.Unlock()
 		if m.LocalWriter != nil {
 			m.LocalWriter(e.domain, e.id)
 		}

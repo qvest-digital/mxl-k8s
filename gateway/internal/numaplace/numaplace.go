@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
+	gwmxlfs "github.com/qvest-digital/mxl-k8s/gateway/internal/mxlfs"
 )
 
 // Event reasons, recorded on the MxlFlowMirror whose attach placed the
@@ -99,9 +100,10 @@ type Placer struct {
 	log      logr.Logger
 
 	// Seams for tests.
-	open     func(path string) (File, error)
-	memFree  func(node int32) (uint64, bool)
-	pageSize uint64
+	open      func(path string) (File, error)
+	ringFiles func(flowDir string) ([]string, error)
+	memFree   func(node int32) (uint64, bool)
+	pageSize  uint64
 
 	moves      *prometheus.CounterVec
 	moveTime   *prometheus.HistogramVec
@@ -122,12 +124,13 @@ type Placer struct {
 func New(node string, nic int32, rec record.EventRecorder, log logr.Logger) *Placer {
 	cl := prometheus.Labels{"node": node}
 	return &Placer{
-		nic:      nic,
-		recorder: rec,
-		log:      log,
-		open:     openFile,
-		memFree:  nodeMemFree,
-		pageSize: uint64(os.Getpagesize()),
+		nic:       nic,
+		recorder:  rec,
+		log:       log,
+		open:      openFile,
+		ringFiles: mxlfs.RingFiles,
+		memFree:   nodeMemFree,
+		pageSize:  uint64(os.Getpagesize()),
 		moves: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name:        "mxl_gateway_numa_moves_total",
 			Help:        "First acquires of a source ring by what became of its placement on the NIC's NUMA node, and why a block stayed off it.",
@@ -275,7 +278,17 @@ func (p *Placer) holdTarget(k flowKey) ([]File, error) {
 func (p *Placer) place(pin *flowPin, k flowKey, obj client.Object) {
 	start := time.Now()
 	nic := p.nic
-	paths, err := mxlfs.RingFiles(flowDir(k.domain, k.flowID))
+	// The source's reader holds no lock, so the producer may have
+	// deleted the flow since it was opened, and on mxlfs a lookup of a
+	// flow directory that is not there waits for it to appear.
+	listed, err := gwmxlfs.Listed(k.domain, k.flowID)
+	var paths []string
+	switch {
+	case err == nil && !listed:
+		err = fmt.Errorf("%s: %w", flowDir(k.domain, k.flowID), os.ErrNotExist)
+	case err == nil:
+		paths, err = p.ringFiles(flowDir(k.domain, k.flowID))
+	}
 	if err != nil {
 		p.log.Info("no source ring to place", "domain", k.domain, "flowID", k.flowID, "error", err.Error())
 		p.moves.WithLabelValues(k.domain, ResultRefused, "error").Inc()
