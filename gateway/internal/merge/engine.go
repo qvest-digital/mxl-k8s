@@ -185,10 +185,13 @@ type Engine struct {
 	// read as a gap a writer left.
 	chanMem [][]byte
 	zeroRun uint64
-	audio   *Audio
-	disc    *Discrete
-	rate    C.mxlRational
-	period  time.Duration // of a grain
+	// dirs are the members' flow directories, held open while Start
+	// builds the output.
+	dirs   []*os.File
+	audio  *Audio
+	disc   *Discrete
+	rate   C.mxlRational
+	period time.Duration // of a grain
 	// reported is, per member, when the gateway last reported an arrival
 	// and how long the range it reported lasts; see fed.
 	reported []report
@@ -238,9 +241,18 @@ func Start(ctx context.Context, spec Spec, log logr.Logger) (*Engine, error) {
 		}
 	}()
 	for _, id := range spec.Members {
-		path := filepath.Join(flowDir(spec.DomainDir, id), "data")
-		h, f, err := mapHeader(path, false)
+		dir, err := os.Open(flowDir(spec.DomainDir, id))
 		if err != nil {
+			return nil, err
+		}
+		e.dirs = append(e.dirs, dir)
+		f, err := openIn(dir, "data")
+		if err != nil {
+			return nil, err
+		}
+		h, err := mapHeaderFile(f, unix.PROT_READ)
+		if err != nil {
+			f.Close()
 			return nil, err
 		}
 		e.members = append(e.members, h)
@@ -252,6 +264,7 @@ func Start(ctx context.Context, spec Spec, log logr.Logger) (*Engine, error) {
 	if err := e.build(); err != nil {
 		return nil, err
 	}
+	e.closeDirs()
 	e.replaceable = canReplace(e.views[0])
 	if e.disc == nil || !e.disc.Data {
 		reported := make([]bool, len(spec.Members))
@@ -548,8 +561,11 @@ func (e *Engine) buildAudio(tmp, src0 string) error {
 		return err
 	}
 	var srcs []*os.File
-	for _, id := range e.spec.Members {
-		f, err := os.Open(filepath.Join(flowDir(e.spec.DomainDir, id), "channels"))
+	for _, dir := range e.dirs {
+		// The channels of the ring whose header the engine mapped: a page
+		// of another, lazily held ring may not exist, and reading it would
+		// fault in the gateway.
+		f, err := openIn(dir, "channels")
 		if err != nil {
 			return err
 		}
@@ -592,20 +608,22 @@ func mapChannels(f *os.File, size int64) ([]byte, error) {
 }
 
 // zeros is Audio.Zeros over the members' mapped channels.
-func (e *Engine) zeros(m int, from, to uint64) uint64 {
+func (e *Engine) zeros(m int, lo, from, to, hi uint64) uint64 {
 	channels, length := e.members[0].continuous()
-	return zeroRunStart(e.chanMem[m], uint64(channels), uint64(length), from, to, e.zeroRun)
+	return zeroRunStart(e.chanMem[m], uint64(channels), uint64(length), lo, from, to, hi, e.zeroRun)
 }
 
-// zeroRunStart returns the first sample in [from, to) that starts a run
+// zeroRunStart returns the first sample in [from, to) that lies in a run
 // of at least run samples whose 32-bit words are 0 on every channel of
-// mem, channels rings of length samples each, or to when there is none.
-// libmxl fills a skipped range with zero bytes; a run that reaches to
-// shorter than run is not counted.
-func zeroRunStart(mem []byte, channels, length, from, to, run uint64) uint64 {
+// mem, channels rings of length samples each, or to when none does. The
+// run may reach into [lo, from) and [to, hi), up to run - 1 samples each
+// way. libmxl v1.1.0's ContinuousFlowWriter::commit fills the samples a
+// writer skipped with zero bytes.
+func zeroRunStart(mem []byte, channels, length, lo, from, to, hi, run uint64) uint64 {
 	words := unsafe.Slice((*uint32)(unsafe.Pointer(unsafe.SliceData(mem))), uint64(len(mem))/4)
+	lo, hi = max(lo, from-min(from, run-1)), min(hi, to+run-1)
 	var n uint64
-	for s := from; s < to; s++ {
+	for s := lo; s < hi; s++ {
 		off := s % length
 		zero := true
 		for c := range channels {
@@ -619,7 +637,10 @@ func zeroRunStart(mem []byte, channels, length, from, to, run uint64) uint64 {
 			continue
 		}
 		if n++; n >= run {
-			return s + 1 - n
+			if start := s + 1 - n; start < to {
+				return max(start, from)
+			}
+			return to
 		}
 	}
 	return to
@@ -776,13 +797,7 @@ func (e *Engine) openRing(member int) (_ *memberRing, err error) {
 		return nil, err
 	}
 	defer dir.Close()
-	open := func(name string) (*os.File, error) {
-		fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC, 0)
-		if err != nil {
-			return nil, fmt.Errorf("open %s: %w", filepath.Join(dir.Name(), name), err)
-		}
-		return os.NewFile(uintptr(fd), filepath.Join(dir.Name(), name)), nil
-	}
+	open := func(name string) (*os.File, error) { return openIn(dir, name) }
 	r := &memberRing{}
 	defer func() {
 		if err != nil {
@@ -829,6 +844,17 @@ func (e *Engine) openRing(member int) (_ *memberRing, err error) {
 		r.mems = append(r.mems, mem)
 	}
 	return r, nil
+}
+
+// openIn opens name read-only in the directory dir holds open, so files
+// opened in one dir are of one ring even while the flow's directory is
+// being replaced.
+func openIn(dir *os.File, name string) (*os.File, error) {
+	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", filepath.Join(dir.Name(), name), err)
+	}
+	return os.NewFile(uintptr(fd), filepath.Join(dir.Name(), name)), nil
 }
 
 // layout describes what aligned compares.
@@ -1270,7 +1296,16 @@ func (e *Engine) Close() {
 	_ = os.RemoveAll(e.outDir)
 }
 
+// closeDirs closes the members' flow directories.
+func (e *Engine) closeDirs() {
+	for _, d := range e.dirs {
+		d.Close()
+	}
+	e.dirs = nil
+}
+
 func (e *Engine) release() {
+	e.closeDirs()
 	for _, v := range e.views {
 		v.Close()
 	}

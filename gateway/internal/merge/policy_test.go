@@ -751,24 +751,23 @@ func (s *samples) write(m int, from, to uint64, v func(uint64) float32) {
 	}
 }
 
-func (s *samples) zeros(m int, from, to uint64) uint64 {
-	return zeroRunStart(s.mem[m], s.channels, s.length, from, to, 48)
+func (s *samples) zeros(m int, lo, from, to, hi uint64) uint64 {
+	return zeroRunStart(s.mem[m], s.channels, s.length, lo, from, to, hi, 48)
 }
 
 func zero(uint64) float32 { return 0 }
 
-// A writer that skips a range has libmxl fill it with zeros on its next
-// commit, under its head: a member's gap arrives as committed silence.
-// While another member holds the same samples, they are served from it,
-// the page where the primary resumes mid-page included, whose published
-// part the primary holds as zeros. The primary stays the primary.
-func TestAudioServesAMemberWithContentOverAZeroFilledGap(t *testing.T) {
+// driveGap runs two members over batches of 480 samples, member 0 holding
+// zeros where gap says and member 1 the content throughout, both
+// committing each batch at once, and returns, per published sample, the
+// source it showed.
+func driveGap(t *testing.T, gap func(uint64) bool) (*Audio, map[uint64]int) {
+	t.Helper()
 	const batch = 480
 	a := NewAudio(2, 38, 2)
 	a.Skew, a.Tolerance = 2048, ToleranceFor(40*time.Millisecond)
 	s := newSamples(2, 2, 38)
 	a.Zeros = s.zeros
-	gap := func(i uint64) bool { return i >= 100*batch && i < 105*batch } // 48000 to 50400
 	shown := map[uint64]int{}
 	now := time.Unix(0, 0)
 	for b := uint64(10); b < 200; b++ {
@@ -798,9 +797,26 @@ func TestAudioServesAMemberWithContentOverAZeroFilledGap(t *testing.T) {
 			require.Equal(t, 1, src, "sample %d of the gap shown from member %d", i, src)
 		}
 	}
+	return a, shown
+}
+
+// A writer that skips a range has libmxl fill it with zeros on its next
+// commit, under its head: a member's gap arrives as committed silence.
+// While another member holds the same samples, they are served from it,
+// the page where the primary resumes mid-page included, whose published
+// part the primary holds as zeros. The primary stays the primary.
+func TestAudioServesAMemberWithContentOverAZeroFilledGap(t *testing.T) {
+	_, shown := driveGap(t, func(i uint64) bool { return i >= 48000 && i < 50400 })
 	// The pages after the one the gap ends in are the primary's again.
 	require.Equal(t, 0, shown[51*PageSamples])
 	require.Equal(t, 1, shown[50400], "the page the primary resumed in moved back to its zeros")
+}
+
+// A gap that starts fewer samples before a page boundary than a run
+// takes is a run all the same: the zeros past the boundary, which the
+// member committed with them, count.
+func TestAudioServesAroundAGapEndingAPage(t *testing.T) {
+	driveGap(t, func(i uint64) bool { return i >= 21*PageSamples-30 && i < 21*PageSamples+400 })
 }
 
 // The zero-filled range usually arrives before the same samples from a
@@ -847,6 +863,61 @@ func TestAudioWaitsForAMemberBehindAZeroFilledRange(t *testing.T) {
 		require.Equal(t, uint64(23*PageSamples), head)
 		require.Equal(t, []int{0, 0, 0}, a.Current[20:23])
 	})
+}
+
+// Members holding the same silence a little apart wait once per stretch
+// of it, not at every batch the later one has not committed yet.
+func TestAudioWaitsOncePerStretchOfSilence(t *testing.T) {
+	const batch = 480
+	a := NewAudio(2, 38, 2)
+	a.Skew, a.Tolerance = 2048, ToleranceFor(40*time.Millisecond)
+	s := newSamples(2, 2, 38)
+	a.Zeros = s.zeros
+	now := time.Unix(0, 0)
+	waits := 0
+	for b := uint64(10); b < 120; b++ {
+		v := content
+		if b >= 30 && b < 110 {
+			v = zero
+		}
+		for m := range 2 {
+			s.write(m, b*batch, (b+1)*batch, v)
+			a.Committed(m, b*batch, (b+1)*batch)
+			_, _, wait := a.Step(now)
+			if wait > 0 && b >= 30 && b < 110 {
+				waits++
+			}
+			now = now.Add(5 * time.Millisecond) // member 1 commits 5 ms after member 0
+		}
+	}
+	require.Equal(t, uint64(120*batch), a.Head)
+	require.LessOrEqual(t, waits, 1, "a stretch of silence waited more than once")
+	require.Equal(t, 0, a.Primary)
+}
+
+// A late primary whose alternative holds zeros is waited for once: the
+// zeros' wait and the late primary's run on one clock.
+func TestAudioWaitsForALatePrimaryOverZerosOnce(t *testing.T) {
+	a := NewAudio(2, 38, 2)
+	a.Skew, a.Tolerance = 2048, ToleranceFor(40*time.Millisecond)
+	s := newSamples(2, 2, 38)
+	a.Zeros = s.zeros
+	for m := range 2 {
+		s.write(m, 10*PageSamples, 20*PageSamples, content)
+		a.Committed(m, 10*PageSamples, 20*PageSamples)
+	}
+	now := time.Unix(0, 0)
+	_, head, _ := a.Step(now)
+	require.Equal(t, uint64(20*PageSamples), head)
+	s.write(1, 20*PageSamples, 21*PageSamples, zero)
+	a.Committed(1, 20*PageSamples, 21*PageSamples)
+	_, head, wait := a.Step(now)
+	require.Equal(t, uint64(20*PageSamples), head)
+	require.Equal(t, a.Tolerance, wait)
+
+	_, head, wait = a.Step(now.Add(a.Tolerance))
+	require.Zero(t, wait, "the late primary was waited for a second time")
+	require.Equal(t, uint64(21*PageSamples), head)
 }
 
 // Digital silence on every member is content like any other: nothing is
@@ -910,6 +981,7 @@ func TestAudioDropPrefersAMemberWithoutZeros(t *testing.T) {
 func TestZeroRunStartFindsTheFirstRunOnEveryChannel(t *testing.T) {
 	s := newSamples(1, 2, 2)
 	s.write(0, 0, 2*PageSamples, content)
+	at := func(from, to uint64) uint64 { return s.zeros(0, from, from, to, to) }
 	// A zero on one channel only is not a run; on both, 47 samples are
 	// too short, 48 are one.
 	words := unsafe.Slice((*uint32)(unsafe.Pointer(&s.mem[0][0])), len(s.mem[0])/4)
@@ -918,12 +990,17 @@ func TestZeroRunStartFindsTheFirstRunOnEveryChannel(t *testing.T) {
 	}
 	s.write(0, 400, 447, zero)
 	s.write(0, 600, 648, zero)
-	require.Equal(t, uint64(600), s.zeros(0, 0, 2*PageSamples))
-	require.Equal(t, uint64(2*PageSamples), s.zeros(0, 601, 2*PageSamples), "a run counts from where the range starts")
-	require.Equal(t, uint64(640), s.zeros(0, 0, 640), "a run cut short by the range is none")
+	require.Equal(t, uint64(600), at(0, 2*PageSamples))
+	require.Equal(t, uint64(2*PageSamples), at(601, 2*PageSamples), "only the range counts")
+	require.Equal(t, uint64(640), at(0, 640), "a run cut short by the range is none")
+	// Around the range, as far as run - 1 samples into what it may read.
+	require.Equal(t, uint64(620), s.zeros(0, 0, 620, 2*PageSamples, 2*PageSamples))
+	require.Equal(t, uint64(600), s.zeros(0, 0, 0, 640, 2*PageSamples))
+	require.Equal(t, uint64(640), s.zeros(0, 0, 0, 640, 647), "past what may be read")
+	require.Equal(t, uint64(2*PageSamples), s.zeros(0, 0, 648, 2*PageSamples, 2*PageSamples), "a run before the range")
 	// Across the ring's end.
 	s.write(0, 2*PageSamples-20, 2*PageSamples+40, zero)
-	require.Equal(t, uint64(2*PageSamples-20), s.zeros(0, PageSamples, 3*PageSamples))
+	require.Equal(t, uint64(2*PageSamples-20), at(PageSamples, 3*PageSamples))
 }
 
 // The cost of Audio.Zeros over one page of 1024 samples, the most one
@@ -946,7 +1023,7 @@ func BenchmarkZeroRunStartPage(b *testing.B) {
 			s.write(0, 0, 38*PageSamples, tc.v)
 			for i := 0; b.Loop(); i++ {
 				p := uint64(i%38) * PageSamples
-				s.zeros(0, p, p+PageSamples)
+				s.zeros(0, p, p, p+PageSamples, p+PageSamples)
 			}
 		})
 	}
