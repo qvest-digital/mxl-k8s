@@ -2054,10 +2054,31 @@
               },
               "title": "verbsAckTimeout",
               "type": "integer"
+            },
+            "wait": {
+              "properties": {
+                "driver": {
+                  "default": "",
+                  "description": "Kernel driver the device has to be bound to, the basename of its device/driver link, as efa for the AWS Elastic Fabric Adapter. Empty accepts any device.",
+                  "required": [],
+                  "title": "driver"
+                },
+                "seconds": {
+                  "default": 0,
+                  "description": "Seconds the gateway waits at start, in an init container, for a device under /sys/class/infiniband with an ACTIVE port, checked once a second. Only consulted when rdma.enabled is set. libfabric fixes a provider's device list when the gateway first enumerates, so a gateway that starts before its device is usable advertises no RDMA for the life of the process, and every mirror created meanwhile resolves to tcp. A driver loaded after the pod starts, as by the Kernel Module Management operator, which loads it from a pod of its own once the kubelet runs, has to bind before then. The init container exits 0 when the bound passes, and the gateway then starts as it would without it. 0 starts the gateway at once.",
+                  "minimum": 0,
+                  "title": "seconds",
+                  "type": "integer"
+                }
+              },
+              "required": [],
+              "title": "wait",
+              "type": "object"
             }
           },
           "required": [
-            "extraEnv"
+            "extraEnv",
+            "wait"
           ],
           "title": "rdma",
           "type": "object"
@@ -2272,12 +2293,27 @@
                       "default": "vpc.amazonaws.com/efa",
                       "title": "resourceName",
                       "type": "string"
+                    },
+                    "wait": {
+                      "properties": {
+                        "driver": {
+                          "default": "efa",
+                          "title": "driver",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "driver"
+                      ],
+                      "title": "wait",
+                      "type": "object"
                     }
                   },
                   "required": [
                     "enabled",
                     "mountInfiniband",
-                    "resourceName"
+                    "resourceName",
+                    "wait"
                   ],
                   "title": "rdma",
                   "type": "object"
@@ -2496,6 +2532,13 @@
           "required": [],
           "title": "huge"
         },
+        "moduleWaitSeconds": {
+          "default": 0,
+          "description": "Seconds the agent waits at start for the kernel to list mxlfs in /proc/filesystems, checked once a second from an init container. The agent decides each domain once: a mount that finds no mxlfs leaves the domain plain for the life of the agent process and records a MxlfsUnavailable warning event on the Node. A module loaded after the agent starts, as by the Kernel Module Management operator, which loads it from a pod of its own once the kubelet runs, has to be listed before then. The init container exits 0 when the bound passes, and the agent then starts as it would without it. 0 starts the agent at once.",
+          "minimum": 0,
+          "title": "moduleWaitSeconds",
+          "type": "integer"
+        },
         "numa": {
           "properties": {
             "metrics": {
@@ -2605,12 +2648,12 @@
         },
         "waitImage": {
           "default": "busybox:1.38",
-          "description": "Image of the init container that waits for mxlfs.ready. Needs a POSIX sh, test and sleep.",
+          "description": "Image of the init containers that wait for mxlfs.ready, for the mxlfs module and for an RDMA device (gateway.rdma.wait). Needs a POSIX sh, test, sleep, date, awk, grep and readlink.",
           "required": [],
           "title": "waitImage"
         },
         "waitResources": {
-          "description": "Resources of that init container.",
+          "description": "Resources of those init containers.",
           "properties": {
             "limits": {
               "required": [],
