@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/qvest-digital/mxl-k8s/agent/internal/flowlock"
 	"github.com/qvest-digital/mxl-k8s/api/selection"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -392,7 +393,7 @@ func (d *Dispatcher) flowExistsLocally(ref mxlv1alpha1.FlowRef) bool {
 	// wait=, a lookup of a missing flow directory waits for it to
 	// appear, which would hold this request until the reader that made
 	// it has given up.
-	if !listed(dir, ref.ID+".mxl-flow") {
+	if ok, err := flowlock.Listed(dir, ref.ID); err != nil || !ok {
 		return false
 	}
 	// The directory is listed, so its dentry is positive and the walk into
@@ -405,25 +406,6 @@ func (d *Dispatcher) flowExistsLocally(ref mxlv1alpha1.FlowRef) bool {
 // statFlowDef looks a flow's flow_def.json up by name. A seam for tests,
 // which have no mxlfs to show that a lookup of a missing flow waits.
 var statFlowDef = os.Stat
-
-// listed reports whether dir has an entry called name, reading the
-// directory instead of looking the name up.
-func listed(dir, name string) bool {
-	f, err := os.Open(dir)
-	if err != nil {
-		return false
-	}
-	defer func() { _ = f.Close() }()
-	for {
-		names, err := f.Readdirnames(256)
-		if slices.Contains(names, name) {
-			return true
-		}
-		if err != nil {
-			return false
-		}
-	}
-}
 
 func (d *Dispatcher) resolveSourceNode(ctx context.Context, ref mxlv1alpha1.FlowRef) (mxlv1alpha1.OriginResolution, error) {
 	var flow mxlv1alpha1.MxlFlow

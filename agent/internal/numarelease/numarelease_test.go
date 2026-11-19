@@ -449,3 +449,27 @@ func TestHoldWhileUnpinnedRestartsTheDelay(t *testing.T) {
 	}
 	require.Empty(t, fx.ring.calls)
 }
+
+// A process keeps the files of a deleted flow mapped, and the scan
+// reports the flow for as long as it does. On mxlfs a lookup of the
+// flow's directory then waits for it to come back, once per pass and
+// such flow, so a flow the domain does not list is not looked up.
+func TestDeletedFlowIsNotLookedUp(t *testing.T) {
+	fx := newFixture(t)
+	fx.h.pid(10, "1", "4-7")
+	fx.use(10, podProd, observed.Output)
+	var looked []string
+	fx.loop.ringFiles = func(flowDir string) ([]string, error) {
+		looked = append(looked, flowDir)
+		return mxlfs.RingFiles(flowDir)
+	}
+	flow := filepath.Join(fx.dir, flowA+".mxl-flow")
+	require.NoError(t, os.Rename(flow, filepath.Join(t.TempDir(), "deleted")))
+
+	require.Equal(t, "", fx.pass(t))
+	require.Empty(t, looked, "a flow the listing did not return was looked up by name")
+
+	fx.ring.add(t, fx.dir, flowA, 2, 0, 512)
+	require.Equal(t, StateSettling, fx.pass(t))
+	require.Equal(t, []string{flow}, looked)
+}

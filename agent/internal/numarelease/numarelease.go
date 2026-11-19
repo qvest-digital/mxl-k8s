@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	"github.com/qvest-digital/mxl-k8s/agent/internal/flowlock"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/observed"
 	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -91,6 +92,7 @@ type Loop struct {
 
 	procRoot, nodeRoot string
 	open               func(path string) (File, error)
+	ringFiles          func(flowDir string) ([]string, error)
 	now                func() time.Time
 	sleep              func(time.Duration)
 	pageSize           uint64
@@ -111,12 +113,13 @@ type Loop struct {
 func New(node string) *Loop {
 	cl := prometheus.Labels{"node": node}
 	return &Loop{
-		procRoot: "/proc",
-		nodeRoot: NodeRoot,
-		open:     openFile,
-		now:      time.Now,
-		sleep:    time.Sleep,
-		pageSize: uint64(os.Getpagesize()),
+		procRoot:  "/proc",
+		nodeRoot:  NodeRoot,
+		open:      openFile,
+		ringFiles: mxlfs.RingFiles,
+		now:       time.Now,
+		sleep:     time.Sleep,
+		pageSize:  uint64(os.Getpagesize()),
 		moves: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mxl_agent_numa_release_moves_total",
 			Help: "Ring files the release loop moved to the node of their flow's writers and readers, by " +
@@ -258,7 +261,14 @@ func (l *Loop) flow(f *flowUse, dir string, topo topology) string {
 		w = n
 	}
 
-	paths, err := mxlfs.RingFiles(filepath.Join(dir, f.ref.ID+".mxl-flow"))
+	// A process keeps a flow's files mapped after the flow is deleted, so
+	// the flow it reports may be gone. On mxlfs a lookup of a flow
+	// directory that is not there waits for it, so the flow is looked up
+	// only once the domain lists it.
+	if listed, err := flowlock.Listed(dir, f.ref.ID); err != nil || !listed {
+		return ""
+	}
+	paths, err := l.ringFiles(filepath.Join(dir, f.ref.ID+".mxl-flow"))
 	if err != nil {
 		return ""
 	}

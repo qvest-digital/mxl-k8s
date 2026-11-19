@@ -706,3 +706,42 @@ func TestRunRenewLoop_RenewsAnOriginWhoseIdASetNamesAsOutput(t *testing.T) {
 		t.Fatal("the Lease of a held Origin whose id a set names as output was not renewed")
 	}
 }
+
+// On mxlfs a lookup by name of a flow directory that is gone waits for
+// it to come back. A placeholder's marker goes once its flow has been
+// deleted, and the publish that follows ran inside the serial marker
+// loop, which then stalled for the whole wait on every such flow. A flow
+// the domain no longer lists is published as nothing, without a lookup.
+func TestPublishAppeared_LooksUpOnlyListedFlows(t *testing.T) {
+	domain := t.TempDir()
+	var looked []string
+	read := readFlowDef
+	readFlowDef = func(name string) ([]byte, error) {
+		looked = append(looked, name)
+		return read(name)
+	}
+	t.Cleanup(func() { readFlowDef = read })
+	probed := 0
+	p := &Publisher{
+		Client:     fake.NewClientBuilder().WithScheme(newScheme(t)).WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).Build(),
+		DomainPath: domain,
+		NodeName:   "n1",
+		WriterAttached: func(string) (bool, error) {
+			probed++
+			return true, nil
+		},
+	}
+
+	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
+	assert.Empty(t, looked, "a flow the listing did not return was looked up by name")
+	assert.Zero(t, probed, "a flow the listing did not return was probed for a writer")
+
+	flowDir := filepath.Join(domain, validFlowID+".mxl-flow")
+	require.NoError(t, os.Mkdir(flowDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(flowDir, FlowDefName), []byte(`{"id":"`+validFlowID+`"}`), 0o644))
+	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
+	assert.Equal(t, []string{filepath.Join(flowDir, FlowDefName)}, looked)
+	assert.Equal(t, 1, probed)
+	var got mxlv1alpha1.MxlFlow
+	require.NoError(t, p.Client.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
+}
