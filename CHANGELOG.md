@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.0-rc.52](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.51...v1.1.0-rc.52) (2026-11-19)
+
+
+### Bug Fixes
+
+* **gateway:** serve merged audio around a member's zero-filled gap ([#453](https://github.com/qvest-digital/mxl-k8s/issues/453)) ([d3ed530](https://github.com/qvest-digital/mxl-k8s/commit/d3ed5301a053fdfa44a09e0aa3f59605cc4cd0f8))
+* **operator:** count only serving redundancy sets as an output's owner ([#452](https://github.com/qvest-digital/mxl-k8s/issues/452)) ([11fd4df](https://github.com/qvest-digital/mxl-k8s/commit/11fd4df9601cc4c10bd011e812b7c58faecf8c60))
+* **operator:** hand a flow's id over to a redundancy set at once ([#450](https://github.com/qvest-digital/mxl-k8s/issues/450)) ([5548f3a](https://github.com/qvest-digital/mxl-k8s/commit/5548f3a47436d68fd4789c1e2faa92bf52f190f0))
+
 ## [1.1.0-rc.51](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.50...v1.1.0-rc.51) (2026-11-14)
 
 
