@@ -271,6 +271,40 @@ Call as: include "mxlk8s.mxlfs.waitContainer" (dict "Context" $ "root" "/run/mxl
 {{- end -}}
 
 {{/*
+Init container holding the agent until the kernel lists mxlfs in
+/proc/filesystems, for at most mxlfs.moduleWaitSeconds. It exits 0
+either way. /proc/filesystems is global, so it needs no host mount.
+Call as: include "mxlk8s.mxlfs.moduleWaitContainer" .
+*/}}
+{{- define "mxlk8s.mxlfs.moduleWaitContainer" -}}
+- name: wait-for-mxlfs-module
+  image: {{ .Values.mxlfs.waitImage }}
+  command:
+    - sh
+    - -c
+    - |
+      end=$(($(date +%s) + $0))
+      until awk '$NF == "mxlfs" { f = 1 } END { exit !f }' "$1"; do
+        if [ "$(date +%s)" -ge "$end" ]; then
+          echo "no mxlfs in $1 after $0s" >&2
+          exit 0
+        fi
+        sleep 1
+      done
+    - {{ int .Values.mxlfs.moduleWaitSeconds | quote }}
+    - /proc/filesystems
+  {{- with .Values.mxlfs.waitResources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+{{- end -}}
+
+{{/*
 The NUMA placement mode in effect: off, node or flow. Empty is off. A
 mode other than off needs mxlfs.enabled, as only an mxlfs domain has a
 numa_node= or per-file placement.

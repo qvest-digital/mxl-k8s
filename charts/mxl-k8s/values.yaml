@@ -214,10 +214,25 @@ mxlfs:
       # scrape. Needs an mxlfs module with the NUMA ioctls; with an older
       # one the series are left out.
       enabled: false
-  # -- Image of the init container that waits for mxlfs.ready. Needs a
-  # POSIX sh, test and sleep.
+  # @schema
+  # type: integer
+  # minimum: 0
+  # @schema
+  # -- Seconds the agent waits at start for the kernel to list mxlfs in
+  # /proc/filesystems, checked once a second from an init container.
+  # The agent decides each domain once: a mount that finds no mxlfs
+  # leaves the domain plain for the life of the agent process and
+  # records a MxlfsUnavailable warning event on the Node. A module
+  # loaded after the agent starts, as by the Kernel Module Management
+  # operator, which loads it from a pod of its own once the kubelet
+  # runs, has to be listed before then. The init container exits 0
+  # when the bound passes, and the agent then starts as it would
+  # without it. 0 starts the agent at once.
+  moduleWaitSeconds: 0
+  # -- Image of the init containers that wait for mxlfs.ready and for
+  # the mxlfs module. Needs a POSIX sh, test, sleep, date and awk.
   waitImage: busybox:1.38
-  # -- Resources of that init container.
+  # -- Resources of those init containers.
   waitResources:
     requests:
       cpu: 1m
