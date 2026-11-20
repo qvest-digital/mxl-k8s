@@ -373,6 +373,37 @@ func TestReconcilerLeavesAnOutputIDAWriterHolds(t *testing.T) {
 	require.Empty(t, r.engines)
 }
 
+// There is usually no flow under the output's id when an engine is
+// built, and on mxlfs a lookup of a flow directory that is not there
+// waits for it to appear, holding the set's one worker. The leftover
+// output is looked for in the domain's listing; one listed is still
+// checked for a writer and removed.
+func TestReconcilerLooksUpOnlyAListedOutput(t *testing.T) {
+	started := fakeStart(t)
+	dir := t.TempDir()
+	memberDir(t, dir, memberA, videoDef(memberA))
+	var looked []string
+	orig := writers
+	writers = func(dataPath string) (int, error) {
+		looked = append(looked, dataPath)
+		return orig(dataPath)
+	}
+	t.Cleanup(func() { writers = orig })
+	r := reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+
+	require.Equal(t, recheck, reconcileSet(t, r).RequeueAfter)
+	require.Len(t, *started, 1)
+	require.Empty(t, looked, "an output the listing did not return was looked up by name")
+
+	// A gateway started again finds the output its engine left.
+	memberDir(t, dir, output, videoDef(output))
+	r = reconcilerFor(t, wantedSet("reader"), &fakeDomains{dir: dir, onMxlfs: true})
+	reconcileSet(t, r)
+	require.Len(t, *started, 2)
+	require.Equal(t, []string{filepath.Join(flowDir(dir, output), "data")}, looked)
+	require.NoDirExists(t, flowDir(dir, output), "a leftover output nothing holds was kept")
+}
+
 // fakeReplace replaces Engine.Replace: it records the engine members it
 // was asked to replace and answers with err, or with the inode now in
 // the member's directory. then, if set, runs before it answers.

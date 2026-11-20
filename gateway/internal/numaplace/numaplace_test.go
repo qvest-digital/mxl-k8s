@@ -497,3 +497,27 @@ func gauge(t *testing.T, p *Placer, name, side string) float64 {
 	t.Fatalf("no %s{side=%q}", name, side)
 	return 0
 }
+
+// A source's reader holds no lock on its flow, so the producer can
+// delete the flow between the open and the first acquire. On mxlfs a
+// lookup of a flow directory that is not there waits for it to appear,
+// so a flow the domain does not list is not looked up.
+func TestAcquireLooksUpOnlyAListedFlow(t *testing.T) {
+	fs := &fakeFS{}
+	dom := t.TempDir()
+	p, _ := newPlacer(fs)
+	var looked []string
+	p.ringFiles = func(flowDir string) ([]string, error) {
+		looked = append(looked, flowDir)
+		return mxlfs.RingFiles(flowDir)
+	}
+
+	p.Acquire(dom, flowA, mirror())()
+	require.Empty(t, looked, "a flow the listing did not return was looked up by name")
+	require.Equal(t, 1.0, moves(p, dom, ResultRefused, "error"))
+
+	fs.ring(t, dom, flowB, 1, 512, 0)
+	p.Acquire(dom, flowB, mirror())()
+	require.Equal(t, []string{filepath.Join(dom, flowB+".mxl-flow")}, looked)
+	require.Equal(t, 1.0, moves(p, dom, ResultMoved, "none"))
+}

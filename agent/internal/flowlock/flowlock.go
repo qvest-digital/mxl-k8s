@@ -27,6 +27,8 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
 )
 
 // flowDirSuffix is the directory-name suffix libmxl gives a per-flow
@@ -57,20 +59,25 @@ const dataFileName = "data"
 //
 // A directory with no data file has no writer: libmxl creates that
 // file before it allocates anything, so its absence means nothing ever
-// got as far as attaching.
+// got as far as attaching. A flow the domain does not list has none
+// either, and is not looked up (see listed).
 //
-// Any other error reports a writer attached, and returns the error for
-// the caller to log. Being unable to tell must not read as "abandoned":
-// demoting a live producer's location costs every consumer of that flow
-// its source, while leaving a corpse published costs one more pass.
+// Any other error, a domain that cannot be listed included, reports a
+// writer attached, and returns the error for the caller to log. Being
+// unable to tell must not read as "abandoned": demoting a live
+// producer's location costs every consumer of that flow its source,
+// while leaving a corpse published costs one more pass.
 //
 // Deliberately not O_NOATIME. libmxl opens flow files with it, and
 // without CAP_FOWNER that only succeeds on files the caller owns, so a
 // flow created by another uid would report a writer that is not there.
 func WriterAttached(domainPath, flowID string) (bool, error) {
+	if listed, err := listed(domainPath, flowID); err != nil || !listed {
+		return err != nil, err
+	}
 	path := filepath.Join(domainPath, flowID+flowDirSuffix, dataFileName)
 
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	fd, err := openData(path, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
@@ -91,6 +98,27 @@ func WriterAttached(domainPath, flowID string) (bool, error) {
 	_ = syscall.Flock(fd, syscall.LOCK_UN)
 	return false, nil
 }
+
+// listed reports whether the domain at domainPath lists flowID's
+// directory (see mxlfs.Listed). On mxlfs a lookup of a flow directory
+// that is not there waits for it to appear, so a flow is looked up by
+// name only once the listing has returned it. A domain that does not
+// exist lists no flow.
+func listed(domainPath, flowID string) (bool, error) {
+	ok, err := mxlfs.Listed(domainPath, flowID+flowDirSuffix)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return ok, err
+}
+
+// openData and statData look a flow's data file up by name. Seams for
+// tests, which have no mxlfs to show that a lookup of a missing flow
+// waits.
+var (
+	openData = syscall.Open
+	statData = unix.Stat
+)
 
 // ProcLocks is where the kernel lists every file lock.
 var ProcLocks = "/proc/locks"
@@ -117,10 +145,14 @@ func ReadLocks() (Locks, error) {
 }
 
 // WriterPIDs lists, once each, the processes holding a writer's lock on
-// flowID's data file under domainPath. A missing file has none.
+// flowID's data file under domainPath. A missing file has none, and a
+// flow the domain does not list is not looked up.
 func (l Locks) WriterPIDs(domainPath, flowID string) ([]int32, error) {
+	if listed, err := listed(domainPath, flowID); err != nil || !listed {
+		return nil, err
+	}
 	var st unix.Stat_t
-	if err := unix.Stat(filepath.Join(domainPath, flowID+flowDirSuffix, dataFileName), &st); err != nil {
+	if err := statData(filepath.Join(domainPath, flowID+flowDirSuffix, dataFileName), &st); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}

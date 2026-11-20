@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/placeholder"
 )
@@ -81,7 +82,7 @@ func (p *Publisher) Reconcile(ctx context.Context, req reconcile.Request) (recon
 	}
 	// A path walk into a missing flow on mxlfs waits for it and posts it
 	// as wanted; a producer that has just exited leaves none.
-	if ok, err := placeholder.Present(h.DomainPath(), flow.Spec.ID); err != nil || !ok {
+	if ok, err := mxlfs.Listed(h.DomainPath(), flow.Spec.ID+".mxl-flow"); err != nil || !ok {
 		return reconcile.Result{}, err
 	}
 	inst := h.MXL()

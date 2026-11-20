@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -1002,6 +1003,45 @@ func TestEngineRefusesARingOfAnotherDepth(t *testing.T) {
 	require.ErrorIs(t, err, ErrOtherLayout)
 	require.NotErrorIs(t, err, ErrNotOpened)
 	require.Contains(t, err.Error(), "grains")
+}
+
+// Start opens each member's directory once and builds the output from
+// the files in it. A member whose directory is replaced or removed in
+// between, as a producer that exits takes it, is no ring to build
+// from by its name any more, and on mxlfs a lookup of a flow directory
+// that is not there waits for it to appear. The build reads every
+// member file in the directory Start opened. Without mxlfs the build
+// stops at its first mxlfs ioctl, after it read the first member's
+// definition and first grain, so the per-slot grain opens are covered
+// only on a real mxlfs (MXLFS_TEST_DIR).
+func TestEngineBuildsFromTheMemberDirectoriesItOpened(t *testing.T) {
+	domain := t.TempDir()
+	if os.Getenv("MXLFS_TEST_DIR") != "" {
+		domain = mxlfsDomain(t)
+		lazily(t, domain)
+	}
+	inst, err := mxl.NewInstance(domain, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { inst.Close() })
+	w, _, err := inst.NewWriter(videoDef(memberA))
+	require.NoError(t, err)
+	t.Cleanup(func() { w.Close() })
+
+	e := &Engine{spec: Spec{DomainDir: domain, OutputID: output, Members: []string{memberA}},
+		outDir: flowDir(domain, output)}
+	t.Cleanup(e.release)
+	dir, err := os.Open(flowDir(domain, memberA))
+	require.NoError(t, err)
+	e.dirs = append(e.dirs, dir)
+	f, err := openIn(dir, "data")
+	require.NoError(t, err)
+	h, err := mapHeaderFile(f, unix.PROT_READ)
+	require.NoError(t, err)
+	e.members, e.files = append(e.members, h), append(e.files, f)
+	require.NoError(t, e.checkAligned())
+	require.NoError(t, os.Rename(flowDir(domain, memberA), filepath.Join(domain, ".gone")))
+
+	require.NotErrorIs(t, e.build(), fs.ErrNotExist, "the build looked a member up by its name")
 }
 
 // rig runs an engine's loop over two audio members on tmpfs, without

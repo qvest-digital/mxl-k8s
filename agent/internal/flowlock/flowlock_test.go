@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 const flowID = "11111111-2222-3333-4444-555555555555"
@@ -163,4 +164,79 @@ func TestWriterPIDsListsTheHolder(t *testing.T) {
 
 	holdShared(t, dir)
 	require.Equal(t, []int32{int32(os.Getpid())}, pids())
+}
+
+// lookups records every by-name lookup of a flow's data file the probes
+// make, through the seams, for the test's duration.
+func lookups(t *testing.T) *[]string {
+	t.Helper()
+	var looked []string
+	open, stat := openData, statData
+	openData = func(path string, mode int, perm uint32) (int, error) {
+		looked = append(looked, path)
+		return open(path, mode, perm)
+	}
+	statData = func(path string, st *unix.Stat_t) error {
+		looked = append(looked, path)
+		return stat(path, st)
+	}
+	t.Cleanup(func() { openData, statData = open, stat })
+	return &looked
+}
+
+// On mxlfs a lookup by name of a flow directory that is gone waits for
+// it to come back. The probes run once per flow on every rescan and
+// renew tick, between API calls that leave time for a flow listed at
+// the start of the pass to go, so each looks a flow up only once a
+// fresh listing has returned it.
+func TestProbesLookUpOnlyListedFlows(t *testing.T) {
+	domain := t.TempDir()
+	looked := lookups(t)
+
+	attached, err := WriterAttached(domain, flowID)
+	require.NoError(t, err)
+	assert.False(t, attached)
+	pids, err := Locks{}.WriterPIDs(domain, flowID)
+	require.NoError(t, err)
+	assert.Empty(t, pids)
+	assert.Empty(t, *looked, "a flow the listing did not return was looked up by name")
+
+	dir := makeFlowDir(t, domain, flowID)
+	holdShared(t, dir)
+	attached, err = WriterAttached(domain, flowID)
+	require.NoError(t, err)
+	assert.True(t, attached)
+	_, err = Locks{}.WriterPIDs(domain, flowID)
+	require.NoError(t, err)
+	data := filepath.Join(dir, dataFileName)
+	assert.Equal(t, []string{data, data}, *looked)
+}
+
+// A domain that cannot be listed cannot tell either, and reads as a
+// writer attached, like a data file that cannot be opened.
+func TestWriterAttached_UnlistableDomainReportsAttached(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the mode bits this test turns on")
+	}
+	domain := t.TempDir()
+	makeFlowDir(t, domain, flowID)
+	require.NoError(t, os.Chmod(domain, 0o300))
+	t.Cleanup(func() { _ = os.Chmod(domain, 0o755) })
+
+	attached, err := WriterAttached(domain, flowID)
+	assert.Error(t, err)
+	assert.True(t, attached)
+}
+
+// A domain that is not there holds no flow, so nothing writes to it.
+// Read as "cannot tell", it would keep every location of a removed
+// domain published.
+func TestWriterAttached_MissingDomain(t *testing.T) {
+	domain := filepath.Join(t.TempDir(), "absent")
+	attached, err := WriterAttached(domain, flowID)
+	require.NoError(t, err)
+	assert.False(t, attached)
+	pids, err := Locks{}.WriterPIDs(domain, flowID)
+	require.NoError(t, err)
+	assert.Empty(t, pids)
 }

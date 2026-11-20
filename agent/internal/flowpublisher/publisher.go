@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -21,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/flowlock"
+	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -180,6 +182,10 @@ func FlowIDFromDirName(name string) (string, bool) {
 	return id, true
 }
 
+// readFlowDef reads a flow's flow_def.json by name. A seam for tests,
+// which have no mxlfs to show that a lookup of a missing flow waits.
+var readFlowDef = os.ReadFile
+
 // PublishAppeared loads flow_def.json from a freshly observed flow
 // directory and, for an Origin, writes an MxlFlow describing it. status.locations
 // for this node is set to Origin when the agent saw the directory
@@ -218,8 +224,19 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 		}
 	}
 
+	// On mxlfs a lookup of a flow directory that is gone waits for it to
+	// come back. A directory removed since it was reported, as a
+	// placeholder's once its marker goes, has nothing left to publish.
+	listed, err := mxlfs.Listed(p.DomainPath, dirName)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("list %s: %w", p.DomainPath, err)
+	}
+	if !listed {
+		l.V(1).Info("flow directory is gone", "flowID", flowID)
+		return nil
+	}
 	defPath := filepath.Join(p.DomainPath, dirName, FlowDefName)
-	raw, err := os.ReadFile(defPath)
+	raw, err := readFlowDef(defPath)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", defPath, err)
 	}

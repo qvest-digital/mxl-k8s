@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/placeholder"
@@ -123,6 +124,9 @@ func inodes(domain string, members []mxlv1alpha1.RedundancyFlowRef) []uint64 {
 	}
 	return out
 }
+
+// writers is flowlocks.Writers; tests replace it.
+var writers = flowlocks.Writers
 
 // replace is (*Engine).Replace; tests replace it.
 var replace = (*Engine).Replace
@@ -346,13 +350,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 	// change of the rebuilt one. A directory some writer holds, a
 	// producer's or a mirror's, is a live flow of that id and stays.
 	out := flowDir(dir, spec.OutputID)
-	// This set's engine is stopped by now, so every flock is another
-	// writer's, the gateway's own mirrors and engines included.
-	if n, err := flowlocks.Writers(filepath.Join(out, "data")); err != nil || n > 0 {
-		l.Info("output id is a flow some writer holds; not replacing it", "output", spec.OutputID, "writers", n, "error", err)
+	// Usually there is none, and on mxlfs a lookup of a flow directory
+	// that is not there waits for it to appear, so the output is looked
+	// up only once the domain lists it.
+	listed, err := mxlfs.Listed(dir, spec.OutputID+".mxl-flow")
+	if err != nil {
+		l.Info("cannot list the domain for a leftover output", "error", err.Error())
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
-	_ = os.RemoveAll(out)
+	if listed {
+		// This set's engine is stopped by now, so every flock is another
+		// writer's, the gateway's own mirrors and engines included.
+		if n, err := writers(filepath.Join(out, "data")); err != nil || n > 0 {
+			l.Info("output id is a flow some writer holds; not replacing it", "output", spec.OutputID, "writers", n, "error", err)
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+		_ = os.RemoveAll(out)
+	}
 	e, err := start(context.Background(), spec, l)
 	if err != nil {
 		l.Error(err, "start merge")

@@ -29,6 +29,7 @@ import (
 	"github.com/qvest-digital/go-mxl/fabrics"
 	"github.com/qvest-digital/go-mxl/mxl"
 
+	apimxlfs "github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
@@ -987,14 +988,7 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain string, i
 	// over a producer's ring.
 	if handles.OnMxlfs() {
 		if id, ok := flowIDFromDef(flowDef); ok {
-			n, err := flowlocks.ForeignWriters(filepath.Join(handles.DomainPath(), id+".mxl-flow", "data"))
-			if err != nil {
-				return nil, fmt.Errorf("%w: check local writers: %w", errOpenWriterFailed, err)
-			}
-			if n > 0 {
-				return nil, errLocalWriter
-			}
-			if err := clearOtherGeometry(filepath.Join(handles.DomainPath(), id+".mxl-flow"), flowDef, r.Retire); err != nil {
+			if err := prepareFlowDir(handles.DomainPath(), id, flowDef, r.Retire); err != nil {
 				return nil, err
 			}
 		}
@@ -1865,6 +1859,38 @@ func commitArrivedSamples(writer *mxl.Writer, head uint64, count int) (uint64, e
 // this node already writes.
 var errLocalWriter = errors.New("a process on this node writes the flow")
 
+// prepareFlowDir readies the directory of flow id in domain for a
+// target writing def: a flow another process here writes is that
+// process's (errLocalWriter), and a directory of another geometry is
+// cleared. A flow the domain does not list, as a flow a target opens
+// usually is not yet, has neither and is not looked up: on mxlfs a
+// lookup of a flow directory that is not there waits for it to appear.
+func prepareFlowDir(domain, id, def string, retire func(domain, id string)) error {
+	listed, err := apimxlfs.Listed(domain, id+flowDirSuffix)
+	if err != nil {
+		return fmt.Errorf("%w: list domain: %w", errOpenWriterFailed, err)
+	}
+	if !listed {
+		return nil
+	}
+	dir := filepath.Join(domain, id+".mxl-flow")
+	n, err := foreignWriters(filepath.Join(dir, "data"))
+	if err != nil {
+		return fmt.Errorf("%w: check local writers: %w", errOpenWriterFailed, err)
+	}
+	if n > 0 {
+		return errLocalWriter
+	}
+	return clearOtherGeometry(dir, def, retire)
+}
+
+// foreignWriters is flowlocks.ForeignWriters and flowWriters
+// flowlocks.Writers; tests replace them.
+var (
+	foreignWriters = flowlocks.ForeignWriters
+	flowWriters    = flowlocks.Writers
+)
+
 // errOtherGeometry is why a target does not open yet on a directory
 // laid out in another geometry that a writer here still holds.
 var errOtherGeometry = errors.New("the flow directory here has another geometry and a writer still holds it")
@@ -1894,10 +1920,21 @@ var errOtherHints = errors.New("the flow here has other batch size hints and a w
 // placeholder held there, or returns held when another writer still
 // holds it.
 func clearFlowDir(dir string, retire func(domain, id string), held error) error {
+	domain, id := filepath.Dir(dir), strings.TrimSuffix(filepath.Base(dir), ".mxl-flow")
 	if retire != nil {
-		retire(filepath.Dir(dir), strings.TrimSuffix(filepath.Base(dir), ".mxl-flow"))
+		retire(domain, id)
 	}
-	n, err := flowlocks.Writers(filepath.Join(dir, "data"))
+	// Closing the last writer deletes the flow, as retiring a placeholder
+	// or closing the target's own writer before this does, and on mxlfs a
+	// lookup of the deleted flow would wait for it to come back.
+	listed, err := apimxlfs.Listed(domain, id+flowDirSuffix)
+	if err != nil {
+		return fmt.Errorf("list %s: %w", domain, err)
+	}
+	if !listed {
+		return nil
+	}
+	n, err := flowWriters(filepath.Join(dir, "data"))
 	if err != nil {
 		return fmt.Errorf("check writers of %s: %w", dir, err)
 	}

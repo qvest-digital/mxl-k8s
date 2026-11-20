@@ -242,3 +242,32 @@ func BenchmarkScan100Flows(b *testing.B) {
 	require.Len(b, c.snaps[dom].flows, 100)
 	c.mu.Unlock()
 }
+
+// A scan reads each flow's ring files one after another, and a flow can
+// go meanwhile. On mxlfs every lookup through the directory of a flow
+// that went waits for it to come back, so the flow's directory is looked
+// up once and its files opened in it: a directory moved away after its
+// first file was read still yields the rest of its ring.
+func TestFlowFilesAreOpenedInTheDirectoryLookedUpOnce(t *testing.T) {
+	dom := domainDir(t)
+	f := &fake{perFile: map[string]mxlfs.Pages{
+		flowA + ".mxl-flow/data.0": {PerNode: []uint64{2, 0}},
+		flowA + ".mxl-flow/data.1": {PerNode: []uint64{0, 5}},
+	}}
+	c := f.collector(t)
+	pages := c.pages
+	moved := false
+	c.pages = func(file *os.File) (mxlfs.Pages, error) {
+		p, err := pages(file)
+		if !moved && strings.Contains(file.Name(), flowA) {
+			moved = true
+			require.NoError(t, os.Rename(filepath.Join(dom, flowA+".mxl-flow"), filepath.Join(dom, ".gone")))
+		}
+		return p, err
+	}
+
+	c.Scan([]string{dom})
+
+	require.True(t, moved)
+	require.Equal(t, flowPages{perNode: []uint64{2, 5}}, c.snaps[dom].flows[flowA])
+}
