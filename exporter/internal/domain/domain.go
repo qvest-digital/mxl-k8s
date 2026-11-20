@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/qvest-digital/go-mxl/mxl"
 	"golang.org/x/sys/unix"
 
+	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -187,7 +187,7 @@ func (d *Domain) openReader(e *entry) {
 	// leaves time for a flow to go. libmxl looks the flow up by name, and
 	// on mxlfs a lookup of a flow directory that is not there waits for
 	// it to appear, with d.mu held, so the flow is listed again first.
-	if !listed(d.path, e.id) {
+	if ok, _ := mxlfs.Listed(d.path, e.id+flowDirSuffix); !ok {
 		e.openAttempt = false
 		return
 	}
@@ -207,18 +207,6 @@ func (d *Domain) openReader(e *entry) {
 
 // newReader is libmxl's lookup of a flow by name; tests replace it.
 var newReader = (*mxl.Instance).NewReader
-
-// listed reports whether the domain at dir has an entry for flow id,
-// reading the directory rather than looking the flow's name up.
-func listed(dir, id string) bool {
-	f, err := os.Open(dir)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	names, _ := f.Readdirnames(-1)
-	return slices.Contains(names, id+flowDirSuffix)
-}
 
 // minActivityWindow floors the window derived from a flow's cadence.
 // A 48 kHz audio flow commits every 10 ms and a 60 fps video flow
@@ -398,9 +386,10 @@ func (d *Domain) listFlows() (map[string]struct{}, map[string]uint64, error) {
 // opened: on mxlfs a lookup through a flow directory that went mid-walk
 // waits for it to come back, once per file. A file that vanishes
 // mid-walk is skipped rather than failing the walk: flows are created
-// and torn down while this runs.
+// and torn down while this runs. A symlink is not followed, so the walk
+// stays inside the flow's directory.
 func dirSize(parent *os.File, name string) uint64 {
-	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return 0
 	}

@@ -62,3 +62,18 @@ func TestDirSizeWalksTheOpenDirectory(t *testing.T) {
 
 	require.EqualValues(t, 120, dirSize(dir, activeTestFlowID+flowDirSuffix))
 }
+
+// A symlink in place of a directory is not walked: a flow directory
+// swapped for a link between the type check and the open would
+// otherwise have the walk count whatever the link points at.
+func TestDirSizeDoesNotFollowASymlink(t *testing.T) {
+	dom := t.TempDir()
+	other := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(other, "data"), make([]byte, 100), 0o644))
+	require.NoError(t, os.Symlink(other, filepath.Join(dom, activeTestFlowID+flowDirSuffix)))
+	dir, err := os.Open(dom)
+	require.NoError(t, err)
+	t.Cleanup(func() { dir.Close() })
+
+	require.Zero(t, dirSize(dir, activeTestFlowID+flowDirSuffix))
+}
