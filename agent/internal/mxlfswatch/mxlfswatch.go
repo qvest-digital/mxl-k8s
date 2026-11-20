@@ -27,6 +27,8 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/fanotify"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/intent"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/keyed"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -321,6 +323,33 @@ type Wanted struct {
 	// next is wantedNext(f); a seam for tests, which have no mxlfs.
 	next  func(req *wantedReq) error
 	first *wantedReq // taken by the probe, handed to Run
+	// now reads the clock; nil is time.Now. A seam for tests.
+	now func() time.Time
+}
+
+// wantedHandlers bounds how many flows' wants are handled at once. Each
+// handler makes API calls on the agent's one client.
+const wantedHandlers = 8
+
+// unknownFor is how long a flow Materialize answered is not known
+// cluster-wide is not looked up again. Every path walk waiting on a
+// missing name queues a want, so readers walking into a flow nobody
+// publishes cost a round of API lookups per walk; inside the window they
+// cost one. It is under the default materialize timeout. It holds back no
+// mirror: a flow that becomes known with an Origin gets a placeholder,
+// which ends the walks waiting on it, and opening that placeholder asks
+// for the mirror through the open trigger.
+//
+// Only that answer is remembered: any other error is looked up again on
+// the next want. A flow's queued wants are not bounded here; each comes
+// from a walk the kernel holds for its wait, so a flow queues no more
+// than its walkers make in that time.
+const unknownFor = 2 * time.Second
+
+// want is one flow a path walk waits for, as this process sees it.
+type want struct {
+	dir string
+	pid int32
 }
 
 // OpenWanted opens the queue of the mxlfs holding domain. It takes the
@@ -376,21 +405,65 @@ func newWanted(mount Mount, f *os.File, next func(req *wantedReq) error) (*Wante
 // offered each wanted flow directory first and takes it when it reports
 // true: a redundancy set's output is merged here, not mirrored. A walk by
 // a process ours reports as mxl-k8s's own is no reader and starts nothing.
+//
+// A flow's wants are handled one at a time and at most wantedHandlers
+// flows at once, so only that many slow flows hold the queue. A want for
+// a flow answered not known cluster-wide within unknownFor is dropped.
 func (w *Wanted) Run(ctx context.Context, d Materializer, claim func(ctx context.Context, flowDir string) bool,
 	ours func(ctx context.Context, pid int32) bool, l logr.Logger) error {
 	defer w.Close()
-	var requests sync.WaitGroup
-	defer requests.Wait()
+	now := w.now
+	if now == nil {
+		now = time.Now
+	}
+	var (
+		mu      sync.Mutex
+		unknown = map[string]time.Time{} // flow directory -> when it was answered
+	)
+	recent := func(dir string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		at, ok := unknown[dir]
+		return ok && now().Sub(at) < unknownFor
+	}
+	remember := func(dir string) {
+		mu.Lock()
+		defer mu.Unlock()
+		t := now()
+		for k, at := range unknown {
+			if t.Sub(at) >= unknownFor {
+				delete(unknown, k)
+			}
+		}
+		unknown[dir] = t
+	}
+
+	wants := make(chan want)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		keyed.Run(ctx, wants, wantedHandlers, func(x want) string { return x.dir }, func(x want) {
+			if recent(x.dir) {
+				return
+			}
+			if errors.Is(wanted(ctx, x.dir, x.pid, d, claim, ours, l), intent.ErrFlowNotKnown) {
+				remember(x.dir)
+			}
+		})
+	}()
+	defer func() {
+		close(wants)
+		<-done
+	}()
 	handle := func(req *wantedReq) {
 		local, ok := w.mount.Local(unix.ByteSliceToString(req.Path[:]))
 		if !ok {
 			return
 		}
-		requests.Add(1)
-		go func() {
-			defer requests.Done()
-			wanted(ctx, local, int32(req.PID), d, claim, ours, l)
-		}()
+		select {
+		case wants <- want{dir: local, pid: int32(req.PID)}:
+		case <-ctx.Done():
+		}
 	}
 	if w.first != nil {
 		handle(w.first)
@@ -418,18 +491,20 @@ func (w *Wanted) Close() error {
 
 // wanted handles one flow a path walk waits for: nothing when the walker
 // is mxl-k8s's own process, the claim when it takes the flow, a mirror
-// otherwise.
+// otherwise. It returns why no mirror was started, when one was asked for.
 func wanted(ctx context.Context, flowDir string, pid int32, d Materializer,
-	claim func(ctx context.Context, flowDir string) bool, ours func(ctx context.Context, pid int32) bool, l logr.Logger) {
+	claim func(ctx context.Context, flowDir string) bool, ours func(ctx context.Context, pid int32) bool, l logr.Logger) error {
 	if ours != nil && ours(ctx, pid) {
-		return
+		return nil
 	}
 	if claim != nil && claim(ctx, flowDir) {
-		return
+		return nil
 	}
-	if err := d.Materialize(ctx, pid, filepath.Join(flowDir, "data")); err != nil {
+	err := d.Materialize(ctx, pid, filepath.Join(flowDir, "data"))
+	if err != nil {
 		l.Info("wanted flow, no mirror yet", "path", flowDir, "pid", pid, "reason", err.Error())
 	}
+	return err
 }
 
 // Locations is what a placeholder marker change asks of the publisher.

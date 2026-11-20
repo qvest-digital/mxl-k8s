@@ -3,6 +3,7 @@ package podlookup
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -115,4 +116,181 @@ func TestPodForUIDListsOnlyThisNodesPods(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "here", p.Name)
 	assert.Equal(t, []string{"spec.nodeName=n1"}, selectors)
+}
+
+func nodePod(name, uid string) *corev1.Pod {
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", UID: types.UID(uid)},
+		Spec: corev1.PodSpec{NodeName: "n1"}}
+}
+
+// countingClient counts the pod Lists made on c.
+func countingClient(lists *int, objs ...client.Object) client.WithWatch {
+	return fake.NewClientBuilder().
+		WithObjects(objs...).
+		WithIndex(&corev1.Pod{}, "spec.nodeName", func(o client.Object) []string {
+			return []string{o.(*corev1.Pod).Spec.NodeName}
+		}).
+		WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, l client.ObjectList, opts ...client.ListOption) error {
+			*lists++
+			return c.List(ctx, l, opts...)
+		}}).Build()
+}
+
+func shortenListEvery(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := listEvery
+	listEvery = d
+	t.Cleanup(func() { listEvery = old })
+}
+
+const (
+	uidA = "11111111-2222-3333-4444-555555555555"
+	uidB = "22222222-2222-3333-4444-555555555555"
+	uidC = "33333333-2222-3333-4444-555555555555"
+)
+
+// Every placeholder open and every wanted flow resolves its pid, so a
+// List of the node's pods per lookup cost the API one List per want.
+func TestLookupsOfKnownPodsShareOneList(t *testing.T) {
+	var lists int
+	r := &Resolver{Client: countingClient(&lists, nodePod("a", uidA), nodePod("b", uidB)), NodeName: "n1"}
+
+	for i := range 100 {
+		uid := uidA
+		if i%2 == 1 {
+			uid = uidB
+		}
+		p, err := r.PodForUID(context.Background(), uid)
+		require.NoError(t, err)
+		assert.Equal(t, types.UID(uid), p.UID)
+	}
+	assert.Equal(t, 1, lists)
+}
+
+// A pod started after the last List is not in it; its lookup lists again
+// rather than report it missing, or its reader never gets a mirror.
+func TestAnUnknownUIDListsAgain(t *testing.T) {
+	shortenListEvery(t, 10*time.Millisecond)
+	var lists int
+	c := countingClient(&lists, nodePod("a", uidA))
+	r := &Resolver{Client: c, NodeName: "n1"}
+
+	_, err := r.PodForUID(context.Background(), uidA)
+	require.NoError(t, err)
+	require.NoError(t, c.Create(context.Background(), nodePod("c", uidC)))
+
+	p, err := r.PodForUID(context.Background(), uidC)
+	require.NoError(t, err)
+	assert.Equal(t, "c", p.Name)
+	assert.Equal(t, 2, lists)
+}
+
+// A pid whose pod never shows up misses every time; those misses list
+// again, but never sooner than listEvery after the last List started.
+// Checked on when each List started, not on how many fit a wall-clock
+// span, which a loaded runner shifts.
+func TestMissesListAtMostOncePerInterval(t *testing.T) {
+	shortenListEvery(t, 50*time.Millisecond)
+	var starts []time.Time
+	c := fake.NewClientBuilder().
+		WithObjects(nodePod("a", uidA)).
+		WithIndex(&corev1.Pod{}, "spec.nodeName", func(o client.Object) []string {
+			return []string{o.(*corev1.Pod).Spec.NodeName}
+		}).
+		WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, l client.ObjectList, opts ...client.ListOption) error {
+			starts = append(starts, time.Now())
+			return c.List(ctx, l, opts...)
+		}}).Build()
+	r := &Resolver{Client: c, NodeName: "n1"}
+
+	for deadline := time.Now().Add(10 * time.Second); len(starts) < 4 && time.Now().Before(deadline); {
+		_, err := r.PodForUID(context.Background(), uidC)
+		require.EqualError(t, err, "no pod with uid "+uidC+" on node n1")
+	}
+	require.Len(t, starts, 4, "misses list again once the interval has passed")
+	for i := 1; i < len(starts); i++ {
+		assert.GreaterOrEqual(t, starts[i].Sub(starts[i-1]), listEvery, "List %d followed the last within the interval", i)
+	}
+}
+
+// The wait for the next List ends with the request.
+func TestAMissWaitsNoLongerThanItsContext(t *testing.T) {
+	shortenListEvery(t, time.Hour)
+	var lists int
+	r := &Resolver{Client: countingClient(&lists, nodePod("a", uidA)), NodeName: "n1"}
+	_, err := r.PodForUID(context.Background(), uidA)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = r.PodForUID(ctx, uidC)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Equal(t, 1, lists)
+}
+
+// blockingClient lists only once release is closed or its context ends,
+// and reports each List it is in.
+func blockingClient(listing chan<- struct{}, release <-chan struct{}) client.WithWatch {
+	return fake.NewClientBuilder().
+		WithObjects(nodePod("a", uidA)).
+		WithIndex(&corev1.Pod{}, "spec.nodeName", func(o client.Object) []string {
+			return []string{o.(*corev1.Pod).Spec.NodeName}
+		}).
+		WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, l client.ObjectList, opts ...client.ListOption) error {
+			listing <- struct{}{}
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			return c.List(ctx, l, opts...)
+		}}).Build()
+}
+
+// A lookup that misses while another's List hangs waits for it no longer
+// than its own request: the wanted path runs a bounded number of
+// handlers, and lookups held past their requests behind one stuck List
+// would hold every one of them.
+func TestALookupWaitingOnAHeldListEndsWithItsRequest(t *testing.T) {
+	listing, release := make(chan struct{}, 2), make(chan struct{})
+	defer close(release)
+	r := &Resolver{Client: blockingClient(listing, release), NodeName: "n1"}
+
+	first := make(chan error, 1)
+	go func() { _, err := r.PodForUID(context.Background(), uidA); first <- err }()
+	<-listing
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := r.PodForUID(ctx, uidB); done <- err }()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the lookup waited for the held List past its own request")
+	}
+	release <- struct{}{}
+	require.NoError(t, <-first)
+}
+
+// A List that hangs ends at listTimeout even for a request with no
+// deadline, so the lookups waiting for it are not held without end.
+func TestAHungListEndsAtTheListTimeout(t *testing.T) {
+	old := listTimeout
+	listTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { listTimeout = old })
+	listing, release := make(chan struct{}, 1), make(chan struct{})
+	defer close(release)
+	r := &Resolver{Client: blockingClient(listing, release), NodeName: "n1"}
+
+	done := make(chan error, 1)
+	go func() { _, err := r.PodForUID(context.Background(), uidA); done <- err }()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.ErrorContains(t, err, "list pods: ")
+	case <-time.After(5 * time.Second):
+		t.Fatal("a List with no deadline hung the lookup")
+	}
 }

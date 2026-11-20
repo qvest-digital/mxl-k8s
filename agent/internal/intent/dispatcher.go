@@ -173,6 +173,9 @@ func (e *LimitError) Error() string { return e.msg }
 // many ask again together as places free.
 func (e *LimitError) RetryAfter() time.Duration { return e.retryAfter }
 
+// ErrFlowNotKnown is Materialize's answer for a flow no MxlFlow names.
+var ErrFlowNotKnown = errors.New("MxlFlow not yet known cluster-wide")
+
 // ReasonMirrorLimitReached is the reason of the event a pod gets when a
 // mirror it asked for is refused by a limit.
 const ReasonMirrorLimitReached = "MirrorLimitReached"
@@ -250,7 +253,7 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 		if res.AllStale {
 			return errors.New("all Origin locations have an expired Lease")
 		}
-		return errors.New("MxlFlow not yet known cluster-wide")
+		return ErrFlowNotKnown
 	}
 
 	if podErr != nil {
@@ -651,7 +654,7 @@ func (d *Dispatcher) burstRefusal(b *burst, ref mxlv1alpha1.FlowRef, now time.Ti
 
 // refuseEarly refuses a request by its pod's burst limit before the pod
 // is looked up, from the pod UID /proc names for pid. A refused flow asks
-// again until it passes, and the full path costs it a pod List and the
+// again until it passes, and the full path costs it a pod lookup and the
 // provider's lookups each time. What that path answers ahead of the limit
 // is checked first and left to it: a flow already here, one no other node
 // can source, one a mirror already serves.
