@@ -449,3 +449,42 @@ tests:
     asserts:
       - notExists:
           path: spec.template.spec.initContainers
+
+  # The schema checks rdma.wait.seconds at the base only; in a variant,
+  # a value int reads as 0 would turn the wait off without a word.
+  - it: refuses a variant rdma.wait.seconds that is not an integer
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      gateway.variants.efa.rdma.wait.seconds: thirty
+    asserts:
+      - failedTemplate:
+          errorMessage: "gateway.variants.efa.rdma.wait.seconds must be a non-negative integer, not thirty"
+  - it: refuses a fractional variant rdma.wait.seconds
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      gateway.variants.efa.rdma.wait.seconds: 1.5
+    asserts:
+      - failedTemplate:
+          errorMessage: "gateway.variants.efa.rdma.wait.seconds must be a non-negative integer, not 1.5"
+  - it: refuses a negative variant rdma.wait.seconds
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      gateway.variants.verbs.rdma.wait.seconds: -5
+    asserts:
+      - failedTemplate:
+          errorMessage: "gateway.variants.verbs.rdma.wait.seconds must be a non-negative integer, not -5"
+  - it: takes a variant's own rdma.wait.seconds
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      gateway.variants.efa.rdma.wait.seconds: 45
+    documentSelector:
+      path: metadata.name
+      value: mxl-k8s-gateway-efa
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].command[3]
+          value: "45"

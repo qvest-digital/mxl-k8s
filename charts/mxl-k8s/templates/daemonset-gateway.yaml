@@ -30,6 +30,15 @@ rdma.enabled implies IPC_LOCK, which exempts the providers' memory
 registrations from RLIMIT_MEMLOCK. Users may add more via
 containerSecurityContext.capabilities.add.
 */ -}}
+{{- /*
+The schema checks rdma.wait.seconds at the base only. A variant is
+merged in here, and a value that is no integer would be truncated or
+read as 0 by int, turning its wait off without a word.
+*/ -}}
+{{- $waitSeconds := $g.rdma.wait.seconds -}}
+{{- if not (and (or (kindIs "int" $waitSeconds) (kindIs "int64" $waitSeconds) (and (kindIs "float64" $waitSeconds) (eq $waitSeconds (float64 (int64 $waitSeconds))))) (ge (int64 $waitSeconds) 0)) -}}
+{{- fail (printf "gateway%s.rdma.wait.seconds must be a non-negative integer, not %v" (ternary (printf ".variants.%s" $variant) "" (ne $variant "")) $waitSeconds) -}}
+{{- end -}}
 {{- $numa := include "mxlk8s.numa.mode" $ctx -}}
 {{- $caps := list -}}
 {{- if $g.rdma.enabled -}}
