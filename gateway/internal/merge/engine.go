@@ -182,10 +182,8 @@ type Engine struct {
 	grains   [][]*C.mxlGrainInfo
 	grainMem [][][]byte // per member, per slot
 	// chanMem is, per member of an audio output, its channels file mapped
-	// read-only for zeroRun; zeroRun is the samples of zeros, 1 ms, that
-	// read as a gap a writer left.
+	// read-only, for Audio.Zeros and Audio.Content.
 	chanMem [][]byte
-	zeroRun uint64
 	// dirs are the members' flow directories, held open while Start
 	// builds the output.
 	dirs   []*os.File
@@ -605,8 +603,9 @@ func (e *Engine) buildAudio(tmp string) error {
 	e.audio.Skew = uint64(e.spec.Skew.Seconds() * float64(e.rate.numerator) / float64(e.rate.denominator))
 	e.audio.Tolerance = ToleranceFor(e.spec.Skew)
 	e.audio.Ahead = uint64(maxSleep.Seconds()*float64(e.rate.numerator)/float64(e.rate.denominator)) + 1
-	e.zeroRun = max(uint64(time.Millisecond.Seconds()*float64(e.rate.numerator)/float64(e.rate.denominator)), 1)
+	e.audio.Run = max(uint64(time.Millisecond.Seconds()*float64(e.rate.numerator)/float64(e.rate.denominator)), 1)
 	e.audio.Zeros = e.zeros
+	e.audio.Content = e.content
 	return nil
 }
 
@@ -622,9 +621,31 @@ func mapChannels(f *os.File, size int64) ([]byte, error) {
 }
 
 // zeros is Audio.Zeros over the members' mapped channels.
-func (e *Engine) zeros(m int, lo, from, to, hi uint64) uint64 {
+func (e *Engine) zeros(m int, lo, from, to, hi, run uint64) uint64 {
 	channels, length := e.members[0].continuous()
-	return zeroRunStart(e.chanMem[m], uint64(channels), uint64(length), lo, from, to, hi, e.zeroRun)
+	return zeroRunStart(e.chanMem[m], uint64(channels), uint64(length), lo, from, to, hi, run)
+}
+
+// content is Audio.Content over the members' mapped channels.
+func (e *Engine) content(m int, from, to uint64) uint64 {
+	channels, length := e.members[0].continuous()
+	return contentStart(e.chanMem[m], uint64(channels), uint64(length), from, to)
+}
+
+// contentStart returns the first sample in [from, to) whose 32-bit word
+// is not 0 on some channel of mem, channels rings of length samples each,
+// or to when every sample there is 0 on every channel.
+func contentStart(mem []byte, channels, length, from, to uint64) uint64 {
+	words := unsafe.Slice((*uint32)(unsafe.Pointer(unsafe.SliceData(mem))), uint64(len(mem))/4)
+	for s := from; s < to; s++ {
+		off := s % length
+		for c := range channels {
+			if words[c*length+off] != 0 {
+				return s
+			}
+		}
+	}
+	return to
 }
 
 // zeroRunStart returns the first sample in [from, to) that lies in a run
