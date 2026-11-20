@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.1.0-rc.53](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.52...v1.1.0-rc.53) (2026-11-20)
+
+
+### Features
+
+* **api:** add mxlfs.Listed to find a flow without a lookup ([7001af2](https://github.com/qvest-digital/mxl-k8s/commit/7001af2d90b1ef9e0c633fc3262d3bda2bcc056f))
+* **chart:** wait for kernel modules loaded after the pods start ([#454](https://github.com/qvest-digital/mxl-k8s/issues/454)) ([09450de](https://github.com/qvest-digital/mxl-k8s/commit/09450de8e254adad9e2818fd4d15047165991492))
+
+
+### Bug Fixes
+
+* **agent,gateway,exporter:** list a flow before looking it up by name ([7001af2](https://github.com/qvest-digital/mxl-k8s/commit/7001af2d90b1ef9e0c633fc3262d3bda2bcc056f))
+* **agent:** handle each flow's events apart from the others ([#458](https://github.com/qvest-digital/mxl-k8s/issues/458)) ([8b518ec](https://github.com/qvest-digital/mxl-k8s/commit/8b518ece33ecf2794da105dd7f8236cd11e773fd))
+
 ## [1.1.0-rc.52](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.51...v1.1.0-rc.52) (2026-11-19)
 
 
