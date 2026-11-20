@@ -559,6 +559,14 @@ agent:
     # -- Client-side burst above kubeApiQps. 0 leaves the client-go
     # default in place.
     kubeApiBurst: 100
+    # -- Client-side request rate of a second API client, which serves
+    # pod lookups and on-demand mirrors: what a reader's open, or its
+    # wait on a missing flow, asks of the API server. Its limit is its
+    # own, so readers asking for many flows do not spend the rate flow
+    # publishing and Lease renewal run on.
+    intentApiQps: 50
+    # -- Client-side burst above intentApiQps.
+    intentApiBurst: 100
     # -- Pod label naming a pod's dmf-k8s MediaFunctionClaim, in the
     # pod's namespace. When set, the agent writes each such claim's
     # status.io from the flows its pods on the node are observed to

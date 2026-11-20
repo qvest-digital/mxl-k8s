@@ -32,6 +32,8 @@ renders every gateway variant unchanged with mxlfs:
             - args:
                 - --domain-path=/run/mxl/domain
                 - --health-probe-bind-address=:8081
+                - --intent-api-burst=100
+                - --intent-api-qps=50
                 - --intent-mirror-burst=8
                 - --intent-mirror-burst-window=10s
                 - --intent-mirrors-per-node=128
@@ -581,6 +583,8 @@ renders the agent and gateway unchanged at defaults:
             - args:
                 - --domain-path=/run/mxl/domain
                 - --health-probe-bind-address=:8081
+                - --intent-api-burst=100
+                - --intent-api-qps=50
                 - --intent-mirror-burst=8
                 - --intent-mirror-burst-window=10s
                 - --intent-mirrors-per-node=128
@@ -787,6 +791,8 @@ renders the agent and gateway unchanged with mxlfs:
             - args:
                 - --domain-path=/run/mxl/domain
                 - --health-probe-bind-address=:8081
+                - --intent-api-burst=100
+                - --intent-api-qps=50
                 - --intent-mirror-burst=8
                 - --intent-mirror-burst-window=10s
                 - --intent-mirrors-per-node=128
@@ -1060,6 +1066,8 @@ renders the agent and gateway unchanged with rdma:
             - args:
                 - --domain-path=/run/mxl/domain
                 - --health-probe-bind-address=:8081
+                - --intent-api-burst=100
+                - --intent-api-qps=50
                 - --intent-mirror-burst=8
                 - --intent-mirror-burst-window=10s
                 - --intent-mirrors-per-node=128
@@ -1278,6 +1286,8 @@ renders the site's own init containers unchanged with mxlfs:
             - args:
                 - --domain-path=/run/mxl/domain
                 - --health-probe-bind-address=:8081
+                - --intent-api-burst=100
+                - --intent-api-qps=50
                 - --intent-mirror-burst=8
                 - --intent-mirror-burst-window=10s
                 - --intent-mirrors-per-node=128
