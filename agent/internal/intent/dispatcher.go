@@ -173,6 +173,9 @@ func (e *LimitError) Error() string { return e.msg }
 // many ask again together as places free.
 func (e *LimitError) RetryAfter() time.Duration { return e.retryAfter }
 
+// ErrFlowNotKnown is Materialize's answer for a flow no MxlFlow names.
+var ErrFlowNotKnown = errors.New("MxlFlow not yet known cluster-wide")
+
 // ReasonMirrorLimitReached is the reason of the event a pod gets when a
 // mirror it asked for is refused by a limit.
 const ReasonMirrorLimitReached = "MirrorLimitReached"
@@ -250,7 +253,7 @@ func (d *Dispatcher) Materialize(ctx context.Context, pid int32, path string) er
 		if res.AllStale {
 			return errors.New("all Origin locations have an expired Lease")
 		}
-		return errors.New("MxlFlow not yet known cluster-wide")
+		return ErrFlowNotKnown
 	}
 
 	if podErr != nil {
