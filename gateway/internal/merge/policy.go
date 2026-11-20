@@ -276,7 +276,8 @@ type Audio struct {
 	Ahead     uint64 // samples the clock advances between two passes
 	// Run is the samples of zeros, 1 ms, that read as a gap a writer
 	// left even before another member has committed the same samples.
-	// Zero counts as one.
+	// NewAudio sets 1 ms at 48 kHz; the engine sets it from the flow's
+	// rate. Zero counts as one.
 	Run uint64
 
 	// Zeros returns the first sample in [from, to) that lies in a run of
@@ -326,7 +327,7 @@ const (
 
 // NewAudio returns a policy for members rings of pages pages each.
 func NewAudio(members int, pages uint64, silence int) *Audio {
-	a := &Audio{Pages: pages, Silence: silence, Primary: 0, Tolerance: 2 * time.Millisecond,
+	a := &Audio{Pages: pages, Silence: silence, Primary: 0, Tolerance: 2 * time.Millisecond, Run: 48,
 		Current: make([]int, pages), cov: make([][]coverage, members), evHead: make([]uint64, members),
 		batch: make([]uint64, members), waitingPage: ^uint64(0)}
 	for i := range a.Current {
@@ -454,9 +455,10 @@ func (a *Audio) Step(now time.Time) (selects []PageSelect, head uint64, wait tim
 // zeros applies Zeros to upto, what each member holds of page n at the
 // head. A member holding zeros further on holds only up to them for now.
 // One holding zeros at the head holds nothing while another member holds
-// more than zeros there, and neither does one with a run under samples
+// more than zeros there, and neither does one with zeros under samples
 // of the page already published from cur that are not zeros: the page
-// would show the run in their place.
+// would show them in their place. A run there is waited over as a run at
+// the head is; shorter zeros are not.
 //
 // While no member holds more than zeros, one holding a run at the head,
 // and one within Skew of the head has not committed it, it returns how
@@ -492,10 +494,14 @@ func (a *Audio) zeros(n uint64, cur int, upto []uint64, now time.Time) time.Dura
 		a.bad[m], a.brief[m] = false, false
 		switch {
 		case upto[m] > a.Head:
+			var short, long bool
+			if prefix && m != cur {
+				short, long = a.under(m, cur, n)
+			}
 			switch {
-			case a.zerosIn(m, n, a.Head, a.Head+1, a.run()) == a.Head || (prefix && m != cur && a.under(m, cur, n)):
+			case long || a.zerosIn(m, n, a.Head, a.Head+1, a.run()) == a.Head:
 				a.bad[m], run = true, true
-			case a.zerosIn(m, n, a.Head, a.Head+1, 1) == a.Head:
+			case short || a.zerosIn(m, n, a.Head, a.Head+1, 1) == a.Head:
 				a.brief[m], brief = true, true
 			default:
 				content = true
@@ -525,15 +531,20 @@ func (a *Audio) zeros(n uint64, cur int, upto []uint64, now time.Time) time.Dura
 		}
 		return 0
 	case brief:
-		// No committed member holds more than zeros shorter than a run:
-		// served as they are, as far as they reach, so what follows is
-		// weighed member by member again.
+		// No committed member holds more than zeros shorter than a run,
+		// at the head or under the published part: served as they are,
+		// as far as they reach at the head, so what follows is weighed
+		// member by member again.
 		for m := range a.cov {
 			switch {
 			case a.bad[m]:
 				upto[m] = 0
-			case a.brief[m]:
+			case a.brief[m] && a.zerosIn(m, n, a.Head, a.Head+1, 1) == a.Head:
 				upto[m] = a.reach(m, upto[m])
+			case a.brief[m]:
+				// Brief only for zeros under the published part: it holds
+				// samples at the head, served as a member holding them is.
+				upto[m] = a.differs(m, n, a.Head, a.zerosIn(m, n, a.Head, held[m], a.run()), held)
 			}
 		}
 		return 0
@@ -613,18 +624,19 @@ func (a *Audio) reach(m int, to uint64) uint64 {
 // run is Run, or one sample when it is not set.
 func (a *Audio) run() uint64 { return max(a.Run, 1) }
 
-// under reports whether member m holds a run of zeros in the part of
-// page n already published from cur where cur holds samples that are
-// not zeros. Zeros cur holds there too are the signal's own and do not
-// count. Without Content, any run m holds there counts while cur holds
-// none.
+// under reports whether member m holds zeros in the part of page n
+// already published from cur where cur holds samples that are not zeros,
+// and whether one of them lies in a run of at least Run samples. Zeros
+// cur holds there too are the signal's own and do not count. Without
+// Content, a run m holds there counts, as long, while cur holds none.
 //
 // The published part only grows, so what was found of it for the page
 // and cur is kept per member and only what was published since is read.
-func (a *Audio) under(m, cur int, n uint64) bool {
+func (a *Audio) under(m, cur int, n uint64) (short, long bool) {
 	start := n * PageSamples
 	if a.Content == nil {
-		return a.zerosIn(cur, n, start, a.Head, a.run()) == a.Head && a.zerosIn(m, n, start, a.Head, a.run()) < a.Head
+		long = a.zerosIn(cur, n, start, a.Head, a.run()) == a.Head && a.zerosIn(m, n, start, a.Head, a.run()) < a.Head
+		return long, long
 	}
 	if len(a.seen) != len(a.cov) {
 		a.seen = make([]seen, len(a.cov))
@@ -633,31 +645,30 @@ func (a *Audio) under(m, cur int, n uint64) bool {
 	if !k.valid || k.n != n || k.cur != cur || k.to > a.Head {
 		*k = seen{valid: true, n: n, cur: cur, to: start}
 	}
-	// A run reaching back over what was read is found from where it
-	// starts, up to Run - 1 samples before.
-	for from := max(start, k.to-min(k.to, a.run()-1)); !k.found && from < a.Head; {
-		z := a.zerosIn(m, n, from, a.Head, a.run())
+	for from := k.to; !k.long && from < a.Head; {
+		z := a.zerosIn(m, n, from, a.Head, 1)
 		if z == a.Head {
 			break
 		}
 		end := a.Content(m, z, a.Head)
-		if a.Content(cur, z, end) < end {
-			k.found = true
+		if c := a.Content(cur, z, end); c < end {
+			k.short = true
+			k.long = a.zerosIn(m, n, c, c+1, a.run()) == c
 		}
 		from = end
 	}
 	k.to = a.Head
-	return k.found
+	return k.short, k.long
 }
 
 // seen is what under found of the published part of page n from cur
-// for one member: the part before to, and whether it holds a run under
-// samples that are not zeros.
+// for one member: the part before to, and whether it holds zeros, and a
+// run, under samples that are not zeros.
 type seen struct {
-	valid bool
-	n, to uint64
-	cur   int
-	found bool
+	valid       bool
+	n, to       uint64
+	cur         int
+	short, long bool
 }
 
 // zerosIn is Zeros with run for member m over [from, to) of page n, which m holds
