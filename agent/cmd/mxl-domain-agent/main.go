@@ -37,6 +37,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/agent/internal/flowpublisher"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/intent"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/intentsock"
+	"github.com/qvest-digital/mxl-k8s/agent/internal/keyed"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/mxlfsmount"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/mxlfswatch"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/numarelease"
@@ -476,10 +477,26 @@ func requireKind(mapper meta.RESTMapper, kind string) error {
 	return nil
 }
 
-// runDispatcher routes fanotify events to the flow publisher.
-func runDispatcher(ctx context.Context, in <-chan fanotify.Event, fp *flowpublisher.Publisher) {
+// flowEventHandlers bounds how many flows' events a domain's watch
+// handles at once. Each handler makes API calls.
+const flowEventHandlers = 8
+
+// eventName keys a fanotify event by the directory entry it names: one
+// flow, whose events are handled in order.
+func eventName(ev fanotify.Event) string { return ev.Name }
+
+// flowLocations is what a flow directory's appearance and removal ask
+// of the publisher.
+type flowLocations interface {
+	PublishAppeared(ctx context.Context, dirName string) error
+	PublishVanished(ctx context.Context, dirName string) error
+}
+
+// runDispatcher routes fanotify events to the flow publisher, each
+// flow's apart from the others'.
+func runDispatcher(ctx context.Context, in <-chan fanotify.Event, fp flowLocations) {
 	l := ctrl.Log.WithName("dispatcher")
-	for ev := range in {
+	keyed.Run(ctx, in, flowEventHandlers, eventName, func(ev fanotify.Event) {
 		switch {
 		case ev.IsCreate():
 			if err := fp.PublishAppeared(ctx, ev.Name); err != nil {
@@ -490,7 +507,17 @@ func runDispatcher(ctx context.Context, in <-chan fanotify.Event, fp *flowpublis
 				l.Error(err, "PublishVanished", "name", ev.Name)
 			}
 		}
-	}
+	})
+}
+
+// runMarkers publishes placeholder marker changes, each flow's apart
+// from the others'.
+func runMarkers(ctx context.Context, in <-chan fanotify.Event, fp mxlfswatch.Locations, l logr.Logger) {
+	keyed.Run(ctx, in, flowEventHandlers, eventName, func(ev fanotify.Event) {
+		if err := mxlfswatch.MarkerChanged(ctx, fp, ev.Name, ev.IsCreate()); err != nil {
+			l.Error(err, "publish placeholder change", "flowID", ev.Name)
+		}
+	})
 }
 
 // runProbes serves /healthz and /readyz on addr. /readyz returns 503
@@ -992,14 +1019,7 @@ func runMxlfs(ctx context.Context, domain string, fp *flowpublisher.Publisher,
 			l.Error(err, "placeholder marker watcher exited")
 		}
 	}()
-	go func() {
-		defer wg.Done()
-		for ev := range events {
-			if err := mxlfswatch.MarkerChanged(ctx, fp, ev.Name, ev.IsCreate()); err != nil {
-				l.Error(err, "publish placeholder change", "flowID", ev.Name)
-			}
-		}
-	}()
+	go func() { defer wg.Done(); runMarkers(ctx, events, fp, l) }()
 	l.Info("watching mxlfs placeholders")
 	return wg.Wait, nil
 }
