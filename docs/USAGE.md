@@ -92,7 +92,9 @@ prerequisite, not a suggestion.
   the same way. `mxlfs.moduleWaitSeconds`, off by default, holds the
   agent until the kernel lists `mxlfs` in `/proc/filesystems`, for at
   most that many seconds, after which the agent starts and falls back
-  as before. A module loaded at boot needs no wait.
+  as before. The gateway, the exporter and CSI consumers wait for the
+  agent, so they start up to that much later on a node whose module
+  never loads. A module loaded at boot needs no wait.
 - Routable inter-node networking on whatever interface the
   libfabric endpoints bind to. The gateway runs `hostNetwork`, so
   the address it publishes in `MxlFlowMirror.status.targetInfo` is

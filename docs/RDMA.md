@@ -294,13 +294,16 @@ enumerating that early where the driver loads after the pod starts,
 as the Kernel Module Management operator loads it on Ubuntu or Debian
 nodes; a driver loaded at boot needs no wait. An init container holds
 the gateway until `/sys/class/infiniband` holds a device with an
-`ACTIVE` port, bound to the kernel driver `gateway.rdma.wait.driver`
-names when that is set, checking once a second. It ends at the latest
-at the first check after that many seconds and exits 0 either way, so
-a gateway whose device never comes up starts and resolves to tcp as
-it does without the wait. The shipped `efa` variant sets the driver to
-`efa`. The wait applies only to a gateway with `rdma.enabled`, and 0,
-the default, renders no init container.
+`ACTIVE` port, checking once a second. It ends at the latest at the
+first check after that many seconds and exits 0 either way, so a
+gateway whose device never comes up starts and falls back as it does
+without the wait. `gateway.rdma.wait.driver` narrows the wait to
+devices whose `device/driver` link names that driver: `efa` for EFA,
+`mlx5_core` for a ConnectX. Left empty, any device counts, so on a
+node whose boot already brings up another RDMA device the wait ends at
+once. The shipped `efa` variant sets `efa`. The wait applies only to a
+gateway with `rdma.enabled`, and 0, the default, renders no init
+container.
 
 `version` is unset on every entry: libmxl-fabrics exposes no
 per-provider version through its C API.
