@@ -9,6 +9,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -19,7 +21,32 @@ import (
 type Resolver struct {
 	Client   client.Client
 	NodeName string
+
+	// listing holds one List at a time, so lookups that miss together
+	// share it. A channel rather than a mutex: a lookup waiting for
+	// another's List gives up when its own request ends.
+	listing     chan struct{}
+	listingOnce sync.Once
+	mu          sync.Mutex
+	byUID       map[string]*corev1.Pod // this node's pods, from the last List
+	listed      time.Time              // when the last List started
 }
+
+// podsFresh is how long the last List answers for the pods it holds. A
+// pod's name, namespace and UID never change, and the labels read are
+// not expected to.
+const podsFresh = 30 * time.Second
+
+// listEvery is the shortest time between two Lists. A lookup that misses
+// sooner waits for it, so a pod that started after the last List still
+// resolves, and a flood of unknown UIDs costs one List per interval.
+// Tests shorten it.
+var listEvery = time.Second
+
+// listTimeout bounds one List, which every lookup that misses meanwhile
+// waits for: a request with no deadline of its own must not hold them
+// past it. Tests shorten it.
+var listTimeout = 5 * time.Second
 
 // PodForPID returns the Pod scheduled on this node whose
 // metadata.uid matches the kubepods slice for the given host PID.
@@ -45,20 +72,78 @@ func (r *Resolver) UIDForPID(pid int32) (string, error) {
 	return uid, nil
 }
 
-// PodForUID lists only this node's pods: the client is uncached, and a
-// placeholder open resolves its pid every time.
+// PodForUID returns this node's pod with uid. The pods come from a List
+// of this node's pods, made again when uid is not in the last one or it
+// is older than podsFresh: the client is uncached, and every placeholder
+// open and wanted flow resolves its pid.
 func (r *Resolver) PodForUID(ctx context.Context, uid string) (*corev1.Pod, error) {
-	var pods corev1.PodList
-	if err := r.Client.List(ctx, &pods, client.MatchingFields{"spec.nodeName": r.NodeName}); err != nil {
-		return nil, fmt.Errorf("list pods: %w", err)
+	missed := time.Now()
+	if p, ok := r.cached(uid, missed); ok {
+		return p, nil
 	}
-	for i := range pods.Items {
-		p := &pods.Items[i]
-		if string(p.UID) == uid && p.Spec.NodeName == r.NodeName {
+	r.listingOnce.Do(func() { r.listing = make(chan struct{}, 1) })
+	select {
+	case r.listing <- struct{}{}:
+	case <-ctx.Done():
+		return nil, fmt.Errorf("list pods: %w", ctx.Err())
+	}
+	defer func() { <-r.listing }()
+	r.mu.Lock()
+	listed := r.listed
+	r.mu.Unlock()
+	// A List started after the miss holds every pod that had a process
+	// by then, so its answer stands, found or not.
+	if listed.After(missed) {
+		if p, ok := r.cached(uid, time.Now()); ok {
 			return p, nil
 		}
+		return nil, r.notFound(uid)
 	}
-	return nil, fmt.Errorf("no pod with uid %s on node %s", uid, r.NodeName)
+	if wait := time.Until(listed.Add(listEvery)); wait > 0 {
+		t := time.NewTimer(wait)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("list pods: %w", ctx.Err())
+		case <-t.C:
+		}
+	}
+	start := time.Now()
+	var pods corev1.PodList
+	lctx, cancel := context.WithTimeout(ctx, listTimeout)
+	err := r.Client.List(lctx, &pods, client.MatchingFields{"spec.nodeName": r.NodeName})
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+	byUID := make(map[string]*corev1.Pod, len(pods.Items))
+	for i := range pods.Items {
+		if p := &pods.Items[i]; p.Spec.NodeName == r.NodeName {
+			byUID[string(p.UID)] = p
+		}
+	}
+	r.mu.Lock()
+	r.byUID, r.listed = byUID, start
+	r.mu.Unlock()
+	if p, ok := r.cached(uid, start); ok {
+		return p, nil
+	}
+	return nil, r.notFound(uid)
+}
+
+// cached returns a copy of the pod with uid from a List fresh at now.
+func (r *Resolver) cached(uid string, now time.Time) (*corev1.Pod, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p, ok := r.byUID[uid]
+	if !ok || now.Sub(r.listed) >= podsFresh {
+		return nil, false
+	}
+	return p.DeepCopy(), true
+}
+
+func (r *Resolver) notFound(uid string) error {
+	return fmt.Errorf("no pod with uid %s on node %s", uid, r.NodeName)
 }
 
 // systemd cgroup driver: `.../kubepods-burstable-podUID.slice/...`.
