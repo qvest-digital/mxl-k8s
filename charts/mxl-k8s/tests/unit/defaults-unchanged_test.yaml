@@ -3,19 +3,30 @@ suite: defaults-unchanged
 # mxlfs.moduleWaitSeconds and gateway.rdma.wait existed. Both are for a
 # module or driver loaded after the pods start; left at their defaults
 # they must render the agent and gateway exactly as before, so an
-# install that does not use them sees no change on upgrade. Version and
-# appVersion are pinned so a release bump does not move the labels and
-# image tags the snapshot holds.
+# install that does not use them sees no change on upgrade.
+#
+# Everything a release or a dependency bump moves is pinned here, so
+# only a template change moves the snapshot: chart version and
+# appVersion carry the labels and the chart's own image tags, the rest
+# are third-party images. The initContainers asserts restate the part
+# the waits would change, so the guard holds even where the snapshot is
+# written afresh; CI fails a run that writes one.
 chart:
   version: 0.0.0
   appVersion: 0.0.0
 templates:
   - templates/daemonset-agent.yaml
   - templates/daemonset-gateway.yaml
+set:
+  mxlfs.waitImage: wait:pinned
+  agent.csi.registrar.image.repository: registrar
+  agent.csi.registrar.image.tag: pinned
 tests:
   - it: renders the agent and gateway unchanged at defaults
     asserts:
       - matchSnapshot: {}
+      - notExists:
+          path: spec.template.spec.initContainers
 
   - it: renders the agent and gateway unchanged with mxlfs
     set:
@@ -23,12 +34,34 @@ tests:
       agent.csi.enabled: true
     asserts:
       - matchSnapshot: {}
+      - notExists:
+          path: spec.template.spec.initContainers
+        template: templates/daemonset-agent.yaml
+      - equal:
+          path: spec.template.spec.initContainers
+          value:
+            - &waitForMxlfs
+              name: wait-for-mxlfs
+              image: wait:pinned
+              command: ["sh", "-c", "until [ -e \"$0\" ]; do sleep 1; done", "/run/mxl/mxlfs.ready"]
+              resources:
+                limits: {}
+                requests: {cpu: 1m, memory: 4Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: ["ALL"]}
+              volumeMounts:
+                - {name: mxl-run, mountPath: /run/mxl, readOnly: true}
+        template: templates/daemonset-gateway.yaml
 
   - it: renders the agent and gateway unchanged with rdma
     values:
       - ../values/full-rdma.yaml
     asserts:
       - matchSnapshot: {}
+      - notExists:
+          path: spec.template.spec.initContainers
 
   - it: renders every gateway variant unchanged with mxlfs
     values:
@@ -37,3 +70,32 @@ tests:
       mxlfs.enabled: true
     asserts:
       - matchSnapshot: {}
+      - notExists:
+          path: spec.template.spec.initContainers
+        template: templates/daemonset-agent.yaml
+      - equal:
+          path: spec.template.spec.initContainers
+          value: [*waitForMxlfs]
+        template: templates/daemonset-gateway.yaml
+
+  # The agent template now decides whether to render initContainers from
+  # the module wait as well as from agent.initContainers.
+  - it: renders the site's own init containers unchanged with mxlfs
+    set:
+      mxlfs.enabled: true
+      agent.initContainers:
+        - &site
+          name: site-setup
+          image: site:pinned
+      gateway.rdma.enabled: true
+      gateway.initContainers: [*site]
+    asserts:
+      - matchSnapshot: {}
+      - equal:
+          path: spec.template.spec.initContainers
+          value: [*site]
+        template: templates/daemonset-agent.yaml
+      - equal:
+          path: spec.template.spec.initContainers
+          value: [*waitForMxlfs, *site]
+        template: templates/daemonset-gateway.yaml

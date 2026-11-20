@@ -204,7 +204,7 @@ renders every gateway variant unchanged with mxlfs:
                 - -c
                 - until [ -e "$0" ]; do sleep 1; done
                 - /run/mxl/mxlfs.ready
-              image: busybox:1.38
+              image: wait:pinned
               name: wait-for-mxlfs
               resources:
                 limits: {}
@@ -360,7 +360,7 @@ renders every gateway variant unchanged with mxlfs:
                 - -c
                 - until [ -e "$0" ]; do sleep 1; done
                 - /run/mxl/mxlfs.ready
-              image: busybox:1.38
+              image: wait:pinned
               name: wait-for-mxlfs
               resources:
                 limits: {}
@@ -510,7 +510,7 @@ renders every gateway variant unchanged with mxlfs:
                 - -c
                 - until [ -e "$0" ]; do sleep 1; done
                 - /run/mxl/mxlfs.ready
-              image: busybox:1.38
+              image: wait:pinned
               name: wait-for-mxlfs
               resources:
                 limits: {}
@@ -845,7 +845,7 @@ renders the agent and gateway unchanged with mxlfs:
             - args:
                 - --csi-address=/csi/csi.sock
                 - --kubelet-registration-path=/var/lib/kubelet/plugins/mxl.qvest-digital.com/csi.sock
-              image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.15.0
+              image: registrar:pinned
               name: csi-registrar
               resources:
                 limits: {}
@@ -991,7 +991,7 @@ renders the agent and gateway unchanged with mxlfs:
                 - -c
                 - until [ -e "$0" ]; do sleep 1; done
                 - /run/mxl/mxlfs.ready
-              image: busybox:1.38
+              image: wait:pinned
               name: wait-for-mxlfs
               resources:
                 limits: {}
@@ -1236,6 +1236,255 @@ renders the agent and gateway unchanged with rdma:
                 path: /run/mxl/domains
                 type: DirectoryOrCreate
               name: mxl-domains
+            - hostPath:
+                path: /dev/infiniband
+                type: Directory
+              name: infiniband
+      updateStrategy:
+        rollingUpdate:
+          maxUnavailable: 1
+        type: RollingUpdate
+renders the site's own init containers unchanged with mxlfs:
+  1: |
+    apiVersion: apps/v1
+    kind: DaemonSet
+    metadata:
+      labels:
+        app.kubernetes.io/component: agent
+        app.kubernetes.io/instance: RELEASE-NAME
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/name: mxl-k8s-agent
+        app.kubernetes.io/version: 0.0.0
+        helm.sh/chart: mxl-k8s-0.0.0
+      name: mxl-k8s-agent
+      namespace: NAMESPACE
+    spec:
+      selector:
+        matchLabels:
+          app.kubernetes.io/component: agent
+          app.kubernetes.io/instance: RELEASE-NAME
+          app.kubernetes.io/name: mxl-k8s-agent
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/component: agent
+            app.kubernetes.io/instance: RELEASE-NAME
+            app.kubernetes.io/managed-by: Helm
+            app.kubernetes.io/name: mxl-k8s-agent
+            app.kubernetes.io/version: 0.0.0
+            helm.sh/chart: mxl-k8s-0.0.0
+        spec:
+          containers:
+            - args:
+                - --domain-path=/run/mxl/domain
+                - --health-probe-bind-address=:8081
+                - --intent-mirror-burst=8
+                - --intent-mirror-burst-window=10s
+                - --intent-mirrors-per-node=128
+                - --intent-mirrors-per-pod=64
+                - --intent-socket=/run/mxl/agent.sock
+                - --kube-api-burst=100
+                - --kube-api-qps=50
+                - --materialize-timeout=5s
+                - --metrics-bind-address=:8080
+                - --resync-period=30s
+                - --shim-path=/run/mxl/libmxl-intent.so
+                - --zap-log-level=info
+                - --mxlfs
+              env:
+                - name: NODE_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: spec.nodeName
+              image: ghcr.io/qvest-digital/mxl-k8s/agent:v0.0.0
+              imagePullPolicy: IfNotPresent
+              livenessProbe:
+                httpGet:
+                  path: /healthz
+                  port: probe
+                initialDelaySeconds: 5
+              name: agent
+              ports:
+                - containerPort: 8081
+                  name: probe
+                - containerPort: 8080
+                  name: metrics
+              readinessProbe:
+                httpGet:
+                  path: /readyz
+                  port: probe
+                initialDelaySeconds: 2
+              resources:
+                limits: {}
+                requests:
+                  cpu: 25m
+                  memory: 32Mi
+              securityContext:
+                privileged: true
+                readOnlyRootFilesystem: true
+                runAsNonRoot: false
+              volumeMounts:
+                - mountPath: /run/mxl
+                  mountPropagation: Bidirectional
+                  name: mxl-run
+          hostPID: true
+          initContainers:
+            - image: site:pinned
+              name: site-setup
+          serviceAccountName: mxl-k8s-agent
+          volumes:
+            - hostPath:
+                path: /run/mxl
+                type: DirectoryOrCreate
+              name: mxl-run
+      updateStrategy:
+        rollingUpdate:
+          maxUnavailable: 1
+        type: RollingUpdate
+  2: |
+    apiVersion: apps/v1
+    kind: DaemonSet
+    metadata:
+      labels:
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/instance: RELEASE-NAME
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/name: mxl-k8s-gateway
+        app.kubernetes.io/version: 0.0.0
+        helm.sh/chart: mxl-k8s-0.0.0
+      name: mxl-k8s-gateway
+      namespace: NAMESPACE
+    spec:
+      selector:
+        matchLabels:
+          app.kubernetes.io/component: gateway
+          app.kubernetes.io/instance: RELEASE-NAME
+          app.kubernetes.io/name: mxl-k8s-gateway
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/component: gateway
+            app.kubernetes.io/instance: RELEASE-NAME
+            app.kubernetes.io/managed-by: Helm
+            app.kubernetes.io/name: mxl-k8s-gateway
+            app.kubernetes.io/version: 0.0.0
+            helm.sh/chart: mxl-k8s-0.0.0
+        spec:
+          containers:
+            - args:
+                - --bind-address=$(POD_IP)
+                - --degraded-after=10s
+                - --domain-gc-grace=2m
+                - --domain-gc-interval=5m
+                - --domain-gc-scaffold-grace=10m
+                - --domain-path=/run/mxl/domain
+                - --fabric-max-utilization=0
+                - --health-probe-bind-address=:8081
+                - --kube-api-burst=100
+                - --kube-api-qps=50
+                - --metrics-bind-address=:8080
+                - --placement-wait=10s
+                - --probe-period=5m
+                - --providers=any
+                - --rdma-enumeration-grace=10m
+                - --reader-stall-after=20s
+                - --resync-period=60s
+                - --zap-log-level=info
+                - --mxlfs
+              env:
+                - name: NODE_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: spec.nodeName
+                - name: POD_IP
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: status.podIP
+                - name: FI_VERBS_ACK_TIMEOUT
+                  value: "14"
+              image: ghcr.io/qvest-digital/mxl-k8s/gateway:v0.0.0
+              imagePullPolicy: IfNotPresent
+              livenessProbe:
+                httpGet:
+                  path: /healthz
+                  port: probe
+                initialDelaySeconds: 5
+              name: gateway
+              ports:
+                - containerPort: 8081
+                  name: probe
+                - containerPort: 8080
+                  name: metrics
+              readinessProbe:
+                httpGet:
+                  path: /readyz
+                  port: probe
+                initialDelaySeconds: 2
+              resources:
+                limits: {}
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                  drop:
+                    - ALL
+                readOnlyRootFilesystem: true
+                runAsNonRoot: false
+              volumeMounts:
+                - mountPath: /run/mxl/domain
+                  mountPropagation: HostToContainer
+                  name: mxl-domain
+                - mountPath: /run/mxl/domains
+                  mountPropagation: HostToContainer
+                  name: mxl-domains
+                - mountPath: /dev/infiniband
+                  name: infiniband
+          dnsPolicy: ClusterFirstWithHostNet
+          hostNetwork: true
+          hostPID: true
+          initContainers:
+            - command:
+                - sh
+                - -c
+                - until [ -e "$0" ]; do sleep 1; done
+                - /run/mxl/mxlfs.ready
+              image: wait:pinned
+              name: wait-for-mxlfs
+              resources:
+                limits: {}
+                requests:
+                  cpu: 1m
+                  memory: 4Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+                readOnlyRootFilesystem: true
+              volumeMounts:
+                - mountPath: /run/mxl
+                  name: mxl-run
+                  readOnly: true
+            - image: site:pinned
+              name: site-setup
+          serviceAccountName: mxl-k8s-gateway
+          volumes:
+            - hostPath:
+                path: /run/mxl/domain
+                type: DirectoryOrCreate
+              name: mxl-domain
+            - hostPath:
+                path: /run/mxl/domains
+                type: DirectoryOrCreate
+              name: mxl-domains
+            - hostPath:
+                path: /run/mxl
+                type: DirectoryOrCreate
+              name: mxl-run
             - hostPath:
                 path: /dev/infiniband
                 type: Directory
