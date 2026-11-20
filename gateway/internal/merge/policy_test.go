@@ -772,7 +772,7 @@ func driveGap(t *testing.T, gap func(uint64) bool) (*Audio, map[uint64]int) {
 	a := NewAudio(2, 38, 2)
 	a.Skew, a.Tolerance = 2048, ToleranceFor(40*time.Millisecond)
 	s := newSamples(2, 2, 38)
-	a.Run, a.Zeros, a.Content = 48, s.zeros, s.content
+	a.Zeros, a.Content = s.zeros, s.content
 	shown := map[uint64]int{}
 	now := time.Unix(0, 0)
 	for b := uint64(10); b < 200; b++ {
@@ -834,7 +834,7 @@ func driveMembers(t *testing.T, batch uint64, zero func(m int, i uint64) bool) m
 	a := NewAudio(members, pages, members)
 	a.Skew, a.Tolerance = 2048, ToleranceFor(40*time.Millisecond)
 	s := newSamples(members, 2, pages)
-	a.Run, a.Zeros, a.Content = 48, s.zeros, s.content
+	a.Zeros, a.Content = s.zeros, s.content
 	shown := map[uint64]int{}
 	now := time.Unix(0, 0)
 	first, end := 10*PageSamples/batch*batch+batch, 200*PageSamples/batch*batch
@@ -920,7 +920,7 @@ func TestAudioDoesNotWaitForALateMemberOverZerosShorterThanARun(t *testing.T) {
 		a := NewAudio(members, pages, members)
 		a.Skew, a.Tolerance = 2048, ToleranceFor(40*time.Millisecond)
 		s := newSamples(members, 2, pages)
-		a.Run, a.Zeros, a.Content = 48, s.zeros, s.content
+		a.Zeros, a.Content = s.zeros, s.content
 		natural := func(i uint64) float32 {
 			if i%10 == 0 {
 				return 0
@@ -964,6 +964,49 @@ func TestAudioKeepsAPageOffAGapUnderPublishedSamplesAmidOwnZeros(t *testing.T) {
 	}
 }
 
+// A member's gap shorter than a run, under samples of the page already
+// published from another member, is shown in their place when the page
+// moves to it: the page is shown whole from one member. Where another
+// member holds the page without such a gap, the page moves to that one.
+func TestAudioMovesAPageOffAShortGapUnderPublishedSamples(t *testing.T) {
+	page := uint64(60 * PageSamples)
+	for _, run := range []uint64{1, 16, 47} {
+		shown := driveMembers(t, 480, func(m int, i uint64) bool {
+			switch m {
+			case 0: // the primary stops mid-page, its gap zero-filled
+				return i >= page+500 && i < page+1100
+			case 1: // a gap under what page 60 already showed from member 0
+				return i >= page+100 && i < page+100+run
+			}
+			return false
+		})
+		for i := page + 500; i < page+PageSamples; i++ {
+			require.Equal(t, 2, shown[i], "run %d: sample %d of page 60 shown from %d", run, i, shown[i])
+		}
+	}
+}
+
+// A member held back only for a short gap under the published part
+// holds samples at the head, and is served as far as they go: where it
+// holds zeros later that another member holding the samples does not,
+// the members are weighed again. Here no member holds samples at the
+// head itself: the primary has a run, member 1 short zeros.
+func TestAudioWeighsAMemberHeldForAPublishedGapAtItsLaterZeros(t *testing.T) {
+	page := uint64(60 * PageSamples)
+	shown := driveMembers(t, 480, func(m int, i uint64) bool {
+		switch m {
+		case 0:
+			return i >= page+500 && i < page+1100
+		case 1:
+			return i >= page+500 && i < page+516
+		}
+		return (i >= page+100 && i < page+116) || (i >= page+700 && i < page+716)
+	})
+	for i := page + 700; i < page+716; i++ {
+		require.NotEqual(t, 2, shown[i], "sample %d of member 2's later gap shown from it", i)
+	}
+}
+
 // The zero-filled range usually arrives before the same samples from a
 // member that commits them later, as a replica holding blocks for
 // evidence does. A member within Skew of the head that has not committed
@@ -974,7 +1017,7 @@ func TestAudioWaitsForAMemberBehindAZeroFilledRange(t *testing.T) {
 		a := NewAudio(2, 38, 2)
 		a.Skew, a.Tolerance = 2048, ToleranceFor(40*time.Millisecond)
 		s := newSamples(2, 2, 38)
-		a.Run, a.Zeros, a.Content = 48, s.zeros, s.content
+		a.Zeros, a.Content = s.zeros, s.content
 		for m := range 2 {
 			s.write(m, 10*PageSamples, 20*PageSamples, content)
 			a.Committed(m, 10*PageSamples, 20*PageSamples)
@@ -1017,7 +1060,7 @@ func TestAudioWaitsOncePerStretchOfSilence(t *testing.T) {
 	a := NewAudio(2, 38, 2)
 	a.Skew, a.Tolerance = 2048, ToleranceFor(40*time.Millisecond)
 	s := newSamples(2, 2, 38)
-	a.Run, a.Zeros, a.Content = 48, s.zeros, s.content
+	a.Zeros, a.Content = s.zeros, s.content
 	now := time.Unix(0, 0)
 	waits := 0
 	for b := uint64(10); b < 120; b++ {
@@ -1046,7 +1089,7 @@ func TestAudioWaitsForALatePrimaryOverZerosOnce(t *testing.T) {
 	a := NewAudio(2, 38, 2)
 	a.Skew, a.Tolerance = 2048, ToleranceFor(40*time.Millisecond)
 	s := newSamples(2, 2, 38)
-	a.Run, a.Zeros, a.Content = 48, s.zeros, s.content
+	a.Zeros, a.Content = s.zeros, s.content
 	for m := range 2 {
 		s.write(m, 10*PageSamples, 20*PageSamples, content)
 		a.Committed(m, 10*PageSamples, 20*PageSamples)
@@ -1072,7 +1115,7 @@ func TestAudioServesSilenceOnEveryMemberFromThePrimary(t *testing.T) {
 	a := NewAudio(2, 38, 2)
 	a.Skew, a.Tolerance = 2048, ToleranceFor(40*time.Millisecond)
 	s := newSamples(2, 2, 38)
-	a.Run, a.Zeros, a.Content = 48, s.zeros, s.content
+	a.Zeros, a.Content = s.zeros, s.content
 	now := time.Unix(0, 0)
 	selects := 0
 	for b := uint64(10); b < 200; b++ {
@@ -1103,7 +1146,7 @@ func TestAudioDropPrefersAMemberWithoutZeros(t *testing.T) {
 	a := NewAudio(3, 38, 3)
 	a.Skew = 2048
 	s := newSamples(3, 2, 38)
-	a.Run, a.Zeros, a.Content = 48, s.zeros, s.content
+	a.Zeros, a.Content = s.zeros, s.content
 	for m := range 3 {
 		s.write(m, 10*PageSamples, 41*PageSamples, content)
 		a.Committed(m, 10*PageSamples, 41*PageSamples)
