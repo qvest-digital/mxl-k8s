@@ -1,0 +1,39 @@
+suite: defaults-unchanged
+# The snapshot under __snapshot__ was rendered from the chart before
+# mxlfs.moduleWaitSeconds and gateway.rdma.wait existed. Both are for a
+# module or driver loaded after the pods start; left at their defaults
+# they must render the agent and gateway exactly as before, so an
+# install that does not use them sees no change on upgrade. Version and
+# appVersion are pinned so a release bump does not move the labels and
+# image tags the snapshot holds.
+chart:
+  version: 0.0.0
+  appVersion: 0.0.0
+templates:
+  - templates/daemonset-agent.yaml
+  - templates/daemonset-gateway.yaml
+tests:
+  - it: renders the agent and gateway unchanged at defaults
+    asserts:
+      - matchSnapshot: {}
+
+  - it: renders the agent and gateway unchanged with mxlfs
+    set:
+      mxlfs.enabled: true
+      agent.csi.enabled: true
+    asserts:
+      - matchSnapshot: {}
+
+  - it: renders the agent and gateway unchanged with rdma
+    values:
+      - ../values/full-rdma.yaml
+    asserts:
+      - matchSnapshot: {}
+
+  - it: renders every gateway variant unchanged with mxlfs
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      mxlfs.enabled: true
+    asserts:
+      - matchSnapshot: {}
