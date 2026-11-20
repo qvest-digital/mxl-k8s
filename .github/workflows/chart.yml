@@ -231,6 +231,17 @@ jobs:
       - name: helm unittest
         run: helm unittest charts/mxl-k8s -f 'tests/unit/*_test.yaml'
 
+      # helm unittest writes a snapshot it does not find instead of
+      # failing, so a deleted or renamed one would pass unnoticed.
+      - name: Snapshot drift check
+        run: |
+          set -eu
+          if [ -n "$(git status --porcelain -- charts/mxl-k8s/tests)" ]; then
+            git status --porcelain -- charts/mxl-k8s/tests
+            echo "::error::helm unittest wrote snapshots that are not committed"
+            exit 1
+          fi
+
       - name: Dashboard lint
         run: hack/check-dashboards.sh
 
