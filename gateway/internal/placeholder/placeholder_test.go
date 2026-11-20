@@ -207,6 +207,60 @@ func TestLocalWriterCheckLooksUpOnlyListedFlowsOutsideTheLock(t *testing.T) {
 	require.Equal(t, []string{flowID}, m.Held())
 }
 
+// A held placeholder's flock is advisory and does not keep its
+// directory. A directory that went is not looked up by name, which on
+// mxlfs waits for it to come back under the lock every Reconcile takes:
+// the placeholder is retired and created again.
+func TestHeldPlaceholderWhoseDirectoryWentIsNotLookedUp(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	reconcileFlow(t, m)
+	require.NoError(t, os.Rename(flowDir(h), filepath.Join(h.dir, ".gone")))
+	saved := foreignWriters
+	t.Cleanup(func() { foreignWriters = saved })
+	foreignWriters = func(path string) (int, error) {
+		if _, err := os.Stat(filepath.Dir(path)); os.IsNotExist(err) {
+			t.Errorf("looked up %s, which does not exist", path)
+		}
+		return saved(path)
+	}
+
+	reconcileFlow(t, m)
+
+	require.Equal(t, []string{flowID}, m.Held())
+	require.DirExists(t, flowDir(h), "the placeholder was not created again")
+	require.True(t, IsPlaceholder(h.dir, flowID))
+}
+
+// A placeholder replaced while the local-writer check counted the old
+// one's writers is not the one a local writer took over, and stays.
+func TestLocalWriterCheckKeepsAPlaceholderReplacedWhileCounting(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	reconcileFlow(t, m)
+	var stopped []string
+	m.LocalWriter = func(domain, id string) { stopped = append(stopped, id) }
+	replacement := &entry{domain: h.dir, id: flowID, writer: &fakeWriter{}}
+	saved := foreignWriters
+	t.Cleanup(func() { foreignWriters = saved })
+	foreignWriters = func(string) (int, error) {
+		m.mu.Lock()
+		old := m.held[flowID]
+		m.held[flowID] = replacement
+		m.mu.Unlock()
+		_ = old.writer.Close()
+		return 1, nil
+	}
+
+	m.CheckLocalWriters(logr.Discard())
+
+	require.Same(t, replacement, m.held[flowID], "the replacement was given up")
+	require.Empty(t, stopped, "LocalWriter was called for the replacement")
+	w := replacement.writer.(*fakeWriter)
+	require.False(t, w.detached || w.closed, "the replacement's writer was released")
+	require.True(t, IsPlaceholder(h.dir, flowID), "the replacement's marker was removed")
+}
+
 func TestFlowAProcessHereWritesGetsNoPlaceholder(t *testing.T) {
 	h := newDomain(t)
 	require.NoError(t, os.MkdirAll(flowDir(h), 0o755))

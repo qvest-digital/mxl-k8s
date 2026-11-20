@@ -45,10 +45,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
-	"github.com/qvest-digital/mxl-k8s/gateway/internal/mxlfs"
 )
 
 // MarkerDir is the directory in a domain that holds the placeholder
@@ -221,14 +221,24 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 		if e.filled {
 			return reconcile.Result{}, nil
 		}
-		def, err := onDiskDefinition(filepath.Dir(m.dataPath(e)))
-		if err == nil && hasOrigin(&flow) && SameGeometry(def, flow.Spec.Definition.Raw) && !HintsOf(&flow).Differ(e.cfg) {
-			return reconcile.Result{}, nil
-		}
-		// One a producer here opened is the producer's: CheckLocalWriters
-		// gives it up.
-		if n, err := foreignWriters(m.dataPath(e)); err != nil || n > 0 {
+		// The writer's flock is advisory and does not keep the directory:
+		// the target reclaim removes one only other processes' locks keep.
+		// One that went is retired and created again without a lookup of
+		// its name, which on mxlfs waits for the flow to come back.
+		listed, err := mxlfs.Listed(e.domain, e.id+".mxl-flow")
+		if err != nil {
 			return reconcile.Result{}, err
+		}
+		if listed {
+			def, err := onDiskDefinition(filepath.Dir(m.dataPath(e)))
+			if err == nil && hasOrigin(&flow) && SameGeometry(def, flow.Spec.Definition.Raw) && !HintsOf(&flow).Differ(e.cfg) {
+				return reconcile.Result{}, nil
+			}
+			// One a producer here opened is the producer's:
+			// CheckLocalWriters gives it up.
+			if n, err := foreignWriters(m.dataPath(e)); err != nil || n > 0 {
+				return reconcile.Result{}, err
+			}
 		}
 		l.Info("retiring placeholder", "origin", hasOrigin(&flow), "domain", e.domain)
 		if old := m.release(l, req.Name); old != nil {
@@ -253,7 +263,7 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	// exists at all is read from the directory: a path walk into a
 	// missing flow on mxlfs waits for it and posts it as wanted, under
 	// the gateway's pid, which the agent would mirror.
-	exists, err := mxlfs.Listed(domain, e.id)
+	exists, err := mxlfs.Listed(domain, e.id+".mxl-flow")
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -297,7 +307,7 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 		// The close deletes the flow when no other writer holds it, and a
 		// lookup of the deleted flow would wait for it to come back.
 		_ = w.Close()
-		listed, werr := mxlfs.Listed(domain, e.id)
+		listed, werr := mxlfs.Listed(domain, e.id+".mxl-flow")
 		if werr != nil {
 			_ = os.Remove(MarkerPath(domain, e.id))
 			return reconcile.Result{}, werr
@@ -562,7 +572,7 @@ func (m *Manager) CheckLocalWriters(l logr.Logger) {
 	m.mu.Unlock()
 	var taken []string
 	for name, e := range held {
-		if ok, err := mxlfs.Listed(e.domain, e.id); err != nil || !ok {
+		if ok, err := mxlfs.Listed(e.domain, e.id+".mxl-flow"); err != nil || !ok {
 			continue
 		}
 		if n, err := foreignWriters(m.dataPath(e)); err == nil && n > 0 {
