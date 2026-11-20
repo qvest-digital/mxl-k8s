@@ -173,6 +173,88 @@ tests:
     asserts:
       - failedTemplate: {}
 
+  # The agent decides each domain once, so a module loaded after it
+  # starts, as by the Kernel Module Management operator, finds the
+  # domains already left plain unless the agent waits for it.
+  - it: holds the agent until the kernel lists mxlfs, for the set bound
+    set:
+      mxlfs.enabled: true
+      mxlfs.moduleWaitSeconds: 120
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-mxlfs-module
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: busybox:1.38
+      - equal:
+          path: spec.template.spec.initContainers[0].command[3]
+          value: "120"
+      - equal:
+          path: spec.template.spec.initContainers[0].command[4]
+          value: /proc/filesystems
+      # A whole-name match on the last column, so mxlfs2 or a
+      # mxlfs-old do not count.
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: \$NF == "mxlfs"
+      - equal:
+          path: spec.template.spec.initContainers[0].resources.requests
+          value:
+            cpu: 1m
+            memory: 4Mi
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext
+          value:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      # /proc/filesystems is global; the wait needs no host path.
+      - notExists:
+          path: spec.template.spec.initContainers[0].volumeMounts
+
+  - it: keeps the agent's own init containers after the module wait
+    set:
+      mxlfs.enabled: true
+      mxlfs.moduleWaitSeconds: 30
+      agent.initContainers:
+        - name: site-setup
+          image: busybox:1.38
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-mxlfs-module
+      - equal:
+          path: spec.template.spec.initContainers[1].name
+          value: site-setup
+
+  - it: starts the agent at once when moduleWaitSeconds is 0
+    set:
+      mxlfs.enabled: true
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  - it: does not wait for the mxlfs module without mxlfs
+    set:
+      mxlfs.moduleWaitSeconds: 120
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  - it: refuses a negative moduleWaitSeconds
+    set:
+      mxlfs.enabled: true
+      mxlfs.moduleWaitSeconds: -1
+    template: templates/daemonset-agent.yaml
+    asserts:
+      - failedTemplate: {}
+
   - it: holds the gateway until the agent has decided the domains
     set:
       mxlfs.enabled: true

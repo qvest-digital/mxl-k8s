@@ -289,6 +289,22 @@ enumerations from one seen once, so it is set in multiples of
 Service, which stops the per-mirror counters being collected without
 revisiting the enumeration that caused it.
 
+`gateway.rdma.wait.seconds`, off by default, keeps a gateway from
+enumerating that early where the driver loads after the pod starts,
+as the Kernel Module Management operator loads it on Ubuntu or Debian
+nodes; a driver loaded at boot needs no wait. An init container holds
+the gateway until `/sys/class/infiniband` holds a device with an
+`ACTIVE` port, checking once a second. It ends at the latest at the
+first check after that many seconds and exits 0 either way, so a
+gateway whose device never comes up starts and falls back as it does
+without the wait. `gateway.rdma.wait.driver` narrows the wait to
+devices whose `device/driver` link names that driver: `efa` for EFA,
+`mlx5_core` for a ConnectX. Left empty, any device counts, so on a
+node whose boot already brings up another RDMA device the wait ends at
+once. The shipped `efa` variant sets `efa`. The wait applies only to a
+gateway with `rdma.enabled`, and 0, the default, renders no init
+container.
+
 `version` is unset on every entry: libmxl-fabrics exposes no
 per-provider version through its C API.
 
@@ -782,7 +798,7 @@ those nodes belong in their own variant.
 | `MxlFlowMirror` `Degraded` with `TargetProgress=False/OpenTargetFailed` | Gateway can't `fi_getinfo` the provider on the local NIC. Check `/dev/infiniband` is mounted and the host module is loaded. `status.targetAttemptCount` carries the length of the failure run. |
 | Mirror fails with `no usable fabric interface` | Every candidate was excluded. The error names the first exclusion and its reason; check the fabric flags against `kubectl get mxlnodecapabilities <node> -o yaml`. |
 | A node advertises `deviceCount: 0` for a provider whose hardware is installed | libmxl-fabrics did not enumerate a usable device. Check `RDMADevicesEnumerated` first: `False` means the host exposes an active device this process never enumerated, which only a gateway restart clears. Otherwise check the host module and `/dev/infiniband`, then whether the fabric flags exclude the interface it would have used. |
-| Every mirror on one node sits on tcp while its peers use verbs | The gateway enumerated before the node's RDMA device was usable, and libfabric does not rebuild a provider's device list within a process. `RDMADevicesEnumerated=False/HostDevicesUnenumerated` reports it; restart the gateway pod on that node. |
+| Every mirror on one node sits on tcp while its peers use verbs | The gateway enumerated before the node's RDMA device was usable, and libfabric does not rebuild a provider's device list within a process. `RDMADevicesEnumerated=False/HostDevicesUnenumerated` reports it; restart the gateway pod on that node. Where the driver loads after the pod starts, set `gateway.rdma.wait.seconds`. |
 | Every mirror sits on tcp after an upgrade | Nodes whose gateway has not rolled yet report no `Probed` condition. Check `kubectl get mxlnodecapabilities` for the ones still on the old shape. |
 | Gateway pods Pending with `Insufficient <resource>` | The DaemonSet requests a device-plugin resource on nodes that do not advertise it. Split those nodes into their own `gateway.variants` entry. |
 | Gateway pods stuck in `ContainerCreating` | The `/dev/infiniband` hostPath is absent and `rdma.infinibandHostPathType` is `Directory`. Either place the DaemonSet only on RDMA-capable nodes or set `rdma.mountInfiniband: false` and reach the device through a device plugin. |

@@ -307,3 +307,184 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].args
           content: --fabric-max-utilization=70
+
+  # libfabric fixes a provider's device list at the gateway's first
+  # enumeration, so a gateway that starts before a driver loaded after
+  # it, as by the Kernel Module Management operator, advertises no RDMA
+  # for its whole life unless it waits for the device.
+  - it: holds an RDMA gateway until a device has an active port
+    set:
+      gateway.rdma.enabled: true
+      gateway.rdma.wait.seconds: 60
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-rdma
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: busybox:1.38
+      - equal:
+          path: spec.template.spec.initContainers[0].command[3]
+          value: "60"
+      - equal:
+          path: spec.template.spec.initContainers[0].command[4]
+          value: /sys/class/infiniband
+      # No driver argument: any device counts.
+      - lengthEqual:
+          path: spec.template.spec.initContainers[0].command
+          count: 5
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: active
+      - equal:
+          path: spec.template.spec.initContainers[0].resources.requests
+          value:
+            cpu: 1m
+            memory: 4Mi
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext
+          value:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      # It reads the sysfs the runtime mounts, as the gateway does.
+      - notExists:
+          path: spec.template.spec.initContainers[0].volumeMounts
+
+  - it: waits only for a device of rdma.wait.driver when it is set
+    set:
+      gateway.rdma.enabled: true
+      gateway.rdma.wait.seconds: 60
+      gateway.rdma.wait.driver: efa
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.initContainers[0].command
+          count: 6
+      - equal:
+          path: spec.template.spec.initContainers[0].command[5]
+          value: efa
+
+  - it: starts an RDMA gateway at once when rdma.wait.seconds is 0
+    set:
+      gateway.rdma.enabled: true
+      gateway.rdma.wait.driver: efa
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  - it: does not wait for an RDMA device when rdma is disabled
+    set:
+      gateway.rdma.wait.seconds: 60
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  - it: waits for the device after mxlfs.ready and before site init containers
+    set:
+      mxlfs.enabled: true
+      gateway.rdma.enabled: true
+      gateway.rdma.wait.seconds: 60
+      gateway.initContainers:
+        - name: site-setup
+          image: busybox:1.38
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.initContainers
+          count: 3
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-mxlfs
+      - equal:
+          path: spec.template.spec.initContainers[1].name
+          value: wait-for-rdma
+      - equal:
+          path: spec.template.spec.initContainers[2].name
+          value: site-setup
+
+  - it: refuses a negative rdma.wait.seconds
+    set:
+      gateway.rdma.enabled: true
+      gateway.rdma.wait.seconds: -1
+    asserts:
+      - failedTemplate: {}
+
+  # Set once at the base, the wait reaches every RDMA variant, the efa
+  # variant names its driver, and the tcp variant does not wait at all.
+  - it: applies rdma.wait per variant
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      gateway.rdma.wait.seconds: 120
+    documentSelector:
+      path: metadata.name
+      value: mxl-k8s-gateway-efa
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].command[3]
+          value: "120"
+      - equal:
+          path: spec.template.spec.initContainers[0].command[5]
+          value: efa
+  - it: waits for any device on the verbs variant
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      gateway.rdma.wait.seconds: 120
+    documentSelector:
+      path: metadata.name
+      value: mxl-k8s-gateway-verbs
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.initContainers[0].command
+          count: 5
+  - it: does not wait for an RDMA device on the tcp variant
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      gateway.rdma.wait.seconds: 120
+    documentSelector:
+      path: metadata.name
+      value: mxl-k8s-gateway-tcp
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers
+
+  # The schema checks rdma.wait.seconds at the base only; in a variant,
+  # a value int reads as 0 would turn the wait off without a word.
+  - it: refuses a variant rdma.wait.seconds that is not an integer
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      gateway.variants.efa.rdma.wait.seconds: thirty
+    asserts:
+      - failedTemplate:
+          errorMessage: "gateway.variants.efa.rdma.wait.seconds must be a non-negative integer, not thirty"
+  - it: refuses a fractional variant rdma.wait.seconds
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      gateway.variants.efa.rdma.wait.seconds: 1.5
+    asserts:
+      - failedTemplate:
+          errorMessage: "gateway.variants.efa.rdma.wait.seconds must be a non-negative integer, not 1.5"
+  - it: refuses a negative variant rdma.wait.seconds
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      gateway.variants.verbs.rdma.wait.seconds: -5
+    asserts:
+      - failedTemplate:
+          errorMessage: "gateway.variants.verbs.rdma.wait.seconds must be a non-negative integer, not -5"
+  - it: takes a variant's own rdma.wait.seconds
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      gateway.variants.efa.rdma.wait.seconds: 45
+    documentSelector:
+      path: metadata.name
+      value: mxl-k8s-gateway-efa
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].command[3]
+          value: "45"

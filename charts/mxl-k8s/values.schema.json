@@ -2054,10 +2054,31 @@
               },
               "title": "verbsAckTimeout",
               "type": "integer"
+            },
+            "wait": {
+              "properties": {
+                "driver": {
+                  "default": "",
+                  "description": "Driver of the device's bus device the wait accepts, the basename of /sys/class/infiniband/\u003cdevice\u003e/device/driver: efa for the AWS Elastic Fabric Adapter, mlx5_core for a ConnectX, whose RDMA module mlx5_ib is not what that link names. Empty accepts any device, so on a node whose boot already brings up another RDMA device with an ACTIVE port the wait ends at once; set the driver there. Only consulted when rdma.wait.seconds is above 0.",
+                  "required": [],
+                  "title": "driver"
+                },
+                "seconds": {
+                  "default": 0,
+                  "description": "Off by default. Only for an RDMA driver loaded after the gateway pod starts, as the Kernel Module Management operator loads it on Ubuntu or Debian nodes, from a pod of its own once the kubelet runs; a driver loaded at boot needs none. libfabric fixes a provider's device list when the gateway first enumerates, so a gateway that starts before its device is usable advertises no RDMA for the life of the process, and every mirror created meanwhile resolves to a non-RDMA provider. A value above 0 adds an init container to the gateway that checks /sys/class/infiniband once a second for a device with an ACTIVE port, and ends as soon as one is there, or at the latest at the first check after this many seconds, exiting 0 either way: the gateway then starts, enumerates and falls back as it does with 0. Only consulted when rdma.enabled is set. 0 renders no init container.",
+                  "minimum": 0,
+                  "title": "seconds",
+                  "type": "integer"
+                }
+              },
+              "required": [],
+              "title": "wait",
+              "type": "object"
             }
           },
           "required": [
-            "extraEnv"
+            "extraEnv",
+            "wait"
           ],
           "title": "rdma",
           "type": "object"
@@ -2272,12 +2293,27 @@
                       "default": "vpc.amazonaws.com/efa",
                       "title": "resourceName",
                       "type": "string"
+                    },
+                    "wait": {
+                      "properties": {
+                        "driver": {
+                          "default": "efa",
+                          "title": "driver",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "driver"
+                      ],
+                      "title": "wait",
+                      "type": "object"
                     }
                   },
                   "required": [
                     "enabled",
                     "mountInfiniband",
-                    "resourceName"
+                    "resourceName",
+                    "wait"
                   ],
                   "title": "rdma",
                   "type": "object"
@@ -2496,6 +2532,13 @@
           "required": [],
           "title": "huge"
         },
+        "moduleWaitSeconds": {
+          "default": 0,
+          "description": "Off by default. Only for an mxlfs module loaded after the agent pod starts, as the Kernel Module Management operator loads it on Ubuntu or Debian nodes, from a pod of its own once the kubelet runs; a module loaded at boot needs none. The agent decides each domain once: a mount that finds no mxlfs leaves the domain plain for the life of the agent process and records a MxlfsUnavailable warning event on the Node. A value above 0 adds an init container to the agent that checks /proc/filesystems for mxlfs once a second and ends as soon as it is listed, or at the latest at the first check after this many seconds, exiting 0 either way: the agent then starts and mounts or falls back to a plain directory as it does with 0. The gateway and the exporter wait for the agent's mxlfs.ready, and the agent publishes its CSI volume only once it has decided the domain, so all of them start that much later too: by up to this many seconds on a node whose module never loads. Needs mxlfs.enabled. 0 renders no init container.",
+          "minimum": 0,
+          "title": "moduleWaitSeconds",
+          "type": "integer"
+        },
         "numa": {
           "properties": {
             "metrics": {
@@ -2605,12 +2648,12 @@
         },
         "waitImage": {
           "default": "busybox:1.38",
-          "description": "Image of the init container that waits for mxlfs.ready. Needs a POSIX sh, test and sleep.",
+          "description": "Image of the init containers that wait for mxlfs.ready, for the mxlfs module and for an RDMA device (gateway.rdma.wait). Needs a POSIX sh, test, sleep, date, awk, grep and readlink.",
           "required": [],
           "title": "waitImage"
         },
         "waitResources": {
-          "description": "Resources of that init container.",
+          "description": "Resources of those init containers.",
           "properties": {
             "limits": {
               "required": [],
