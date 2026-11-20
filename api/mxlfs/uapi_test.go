@@ -77,3 +77,43 @@ func TestRingFiles(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{filepath.Join(dir, "grains", "data.0"), filepath.Join(dir, "grains", "data.1")}, got)
 }
+
+// Listed answers from the directory's listing alone. A directory that
+// can be read but not searched lists its entries while every lookup of
+// a name in it fails, so only a listing finds the entry there.
+func TestListedReadsTheListingAlone(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the mode bits this test turns on")
+	}
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "a.mxl-flow"), 0o755))
+	require.NoError(t, os.Chmod(dir, 0o400))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	ok, err := Listed(dir, "a.mxl-flow")
+	require.NoError(t, err)
+	require.True(t, ok)
+	ok, err = Listed(dir, "b.mxl-flow")
+	require.NoError(t, err)
+	require.False(t, ok)
+}
+
+// More entries than one read returns are all looked at.
+func TestListedFindsAnEntryPastTheFirstRead(t *testing.T) {
+	dir := t.TempDir()
+	for i := range 600 {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%03d", i)), nil, 0o644))
+	}
+	for i := range 600 {
+		ok, err := Listed(dir, fmt.Sprintf("f%03d", i))
+		require.NoError(t, err)
+		require.True(t, ok, "f%03d", i)
+	}
+}
+
+// A directory that is not there is an error, not an empty listing: the
+// caller decides whether a missing domain lists no flow.
+func TestListedFailsOnAMissingDirectory(t *testing.T) {
+	_, err := Listed(filepath.Join(t.TempDir(), "absent"), "a.mxl-flow")
+	require.ErrorIs(t, err, os.ErrNotExist)
+}

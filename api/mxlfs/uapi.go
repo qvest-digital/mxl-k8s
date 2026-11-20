@@ -2,13 +2,16 @@
 // kernel/mxlfs_uapi.h in github.com/danielclasen/mxlfs: the ioctl
 // numbers, the structs they take, and one call per ioctl. A module that
 // predates these ioctls answers ENOTTY; Unsupported tells that apart.
-// HostNICNode finds the NUMA node a placement moves rings to.
+// HostNICNode finds the NUMA node a placement moves rings to. Listed
+// and RingFiles read a domain's flow directories.
 package mxlfs
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"syscall"
 )
 
@@ -187,6 +190,33 @@ const maxNodes = 8
 // Unsupported reports whether err says the module has no such ioctl.
 func Unsupported(err error) bool {
 	return errors.Is(err, syscall.ENOTTY) || errors.Is(err, errors.ErrUnsupported)
+}
+
+// Listed reports whether the directory dir has an entry called name,
+// reading the directory rather than looking the name up. On an mxlfs
+// mounted with wait=, a lookup of a flow directory that is not there
+// waits for it to appear, so a flow is looked up by name only once a
+// listing has returned it. A dir that cannot be opened or read, one
+// that does not exist included, returns the error, unless name was
+// read before the error.
+func Listed(dir, name string) (bool, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	for {
+		names, err := f.Readdirnames(256)
+		if slices.Contains(names, name) {
+			return true, nil
+		}
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
 }
 
 // RingFiles returns the files of the flow directory flowDir that hold its
