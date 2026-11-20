@@ -219,6 +219,18 @@
               "required": [],
               "title": "healthProbeBindAddress"
             },
+            "intentApiBurst": {
+              "default": "100",
+              "description": "Client-side burst above intentApiQps.",
+              "required": [],
+              "title": "intentApiBurst"
+            },
+            "intentApiQps": {
+              "default": "50",
+              "description": "Client-side request rate of a second API client, which serves pod lookups and on-demand mirrors: what a reader's open, or its wait on a missing flow, asks of the API server. Its limit is its own, so readers asking for many flows do not spend the rate flow publishing and Lease renewal run on.",
+              "required": [],
+              "title": "intentApiQps"
+            },
             "intentMirrorBurst": {
               "default": 8,
               "description": "Most mirrors the agent creates on demand for one pod within intentMirrorBurstWindow, so a process opening every flow at once, as a glob over the domain does, gets only a few at a time. The history is the agent's memory and starts afresh when the agent restarts. 0 is unlimited.",

@@ -89,6 +89,14 @@ type Config struct {
 	// rate limiter.
 	KubeAPIBurst int
 
+	// IntentAPIQPS and IntentAPIBurst are the rate and burst of a second
+	// Kubernetes API client, used by what a reader's open or a wait on a
+	// missing flow asks of the API: pod lookups and on-demand mirrors.
+	// Its limiters are its own, so readers asking for many flows cannot
+	// spend the budget flow publishing and Lease renewal run on.
+	IntentAPIQPS   float64
+	IntentAPIBurst int
+
 	// Mxlfs runs what a domain on mxlfs needs: placeholder and wanted
 	// flow watchers, redundancy set demand. Off, every domain is a plain
 	// directory.
@@ -205,6 +213,11 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"Sustained Kubernetes API request rate allowed before client-side throttling.")
 	fs.IntVar(&c.KubeAPIBurst, "kube-api-burst", 100,
 		"Burst ceiling of the Kubernetes API client rate limiter.")
+	fs.Float64Var(&c.IntentAPIQPS, "intent-api-qps", 50,
+		"Sustained Kubernetes API request rate of the client that serves pod "+
+			"lookups and on-demand mirrors, apart from the flow publisher's.")
+	fs.IntVar(&c.IntentAPIBurst, "intent-api-burst", 100,
+		"Burst ceiling of the client that serves pod lookups and on-demand mirrors.")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -263,6 +276,12 @@ func (c *Config) Validate() error {
 	}
 	if c.KubeAPIBurst <= 0 {
 		return fmt.Errorf("--kube-api-burst must be positive, got %d", c.KubeAPIBurst)
+	}
+	if c.IntentAPIQPS <= 0 {
+		return fmt.Errorf("--intent-api-qps must be positive, got %v", c.IntentAPIQPS)
+	}
+	if c.IntentAPIBurst <= 0 {
+		return fmt.Errorf("--intent-api-burst must be positive, got %d", c.IntentAPIBurst)
 	}
 	return nil
 }

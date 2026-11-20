@@ -43,7 +43,6 @@ import (
 	"github.com/qvest-digital/mxl-k8s/agent/internal/numarelease"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/observed"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/originlease"
-	"github.com/qvest-digital/mxl-k8s/agent/internal/podlookup"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/redundancy"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/shiminstall"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/statfs"
@@ -91,14 +90,12 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("build kubeconfig: %w", err)
 	}
-	// client-go defaults to 5 QPS / 10 burst when the limits are left
-	// zero; flow appear/vanish bursts on a busy domain exceed that.
-	restCfg.QPS = float32(cfg.KubeAPIQPS)
-	restCfg.Burst = cfg.KubeAPIBurst
-	kClient, err := client.New(restCfg, client.Options{Scheme: scheme})
+	clients, err := newClients(restCfg, scheme, float32(cfg.KubeAPIQPS), cfg.KubeAPIBurst,
+		float32(cfg.IntentAPIQPS), cfg.IntentAPIBurst)
 	if err != nil {
-		return fmt.Errorf("build client: %w", err)
+		return err
 	}
+	kClient := clients.main
 
 	ctx, cancel := context.WithCancel(ctrl.SetupSignalHandler())
 	defer cancel()
@@ -121,7 +118,7 @@ func run(args []string) error {
 	var domainsMu sync.Mutex
 	current := intent.Domains{Root: root, Primary: primaryDir, ByDir: map[string]string{}}
 
-	pods := &podlookup.Resolver{Client: kClient, NodeName: cfg.NodeName}
+	pods := clients.pods(cfg.NodeName)
 	ns, nsErr := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 	namespace := strings.TrimSpace(string(ns))
 	own := ownPod(namespace)
@@ -138,27 +135,14 @@ func run(args []string) error {
 	}
 	var intentDispatcher *intent.Dispatcher
 	if cfg.IntentSocketPath != "" || cfg.Mxlfs {
-		intentDispatcher = &intent.Dispatcher{
-			Client:             kClient,
-			Resolver:           pods,
-			DomainPath:         cfg.DomainPath,
-			NodeName:           cfg.NodeName,
-			Provider:           mxlv1alpha1.MxlFabricsProvider(cfg.Provider),
-			MaterializeTimeout: cfg.MaterializeTimeout,
-			Limits: intent.Limits{
-				PerPod:      cfg.IntentMirrorsPerPod,
-				PerNode:     cfg.IntentMirrorsPerNode,
-				Burst:       cfg.IntentMirrorBurst,
-				BurstWindow: cfg.IntentMirrorBurstWindow,
-			},
-			Lease:  leaseMgr,
-			Origin: originClaims{primary: flowPub, trackers: trackers},
-			Own:    own,
-			Domains: func() intent.Domains {
-				domainsMu.Lock()
-				defer domainsMu.Unlock()
-				return current
-			},
+		intentDispatcher = clients.dispatcher(cfg, pods)
+		intentDispatcher.Lease = leaseMgr
+		intentDispatcher.Origin = originClaims{primary: flowPub, trackers: trackers}
+		intentDispatcher.Own = own
+		intentDispatcher.Domains = func() intent.Domains {
+			domainsMu.Lock()
+			defer domainsMu.Unlock()
+			return current
 		}
 	}
 	// A redundancy set's output is merged where a reader waits for it, in
