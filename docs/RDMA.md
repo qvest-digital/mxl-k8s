@@ -289,16 +289,18 @@ enumerations from one seen once, so it is set in multiples of
 Service, which stops the per-mirror counters being collected without
 revisiting the enumeration that caused it.
 
-`gateway.rdma.wait.seconds` keeps a gateway from enumerating that
-early where the driver loads after the pod starts, as with a module
-the Kernel Module Management operator loads from a pod of its own
-once the kubelet runs. An init container holds the gateway until
-`/sys/class/infiniband` holds a device with an `ACTIVE` port, bound
-to the kernel driver `gateway.rdma.wait.driver` names when that is
-set, checking once a second for at most that many seconds, and then
-lets the gateway start either way. The shipped `efa` variant sets the
-driver to `efa`. The wait applies only to a gateway with
-`rdma.enabled`, and 0, the default, starts the gateway at once.
+`gateway.rdma.wait.seconds`, off by default, keeps a gateway from
+enumerating that early where the driver loads after the pod starts,
+as the Kernel Module Management operator loads it on Ubuntu or Debian
+nodes; a driver loaded at boot needs no wait. An init container holds
+the gateway until `/sys/class/infiniband` holds a device with an
+`ACTIVE` port, bound to the kernel driver `gateway.rdma.wait.driver`
+names when that is set, checking once a second. It ends at the latest
+at the first check after that many seconds and exits 0 either way, so
+a gateway whose device never comes up starts and resolves to tcp as
+it does without the wait. The shipped `efa` variant sets the driver to
+`efa`. The wait applies only to a gateway with `rdma.enabled`, and 0,
+the default, renders no init container.
 
 `version` is unset on every entry: libmxl-fabrics exposes no
 per-provider version through its C API.
