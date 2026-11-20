@@ -225,11 +225,15 @@ mxlfs:
   # once: a mount that finds no mxlfs leaves the domain plain for the
   # life of the agent process and records a MxlfsUnavailable warning
   # event on the Node. A value above 0 adds an init container to the
-  # agent that checks /proc/filesystems for mxlfs once a second and
-  # ends as soon as it is listed, or at the latest at the first check
-  # after this many seconds, exiting 0 either way: the agent then
-  # starts and mounts or falls back to a plain directory as it does
-  # with 0. Needs mxlfs.enabled. 0 renders no init container.
+  # agent that checks /proc/filesystems for mxlfs once a second and ends
+  # as soon as it is listed, or at the latest at the first check after
+  # this many seconds, exiting 0 either way: the agent then starts and
+  # mounts or falls back to a plain directory as it does with 0. The
+  # gateway and the exporter wait for the agent's mxlfs.ready, and the
+  # agent publishes its CSI volume only once it has decided the domain,
+  # so all of them start that much later too: by up to this many seconds
+  # on a node whose module never loads. Needs mxlfs.enabled. 0 renders
+  # no init container.
   moduleWaitSeconds: 0
   # -- Image of the init containers that wait for mxlfs.ready, for the
   # mxlfs module and for an RDMA device (gateway.rdma.wait). Needs a
@@ -981,21 +985,25 @@ gateway:
       # loads it on Ubuntu or Debian nodes, from a pod of its own once
       # the kubelet runs; a driver loaded at boot needs none. libfabric
       # fixes a provider's device list when the gateway first
-      # enumerates, so a gateway that starts before its device is
-      # usable advertises no RDMA for the life of the process, and
-      # every mirror created meanwhile resolves to tcp. A value above 0
-      # adds an init container to the gateway that checks
+      # enumerates, so a gateway that starts before its device is usable
+      # advertises no RDMA for the life of the process, and every mirror
+      # created meanwhile resolves to a non-RDMA provider. A value above
+      # 0 adds an init container to the gateway that checks
       # /sys/class/infiniband once a second for a device with an ACTIVE
       # port, and ends as soon as one is there, or at the latest at the
       # first check after this many seconds, exiting 0 either way: the
-      # gateway then starts and enumerates as it does with 0, on tcp
-      # where no device came up. Only consulted when rdma.enabled is
-      # set. 0 renders no init container.
+      # gateway then starts, enumerates and falls back as it does with
+      # 0. Only consulted when rdma.enabled is set. 0 renders no init
+      # container.
       seconds: 0
-      # -- Kernel driver the device has to be bound to, the basename of
-      # its device/driver link, as efa for the AWS Elastic Fabric
-      # Adapter. Empty accepts any device. Only consulted when
-      # rdma.wait.seconds is above 0.
+      # -- Driver of the device's bus device the wait accepts, the
+      # basename of /sys/class/infiniband/<device>/device/driver: efa
+      # for the AWS Elastic Fabric Adapter, mlx5_core for a ConnectX,
+      # whose RDMA module mlx5_ib is not what that link names. Empty
+      # accepts any device, so on a node whose boot already brings up
+      # another RDMA device with an ACTIVE port the wait ends at once;
+      # set the driver there. Only consulted when rdma.wait.seconds is
+      # above 0.
       driver: ""
   serviceAccount:
     create: true
