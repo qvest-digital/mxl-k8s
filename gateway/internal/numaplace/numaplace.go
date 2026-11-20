@@ -32,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
-	gwmxlfs "github.com/qvest-digital/mxl-k8s/gateway/internal/mxlfs"
 )
 
 // Event reasons, recorded on the MxlFlowMirror whose attach placed the
@@ -281,7 +280,7 @@ func (p *Placer) place(pin *flowPin, k flowKey, obj client.Object) {
 	// The source's reader holds no lock, so the producer may have
 	// deleted the flow since it was opened, and on mxlfs a lookup of a
 	// flow directory that is not there waits for it to appear.
-	listed, err := gwmxlfs.Listed(k.domain, k.flowID)
+	listed, err := mxlfs.Listed(k.domain, k.flowID+".mxl-flow")
 	var paths []string
 	switch {
 	case err == nil && !listed:

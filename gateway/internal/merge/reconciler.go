@@ -23,9 +23,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
-	"github.com/qvest-digital/mxl-k8s/gateway/internal/mxlfs"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/placeholder"
 )
 
@@ -353,7 +353,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 	// Usually there is none, and on mxlfs a lookup of a flow directory
 	// that is not there waits for it to appear, so the output is looked
 	// up only once the domain lists it.
-	listed, err := mxlfs.Listed(dir, spec.OutputID)
+	listed, err := mxlfs.Listed(dir, spec.OutputID+".mxl-flow")
 	if err != nil {
 		l.Info("cannot list the domain for a leftover output", "error", err.Error())
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil

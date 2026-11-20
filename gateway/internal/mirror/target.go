@@ -29,6 +29,7 @@ import (
 	"github.com/qvest-digital/go-mxl/fabrics"
 	"github.com/qvest-digital/go-mxl/mxl"
 
+	apimxlfs "github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/flowlocks"
@@ -1865,7 +1866,7 @@ var errLocalWriter = errors.New("a process on this node writes the flow")
 // usually is not yet, has neither and is not looked up: on mxlfs a
 // lookup of a flow directory that is not there waits for it to appear.
 func prepareFlowDir(domain, id, def string, retire func(domain, id string)) error {
-	listed, err := mxlfs.Listed(domain, id)
+	listed, err := apimxlfs.Listed(domain, id+flowDirSuffix)
 	if err != nil {
 		return fmt.Errorf("%w: list domain: %w", errOpenWriterFailed, err)
 	}
@@ -1926,7 +1927,7 @@ func clearFlowDir(dir string, retire func(domain, id string), held error) error 
 	// Closing the last writer deletes the flow, as retiring a placeholder
 	// or closing the target's own writer before this does, and on mxlfs a
 	// lookup of the deleted flow would wait for it to come back.
-	listed, err := mxlfs.Listed(domain, id)
+	listed, err := apimxlfs.Listed(domain, id+flowDirSuffix)
 	if err != nil {
 		return fmt.Errorf("list %s: %w", domain, err)
 	}

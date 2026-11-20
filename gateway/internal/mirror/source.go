@@ -34,10 +34,10 @@ import (
 	"github.com/qvest-digital/go-mxl/fabrics"
 	"github.com/qvest-digital/go-mxl/mxl"
 
+	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/instance"
-	"github.com/qvest-digital/mxl-k8s/gateway/internal/mxlfs"
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/numaplace"
 )
 
@@ -1068,7 +1068,7 @@ func (r *SourceReconciler) flowActive(ref mxlv1alpha1.FlowRef) (bool, error) {
 // that is not there, when the domain does not list flow id, so libmxl
 // is asked about a flow by name only once the listing has returned it.
 func requireListed(domain, id string) error {
-	listed, err := mxlfs.Listed(domain, id)
+	listed, err := mxlfs.Listed(domain, id+".mxl-flow")
 	if err != nil {
 		return fmt.Errorf("list %s: %w", domain, err)
 	}

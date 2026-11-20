@@ -77,23 +77,6 @@ func FlowDir(domain string, id [16]byte) string {
 	return filepath.Join(domain, fmt.Sprintf("%x-%x-%x-%x-%x.mxl-flow", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16]))
 }
 
-// Listed reports whether domain holds a directory for flow id, reading
-// the domain's listing rather than looking the flow's name up: on an
-// mxlfs mounted with wait=, a lookup of a flow directory that is not
-// there waits for it to appear.
-func Listed(domain, id string) (bool, error) {
-	entries, err := os.ReadDir(domain)
-	if err != nil {
-		return false, err
-	}
-	for _, d := range entries {
-		if d.Name() == id+".mxl-flow" {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 // AllocateFlow allocates the ring of the flow directory flowDir: every
 // grain file of a discrete flow, or the channels file of a continuous
 // one.
