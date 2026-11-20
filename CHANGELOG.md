@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.0-rc.54](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.53...v1.1.0-rc.54) (2026-11-20)
+
+
+### Bug Fixes
+
+* **agent:** bound and dedupe the handling of wanted flows ([#459](https://github.com/qvest-digital/mxl-k8s/issues/459)) ([bb2a890](https://github.com/qvest-digital/mxl-k8s/commit/bb2a8906a377a1316b48b1ccd5704c2f8c8f0225))
+* **agent:** give pod lookups and mirror requests an API budget ([#462](https://github.com/qvest-digital/mxl-k8s/issues/462)) ([3431278](https://github.com/qvest-digital/mxl-k8s/commit/3431278e4c138e4ab96ad7907aa7a9456b8a0a77))
+* **gateway:** keep a merged page off a gap under its sent part ([#463](https://github.com/qvest-digital/mxl-k8s/issues/463)) ([37e2398](https://github.com/qvest-digital/mxl-k8s/commit/37e2398ba2e5278e5c82f2ded6781c13f698a11f))
+* **gateway:** keep a merged page off a short gap under its published part ([37e2398](https://github.com/qvest-digital/mxl-k8s/commit/37e2398ba2e5278e5c82f2ded6781c13f698a11f))
+* **gateway:** serve merged audio around a zero run shorter than 1 ms ([#460](https://github.com/qvest-digital/mxl-k8s/issues/460)) ([aee1b84](https://github.com/qvest-digital/mxl-k8s/commit/aee1b84952ce78f87edc6ed95e8b574f85415edd))
+
 ## [1.1.0-rc.53](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.52...v1.1.0-rc.53) (2026-11-20)
 
 
