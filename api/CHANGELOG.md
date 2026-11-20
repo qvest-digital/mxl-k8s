@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0-rc.47](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.46...api/v1.1.0-rc.47) (2026-11-20)
+
+
+### Features
+
+* **api:** add mxlfs.Listed to find a flow without a lookup ([7001af2](https://github.com/qvest-digital/mxl-k8s/commit/7001af2d90b1ef9e0c633fc3262d3bda2bcc056f))
+
+
+### Bug Fixes
+
+* **agent,gateway,exporter:** list a flow before looking it up by name ([7001af2](https://github.com/qvest-digital/mxl-k8s/commit/7001af2d90b1ef9e0c633fc3262d3bda2bcc056f))
+
 ## [1.1.0-rc.46](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.45...api/v1.1.0-rc.46) (2026-11-14)
 
 
