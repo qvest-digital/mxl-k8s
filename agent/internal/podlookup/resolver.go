@@ -30,6 +30,10 @@ type Resolver struct {
 	mu          sync.Mutex
 	byUID       map[string]*corev1.Pod // this node's pods, from the last List
 	listed      time.Time              // when the last List started
+	// failErr is the error of the last List, when it failed, and failed
+	// when that List ended.
+	failErr error
+	failed  time.Time
 }
 
 // podsFresh is how long the last List answers for the pods it holds. A
@@ -89,7 +93,7 @@ func (r *Resolver) PodForUID(ctx context.Context, uid string) (*corev1.Pod, erro
 	}
 	defer func() { <-r.listing }()
 	r.mu.Lock()
-	listed := r.listed
+	listed, failErr, failed := r.listed, r.failErr, r.failed
 	r.mu.Unlock()
 	// A List started after the miss holds every pod that had a process
 	// by then, so its answer stands, found or not.
@@ -98,6 +102,13 @@ func (r *Resolver) PodForUID(ctx context.Context, uid string) (*corev1.Pod, erro
 			return p, nil
 		}
 		return nil, r.notFound(uid)
+	}
+	// A List that failed answers the lookups that waited for it, and
+	// those after it, for listEvery: while the API server does not
+	// answer, each lookup behind it would otherwise run a List of its
+	// own, as long as listTimeout each.
+	if failErr != nil && time.Since(failed) < listEvery {
+		return nil, failErr
 	}
 	if wait := time.Until(listed.Add(listEvery)); wait > 0 {
 		t := time.NewTimer(wait)
@@ -114,7 +125,16 @@ func (r *Resolver) PodForUID(ctx context.Context, uid string) (*corev1.Pod, erro
 	err := r.Client.List(lctx, &pods, client.MatchingFields{"spec.nodeName": r.NodeName})
 	cancel()
 	if err != nil {
-		return nil, fmt.Errorf("list pods: %w", err)
+		err = fmt.Errorf("list pods: %w", err)
+		// Only the API's answer, or listTimeout, says the API does not
+		// answer: a List that ended with this lookup's own request says
+		// nothing about the next one.
+		if ctx.Err() == nil {
+			r.mu.Lock()
+			r.failErr, r.failed = err, time.Now()
+			r.mu.Unlock()
+		}
+		return nil, err
 	}
 	byUID := make(map[string]*corev1.Pod, len(pods.Items))
 	for i := range pods.Items {
@@ -123,7 +143,7 @@ func (r *Resolver) PodForUID(ctx context.Context, uid string) (*corev1.Pod, erro
 		}
 	}
 	r.mu.Lock()
-	r.byUID, r.listed = byUID, start
+	r.byUID, r.listed, r.failErr = byUID, start, nil
 	r.mu.Unlock()
 	if p, ok := r.cached(uid, start); ok {
 		return p, nil

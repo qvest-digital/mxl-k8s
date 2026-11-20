@@ -2,6 +2,8 @@ package podlookup
 
 import (
 	"context"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -293,4 +295,88 @@ func TestAHungListEndsAtTheListTimeout(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("a List with no deadline hung the lookup")
 	}
+}
+
+// switchClient lists the node's pods, or, while down is set, hangs
+// until the List's context ends. It counts the Lists.
+func switchClient(down *atomic.Bool, lists *atomic.Int32, objs ...client.Object) client.WithWatch {
+	return fake.NewClientBuilder().
+		WithObjects(objs...).
+		WithIndex(&corev1.Pod{}, "spec.nodeName", func(o client.Object) []string {
+			return []string{o.(*corev1.Pod).Spec.NodeName}
+		}).
+		WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, l client.ObjectList, opts ...client.ListOption) error {
+			lists.Add(1)
+			if down.Load() {
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			return c.List(ctx, l, opts...)
+		}}).Build()
+}
+
+// While the API server does not answer, a List that failed answers the
+// lookups queued behind it for listEvery: each running its own List of
+// listTimeout would hold the eighth of eight bounded wanted handlers
+// eight times as long. Once the API answers again, a lookup past
+// listEvery lists and resolves, and that List clears the failure: the
+// next miss is answered by a List of its own, not by the old error.
+func TestAFailedListAnswersTheLookupsBehindIt(t *testing.T) {
+	oldTimeout := listTimeout
+	listTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { listTimeout = oldTimeout })
+	shortenListEvery(t, 300*time.Millisecond)
+	var down atomic.Bool
+	var lists atomic.Int32
+	down.Store(true)
+	r := &Resolver{Client: switchClient(&down, &lists, nodePod("a", uidA)), NodeName: "n1"}
+
+	const waiters = 8
+	errs := make(chan error, waiters)
+	start := time.Now()
+	for i := range waiters {
+		go func() {
+			_, err := r.PodForUID(context.Background(), fmt.Sprintf("%08d-2222-3333-4444-555555555555", i))
+			errs <- err
+		}()
+	}
+	for range waiters {
+		require.ErrorIs(t, <-errs, context.DeadlineExceeded)
+	}
+	assert.Equal(t, int32(1), lists.Load(), "lookups behind a failed List listed again")
+	assert.Less(t, time.Since(start), 8*listTimeout, "the lookups behind it waited for Lists of their own")
+
+	down.Store(false)
+	time.Sleep(listEvery)
+	p, err := r.PodForUID(context.Background(), uidA)
+	require.NoError(t, err, "a lookup past listEvery with the API back")
+	assert.Equal(t, "a", p.Name)
+	assert.Equal(t, int32(2), lists.Load())
+
+	_, err = r.PodForUID(context.Background(), uidC)
+	require.EqualError(t, err, "no pod with uid "+uidC+" on node n1", "the old failure answered after a List succeeded")
+	assert.Equal(t, int32(3), lists.Load())
+}
+
+// A List that ended because the lookup's own request ended says nothing
+// about the API: the dispatcher bounds each request at its materialize
+// timeout, and a request that ran out while its List was slow must not
+// fail every other lookup for listEvery on an API that answers.
+func TestAListEndedByItsOwnRequestIsNoFailureForOthers(t *testing.T) {
+	shortenListEvery(t, time.Hour)
+	var down atomic.Bool
+	var lists atomic.Int32
+	down.Store(true)
+	r := &Resolver{Client: switchClient(&down, &lists, nodePod("a", uidA)), NodeName: "n1"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	_, err := r.PodForUID(ctx, uidA)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	down.Store(false)
+	p, err := r.PodForUID(context.Background(), uidA)
+	require.NoError(t, err)
+	assert.Equal(t, "a", p.Name)
+	assert.Equal(t, int32(2), lists.Load())
 }
