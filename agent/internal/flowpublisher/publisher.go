@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -21,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/flowlock"
+	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -225,8 +227,8 @@ func (p *Publisher) PublishAppeared(ctx context.Context, dirName string) error {
 	// On mxlfs a lookup of a flow directory that is gone waits for it to
 	// come back. A directory removed since it was reported, as a
 	// placeholder's once its marker goes, has nothing left to publish.
-	listed, err := flowlock.Listed(p.DomainPath, flowID)
-	if err != nil {
+	listed, err := mxlfs.Listed(p.DomainPath, dirName)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("list %s: %w", p.DomainPath, err)
 	}
 	if !listed {

@@ -227,3 +227,16 @@ func TestWriterAttached_UnlistableDomainReportsAttached(t *testing.T) {
 	assert.Error(t, err)
 	assert.True(t, attached)
 }
+
+// A domain that is not there holds no flow, so nothing writes to it.
+// Read as "cannot tell", it would keep every location of a removed
+// domain published.
+func TestWriterAttached_MissingDomain(t *testing.T) {
+	domain := filepath.Join(t.TempDir(), "absent")
+	attached, err := WriterAttached(domain, flowID)
+	require.NoError(t, err)
+	assert.False(t, attached)
+	pids, err := Locks{}.WriterPIDs(domain, flowID)
+	require.NoError(t, err)
+	assert.Empty(t, pids)
+}

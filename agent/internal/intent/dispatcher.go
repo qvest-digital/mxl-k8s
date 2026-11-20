@@ -29,7 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/qvest-digital/mxl-k8s/agent/internal/flowlock"
+	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	"github.com/qvest-digital/mxl-k8s/api/selection"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -393,7 +393,7 @@ func (d *Dispatcher) flowExistsLocally(ref mxlv1alpha1.FlowRef) bool {
 	// wait=, a lookup of a missing flow directory waits for it to
 	// appear, which would hold this request until the reader that made
 	// it has given up.
-	if ok, err := flowlock.Listed(dir, ref.ID); err != nil || !ok {
+	if ok, err := mxlfs.Listed(dir, ref.ID+".mxl-flow"); err != nil || !ok {
 		return false
 	}
 	// The directory is listed, so its dentry is positive and the walk into

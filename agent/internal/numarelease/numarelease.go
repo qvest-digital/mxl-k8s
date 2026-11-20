@@ -25,7 +25,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/qvest-digital/mxl-k8s/agent/internal/flowlock"
 	"github.com/qvest-digital/mxl-k8s/agent/internal/observed"
 	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -265,7 +264,7 @@ func (l *Loop) flow(f *flowUse, dir string, topo topology) string {
 	// the flow it reports may be gone. On mxlfs a lookup of a flow
 	// directory that is not there waits for it, so the flow is looked up
 	// only once the domain lists it.
-	if listed, err := flowlock.Listed(dir, f.ref.ID); err != nil || !listed {
+	if listed, err := mxlfs.Listed(dir, f.ref.ID+".mxl-flow"); err != nil || !listed {
 		return ""
 	}
 	paths, err := l.ringFiles(filepath.Join(dir, f.ref.ID+".mxl-flow"))
