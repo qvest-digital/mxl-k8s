@@ -2059,13 +2059,13 @@
               "properties": {
                 "driver": {
                   "default": "",
-                  "description": "Kernel driver the device has to be bound to, the basename of its device/driver link, as efa for the AWS Elastic Fabric Adapter. Empty accepts any device.",
+                  "description": "Kernel driver the device has to be bound to, the basename of its device/driver link, as efa for the AWS Elastic Fabric Adapter. Empty accepts any device. Only consulted when rdma.wait.seconds is above 0.",
                   "required": [],
                   "title": "driver"
                 },
                 "seconds": {
                   "default": 0,
-                  "description": "Seconds the gateway waits at start, in an init container, for a device under /sys/class/infiniband with an ACTIVE port, checked once a second. Only consulted when rdma.enabled is set. libfabric fixes a provider's device list when the gateway first enumerates, so a gateway that starts before its device is usable advertises no RDMA for the life of the process, and every mirror created meanwhile resolves to tcp. A driver loaded after the pod starts, as by the Kernel Module Management operator, which loads it from a pod of its own once the kubelet runs, has to bind before then. The init container exits 0 when the bound passes, and the gateway then starts as it would without it. 0 starts the gateway at once.",
+                  "description": "Off by default. Only for an RDMA driver loaded after the gateway pod starts, as the Kernel Module Management operator loads it on Ubuntu or Debian nodes, from a pod of its own once the kubelet runs; a driver loaded at boot needs none. libfabric fixes a provider's device list when the gateway first enumerates, so a gateway that starts before its device is usable advertises no RDMA for the life of the process, and every mirror created meanwhile resolves to tcp. A value above 0 adds an init container to the gateway that checks /sys/class/infiniband once a second for a device with an ACTIVE port, and ends as soon as one is there, or at the latest at the first check after this many seconds, exiting 0 either way: the gateway then starts and enumerates as it does with 0, on tcp where no device came up. Only consulted when rdma.enabled is set. 0 renders no init container.",
                   "minimum": 0,
                   "title": "seconds",
                   "type": "integer"
@@ -2534,7 +2534,7 @@
         },
         "moduleWaitSeconds": {
           "default": 0,
-          "description": "Seconds the agent waits at start for the kernel to list mxlfs in /proc/filesystems, checked once a second from an init container. The agent decides each domain once: a mount that finds no mxlfs leaves the domain plain for the life of the agent process and records a MxlfsUnavailable warning event on the Node. A module loaded after the agent starts, as by the Kernel Module Management operator, which loads it from a pod of its own once the kubelet runs, has to be listed before then. The init container exits 0 when the bound passes, and the agent then starts as it would without it. 0 starts the agent at once.",
+          "description": "Off by default. Only for an mxlfs module loaded after the agent pod starts, as the Kernel Module Management operator loads it on Ubuntu or Debian nodes, from a pod of its own once the kubelet runs; a module loaded at boot needs none. The agent decides each domain once: a mount that finds no mxlfs leaves the domain plain for the life of the agent process and records a MxlfsUnavailable warning event on the Node. A value above 0 adds an init container to the agent that checks /proc/filesystems for mxlfs once a second and ends as soon as it is listed, or at the latest at the first check after this many seconds, exiting 0 either way: the agent then starts and mounts or falls back to a plain directory as it does with 0. Needs mxlfs.enabled. 0 renders no init container.",
           "minimum": 0,
           "title": "moduleWaitSeconds",
           "type": "integer"
