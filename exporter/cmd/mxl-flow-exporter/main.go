@@ -29,6 +29,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/domain"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/numa"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/topology"
+	"github.com/qvest-digital/mxl-k8s/exporter/internal/wanted"
 )
 
 var setupLog = ctrl.Log.WithName("setup")
@@ -57,6 +58,23 @@ func main() {
 		setupLog.Error(err, "exporter exited with error")
 		os.Exit(1)
 	}
+}
+
+// scannedCollector exports what its last Scan of the domains read.
+type scannedCollector interface {
+	prometheus.Collector
+	Scan(paths []string)
+}
+
+// mxlfsCounters returns the collectors of the mxlfs module's counters
+// that every scan reads: the waits for missing flows always, and the
+// NUMA placement with numaMetrics.
+func mxlfsCounters(numaMetrics bool, log logr.Logger) []scannedCollector {
+	out := []scannedCollector{wanted.New(log.WithName("wanted"))}
+	if numaMetrics {
+		out = append(out, numa.New(log.WithName("numa")))
+	}
+	return out
 }
 
 func run(ctx context.Context, cfg *config.Config, log logr.Logger) error {
@@ -103,19 +121,20 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) error {
 		nodeReg.MustRegister(topology.New(reader, cfg.NodeName, log.WithName("topology")))
 	}
 
-	scan := func() error { return doms.Scan() }
-	if cfg.MxlfsNumaMetrics {
-		placement := numa.New(log.WithName("numa"))
-		nodeReg.MustRegister(placement)
-		scan = func() error {
-			err := doms.Scan()
-			var paths []string
-			for _, d := range doms.Domains() {
-				paths = append(paths, d.Path())
-			}
-			placement.Scan(paths)
-			return err
+	counters := mxlfsCounters(cfg.MxlfsNumaMetrics, log)
+	for _, c := range counters {
+		nodeReg.MustRegister(c)
+	}
+	scan := func() error {
+		err := doms.Scan()
+		var paths []string
+		for _, d := range doms.Domains() {
+			paths = append(paths, d.Path())
 		}
+		for _, c := range counters {
+			c.Scan(paths)
+		}
+		return err
 	}
 	if err := scan(); err != nil {
 		// A node that has never carried a flow has no domain directory
