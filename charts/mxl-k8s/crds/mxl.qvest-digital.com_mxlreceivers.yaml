@@ -173,8 +173,8 @@ spec:
             properties:
               boundMirror:
                 description: |-
-                  BoundMirror references the MxlFlowMirror created to satisfy
-                  this receiver.
+                  BoundMirror names the first of the MxlFlowMirrors that satisfy
+                  this receiver. Empty on a receiver bound with no mirror.
                 properties:
                   name:
                     description: Name is the MxlFlowMirror name.

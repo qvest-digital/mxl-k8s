@@ -9,15 +9,20 @@ import (
 type MxlReceiverPhase string
 
 const (
-	// MxlReceiverPending means the operator has not yet produced an
-	// MxlFlowMirror.
+	// MxlReceiverPending means the receiver is not served yet: no
+	// target pod is scheduled, the flow has no source to mirror it
+	// from, or a mirror it needs cannot be created yet.
 	MxlReceiverPending MxlReceiverPhase = "Pending"
-	// MxlReceiverBound means an MxlFlowMirror exists for the
-	// receiver. The mirror's own status reports materialization
-	// progress.
+	// MxlReceiverBound means every target node has what it reads the
+	// flow from: the node that produces the flow reads it there, and
+	// every other node through an MxlFlowMirror, whose own status
+	// reports materialization progress. A flow with no Origin location
+	// that is the output of an MxlFlowRedundancySet Valid at its
+	// current generation gets no mirror: the gateway merges it on each
+	// node it is read on.
 	MxlReceiverBound MxlReceiverPhase = "Bound"
-	// MxlReceiverFailed means the operator could not produce a
-	// mirror. Inspect status.conditions for the cause.
+	// MxlReceiverFailed is accepted by the schema. The operator does
+	// not set it.
 	MxlReceiverFailed MxlReceiverPhase = "Failed"
 )
 
@@ -63,8 +68,8 @@ type MxlReceiverSpec struct {
 
 // MxlReceiverStatus reports the runtime state of a receiver.
 type MxlReceiverStatus struct {
-	// BoundMirror references the MxlFlowMirror created to satisfy
-	// this receiver.
+	// BoundMirror names the first of the MxlFlowMirrors that satisfy
+	// this receiver. Empty on a receiver bound with no mirror.
 	// +optional
 	BoundMirror *MirrorRef `json:"boundMirror,omitempty"`
 
