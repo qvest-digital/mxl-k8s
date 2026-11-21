@@ -45,14 +45,14 @@ func runWanted(t *testing.T, w *Wanted, d Materializer, claim func(context.Conte
 	})
 }
 
-// held counts the Materialize calls in flight; every call for a flow
-// slow names waits for release.
+// held counts the Materialize calls in flight, made and returned; every
+// call for a flow slow names waits for release.
 type held struct {
-	mu                   sync.Mutex
-	running, most, calls int
-	slow                 func(path string) bool
-	release              chan struct{}
-	once                 sync.Once
+	mu                         sync.Mutex
+	running, most, calls, done int
+	slow                       func(path string) bool
+	release                    chan struct{}
+	once                       sync.Once
 }
 
 // free releases every call, once.
@@ -69,8 +69,16 @@ func (h *held) Materialize(_ context.Context, _ int32, path string) error {
 	}
 	h.mu.Lock()
 	h.running--
+	h.done++
 	h.mu.Unlock()
 	return nil
+}
+
+// returned is how many calls have returned.
+func (h *held) returned() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.done
 }
 
 func (h *held) read() (running, most, calls int) {
@@ -117,10 +125,14 @@ func TestOneSlowWantDoesNotHoldTheQueue(t *testing.T) {
 	runWanted(t, &Wanted{mount: Mount{Root: "/", MountPoint: "/run/mxl"}, next: q.next}, h, nil)
 	t.Cleanup(h.free)
 
-	require.Eventually(t, func() bool { _, _, c := h.read(); return c == 101 },
+	// Wait for the other flows' calls to return, not only to start: a
+	// call counted as made may still be in flight, and would be counted
+	// as running beside the slow one.
+	require.Eventually(t, func() bool { return h.returned() == 100 },
 		2*time.Second, time.Millisecond, "the other flows' wants were held behind the slow one")
-	r, _, _ := h.read()
+	r, _, c := h.read()
 	require.Equal(t, 1, r, "a flow's wants are handled one at a time")
+	require.Equal(t, 101, c, "a want of the slow flow was handled beside the one in flight")
 }
 
 // answering answers every request with ErrFlowNotKnown until known is
