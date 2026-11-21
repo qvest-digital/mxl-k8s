@@ -19,6 +19,8 @@ func TestCallsAreUnsupportedOffLinux(t *testing.T) {
 	require.ErrorIs(t, err, errors.ErrUnsupported)
 	_, err = ReadStats(nil)
 	require.ErrorIs(t, err, errors.ErrUnsupported)
+	_, err = IsView(nil)
+	require.ErrorIs(t, err, errors.ErrUnsupported)
 	require.ErrorIs(t, Hold(nil, true), errors.ErrUnsupported)
 	require.ErrorIs(t, SetNode(nil, 0), errors.ErrUnsupported)
 	require.True(t, Unsupported(SetNode(nil, 0)))

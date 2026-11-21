@@ -3,6 +3,7 @@
 package mxlfs
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -86,6 +87,25 @@ func MountNodes(f *os.File) ([]NodeStat, error) {
 			continue
 		}
 		return buf[:m.Nr], nil
+	}
+}
+
+// IsView reports whether f's file is an mxlfs view. A view has no pages
+// of its own, so SET_NODE, HOLD and MOVE refuse it once CAP_SYS_NICE is
+// checked: with EPERM from 0.1.0-rc.9 on, with EINVAL before, so the
+// errno alone does not tell a view from a missing capability. It asks
+// with MXLFS_IOC_VIEW_GET_SELECTED, which a module answers on a view and
+// fails with EINVAL on any other regular file. Needs no privilege.
+func IsView(f *os.File) (bool, error) {
+	var source uint32
+	err := ioctl(f, "MXLFS_IOC_VIEW_GET_SELECTED", iocGetSelected, unsafe.Pointer(&source))
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, syscall.EINVAL):
+		return false, nil
+	default:
+		return false, err
 	}
 }
 

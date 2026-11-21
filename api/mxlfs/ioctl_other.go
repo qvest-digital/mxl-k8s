@@ -26,3 +26,6 @@ func MountNodes(*os.File) ([]NodeStat, error) { return nil, errors.ErrUnsupporte
 
 // ReadStats is unsupported off Linux.
 func ReadStats(*os.File) (Stats, error) { return Stats{}, errors.ErrUnsupported }
+
+// IsView is unsupported off Linux.
+func IsView(*os.File) (bool, error) { return false, errors.ErrUnsupported }
