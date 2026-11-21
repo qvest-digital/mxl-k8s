@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
+	"github.com/qvest-digital/mxl-k8s/api/mxlfs/uapitest"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -274,4 +275,10 @@ func TestFlowFilesAreOpenedInTheDirectoryLookedUpOnce(t *testing.T) {
 
 	require.True(t, moved)
 	require.Equal(t, flowPages{perNode: []uint64{2, 5}}, c.snaps[dom].flows[flowA])
+}
+
+func TestMagicMatchesHeader(t *testing.T) {
+	h, err := uapitest.Parse()
+	require.NoError(t, err)
+	require.EqualValues(t, h.Consts["MXLFS_MAGIC"], magic)
 }

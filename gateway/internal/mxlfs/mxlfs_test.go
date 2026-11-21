@@ -9,6 +9,8 @@ import (
 	"github.com/qvest-digital/go-mxl/mxl"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
+
+	"github.com/qvest-digital/mxl-k8s/api/mxlfs/uapitest"
 )
 
 // The numbers must match the kernel's encoding of the mxlfs_uapi.h
@@ -19,6 +21,12 @@ func TestIoctlNumbers(t *testing.T) {
 	}
 	require.Equal(t, ioc(1, 7, 4), uintptr(iocLazyAlloc), "_IOW('x', 7, __u32)")
 	require.Equal(t, ioc(0, 8, 0), uintptr(iocAllocate), "_IO('x', 8)")
+
+	h, err := uapitest.Parse()
+	require.NoError(t, err)
+	require.Equal(t, h.Ioctls["MXLFS_IOC_LAZY_ALLOC"], uintptr(iocLazyAlloc))
+	require.Equal(t, h.Ioctls["MXLFS_IOC_ALLOCATE"], uintptr(iocAllocate))
+	require.EqualValues(t, h.Consts["MXLFS_MAGIC"], Magic)
 }
 
 func TestIsMxlfsOnOtherFilesystem(t *testing.T) {

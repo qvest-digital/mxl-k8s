@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
+	"github.com/qvest-digital/mxl-k8s/api/mxlfs/uapitest"
 )
 
 func collector(calls *atomic.Int64, err *error) *Collector {
@@ -84,4 +85,10 @@ func TestDomainsWithoutCounters(t *testing.T) {
 	c.isMxlfs = func(string) bool { return false }
 	c.Scan([]string{dom})
 	require.Zero(t, testutil.CollectAndCount(c))
+}
+
+func TestMagicMatchesHeader(t *testing.T) {
+	h, err := uapitest.Parse()
+	require.NoError(t, err)
+	require.EqualValues(t, h.Consts["MXLFS_MAGIC"], magic)
 }
