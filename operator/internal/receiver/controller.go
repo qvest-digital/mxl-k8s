@@ -271,7 +271,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		"flowID", recv.Spec.FlowID,
 		"sourceNode", res.Node,
 		"desired", len(desired))
-	result, err := r.markBound(ctx, &recv, primary)
+	result, err := r.markBound(ctx, &recv, primary, "read on "+res.Node+", where it is produced")
 	if err != nil {
 		return result, err
 	}
@@ -1145,10 +1145,17 @@ func (r *Reconciler) markPending(ctx context.Context, recv *mxlv1alpha1.MxlRecei
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
-func (r *Reconciler) markBound(ctx context.Context, recv *mxlv1alpha1.MxlReceiver, primary *mxlv1alpha1.MirrorRef) (ctrl.Result, error) {
+// markBound records the receiver as served: through primary, the first
+// of its mirrors, or with no mirror at all, which unmirrored says why.
+func (r *Reconciler) markBound(ctx context.Context, recv *mxlv1alpha1.MxlReceiver, primary *mxlv1alpha1.MirrorRef, unmirrored string) (ctrl.Result, error) {
 	if r.Recorder != nil && recv.Status.Phase != mxlv1alpha1.MxlReceiverBound {
-		r.Recorder.Eventf(recv, corev1.EventTypeNormal, ReasonReceiverBound,
-			"Bound to mirror %s/%s", primary.Namespace, primary.Name)
+		if primary != nil {
+			r.Recorder.Eventf(recv, corev1.EventTypeNormal, ReasonReceiverBound,
+				"Bound to mirror %s/%s", primary.Namespace, primary.Name)
+		} else {
+			r.Recorder.Eventf(recv, corev1.EventTypeNormal, ReasonReceiverBound,
+				"Bound without a mirror: %s", unmirrored)
+		}
 	}
 	recv.Status.BoundMirror = primary
 	recv.Status.Phase = mxlv1alpha1.MxlReceiverBound

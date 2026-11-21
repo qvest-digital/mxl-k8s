@@ -14,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -154,7 +155,10 @@ func TestReconcile_DistinctSourceAndTarget_CreatesOneMirror(t *testing.T) {
 
 func TestReconcile_SameSourceAndTarget_SkipsMirrorCreation(t *testing.T) {
 	ns := env.NewNamespace(t)
-	r := &receiver.Reconciler{Client: env.Client, Scheme: env.Scheme}
+	// The recorder is what the operator runs with: binding without a
+	// mirror records its event too, with no mirror to name.
+	events := record.NewFakeRecorder(8)
+	r := &receiver.Reconciler{Client: env.Client, Scheme: env.Scheme, Recorder: events}
 
 	// Pod on the same node as the flow's origin: no mirror needed.
 	require.NoError(t, env.Client.Create(context.Background(), testutil.NewPod(ns, "consumer-a", "worker-shared")))
@@ -175,6 +179,8 @@ func TestReconcile_SameSourceAndTarget_SkipsMirrorCreation(t *testing.T) {
 	var mirrors mxlv1alpha1.MxlFlowMirrorList
 	require.NoError(t, env.Client.List(context.Background(), &mirrors, client.InNamespace(ns)))
 	assert.Empty(t, mirrors.Items)
+	require.Len(t, events.Events, 1)
+	assert.Equal(t, "Normal ReceiverBound Bound without a mirror: read on worker-shared, where it is produced", <-events.Events)
 }
 
 func TestReconcile_MultipleTargetNodes_CreatesOneMirrorPerNode(t *testing.T) {
