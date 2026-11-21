@@ -42,7 +42,7 @@ func TestStructSizes(t *testing.T) {
 
 func TestReasonLabels(t *testing.T) {
 	for r, want := range map[Reason]string{0: "none", RefusePinned: "pinned", RefuseView: "view",
-		RefuseBusy: "busy", RefuseNomem: "nomem", RefuseHeld: "held", RefuseSignal: "signal", 7: "error"} {
+		RefuseBusy: "busy", RefuseNomem: "nomem", RefuseHeld: "held", RefuseSignal: "signal", RefusePoisoned: "poisoned", 8: "error"} {
 		require.Equal(t, want, r.String())
 	}
 }

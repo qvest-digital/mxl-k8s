@@ -50,12 +50,13 @@ const (
 type Reason uint32
 
 const (
-	RefusePinned Reason = iota + 1 // folio_maybe_dma_pinned
-	RefuseView                     // a view maps the block
-	RefuseBusy                     // extra references after retries
-	RefuseNomem                    // destination reservation failed
-	RefuseHeld                     // another open file holds the file
-	RefuseSignal                   // fatal signal between blocks
+	RefusePinned   Reason = iota + 1 // folio_maybe_dma_pinned
+	RefuseView                       // a view maps the block
+	RefuseBusy                       // extra references after retries
+	RefuseNomem                      // destination reservation failed
+	RefuseHeld                       // another open file holds the file
+	RefuseSignal                     // fatal signal between blocks
+	RefusePoisoned                   // the block holds a page with a memory error
 )
 
 // RefuseMax is MXLFS_REFUSE_MAX, the length of Stats.MoveRefused.
@@ -79,6 +80,8 @@ func (r Reason) String() string {
 		return "held"
 	case RefuseSignal:
 		return "signal"
+	case RefusePoisoned:
+		return "poisoned"
 	default:
 		return "error"
 	}
