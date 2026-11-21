@@ -211,9 +211,17 @@ var (
 		"1 while an open file holds a file of the flow's ring in place.", flowLabels, nil)
 )
 
-// refuseReasons are the reasons MoveRefused is indexed by.
-var refuseReasons = []mxlfs.Reason{mxlfs.RefusePinned, mxlfs.RefuseView, mxlfs.RefuseBusy,
-	mxlfs.RefuseNomem, mxlfs.RefuseHeld, mxlfs.RefuseSignal}
+// refuseReasons are the reasons MoveRefused is indexed by that have a
+// name: every one the module counts.
+var refuseReasons = func() []mxlfs.Reason {
+	var rs []mxlfs.Reason
+	for r := mxlfs.Reason(1); r < mxlfs.RefuseMax; r++ {
+		if r.String() != "error" {
+			rs = append(rs, r)
+		}
+	}
+	return rs
+}()
 
 // Describe implements prometheus.Collector.
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
