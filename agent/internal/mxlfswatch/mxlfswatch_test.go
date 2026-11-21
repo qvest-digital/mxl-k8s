@@ -4,16 +4,17 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 
 	"github.com/qvest-digital/mxl-k8s/agent/internal/fanotify"
+	"github.com/qvest-digital/mxl-k8s/api/mxlfs/uapitest"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -120,9 +121,11 @@ func TestMountLocal(t *testing.T) {
 // The request layout must match struct mxlfs_wanted_req, or the kernel
 // copies a path into the wrong place.
 func TestWantedRequestLayout(t *testing.T) {
-	require.Equal(t, uintptr(4096), unsafe.Sizeof(wantedReq{}))
-	// _IOWR('x', 5, 4096 bytes): read|write, size, type, number.
-	require.Equal(t, uintptr(3<<30|4096<<16|0x78<<8|5), iocWantedNext)
+	h, err := uapitest.Parse()
+	require.NoError(t, err)
+	require.NoError(t, h.CheckStruct("mxlfs_wanted_req", reflect.TypeFor[wantedReq]()))
+	require.Equal(t, h.Ioctls["MXLFS_IOC_WANTED_NEXT"], iocWantedNext)
+	require.Equal(t, h.Consts["MXLFS_MAGIC"], int64(Magic))
 }
 
 // The gateway and the exporter walk into flows too; neither reads one, and
@@ -164,15 +167,24 @@ func TestOpeningTheWantedQueueFailsWithoutTheIoctl(t *testing.T) {
 	require.ErrorContains(t, err, "no mxlfs mount holds")
 }
 
-// fakeQueue hands out queued paths, then times out as an empty queue does.
+// fakeQueue hands out queued paths, then times out as an empty queue
+// does. Like mxlfs, it fails a request with flags set, and it counts the
+// requests that carry anything an earlier answer wrote.
 type fakeQueue struct {
 	mu     sync.Mutex
 	queued []string
+	stale  int
 }
 
 func (q *fakeQueue) next(req *wantedReq) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if req.Flags != 0 {
+		return unix.EINVAL
+	}
+	if req.ID != 0 || req.PID != 0 || req.Path != [len(req.Path)]byte{} {
+		q.stale++
+	}
 	if len(q.queued) == 0 {
 		time.Sleep(time.Millisecond)
 		return unix.ETIMEDOUT
@@ -201,6 +213,39 @@ func TestWantedRunHandlesTheEntryTheProbeTook(t *testing.T) {
 		t.Fatal("no mirror for the probed flow")
 	}
 	require.Equal(t, []string{"/run/mxl/domain/" + id + ".mxl-flow/data"}, r.calls)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	require.Zero(t, q.stale, "a request reused an answer")
+}
+
+// Every request Run sends after the probe is a fresh one with flags 0:
+// mxlfs fails any flag with EINVAL, which would end Run.
+func TestWantedRunSendsFreshRequests(t *testing.T) {
+	q := &fakeQueue{}
+	w, err := newWanted(Mount{Root: "/", MountPoint: "/run/mxl"}, nil, q.next)
+	require.NoError(t, err)
+	require.Nil(t, w.first)
+
+	r := &recorder{done: make(chan struct{}, 2)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errc := make(chan error, 1)
+	go func() { errc <- w.Run(ctx, r, nil, nil, logr.Discard()) }()
+	for _, flow := range []string{id, "6fbec3b1-1b0f-417d-9059-8b94a47197ed"} {
+		q.mu.Lock()
+		q.queued = append(q.queued, "/domain/"+flow+".mxl-flow")
+		q.mu.Unlock()
+		select {
+		case <-r.done:
+		case err := <-errc:
+			t.Fatalf("Run ended: %v", err)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("no mirror for %s", flow)
+		}
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	require.Zero(t, q.stale, "a request reused an answer")
 }
 
 // blocking holds every Materialize until release is closed.

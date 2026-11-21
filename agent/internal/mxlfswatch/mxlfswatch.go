@@ -249,12 +249,16 @@ func (o *OpenWatch) Run(ctx context.Context) error {
 // Close releases a watch Run never ran.
 func (o *OpenWatch) Close() error { return o.close() }
 
-// wantedReq mirrors struct mxlfs_wanted_req in mxlfs_uapi.h.
+// wantedReq mirrors struct mxlfs_wanted_req in mxlfs_uapi.h. Flags
+// is 0: mxlfs 0.1.0-rc.9 and later fail any bit with EINVAL, and an
+// older module reads those bytes as the end of Path, which it only
+// writes.
 type wantedReq struct {
 	ID        uint64
 	PID       uint32
 	TimeoutMs uint32
-	Path      [4080]byte
+	Path      [4076]byte
+	Flags     uint32
 }
 
 // iocWantedNext is _IOWR('x', 5, struct mxlfs_wanted_req).
