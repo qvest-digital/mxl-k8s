@@ -688,6 +688,51 @@ func Test_FlowWatch_EnqueuesReceiversOnOriginRotation(t *testing.T) {
 			"cluster-wide and an origin rotation has to wake them all.")
 }
 
+// A set naming a flow as its output, or no longer naming it, changes how
+// that flow's receivers are served, so each of them is reconciled: in
+// every namespace, and only in the output's domain.
+func Test_SetWatch_EnqueuesReceiversOfItsOutput(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientBuilder().
+		WithScheme(unitScheme(t)).
+		WithIndex(&mxlv1alpha1.MxlReceiver{}, flowIDIndex, func(o client.Object) []string {
+			return []string{o.(*mxlv1alpha1.MxlReceiver).Ref().Name()}
+		}).
+		WithObjects(
+			&mxlv1alpha1.MxlReceiver{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns-1", Name: "r-match-1"},
+				Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: "f-out", Domain: "d"},
+			},
+			&mxlv1alpha1.MxlReceiver{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns-2", Name: "r-match-2"},
+				Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: "f-out", Domain: "d"},
+			},
+			&mxlv1alpha1.MxlReceiver{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns-1", Name: "r-other-domain"},
+				Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: "f-out"},
+			},
+			&mxlv1alpha1.MxlReceiver{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns-1", Name: "r-member"},
+				Spec:       mxlv1alpha1.MxlReceiverSpec{FlowID: "f-member", Domain: "d"},
+			},
+		).
+		Build()
+	r := &Reconciler{Client: c}
+	set := &mxlv1alpha1.MxlFlowRedundancySet{Spec: mxlv1alpha1.MxlFlowRedundancySetSpec{
+		Members: []mxlv1alpha1.RedundancyFlowRef{{FlowID: "f-member", Domain: "d"}},
+		Output:  mxlv1alpha1.RedundancyFlowRef{FlowID: "f-out", Domain: "d"},
+	}}
+	got := map[client.ObjectKey]struct{}{}
+	for _, req := range r.setToReceivers(ctx, set) {
+		got[req.NamespacedName] = struct{}{}
+	}
+	assert.Equal(t, map[client.ObjectKey]struct{}{
+		{Namespace: "ns-1", Name: "r-match-1"}: {},
+		{Namespace: "ns-2", Name: "r-match-2"}: {},
+	}, got)
+	assert.Nil(t, r.setToReceivers(ctx, &corev1.Pod{}))
+}
+
 func Test_FlowWatch_NonFlowObjectReturnsNil(t *testing.T) {
 	ctx := context.Background()
 	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).Build()

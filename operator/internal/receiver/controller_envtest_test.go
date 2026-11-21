@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -1117,4 +1118,48 @@ func TestReconcile_NoTargetsAndNoOrigin_StillReleases(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err),
 		"with no consumer left there is nothing to keep the mirror for, "+
 			"whatever the origin is doing")
+}
+
+// A receiver of a redundancy set's output is served by the set: the
+// output is merged on each node it is read on, from member mirrors
+// there, and never has an Origin to mirror it from. The receiver binds
+// without a mirror instead of waiting for an MxlFlow that never comes.
+// A set judged invalid serves nothing, and the receiver waits as for
+// any flow.
+func TestReconcile_SetOutput_BindsWithoutAMirror(t *testing.T) {
+	ctx := context.Background()
+	ns := env.NewNamespace(t)
+	events := record.NewFakeRecorder(8)
+	r := &receiver.Reconciler{Client: env.Client, Scheme: env.Scheme, Recorder: events, RedundancySets: true}
+
+	out := flowIDFor(t)
+	set := &mxlv1alpha1.MxlFlowRedundancySet{
+		ObjectMeta: metav1.ObjectMeta{Name: "set-" + out[:8]},
+		Spec: mxlv1alpha1.MxlFlowRedundancySetSpec{
+			Members: []mxlv1alpha1.RedundancyFlowRef{{FlowID: "aaaaaaaa" + out[8:]}, {FlowID: "bbbbbbbb" + out[8:]}},
+			Output:  mxlv1alpha1.RedundancyFlowRef{FlowID: out},
+		},
+	}
+	require.NoError(t, env.Client.Create(ctx, set))
+	t.Cleanup(func() { _ = env.Client.Delete(context.Background(), set) })
+
+	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "local", "n-a")))
+	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "remote", "n-b")))
+	require.NoError(t, env.Client.Create(ctx, testutil.NewReceiver(ns, "r", testutil.WithReceiverFlowID(out))))
+
+	assert.Equal(t, ctrl.Result{}, reconcile(t, r, ns, "r"))
+	rec := mustGetReceiver(t, env.Client, ns, "r")
+	assert.Equal(t, mxlv1alpha1.MxlReceiverBound, rec.Status.Phase)
+	assert.Nil(t, rec.Status.BoundMirror)
+	var mirrors mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, env.Client.List(ctx, &mirrors, client.InNamespace(ns)))
+	assert.Empty(t, mirrors.Items)
+	require.Len(t, events.Events, 1)
+	assert.Equal(t, "Normal ReceiverBound Bound without a mirror: merged by MxlFlowRedundancySet "+set.Name, <-events.Events)
+
+	meta.SetStatusCondition(&set.Status.Conditions, metav1.Condition{Type: mxlv1alpha1.ConditionTypeValid,
+		Status: metav1.ConditionFalse, Reason: "MembersInvalid", Message: "test"})
+	require.NoError(t, env.Client.Status().Update(ctx, set))
+	assert.Equal(t, 10*time.Second, reconcile(t, r, ns, "r").RequeueAfter)
+	assert.Equal(t, mxlv1alpha1.MxlReceiverPending, mustGetReceiver(t, env.Client, ns, "r").Status.Phase)
 }
