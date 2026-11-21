@@ -34,8 +34,9 @@ func TestStructSizes(t *testing.T) {
 	require.EqualValues(t, 5*8, unsafe.Sizeof(NodeStat{}))
 	require.EqualValues(t, 16, unsafe.Sizeof(mountNodes{}))
 	// The five fields before the NUMA ones, then 8 counters, 8 refusal
-	// reasons, window sum and max, 9 buckets, holds and dry runs.
-	require.EqualValues(t, (5+8+RefuseMax+2+9+2)*8, unsafe.Sizeof(Stats{}))
+	// reasons, window sum and max, 9 buckets, holds and dry runs, and the
+	// two counters of waits for missing flows.
+	require.EqualValues(t, (5+8+RefuseMax+2+9+2+2)*8, unsafe.Sizeof(Stats{}))
 	require.Len(t, WindowBuckets, len(Stats{}.MoveWindowHist)-1)
 }
 

@@ -23,4 +23,6 @@ func TestCallsOnOtherFilesystem(t *testing.T) {
 	require.True(t, Unsupported(err), "%v", err)
 	require.True(t, Unsupported(Hold(f, true)))
 	require.True(t, Unsupported(SetNode(f, 0)))
+	_, err = ReadStats(f)
+	require.True(t, Unsupported(err), "%v", err)
 }

@@ -1,7 +1,7 @@
-// Package mxlfs mirrors the NUMA part of the mxlfs userspace interface,
-// kernel/mxlfs_uapi.h in github.com/danielclasen/mxlfs: the ioctl
-// numbers, the structs they take, and one call per ioctl. A module that
-// predates these ioctls answers ENOTTY; Unsupported tells that apart.
+// Package mxlfs mirrors the NUMA and counter part of the mxlfs userspace
+// interface, kernel/mxlfs_uapi.h in github.com/danielclasen/mxlfs: the
+// ioctl numbers, the structs they take, and one call per ioctl. A module
+// that predates these ioctls answers ENOTTY; Unsupported tells that apart.
 // HostNICNode finds the NUMA node a placement moves rings to. Listed
 // and RingFiles read a domain's flow directories.
 package mxlfs
@@ -20,7 +20,7 @@ const NodeNone = -1
 
 // Ioctl numbers: _IOC(dir, 'x', nr, size) with the struct sizes below.
 const (
-	iocStats      = 0x81107804 // _IOR('x', 4, struct mxlfs_stats), 272 bytes
+	iocStats      = 0x81207804 // _IOR('x', 4, struct mxlfs_stats), 288 bytes
 	iocSetNode    = 0x4008780b // _IOW('x', 11, struct mxlfs_node_pref)
 	iocNodePages  = 0xc020780c // _IOWR('x', 12, struct mxlfs_node_pages)
 	iocMove       = 0xc050780d // _IOWR('x', 13, struct mxlfs_move)
@@ -138,7 +138,8 @@ type mountNodes struct {
 var WindowBuckets = []float64{64e-6, 128e-6, 256e-6, 512e-6, 1e-3, 2e-3, 4e-3, 8e-3}
 
 // Stats is struct mxlfs_stats. A module older than a field leaves it
-// zero.
+// zero: a module copies at most its own struct, and ReadStats starts
+// from a zero one.
 type Stats struct {
 	BytesAllocated    uint64
 	BytesLimit        uint64
@@ -159,6 +160,13 @@ type Stats struct {
 	MoveWindowHist    [9]uint64
 	Holds             uint64 // open files holding now
 	DryRuns           uint64
+	// Wanted is how many missing flows path walks wait for now, on a
+	// mount with wait=.
+	Wanted uint64
+	// WantedRefused counts walks that found a flow missing and failed
+	// with ENOENT at once instead of waiting: the mount's or the walker's
+	// thread group's cap on waits was full.
+	WantedRefused uint64
 }
 
 // Pages is where a file's pages are.
