@@ -20,12 +20,13 @@ const NodeNone = -1
 
 // Ioctl numbers: _IOC(dir, 'x', nr, size) with the struct sizes below.
 const (
-	iocStats      = 0x81207804 // _IOR('x', 4, struct mxlfs_stats), 288 bytes
-	iocSetNode    = 0x4008780b // _IOW('x', 11, struct mxlfs_node_pref)
-	iocNodePages  = 0xc020780c // _IOWR('x', 12, struct mxlfs_node_pages)
-	iocMove       = 0xc050780d // _IOWR('x', 13, struct mxlfs_move)
-	iocHold       = 0x4004780e // _IOW('x', 14, __u32)
-	iocMountNodes = 0xc010780f // _IOWR('x', 15, struct mxlfs_mount_nodes)
+	iocGetSelected = 0x80047803 // _IOR('x', 3, __u32)
+	iocStats       = 0x81207804 // _IOR('x', 4, struct mxlfs_stats), 288 bytes
+	iocSetNode     = 0x4008780b // _IOW('x', 11, struct mxlfs_node_pref)
+	iocNodePages   = 0xc020780c // _IOWR('x', 12, struct mxlfs_node_pages)
+	iocMove        = 0xc050780d // _IOWR('x', 13, struct mxlfs_move)
+	iocHold        = 0x4004780e // _IOW('x', 14, __u32)
+	iocMountNodes  = 0xc010780f // _IOWR('x', 15, struct mxlfs_mount_nodes)
 )
 
 // MOVE flags.

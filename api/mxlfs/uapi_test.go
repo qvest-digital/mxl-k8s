@@ -18,6 +18,7 @@ import (
 func TestIoctlNumbers(t *testing.T) {
 	const w, r, rw = 1, 2, 3
 	ioc := func(dir, nr, size uintptr) uintptr { return dir<<30 | size<<16 | uintptr('x')<<8 | nr }
+	require.Equal(t, ioc(r, 3, 4), uintptr(iocGetSelected), "_IOR('x', 3, __u32)")
 	require.Equal(t, ioc(r, 4, unsafe.Sizeof(Stats{})), uintptr(iocStats), "_IOR('x', 4, struct mxlfs_stats)")
 	require.Equal(t, ioc(w, 11, unsafe.Sizeof(nodePref{})), uintptr(iocSetNode), "_IOW('x', 11, struct mxlfs_node_pref)")
 	require.Equal(t, ioc(rw, 12, unsafe.Sizeof(nodePages{})), uintptr(iocNodePages), "_IOWR('x', 12, struct mxlfs_node_pages)")
