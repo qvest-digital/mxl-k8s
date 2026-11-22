@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.0-rc.48](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.47...api/v1.1.0-rc.48) (2026-11-22)
+
+
+### Features
+
+* **api:** name the poisoned refuse reason of an mxlfs move ([#464](https://github.com/qvest-digital/mxl-k8s/issues/464)) ([7c75db9](https://github.com/qvest-digital/mxl-k8s/commit/7c75db945b23fcccd9402b67c8d5c03cf9ad57ef))
+* **api:** read the mxlfs counters of waits for missing flows ([#464](https://github.com/qvest-digital/mxl-k8s/issues/464)) ([7c75db9](https://github.com/qvest-digital/mxl-k8s/commit/7c75db945b23fcccd9402b67c8d5c03cf9ad57ef))
+* **api:** tell an mxlfs view from a missing capability ([#464](https://github.com/qvest-digital/mxl-k8s/issues/464)) ([7c75db9](https://github.com/qvest-digital/mxl-k8s/commit/7c75db945b23fcccd9402b67c8d5c03cf9ad57ef))
+
 ## [1.1.0-rc.47](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.46...api/v1.1.0-rc.47) (2026-11-20)
 
 

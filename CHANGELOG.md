@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.1.0-rc.55](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.54...v1.1.0-rc.55) (2026-11-22)
+
+
+### Features
+
+* **api:** name the poisoned refuse reason of an mxlfs move ([#464](https://github.com/qvest-digital/mxl-k8s/issues/464)) ([7c75db9](https://github.com/qvest-digital/mxl-k8s/commit/7c75db945b23fcccd9402b67c8d5c03cf9ad57ef))
+* **api:** read the mxlfs counters of waits for missing flows ([#464](https://github.com/qvest-digital/mxl-k8s/issues/464)) ([7c75db9](https://github.com/qvest-digital/mxl-k8s/commit/7c75db945b23fcccd9402b67c8d5c03cf9ad57ef))
+* **api:** tell an mxlfs view from a missing capability ([#464](https://github.com/qvest-digital/mxl-k8s/issues/464)) ([7c75db9](https://github.com/qvest-digital/mxl-k8s/commit/7c75db945b23fcccd9402b67c8d5c03cf9ad57ef))
+* **exporter:** export the mxlfs counters of waits for missing flows ([#465](https://github.com/qvest-digital/mxl-k8s/issues/465)) ([7ac59ef](https://github.com/qvest-digital/mxl-k8s/commit/7ac59efeb37711ebef992bd021dd38c412ebb185))
+
+
+### Bug Fixes
+
+* **exporter:** export the poisoned refusals of mxlfs moves ([#465](https://github.com/qvest-digital/mxl-k8s/issues/465)) ([7ac59ef](https://github.com/qvest-digital/mxl-k8s/commit/7ac59efeb37711ebef992bd021dd38c412ebb185))
+* **gateway:** stop reading an mxlfs view's EPERM as missing CAP_SYS_NICE ([#465](https://github.com/qvest-digital/mxl-k8s/issues/465)) ([7ac59ef](https://github.com/qvest-digital/mxl-k8s/commit/7ac59efeb37711ebef992bd021dd38c412ebb185))
+* **operator:** bind a receiver of a valid redundancy set's output ([#467](https://github.com/qvest-digital/mxl-k8s/issues/467)) ([7fd1ed2](https://github.com/qvest-digital/mxl-k8s/commit/7fd1ed2e6839862cd57002cde353d959696f020c))
+* **operator:** bind a receiver read where its flow is produced ([#467](https://github.com/qvest-digital/mxl-k8s/issues/467)) ([7fd1ed2](https://github.com/qvest-digital/mxl-k8s/commit/7fd1ed2e6839862cd57002cde353d959696f020c))
+
+
+### Code Refactoring
+
+* **agent:** mirror the rc.9 flags field of struct mxlfs_wanted_req ([#465](https://github.com/qvest-digital/mxl-k8s/issues/465)) ([7ac59ef](https://github.com/qvest-digital/mxl-k8s/commit/7ac59efeb37711ebef992bd021dd38c412ebb185))
+
 ## [1.1.0-rc.54](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.53...v1.1.0-rc.54) (2026-11-20)
 
 
