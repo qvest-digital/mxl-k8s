@@ -87,9 +87,10 @@ func (h *held) read() (running, most, calls int) {
 	return h.running, h.most, h.calls
 }
 
-// Every want costs API calls on the agent's one client, which publishing
-// and mirror setup share. A goroutine per want let a reader looking up
-// many missing names run as many lookups at once as it had names.
+// Every want costs API calls on the agent's intent client, which pod
+// lookups and mirror setup share. A goroutine per want let a reader
+// looking up many missing names run as many lookups at once as it had
+// names.
 func TestWantedRunBoundsTheFlowsHandledAtOnce(t *testing.T) {
 	q := &fakeQueue{}
 	for i := range 1000 {

@@ -114,7 +114,7 @@ func processStart(pid int32) (string, bool) {
 // refusal says it could pass, for as long as the process lives and the
 // flow is still a placeholder here; a refusal waiting cannot lift, as by
 // a count of live mirrors, is final. Each request costs API calls on the
-// agent's one client, so nothing is asked again that could not pass.
+// agent's intent client, so nothing is asked again that could not pass.
 func (t *Trigger) request(ctx context.Context, pid int32, domain, id string) {
 	start := t.ProcessStart
 	if start == nil {
@@ -333,7 +333,7 @@ type Wanted struct {
 }
 
 // wantedHandlers bounds how many flows' wants are handled at once. Each
-// handler makes API calls on the agent's one client.
+// handler makes API calls on the agent's intent client.
 const wantedHandlers = 8
 
 // unknownFor is how long a flow Materialize answered is not known

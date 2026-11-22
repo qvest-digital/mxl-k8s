@@ -135,9 +135,10 @@ type capped struct{}
 func (capped) Error() string             { return "pod already has 64 mirrors created on demand, its limit" }
 func (capped) RetryAfter() time.Duration { return 0 }
 
-// A refusal waiting cannot lift, by a count of live mirrors or by
-// anything but a limit, is not made again: each request costs API calls
-// on the agent's one client, and a pod at its count stays there.
+// A refusal without a positive RetryAfter, by a count of live mirrors or
+// one that says nothing of when to ask, is not made again: each request
+// costs API calls on the agent's intent client, and a pod at its count
+// stays there.
 func TestARefusalWaitingCannotLiftIsFinal(t *testing.T) {
 	for name, err := range map[string]error{
 		"count of live mirrors": capped{},
@@ -152,18 +153,24 @@ func TestARefusalWaitingCannotLiftIsFinal(t *testing.T) {
 	}
 }
 
-// counted counts the requests made of a Materializer.
-type counted struct {
+// countingMaterializer counts the requests made of a Materializer.
+type countingMaterializer struct {
 	Materializer
 	mu    sync.Mutex
 	calls int
 }
 
-func (c *counted) Materialize(ctx context.Context, pid int32, path string) error {
+func (c *countingMaterializer) Materialize(ctx context.Context, pid int32, path string) error {
 	c.mu.Lock()
 	c.calls++
 	c.mu.Unlock()
 	return c.Materializer.Materialize(ctx, pid, path)
+}
+
+func (c *countingMaterializer) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
 }
 
 // A reader restarted on a node opens the flow while the mirror its
@@ -216,7 +223,7 @@ func TestARequestRefusedForATerminatingMirrorIsMadeAgain(t *testing.T) {
 		},
 	})
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "reader", UID: "uid-after"}}
-	disp := &counted{Materializer: &intent.Dispatcher{
+	disp := &countingMaterializer{Materializer: &intent.Dispatcher{
 		Client:     finishing,
 		Resolver:   podsByPID{pods: map[int32]*corev1.Pod{77: pod}, calls: func() {}},
 		DomainPath: d,
@@ -229,7 +236,7 @@ func TestARequestRefusedForATerminatingMirrorIsMadeAgain(t *testing.T) {
 
 	openRing(t, retryTrigger(t, d, disp, alive), d, 77)
 
-	require.Equal(t, 2, disp.calls, "the refused request was not made again")
+	require.Equal(t, 2, disp.count(), "the refused request was not made again")
 	var l mxlv1alpha1.MxlFlowMirrorList
 	require.NoError(t, c.List(context.Background(), &l))
 	require.Len(t, l.Items, 1)
@@ -314,11 +321,11 @@ func (p podsByPID) PodForPID(_ context.Context, pid int32) (*corev1.Pod, error) 
 
 // A process opening many placeholders at once is held to its pod's
 // burst, and each refused request asks again while it runs. Each request
-// costs API calls on the agent's one client, which renewing its leases
-// shares. Had every refused request been told to ask when the oldest
-// creation leaves the window, all of them would ask together each window,
-// and all but the places that freed be refused again, each at a full
-// request's price.
+// costs API calls on the agent's intent client, whose rate limit every
+// reader's request on the node shares. Had every refused request been
+// told to ask when the oldest creation leaves the window, all of them
+// would ask together each window, and all but the places that freed be
+// refused again, each at a full request's price.
 func TestRefusedRequestsAskAgainAsPlacesFree(t *testing.T) {
 	const n, burst = 50, 8
 	const window = 200 * time.Millisecond
