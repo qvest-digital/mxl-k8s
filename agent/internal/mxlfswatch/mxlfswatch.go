@@ -82,7 +82,8 @@ type Trigger struct {
 var minRetry = time.Second
 
 // retryable is a refusal that could pass later, as the intent
-// dispatcher's burst limit reports. A zero RetryAfter is a refusal that
+// dispatcher reports for its burst limit and for a mirror name a
+// terminating mirror still holds. A zero RetryAfter is a refusal that
 // waiting does not lift, and is final.
 type retryable interface{ RetryAfter() time.Duration }
 
@@ -107,13 +108,13 @@ func processStart(pid int32) (string, bool) {
 }
 
 // request asks for a mirror of the placeholder a process opened. The
-// open has already succeeded, so a request a limit refused reaches no
-// one: the process maps a ring nothing fills and does not open it again.
-// A request the burst limit refused is made again when that limit says
-// it could pass, for as long as the process lives and the flow is still
-// a placeholder here; a refusal waiting cannot lift, as by a count of
-// live mirrors, is final. Each request costs API calls on the agent's one
-// client, so nothing is asked again that could not pass.
+// open has already succeeded, so a refused request reaches no one: the
+// process maps a ring nothing fills and does not open it again. A request
+// the burst limit or a terminating mirror refused is made again when the
+// refusal says it could pass, for as long as the process lives and the
+// flow is still a placeholder here; a refusal waiting cannot lift, as by
+// a count of live mirrors, is final. Each request costs API calls on the
+// agent's intent client, so nothing is asked again that could not pass.
 func (t *Trigger) request(ctx context.Context, pid int32, domain, id string) {
 	start := t.ProcessStart
 	if start == nil {
@@ -332,7 +333,7 @@ type Wanted struct {
 }
 
 // wantedHandlers bounds how many flows' wants are handled at once. Each
-// handler makes API calls on the agent's one client.
+// handler makes API calls on the agent's intent client.
 const wantedHandlers = 8
 
 // unknownFor is how long a flow Materialize answered is not known

@@ -173,6 +173,22 @@ func (e *LimitError) Error() string { return e.msg }
 // many ask again together as places free.
 func (e *LimitError) RetryAfter() time.Duration { return e.retryAfter }
 
+// mirrorTerminatingRetry is how long a request for a mirror whose name a
+// terminating mirror still holds waits before it asks again.
+const mirrorTerminatingRetry = 2 * time.Second
+
+// mirrorTerminatingError is a request for a mirror whose name a mirror
+// still working through its finalizers holds. The name frees once they
+// complete, so the request could pass later.
+type mirrorTerminatingError struct{ namespace, name string }
+
+func (e *mirrorTerminatingError) Error() string {
+	return fmt.Sprintf("mirror %s/%s is terminating", e.namespace, e.name)
+}
+
+// RetryAfter is how long until the request is worth asking again.
+func (e *mirrorTerminatingError) RetryAfter() time.Duration { return mirrorTerminatingRetry }
+
 // ErrFlowNotKnown is Materialize's answer for a flow no MxlFlow names.
 var ErrFlowNotKnown = errors.New("MxlFlow not yet known cluster-wide")
 
@@ -481,10 +497,10 @@ func (d *Dispatcher) ensureMirror(ctx context.Context, ref mxlv1alpha1.FlowRef, 
 	if err == nil {
 		// A mirror working through its finalizers occupies the only
 		// name this consumer can use and can never reach Ready. Fail
-		// so the shim retries once the name frees up.
+		// with a refusal that says when to ask again: the open trigger
+		// asks again while the reader runs, until the name frees up.
 		if !existing.DeletionTimestamp.IsZero() {
-			return nil, fmt.Errorf("mirror %s/%s is terminating",
-				existing.Namespace, existing.Name)
+			return nil, &mirrorTerminatingError{namespace: existing.Namespace, name: existing.Name}
 		}
 		// A mirror with the same (flow, target node) name already
 		// exists. The pre-existing object is functionally
