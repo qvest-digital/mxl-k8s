@@ -2,7 +2,9 @@
 // against mxlfs_uapi.h, kernel/mxlfs_uapi.h of github.com/danielclasen/mxlfs
 // at v0.1.0-rc.10, copied unchanged. It reads the subset of C the header
 // uses: structs of fixed-width integers and arrays of them, #define of an
-// integer or an _IO, _IOR, _IOW or _IOWR ioctl, and anonymous enums.
+// integer or an _IO, _IOR, _IOW or _IOWR ioctl, anonymous enums, the
+// include guard and #include. Anything else fails Parse, so a header
+// that grows a construct this package does not read cannot pass it.
 package uapitest
 
 import (
@@ -40,14 +42,16 @@ type Header struct {
 }
 
 var (
-	comment   = regexp.MustCompile(`(?s)/\*.*?\*/`)
-	structRe  = regexp.MustCompile(`(?s)struct (\w+) \{(.*?)\};`)
-	fieldRe   = regexp.MustCompile(`^(__u64|__u32|__s32|char) (\w+)(?:\[(\w+)\])?;$`)
-	enumRe    = regexp.MustCompile(`(?s)enum \{(.*?)\};`)
-	defineRe  = regexp.MustCompile(`(?m)^#define (\w+) (.+)$`)
-	ioctlRe   = regexp.MustCompile(`^_IO(R|W|WR)?\('x', (\d+)(?:, (struct \w+|__u32))?\)$`)
-	shiftRe   = regexp.MustCompile(`^\((-?\w+) << (\w+)\)$`)
-	typeSizes = map[string]uintptr{"__u64": 8, "__u32": 4, "__s32": 4, "char": 1}
+	comment      = regexp.MustCompile(`(?s)/\*.*?\*/`)
+	structRe     = regexp.MustCompile(`^struct\s+(\w+)\s*\{$`)
+	fieldRe      = regexp.MustCompile(`^(__u64|__u32|__s32|char) (\w+)(?:\[(\w+)\])?;$`)
+	enumRe       = regexp.MustCompile(`^enum\s*\{$`)
+	defineRe     = regexp.MustCompile(`^#define\s+(\w+)(?:\s+(.*))?$`)
+	includeRe    = regexp.MustCompile(`^#include\s+<[\w/.]+>$`)
+	enumeratorRe = regexp.MustCompile(`^(\w+)(?:\s*=\s*(.+))?$`)
+	ioctlRe      = regexp.MustCompile(`^_IO(R|W|WR)?\('x', (\d+)(?:, (struct \w+|__u32))?\)$`)
+	shiftRe      = regexp.MustCompile(`^\((-?\w+) << (\w+)\)$`)
+	typeSizes    = map[string]uintptr{"__u64": 8, "__u32": 4, "__s32": 4, "char": 1}
 )
 
 // Parse reads the copy of mxlfs_uapi.h this package carries.
@@ -59,43 +63,56 @@ func parse(src string) (*Header, error) {
 	src = comment.ReplaceAllString(src, "")
 	h := &Header{Structs: map[string][]Field{}, Sizes: map[string]uintptr{}, Consts: map[string]int64{}, Ioctls: map[string]uintptr{}}
 	var ioctls [][2]string
-	for _, m := range defineRe.FindAllStringSubmatch(src, -1) {
-		name, val := m[1], strings.TrimSpace(m[2])
-		if strings.HasPrefix(val, "_IO") {
-			ioctls = append(ioctls, [2]string{name, val})
+	guard := ""
+	lines := strings.Split(src, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		var block func(body string) error
+		switch {
+		case line == "", line == "#endif", includeRe.MatchString(line):
 			continue
-		}
-		if name == "MXLFS_UAPI_H" {
-			continue
-		}
-		v, err := integer(val)
-		if err != nil {
-			return nil, fmt.Errorf("#define %s: %w", name, err)
-		}
-		h.Consts[name] = v
-	}
-	for _, m := range enumRe.FindAllStringSubmatch(src, -1) {
-		next := int64(0)
-		for _, e := range strings.Split(m[1], ",") {
-			e = strings.TrimSpace(e)
-			if e == "" {
-				continue
+		case strings.HasPrefix(line, "#ifndef "):
+			if guard != "" {
+				return nil, fmt.Errorf("line %d: a second #ifndef", i+1)
 			}
-			name, val, explicit := strings.Cut(e, "=")
-			name = strings.TrimSpace(name)
-			if explicit {
-				v, err := integer(strings.TrimSpace(val))
+			guard = strings.TrimSpace(strings.TrimPrefix(line, "#ifndef "))
+			continue
+		case strings.HasPrefix(line, "#"):
+			m := defineRe.FindStringSubmatch(line)
+			switch {
+			case m == nil:
+				return nil, fmt.Errorf("line %d: unknown directive %q", i+1, line)
+			case m[2] == "" && m[1] == guard:
+			case m[2] == "":
+				return nil, fmt.Errorf("line %d: #define %s has no value", i+1, m[1])
+			case strings.HasPrefix(m[2], "_IO"):
+				ioctls = append(ioctls, [2]string{m[1], m[2]})
+			default:
+				v, err := integer(m[2])
 				if err != nil {
-					return nil, fmt.Errorf("enum %s: %w", name, err)
+					return nil, fmt.Errorf("line %d: #define %s: %w", i+1, m[1], err)
 				}
-				next = v
+				h.Consts[m[1]] = v
 			}
-			h.Consts[name] = next
-			next++
+			continue
+		case enumRe.MatchString(line):
+			block = h.enum
+		default:
+			m := structRe.FindStringSubmatch(line)
+			if m == nil {
+				return nil, fmt.Errorf("line %d: unknown declaration %q", i+1, line)
+			}
+			name := m[1]
+			block = func(body string) error { return h.layout(name, body) }
 		}
-	}
-	for _, m := range structRe.FindAllStringSubmatch(src, -1) {
-		if err := h.layout(m[1], m[2]); err != nil {
+		var body []string
+		for i++; i < len(lines) && strings.TrimSpace(lines[i]) != "};"; i++ {
+			body = append(body, lines[i])
+		}
+		if i == len(lines) {
+			return nil, fmt.Errorf("%q has no closing };", line)
+		}
+		if err := block(strings.Join(body, "\n")); err != nil {
 			return nil, err
 		}
 	}
@@ -121,6 +138,31 @@ func parse(src string) (*Header, error) {
 		h.Ioctls[d[0]] = dir<<30 | size<<16 | uintptr('x')<<8 | uintptr(nr)
 	}
 	return h, nil
+}
+
+// enum records the constants of an anonymous enum, numbered as C does.
+func (h *Header) enum(body string) error {
+	next := int64(0)
+	for _, e := range strings.Split(body, ",") {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		m := enumeratorRe.FindStringSubmatch(e)
+		if m == nil {
+			return fmt.Errorf("enum: unknown enumerator %q", e)
+		}
+		if m[2] != "" {
+			v, err := integer(m[2])
+			if err != nil {
+				return fmt.Errorf("enum %s: %w", m[1], err)
+			}
+			next = v
+		}
+		h.Consts[m[1]] = next
+		next++
+	}
+	return nil
 }
 
 // layout lays out struct name with natural alignment and no packing.

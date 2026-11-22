@@ -41,6 +41,35 @@ func TestParsePadsAndRefuses(t *testing.T) {
 	require.ErrorContains(t, err, "unknown ioctl form")
 }
 
+// Whitespace between the parts of a #define is any run of blanks.
+func TestParseReadsTabSeparatedDefines(t *testing.T) {
+	h, err := parse("#ifndef G\n#define G\n#define\tA\t0x10\t\n#define B  (1U << 3)\n#endif\n")
+	require.NoError(t, err)
+	require.EqualValues(t, 16, h.Consts["A"])
+	require.EqualValues(t, 8, h.Consts["B"])
+}
+
+// A construct the parser does not read fails it instead of being
+// skipped, so a constant, a layout or an ioctl a newer header adds
+// that way cannot go unchecked.
+func TestParseRefusesWhatItDoesNotRead(t *testing.T) {
+	for name, src := range map[string]string{
+		"valueless define":    "#define A\n",
+		"function-like macro": "#define A(x) ((x) + 1)\n",
+		"named enum":          "enum e {\n\tA = 1,\n};\n",
+		"conditional":         "#if 1\n#define A 1\n#endif\n",
+		"typedef":             "typedef unsigned int u;\n",
+		"enumerator":          "enum {\n\tA = 1,\n\tB C,\n};\n",
+		"unclosed struct":     "struct a {\n\t__u32 x;\n",
+		"second guard":        "#ifndef A\n#ifndef B\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := parse(src)
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestCheckStruct(t *testing.T) {
 	h, err := parse("struct a {\n\t__s32 x;\n\t__u32 y;\n\tchar p[4];\n};\n")
 	require.NoError(t, err)

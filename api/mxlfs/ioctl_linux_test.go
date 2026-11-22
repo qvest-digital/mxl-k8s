@@ -33,8 +33,9 @@ func TestCallsOnOtherFilesystem(t *testing.T) {
 }
 
 // On a real mxlfs (MXLFS_TEST_DIR): IsView tells a view from the file it
-// shows, and STATS answers the struct this package asks with, from a
-// module whose own struct is shorter or as long.
+// shows, and STATS at the size this package asks with succeeds and reads
+// the mount's allocation. It does not check the counters a module older
+// than this package's struct leaves zero.
 func TestOnMxlfs(t *testing.T) {
 	dir := os.Getenv("MXLFS_TEST_DIR")
 	if dir == "" {
