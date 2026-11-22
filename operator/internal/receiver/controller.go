@@ -2,8 +2,11 @@
 //
 // The reconciler resolves the consumer-side pod(s) of each receiver,
 // looks up the flow's origin node from MxlFlow.status.locations, and
-// ensures one MxlFlowMirror per distinct target node so every node
-// hosting a matching pod gets a local copy of the flow.
+// ensures one MxlFlowMirror per distinct target node other than the
+// origin node, so every node hosting a matching pod reads a local copy
+// of the flow. A flow with no Origin that is the output of an
+// MxlFlowRedundancySet the set controller judged valid gets no mirror:
+// the gateway merges it on each node it is read on.
 package receiver
 
 import (
@@ -155,9 +158,10 @@ type nodeTarget struct {
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowredundancysets,verbs=get;list;watch
 
 // Reconcile drives one MxlReceiver through its lifecycle: translate
-// pod-side intent into one MxlFlowMirror per distinct target node,
-// then garbage-collect any labeled mirrors that no longer belong to
-// the current desired set.
+// pod-side intent into one MxlFlowMirror per distinct target node off
+// the origin node, or none for the output of a redundancy set that
+// serves it, then garbage-collect any labeled mirrors that no longer
+// belong to the current desired set.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("mxlreceiver", req.NamespacedName)
 
