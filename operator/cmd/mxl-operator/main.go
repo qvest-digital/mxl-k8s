@@ -162,11 +162,12 @@ func reconcilers(mgr ctrl.Manager, gcGrace time.Duration, mxlfs bool, setMirrorN
 			Scheme: mgr.GetScheme(),
 		}).SetupWithManager},
 		{"MxlReceiver", (&receiver.Reconciler{
-			Client:    mgr.GetClient(),
-			APIReader: mgr.GetAPIReader(),
-			Scheme:    mgr.GetScheme(),
-			Recorder:  mgr.GetEventRecorderFor("mxlreceiver-controller"),
-			Lease:     &leasecheck.Checker{Client: mgr.GetClient()},
+			Client:         mgr.GetClient(),
+			APIReader:      mgr.GetAPIReader(),
+			Scheme:         mgr.GetScheme(),
+			Recorder:       mgr.GetEventRecorderFor("mxlreceiver-controller"),
+			Lease:          &leasecheck.Checker{Client: mgr.GetClient()},
+			RedundancySets: mxlfs,
 		}).SetupWithManager},
 		{"MxlNodeCapabilities", (&nodecaps.Reconciler{
 			Client:   mgr.GetClient(),
