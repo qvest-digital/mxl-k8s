@@ -152,6 +152,92 @@ func TestARefusalWaitingCannotLiftIsFinal(t *testing.T) {
 	}
 }
 
+// counted counts the requests made of a Materializer.
+type counted struct {
+	Materializer
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *counted) Materialize(ctx context.Context, pid int32, path string) error {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	return c.Materializer.Materialize(ctx, pid, path)
+}
+
+// A reader restarted on a node opens the flow while the mirror its
+// predecessor had is still working through its finalizers, and holds the
+// only name the new mirror can take. The open has succeeded, so a request
+// refused for good leaves the reader on a ring nothing fills; it is made
+// again until the old mirror is gone, and then creates the new one.
+func TestARequestRefusedForATerminatingMirrorIsMadeAgain(t *testing.T) {
+	d := domainWithPlaceholder(t)
+	ref := mxlv1alpha1.FlowRef{ID: id}
+	now := metav1.Now()
+	old := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:         "ns",
+			Name:              mxlv1alpha1.MirrorNameFor(ref, "n-target"),
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"gateway.mxl.qvest-digital.com/source-side"},
+			Labels: map[string]string{
+				mxlv1alpha1.LabelCreatedByIntent: "n-target",
+				mxlv1alpha1.LabelRequestorPodUID: "uid-before",
+			},
+		},
+		Spec: mxlv1alpha1.MxlFlowMirrorSpec{
+			FlowID: id, SourceNode: "n-src", TargetNode: "n-target", Provider: mxlv1alpha1.ProviderTCP,
+		},
+	}
+	flow := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: metav1.ObjectMeta{Name: id},
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: id},
+		Status: mxlv1alpha1.MxlFlowStatus{Locations: []mxlv1alpha1.MxlFlowLocation{
+			{NodeName: "n-src", Phase: mxlv1alpha1.MxlFlowLocationOrigin}}},
+	}
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(mxlv1alpha1.AddToScheme(scheme))
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(flow, old).Build()
+	// The old mirror's finalizers complete once the first request has
+	// seen it terminating.
+	finishing := interceptor.NewClient(c, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, k client.ObjectKey, o client.Object, opts ...client.GetOption) error {
+			if err := cl.Get(ctx, k, o, opts...); err != nil {
+				return err
+			}
+			if m, ok := o.(*mxlv1alpha1.MxlFlowMirror); ok && !m.DeletionTimestamp.IsZero() {
+				gone := m.DeepCopy()
+				gone.Finalizers = nil
+				return cl.Update(ctx, gone)
+			}
+			return nil
+		},
+	})
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "reader", UID: "uid-after"}}
+	disp := &counted{Materializer: &intent.Dispatcher{
+		Client:     finishing,
+		Resolver:   podsByPID{pods: map[int32]*corev1.Pod{77: pod}, calls: func() {}},
+		DomainPath: d,
+		NodeName:   "n-target",
+		Provider:   mxlv1alpha1.ProviderTCP,
+		// No gateway fills a mirror here; a created mirror ends the
+		// request once this runs out.
+		MaterializeTimeout: 50 * time.Millisecond,
+	}}
+
+	openRing(t, retryTrigger(t, d, disp, alive), d, 77)
+
+	require.Equal(t, 2, disp.calls, "the refused request was not made again")
+	var l mxlv1alpha1.MxlFlowMirrorList
+	require.NoError(t, c.List(context.Background(), &l))
+	require.Len(t, l.Items, 1)
+	require.True(t, l.Items[0].DeletionTimestamp.IsZero())
+	require.Equal(t, "uid-after", l.Items[0].Labels[mxlv1alpha1.LabelRequestorPodUID],
+		"no mirror was created for the restarted reader")
+}
+
 // A process opening the flow again after the dedup window, while its
 // first request still waits to ask again, starts no second request.
 func TestAReopenWhileARequestWaitsStartsNoOther(t *testing.T) {

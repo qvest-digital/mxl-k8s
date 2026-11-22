@@ -2,7 +2,9 @@ package intent
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,5 +56,12 @@ func TestEnsureMirror_TerminatingMirrorNotReused(t *testing.T) {
 		"a terminating mirror is not a usable mirror; the shim has to retry "+
 			"rather than block on an object that cannot become Ready")
 	assert.Nil(t, got)
-	assert.Contains(t, err.Error(), "terminating")
+	assert.Equal(t, "mirror ns/"+existing.Name+" is terminating", err.Error())
+
+	// The open trigger asks again only for a refusal that says when: an
+	// open of a placeholder has already succeeded, so a final refusal
+	// leaves the reader on a ring nothing fills once the name frees up.
+	var r interface{ RetryAfter() time.Duration }
+	require.True(t, errors.As(err, &r), "a terminating mirror is no final refusal")
+	assert.Positive(t, r.RetryAfter())
 }
