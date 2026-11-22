@@ -703,6 +703,11 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		controllerutil.RemoveFinalizer(&mirror, TargetFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
+			// The other side's gateway removed its finalizer first and
+			// the object went with it: the teardown is complete.
+			if apierrors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
 			if apierrors.IsConflict(err) {
 				return ctrl.Result{Requeue: true}, nil
 			}
