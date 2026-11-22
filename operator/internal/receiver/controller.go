@@ -2,8 +2,11 @@
 //
 // The reconciler resolves the consumer-side pod(s) of each receiver,
 // looks up the flow's origin node from MxlFlow.status.locations, and
-// ensures one MxlFlowMirror per distinct target node so every node
-// hosting a matching pod gets a local copy of the flow.
+// ensures one MxlFlowMirror per distinct target node other than the
+// origin node, so every node hosting a matching pod reads a local copy
+// of the flow. A flow with no Origin that is the output of an
+// MxlFlowRedundancySet the set controller judged valid gets no mirror:
+// the gateway merges it on each node it is read on.
 package receiver
 
 import (
@@ -19,6 +22,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -67,7 +71,9 @@ const (
 	// carrying the reason it could not. The phase alone says Pending
 	// without saying why, and the why is the actionable half.
 	ReasonReceiverPending = "ReceiverPending"
-	// ReasonReceiverBound marks a receiver reaching a usable mirror.
+	// ReasonReceiverBound marks a receiver becoming bound, through a
+	// mirror or with none, and a bound receiver gaining or losing its
+	// mirror.
 	ReasonReceiverBound = "ReceiverBound"
 	// ReasonMirrorReleased marks a mirror this receiver no longer
 	// wants, released or deleted. A mirror disappearing under a
@@ -100,6 +106,13 @@ type Reconciler struct {
 	// Origin without any liveness check -- the pre-Lease behaviour
 	// the unit tests built around.
 	Lease LeaseChecker
+
+	// RedundancySets reads MxlFlowRedundancySets: a receiver of a set's
+	// output is served by the set, which merges the output on every node
+	// a reader opens it on, and gets no mirror. Off, sets are not read:
+	// the operator then has no access to them, and the kind may not be
+	// installed.
+	RedundancySets bool
 }
 
 // liveReader returns the APIReader when set, otherwise the cached
@@ -142,11 +155,13 @@ type nodeTarget struct {
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlnodecapabilities,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch
+// +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowredundancysets,verbs=get;list;watch
 
 // Reconcile drives one MxlReceiver through its lifecycle: translate
-// pod-side intent into one MxlFlowMirror per distinct target node,
-// then garbage-collect any labeled mirrors that no longer belong to
-// the current desired set.
+// pod-side intent into one MxlFlowMirror per distinct target node off
+// the origin node, or none for the output of a redundancy set that
+// serves it, then garbage-collect any labeled mirrors that no longer
+// belong to the current desired set.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("mxlreceiver", req.NamespacedName)
 
@@ -195,6 +210,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return r.markPending(ctx, &recv, "no target pods scheduled yet")
 	}
 
+	if !res.Found && !res.AllStale {
+		// The output of a redundancy set is merged on each node a reader
+		// opens it on, from member mirrors there, and is never a flow
+		// with an Origin: there is nothing to mirror it from, and the
+		// receiver releases any mirror it holds for the id. A flow that
+		// does resolve is mirrored as any other, whatever a set says
+		// about its id, and so is one whose Origin only has a lapsed
+		// Lease: that producer may still be delivering.
+		set, err := r.setServing(ctx, recv.Ref())
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if set != "" {
+			if err := r.gcOrphanMirrors(ctx, &recv, nil); err != nil {
+				return ctrl.Result{}, fmt.Errorf("gc orphan mirrors: %w", err)
+			}
+			return r.markBound(ctx, &recv, nil, "merged by MxlFlowRedundancySet "+set)
+		}
+	}
 	if !res.Found {
 		// Consumers exist but there is no source to point them at, and
 		// no way to tell which of this receiver's mirrors are still
@@ -271,7 +305,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		"flowID", recv.Spec.FlowID,
 		"sourceNode", res.Node,
 		"desired", len(desired))
-	result, err := r.markBound(ctx, &recv, primary)
+	result, err := r.markBound(ctx, &recv, primary, "read on "+res.Node+", where it is produced")
 	if err != nil {
 		return result, err
 	}
@@ -1145,10 +1179,56 @@ func (r *Reconciler) markPending(ctx context.Context, recv *mxlv1alpha1.MxlRecei
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
-func (r *Reconciler) markBound(ctx context.Context, recv *mxlv1alpha1.MxlReceiver, primary *mxlv1alpha1.MirrorRef) (ctrl.Result, error) {
-	if r.Recorder != nil && recv.Status.Phase != mxlv1alpha1.MxlReceiverBound {
-		r.Recorder.Eventf(recv, corev1.EventTypeNormal, ReasonReceiverBound,
-			"Bound to mirror %s/%s", primary.Namespace, primary.Name)
+// setServing names the MxlFlowRedundancySet that serves ref as its
+// output, or is empty when none does or sets are off.
+func (r *Reconciler) setServing(ctx context.Context, ref mxlv1alpha1.FlowRef) (string, error) {
+	if !r.RedundancySets {
+		return "", nil
+	}
+	var sets mxlv1alpha1.MxlFlowRedundancySetList
+	if err := r.List(ctx, &sets); err != nil {
+		return "", fmt.Errorf("list MxlFlowRedundancySets: %w", err)
+	}
+	for i := range sets.Items {
+		if setOutput(&sets.Items[i]) == ref && serves(&sets.Items[i]) {
+			return sets.Items[i].Name, nil
+		}
+	}
+	return "", nil
+}
+
+func setOutput(s *mxlv1alpha1.MxlFlowRedundancySet) mxlv1alpha1.FlowRef {
+	return mxlv1alpha1.FlowRef{Domain: s.Spec.Output.Domain, ID: s.Spec.Output.FlowID}
+}
+
+// serves reports whether the set serves its output: Valid at its current
+// generation. It is the gateway's valid(), the rule the gateway builds a
+// merge engine by, so a receiver is bound through a set exactly when the
+// gateway merges the set's output on the nodes it is read on. A set not
+// judged yet, judged before a spec change, or refused, OutputIsAFlow
+// included, is not served. The agent and the mirror controller ask
+// whether a set owns the id instead, and count one not judged yet or
+// refused only as OutputIsAFlow as its owner: that rule hands the id
+// over from a producer, before the set serves anything.
+func serves(s *mxlv1alpha1.MxlFlowRedundancySet) bool {
+	c := meta.FindStatusCondition(s.Status.Conditions, mxlv1alpha1.ConditionTypeValid)
+	return c != nil && c.Status == metav1.ConditionTrue && c.ObservedGeneration == s.Generation
+}
+
+// markBound records the receiver as served: through primary, the first
+// of its mirrors, or with no mirror at all, which unmirrored says why.
+// The event marks becoming bound, and a bound receiver gaining or losing
+// its mirror, which changes where its consumers read the flow from.
+func (r *Reconciler) markBound(ctx context.Context, recv *mxlv1alpha1.MxlReceiver, primary *mxlv1alpha1.MirrorRef, unmirrored string) (ctrl.Result, error) {
+	changed := recv.Status.Phase != mxlv1alpha1.MxlReceiverBound || (recv.Status.BoundMirror == nil) != (primary == nil)
+	if r.Recorder != nil && changed {
+		if primary != nil {
+			r.Recorder.Eventf(recv, corev1.EventTypeNormal, ReasonReceiverBound,
+				"Bound to mirror %s/%s", primary.Namespace, primary.Name)
+		} else {
+			r.Recorder.Eventf(recv, corev1.EventTypeNormal, ReasonReceiverBound,
+				"Bound without a mirror: %s", unmirrored)
+		}
 	}
 	recv.Status.BoundMirror = primary
 	recv.Status.Phase = mxlv1alpha1.MxlReceiverBound
@@ -1219,7 +1299,7 @@ func (r *Reconciler) setupWithManagerAgainst(mgr ctrl.Manager, target reconcile.
 		return fmt.Errorf("index MxlFlowMirror by %s: %w", ownerUIDIndex, err)
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&mxlv1alpha1.MxlReceiver{}).
 		Watches(
 			&mxlv1alpha1.MxlFlowMirror{},
@@ -1238,9 +1318,41 @@ func (r *Reconciler) setupWithManagerAgainst(mgr ctrl.Manager, target reconcile.
 			&coordinationv1.Lease{},
 			handler.EnqueueRequestsFromMapFunc(r.leaseToReceivers),
 			builder.WithPredicates(leaseInMxlSystem()),
-		).
-		Named("mxlreceiver").
-		Complete(target)
+		)
+	// A set that names a receiver's flow as its output, or stops naming
+	// it, or starts or stops serving it, changes how the receiver is
+	// served. Without redundancy sets the kind need not be served, and a
+	// watch on it would never sync.
+	if r.RedundancySets {
+		b = b.Watches(
+			&mxlv1alpha1.MxlFlowRedundancySet{},
+			handler.EnqueueRequestsFromMapFunc(r.setToReceivers),
+			builder.WithPredicates(setServingChange()),
+		)
+	}
+	return b.Named("mxlreceiver").Complete(target)
+}
+
+// setToReceivers maps an MxlFlowRedundancySet event to reconcile
+// requests for every MxlReceiver of the set's output.
+func (r *Reconciler) setToReceivers(ctx context.Context, obj client.Object) []reconcile.Request {
+	set, ok := obj.(*mxlv1alpha1.MxlFlowRedundancySet)
+	if !ok {
+		return nil
+	}
+	out := setOutput(set)
+	var receivers mxlv1alpha1.MxlReceiverList
+	if err := r.List(ctx, &receivers, client.MatchingFields{flowIDIndex: out.Name()}); err != nil {
+		return nil
+	}
+	reqs := make([]reconcile.Request, 0, len(receivers.Items))
+	for i := range receivers.Items {
+		reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: receivers.Items[i].Namespace,
+			Name:      receivers.Items[i].Name,
+		}})
+	}
+	return reqs
 }
 
 // mirrorToReceivers maps an MxlFlowMirror event to reconcile
@@ -1410,6 +1522,23 @@ func podNodeChangePredicate() predicate.Predicate {
 				return false
 			}
 			return oldPod.Spec.NodeName != newPod.Spec.NodeName
+		},
+	}
+}
+
+// setServingChange passes a set's create and delete, and an update only
+// when the set's output or whether it serves it changed. The set
+// controller rewrites a set's status on every member and gateway change,
+// none of which the receiver reads.
+func setServingChange() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			o, oldOK := e.ObjectOld.(*mxlv1alpha1.MxlFlowRedundancySet)
+			n, newOK := e.ObjectNew.(*mxlv1alpha1.MxlFlowRedundancySet)
+			if !oldOK || !newOK {
+				return false
+			}
+			return setOutput(o) != setOutput(n) || serves(o) != serves(n)
 		},
 	}
 }
