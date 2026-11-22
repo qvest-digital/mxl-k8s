@@ -10,7 +10,9 @@
 // cannot move, which is why both happen before registration.
 //
 // Every failure is recorded and leaves the mirror to start as it would
-// without placement.
+// without placement. A ring file that is an mxlfs view, the output of a
+// merged redundancy set, has no pages of its own and is never placed;
+// it is counted as refused for reason view.
 package numaplace
 
 import (
@@ -54,6 +56,7 @@ const (
 
 // File is one open ring file.
 type File interface {
+	IsView() (bool, error)
 	Hold() error
 	Pages() (mxlfs.Pages, error)
 	Move(node int32) (mxlfs.Move, error)
@@ -63,6 +66,7 @@ type File interface {
 
 type osFile struct{ *os.File }
 
+func (f osFile) IsView() (bool, error)               { return mxlfs.IsView(f.File) }
 func (f osFile) Hold() error                         { return mxlfs.Hold(f.File, true) }
 func (f osFile) Pages() (mxlfs.Pages, error)         { return mxlfs.NodePages(f.File) }
 func (f osFile) Move(node int32) (mxlfs.Move, error) { return mxlfs.MoveTo(f.File, node, 0) }
@@ -74,6 +78,29 @@ func openFile(path string) (File, error) {
 		return nil, err
 	}
 	return osFile{f}, nil
+}
+
+// errView marks a ring file mxlfs refused to place because it is a view.
+var errView = errors.New("the file is an mxlfs view")
+
+// viewErr returns err marked with errView when f, the file err came
+// from, is a view. mxlfs checks the capability before the view and
+// refuses a view with EPERM or, before 0.1.0-rc.9, EINVAL, so only the
+// file tells a view from a missing CAP_SYS_NICE. A file that cannot be
+// asked leaves err as it is.
+func (p *Placer) viewErr(f File, err error) error {
+	if f == nil || mxlfs.Unsupported(err) {
+		return err
+	}
+	v, verr := f.IsView()
+	if verr != nil {
+		p.log.V(1).Info("cannot tell whether a refused ring file is a view", "error", verr.Error())
+		return err
+	}
+	if v {
+		return fmt.Errorf("%w: %w", errView, err)
+	}
+	return err
 }
 
 type flowKey struct{ domain, flowID string }
@@ -132,7 +159,7 @@ func New(node string, nic int32, rec record.EventRecorder, log logr.Logger) *Pla
 		pageSize:  uint64(os.Getpagesize()),
 		moves: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name:        "mxl_gateway_numa_moves_total",
-			Help:        "First acquires of a source ring by what became of its placement on the NIC's NUMA node, and why a block stayed off it.",
+			Help:        "First acquires of a source ring by what became of its placement on the NIC's NUMA node, and why a block stayed off it. Reason view is a ring file that is an mxlfs view, or a block a view maps.",
 			ConstLabels: cl,
 		}, []string{"domain", "result", "reason"}),
 		moveTime: prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -263,6 +290,7 @@ func (p *Placer) holdTarget(k flowKey) ([]File, error) {
 			err = f.Hold()
 		}
 		if err != nil {
+			err = p.viewErr(f, err)
 			closeAll(files)
 			return nil, err
 		}
@@ -297,7 +325,9 @@ func (p *Placer) place(pin *flowPin, k flowKey, obj client.Object) {
 		f, err := p.open(path)
 		if err == nil {
 			pin.files = append(pin.files, f)
-			err = f.Hold()
+			if err = f.Hold(); err != nil {
+				err = p.viewErr(f, err)
+			}
 		}
 		if err != nil {
 			closeAll(pin.files)
@@ -394,8 +424,14 @@ func moveReason(m mxlfs.Move, err error) string {
 }
 
 // failed records a failed open, hold or preference on domain: counted,
-// and noted.
+// and noted. A view is refused for what it is, with neither a warning
+// nor a mark on the domain.
 func (p *Placer) failed(domain string, err error, obj client.Object, what string) {
+	if errors.Is(err, errView) {
+		p.log.V(1).Info("not placing a view; mxlfs places its sources", "domain", domain, "what", what, "error", err.Error())
+		p.moves.WithLabelValues(domain, ResultRefused, mxlfs.RefuseView.String()).Inc()
+		return
+	}
 	if p.note(domain, err, obj, what) {
 		p.moves.WithLabelValues(domain, ResultUnsupported, "none").Inc()
 		return

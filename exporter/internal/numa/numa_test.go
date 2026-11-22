@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/qvest-digital/mxl-k8s/api/mxlfs"
+	"github.com/qvest-digital/mxl-k8s/api/mxlfs/uapitest"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -64,6 +65,7 @@ func (f *fake) collector(t testing.TB) *Collector {
 		s := mxlfs.Stats{MoveCalls: 5, MoveCallsPartial: 1, MoveCallsNone: 1, MoveBytes: 8192, MoveNs: 2e9,
 			MoveWindowNsSum: 300e3, MoveWindowNsMax: 9e6, Holds: 2}
 		s.MoveRefused[mxlfs.RefuseView] = 3
+		s.MoveRefused[mxlfs.RefusePoisoned] = 4
 		s.MoveWindowHist[1], s.MoveWindowHist[8] = 2, 1
 		return s, nil
 	}
@@ -136,6 +138,9 @@ mxl_flow_ring_held{domain=%[1]q,flow_id=%[3]q} 0
 		"mxl_domain_numa_move_block_window_seconds", "mxl_flow_ring_numa_bytes", "mxl_flow_ring_held"))
 	require.Equal(t, 3.0, sample(t, reg, "mxl_domain_numa_move_refused_blocks_total", "view"))
 	require.Equal(t, 0.0, sample(t, reg, "mxl_domain_numa_move_refused_blocks_total", "pinned"))
+	require.Equal(t, 4.0, sample(t, reg, "mxl_domain_numa_move_refused_blocks_total", "poisoned"))
+	require.Equal(t, 7, testutil.CollectAndCount(c, "mxl_domain_numa_move_refused_blocks_total"),
+		"one series per reason the module counts")
 	require.Equal(t, 8192.0, sample(t, reg, "mxl_domain_numa_moved_bytes_total", ""))
 	require.Equal(t, 2.0, sample(t, reg, "mxl_domain_numa_move_duration_seconds_total", ""))
 	require.Equal(t, 2.0, sample(t, reg, "mxl_domain_numa_holds", ""))
@@ -270,4 +275,10 @@ func TestFlowFilesAreOpenedInTheDirectoryLookedUpOnce(t *testing.T) {
 
 	require.True(t, moved)
 	require.Equal(t, flowPages{perNode: []uint64{2, 5}}, c.snaps[dom].flows[flowA])
+}
+
+func TestMagicMatchesHeader(t *testing.T) {
+	h, err := uapitest.Parse()
+	require.NoError(t, err)
+	require.EqualValues(t, h.Consts["MXLFS_MAGIC"], magic)
 }
