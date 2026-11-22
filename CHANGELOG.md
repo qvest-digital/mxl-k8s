@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0-rc.56](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.55...v1.1.0-rc.56) (2026-11-22)
+
+
+### Bug Fixes
+
+* **agent:** retry a mirror request a terminating mirror refused ([#472](https://github.com/qvest-digital/mxl-k8s/issues/472)) ([b9a61ec](https://github.com/qvest-digital/mxl-k8s/commit/b9a61ecd9f8a8e0d56ca078ac1418702615a1faa))
+* **gateway:** treat NotFound on finalizer removal as completed teardown ([#471](https://github.com/qvest-digital/mxl-k8s/issues/471)) ([7bf2155](https://github.com/qvest-digital/mxl-k8s/commit/7bf2155e2380728de503a8a68c7b7a7e62e56320))
+
 ## [1.1.0-rc.55](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.54...v1.1.0-rc.55) (2026-11-22)
 
 
