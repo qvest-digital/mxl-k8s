@@ -33,8 +33,12 @@ type fakeFS struct {
 
 	holdErr, setErr error
 	moveErr         error
-	moveResult      mxlfs.Result
-	moveReason      mxlfs.Reason
+	// viewErr is what HOLD and SET_NODE answer on a view.
+	viewErr error
+	// isViewErr, when set, is what every IsView answers.
+	isViewErr  error
+	moveResult mxlfs.Result
+	moveReason mxlfs.Reason
 	// moveGate, when set, is waited on by every Move.
 	moveGate chan struct{}
 }
@@ -45,6 +49,7 @@ type fakeFile struct {
 	pages []uint64
 	held  bool
 	pref  int32
+	view  bool
 }
 
 func (fs *fakeFS) record(op, path string) {
@@ -69,6 +74,17 @@ type fakeHandle struct {
 	closed bool
 }
 
+func (h *fakeHandle) IsView() (bool, error) {
+	fs := h.f.fs
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.record("isview", h.f.path)
+	if fs.isViewErr != nil {
+		return false, fs.isViewErr
+	}
+	return h.f.view, nil
+}
+
 func (h *fakeHandle) Hold() error {
 	fs := h.f.fs
 	fs.mu.Lock()
@@ -76,6 +92,9 @@ func (h *fakeHandle) Hold() error {
 	fs.record("hold", h.f.path)
 	if fs.holdErr != nil {
 		return fs.holdErr
+	}
+	if h.f.view {
+		return fs.viewErr
 	}
 	h.held, h.f.held = true, true
 	return nil
@@ -127,6 +146,9 @@ func (h *fakeHandle) SetNode(node int32) error {
 	fs.record("setnode", h.f.path)
 	if fs.setErr != nil {
 		return fs.setErr
+	}
+	if h.f.view {
+		return fs.viewErr
 	}
 	h.f.pref = node
 	return nil
@@ -185,6 +207,20 @@ func (fs *fakeFS) ring(t *testing.T, domain, id string, grains int, perNode ...u
 		path := filepath.Join(dir, fmt.Sprintf("data.%d", i))
 		require.NoError(t, os.WriteFile(path, nil, 0o644))
 		fs.files[path] = &fakeFile{fs: fs, path: path, pages: append([]uint64(nil), perNode...), pref: mxlfs.NodeNone}
+	}
+}
+
+// viewRing makes the ring of flow id in domain views, as the output of
+// a merged redundancy set is.
+func (fs *fakeFS) viewRing(t *testing.T, domain, id string, grains int) {
+	t.Helper()
+	fs.ring(t, domain, id, grains, 512, 0)
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	for path, f := range fs.files {
+		if strings.Contains(path, id) {
+			f.view = true
+		}
 	}
 }
 
@@ -368,6 +404,58 @@ func TestMissingCapabilityWarnsOncePerDomain(t *testing.T) {
 	require.Contains(t, ev[0], "CAP_SYS_NICE")
 	require.Equal(t, 2.0, moves(p, dom, ResultRefused, "error"))
 	require.Zero(t, fs.openNow())
+}
+
+// A ring that is a view, the output of a merged redundancy set, is
+// refused as a view: mxlfs refuses it with the errno a missing
+// CAP_SYS_NICE gives, EPERM, or EINVAL before 0.1.0-rc.9, and that is
+// no reason to warn about the capability or to stop warning about it
+// for the domain. A ring that is not a view and is refused EPERM still
+// gets the capability warning afterwards.
+func TestViewIsRefusedAsViewNotAsCapability(t *testing.T) {
+	for _, errno := range []syscall.Errno{syscall.EPERM, syscall.EINVAL} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			fs := &fakeFS{viewErr: fmt.Errorf("hold: %w", errno)}
+			dom := t.TempDir()
+			fs.viewRing(t, dom, flowA, 2)
+			fs.ring(t, dom, flowB, 1, 512, 0)
+			p, rec := newPlacer(fs)
+
+			p.Acquire(dom, flowA, mirror())()
+			p.HoldTarget(dom, flowA, mirror())()
+			require.Equal(t, 2.0, moves(p, dom, ResultRefused, "view"))
+			require.Zero(t, moves(p, dom, ResultRefused, "error"))
+			require.Empty(t, events(rec), "a view is not a warning")
+			require.Zero(t, fs.openNow())
+			require.Zero(t, fs.opsOf("move"))
+
+			fs.mu.Lock()
+			fs.holdErr = fmt.Errorf("hold: %w", syscall.EPERM)
+			fs.mu.Unlock()
+			p.Acquire(dom, flowB, mirror())()
+			ev := events(rec)
+			require.Len(t, ev, 1, "a view kept the capability warning from the domain")
+			require.Contains(t, ev[0], "CAP_SYS_NICE")
+			require.Equal(t, 1.0, moves(p, dom, ResultRefused, "error"))
+		})
+	}
+}
+
+// A refused file that cannot be asked whether it is a view is judged
+// by its errno, as before views were told apart: EPERM is a missing
+// capability.
+func TestUnaskableFileKeepsTheErrnoClassification(t *testing.T) {
+	fs := &fakeFS{viewErr: fmt.Errorf("hold: %w", syscall.EPERM), isViewErr: fmt.Errorf("get selected: %w", syscall.EIO)}
+	dom := t.TempDir()
+	fs.viewRing(t, dom, flowA, 1)
+	p, rec := newPlacer(fs)
+	p.Acquire(dom, flowA, mirror())()
+	require.Equal(t, 1, fs.opsOf("isview"))
+	ev := events(rec)
+	require.Len(t, ev, 1)
+	require.Contains(t, ev[0], "CAP_SYS_NICE")
+	require.Equal(t, 1.0, moves(p, dom, ResultRefused, "error"))
+	require.Zero(t, moves(p, dom, ResultRefused, "view"))
 }
 
 // Each refusal starts the mirror on the ring where it is, keeps the
