@@ -733,6 +733,47 @@ func Test_SetWatch_EnqueuesReceiversOfItsOutput(t *testing.T) {
 	assert.Nil(t, r.setToReceivers(ctx, &corev1.Pod{}))
 }
 
+// The set controller rewrites a set's status on every member and gateway
+// change. Only a change of the output, or of whether the set serves it,
+// reaches the receivers; a spec change does, because it leaves the
+// Valid condition stale until the set is judged again.
+func Test_SetWatch_PassesOnlyServingChanges(t *testing.T) {
+	valid := func(status metav1.ConditionStatus, gen int64) metav1.Condition {
+		return metav1.Condition{Type: mxlv1alpha1.ConditionTypeValid, Status: status, Reason: "r", ObservedGeneration: gen}
+	}
+	set := func(out string, gen int64, conds ...metav1.Condition) *mxlv1alpha1.MxlFlowRedundancySet {
+		return &mxlv1alpha1.MxlFlowRedundancySet{
+			ObjectMeta: metav1.ObjectMeta{Name: "s", Generation: gen},
+			Spec:       mxlv1alpha1.MxlFlowRedundancySetSpec{Output: mxlv1alpha1.RedundancyFlowRef{FlowID: out}},
+			Status:     mxlv1alpha1.MxlFlowRedundancySetStatus{Conditions: conds},
+		}
+	}
+	ready := metav1.Condition{Type: mxlv1alpha1.ConditionTypeMembersReady, Status: metav1.ConditionFalse, Reason: "r"}
+	for _, c := range []struct {
+		name     string
+		old, new *mxlv1alpha1.MxlFlowRedundancySet
+		want     bool
+	}{
+		{"another condition", set("o", 1, valid(metav1.ConditionTrue, 1)), set("o", 1, valid(metav1.ConditionTrue, 1), ready), false},
+		{"nodes", set("o", 1), func() *mxlv1alpha1.MxlFlowRedundancySet {
+			s := set("o", 1)
+			s.Status.Nodes = []string{"n-a"}
+			return s
+		}(), false},
+		{"judged valid", set("o", 1), set("o", 1, valid(metav1.ConditionTrue, 1)), true},
+		{"judged invalid", set("o", 1, valid(metav1.ConditionTrue, 1)), set("o", 1, valid(metav1.ConditionFalse, 1)), true},
+		{"spec changed", set("o", 1, valid(metav1.ConditionTrue, 1)), set("o", 2, valid(metav1.ConditionTrue, 1)), true},
+		{"output changed", set("o", 1), set("p", 2), true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, setServingChange().Update(event.UpdateEvent{ObjectOld: c.old, ObjectNew: c.new}))
+		})
+	}
+	s := set("o", 1)
+	assert.True(t, setServingChange().Create(event.CreateEvent{Object: s}))
+	assert.True(t, setServingChange().Delete(event.DeleteEvent{Object: s}))
+}
+
 func Test_FlowWatch_NonFlowObjectReturnsNil(t *testing.T) {
 	ctx := context.Background()
 	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).Build()

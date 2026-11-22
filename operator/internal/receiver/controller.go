@@ -1316,13 +1316,14 @@ func (r *Reconciler) setupWithManagerAgainst(mgr ctrl.Manager, target reconcile.
 			builder.WithPredicates(leaseInMxlSystem()),
 		)
 	// A set that names a receiver's flow as its output, or stops naming
-	// it, or is judged, changes how the receiver is served. Without
-	// redundancy sets the kind need not be served, and a watch on it
-	// would never sync.
+	// it, or starts or stops serving it, changes how the receiver is
+	// served. Without redundancy sets the kind need not be served, and a
+	// watch on it would never sync.
 	if r.RedundancySets {
 		b = b.Watches(
 			&mxlv1alpha1.MxlFlowRedundancySet{},
 			handler.EnqueueRequestsFromMapFunc(r.setToReceivers),
+			builder.WithPredicates(setServingChange()),
 		)
 	}
 	return b.Named("mxlreceiver").Complete(target)
@@ -1517,6 +1518,23 @@ func podNodeChangePredicate() predicate.Predicate {
 				return false
 			}
 			return oldPod.Spec.NodeName != newPod.Spec.NodeName
+		},
+	}
+}
+
+// setServingChange passes a set's create and delete, and an update only
+// when the set's output or whether it serves it changed. The set
+// controller rewrites a set's status on every member and gateway change,
+// none of which the receiver reads.
+func setServingChange() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			o, oldOK := e.ObjectOld.(*mxlv1alpha1.MxlFlowRedundancySet)
+			n, newOK := e.ObjectNew.(*mxlv1alpha1.MxlFlowRedundancySet)
+			if !oldOK || !newOK {
+				return false
+			}
+			return setOutput(o) != setOutput(n) || serves(o) != serves(n)
 		},
 	}
 }
