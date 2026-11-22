@@ -127,8 +127,10 @@ func TestOneSlowWantDoesNotHoldTheQueue(t *testing.T) {
 
 	// Wait for the other flows' calls to return, not only to start: a
 	// call counted as made may still be in flight, and would be counted
-	// as running beside the slow one.
-	require.Eventually(t, func() bool { return h.returned() == 100 },
+	// as running beside the slow one. The slow flow's first want may
+	// still be on its way into Materialize once they have, so wait for
+	// it as well.
+	require.Eventually(t, func() bool { _, _, c := h.read(); return h.returned() == 100 && c >= 101 },
 		2*time.Second, time.Millisecond, "the other flows' wants were held behind the slow one")
 	r, _, c := h.read()
 	require.Equal(t, 1, r, "a flow's wants are handled one at a time")
