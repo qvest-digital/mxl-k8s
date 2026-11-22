@@ -1157,6 +1157,19 @@ func clearFlowOrigin(t *testing.T, flow *mxlv1alpha1.MxlFlow) {
 	require.NoError(t, env.Client.Status().Update(context.Background(), &live))
 }
 
+// drain returns the events recorded so far.
+func drain(r *record.FakeRecorder) []string {
+	var out []string
+	for {
+		select {
+		case e := <-r.Events:
+			out = append(out, e)
+		default:
+			return out
+		}
+	}
+}
+
 // A receiver of a redundancy set's output is served by the set: the
 // output is merged on each node it is read on, from member mirrors
 // there, and never has an Origin to mirror it from. The receiver binds
@@ -1257,5 +1270,68 @@ func TestReconcile_SetForAFlowThatResolves_KeepsItsMirror(t *testing.T) {
 	lease.fresh = false
 	reconcile(t, r, ns, "r")
 	held("a Valid set whose output has an Origin with a lapsed Lease")
+	assert.Equal(t, mxlv1alpha1.MxlReceiverPending, mustGetReceiver(t, env.Client, ns, "r").Status.Phase)
+}
+
+// A receiver moves between a mirror and a set as the flow's Origin and
+// the set's judgement do: it releases the mirror once the set serves the
+// output, gets one again while a producer holds the id, and waits once
+// neither the set nor a producer serves it.
+func TestReconcile_SetOutput_ReleasesAndRecreatesTheMirror(t *testing.T) {
+	ctx := context.Background()
+	ns := env.NewNamespace(t)
+	events := record.NewFakeRecorder(16)
+	r := &receiver.Reconciler{Client: env.Client, APIReader: env.Client, Scheme: env.Scheme,
+		Recorder: events, RedundancySets: true}
+
+	require.NoError(t, env.Client.Create(ctx, testutil.NewPod(ns, "consumer", "n-b")))
+	flow := newFlow(t, "n-a")
+	require.NoError(t, env.Client.Create(ctx,
+		testutil.NewReceiver(ns, "r", testutil.WithReceiverFlowID(flow.Spec.ID))))
+	reconcile(t, r, ns, "r")
+	rec := mustGetReceiver(t, env.Client, ns, "r")
+	require.NotNil(t, rec.Status.BoundMirror)
+	mirrorKey := types.NamespacedName{Namespace: rec.Status.BoundMirror.Namespace, Name: rec.Status.BoundMirror.Name}
+	require.Len(t, events.Events, 1)
+	assert.Equal(t, "Normal ReceiverBound Bound to mirror "+mirrorKey.String(), <-events.Events)
+
+	// The producer goes and the set serves the id.
+	set := newSet(t, flow.Spec.ID)
+	judge(t, set, metav1.ConditionTrue, "MembersAligned")
+	clearFlowOrigin(t, flow)
+	assert.Equal(t, ctrl.Result{}, reconcile(t, r, ns, "r"))
+	err := env.Client.Get(ctx, mirrorKey, &mxlv1alpha1.MxlFlowMirror{})
+	assert.True(t, apierrors.IsNotFound(err), "the mirror is released once the set serves the output: %v", err)
+	rec = mustGetReceiver(t, env.Client, ns, "r")
+	assert.Equal(t, mxlv1alpha1.MxlReceiverBound, rec.Status.Phase)
+	assert.Nil(t, rec.Status.BoundMirror)
+	assert.Equal(t, []string{
+		"Normal MirrorReleased Deleting: the last MxlReceiver owning this mirror released it",
+		"Normal ReceiverBound Bound without a mirror: merged by MxlFlowRedundancySet " + set.Name,
+	}, drain(events), "losing the mirror changes where the consumers read")
+
+	// A producer takes the id again, and the set controller refuses the
+	// set for it.
+	require.NoError(t, withFlowOriginStatus(env.Client, flow, "n-a"))
+	judge(t, set, metav1.ConditionFalse, "OutputIsAFlow")
+	assert.Equal(t, ctrl.Result{}, reconcile(t, r, ns, "r"))
+	var live mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, env.Client.Get(ctx, mirrorKey, &live), "the mirror is created again for the producer")
+	assert.Equal(t, "n-a", live.Spec.SourceNode)
+	rec = mustGetReceiver(t, env.Client, ns, "r")
+	assert.Equal(t, mxlv1alpha1.MxlReceiverBound, rec.Status.Phase)
+	require.NotNil(t, rec.Status.BoundMirror)
+	assert.Equal(t, mirrorKey.Name, rec.Status.BoundMirror.Name)
+	assert.Equal(t, []string{"Normal ReceiverBound Bound to mirror " + mirrorKey.String()}, drain(events),
+		"gaining a mirror changes where the consumers read")
+
+	// The producer goes again and the set serves the id; then the set is
+	// deleted, and nothing serves it.
+	clearFlowOrigin(t, flow)
+	judge(t, set, metav1.ConditionTrue, "MembersAligned")
+	reconcile(t, r, ns, "r")
+	require.Equal(t, mxlv1alpha1.MxlReceiverBound, mustGetReceiver(t, env.Client, ns, "r").Status.Phase)
+	require.NoError(t, env.Client.Delete(ctx, set))
+	assert.Equal(t, 10*time.Second, reconcile(t, r, ns, "r").RequeueAfter)
 	assert.Equal(t, mxlv1alpha1.MxlReceiverPending, mustGetReceiver(t, env.Client, ns, "r").Status.Phase)
 }

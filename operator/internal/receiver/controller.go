@@ -68,7 +68,9 @@ const (
 	// carrying the reason it could not. The phase alone says Pending
 	// without saying why, and the why is the actionable half.
 	ReasonReceiverPending = "ReceiverPending"
-	// ReasonReceiverBound marks a receiver reaching a usable mirror.
+	// ReasonReceiverBound marks a receiver becoming bound, through a
+	// mirror or with none, and a bound receiver gaining or losing its
+	// mirror.
 	ReasonReceiverBound = "ReceiverBound"
 	// ReasonMirrorReleased marks a mirror this receiver no longer
 	// wants, released or deleted. A mirror disappearing under a
@@ -1211,8 +1213,11 @@ func serves(s *mxlv1alpha1.MxlFlowRedundancySet) bool {
 
 // markBound records the receiver as served: through primary, the first
 // of its mirrors, or with no mirror at all, which unmirrored says why.
+// The event marks becoming bound, and a bound receiver gaining or losing
+// its mirror, which changes where its consumers read the flow from.
 func (r *Reconciler) markBound(ctx context.Context, recv *mxlv1alpha1.MxlReceiver, primary *mxlv1alpha1.MirrorRef, unmirrored string) (ctrl.Result, error) {
-	if r.Recorder != nil && recv.Status.Phase != mxlv1alpha1.MxlReceiverBound {
+	changed := recv.Status.Phase != mxlv1alpha1.MxlReceiverBound || (recv.Status.BoundMirror == nil) != (primary == nil)
+	if r.Recorder != nil && changed {
 		if primary != nil {
 			r.Recorder.Eventf(recv, corev1.EventTypeNormal, ReasonReceiverBound,
 				"Bound to mirror %s/%s", primary.Namespace, primary.Name)
