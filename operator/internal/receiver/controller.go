@@ -204,21 +204,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return r.markPending(ctx, &recv, "no target pods scheduled yet")
 	}
 
-	set, err := r.setServing(ctx, recv.Ref())
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if set != "" {
+	if !res.Found && !res.AllStale {
 		// The output of a redundancy set is merged on each node a reader
 		// opens it on, from member mirrors there, and is never a flow
 		// with an Origin: there is nothing to mirror it from, and the
-		// receiver releases any mirror it holds for the id.
-		if err := r.gcOrphanMirrors(ctx, &recv, nil); err != nil {
-			return ctrl.Result{}, fmt.Errorf("gc orphan mirrors: %w", err)
+		// receiver releases any mirror it holds for the id. A flow that
+		// does resolve is mirrored as any other, whatever a set says
+		// about its id, and so is one whose Origin only has a lapsed
+		// Lease: that producer may still be delivering.
+		set, err := r.setServing(ctx, recv.Ref())
+		if err != nil {
+			return ctrl.Result{}, err
 		}
-		return r.markBound(ctx, &recv, nil, "merged by MxlFlowRedundancySet "+set)
+		if set != "" {
+			if err := r.gcOrphanMirrors(ctx, &recv, nil); err != nil {
+				return ctrl.Result{}, fmt.Errorf("gc orphan mirrors: %w", err)
+			}
+			return r.markBound(ctx, &recv, nil, "merged by MxlFlowRedundancySet "+set)
+		}
 	}
-
 	if !res.Found {
 		// Consumers exist but there is no source to point them at, and
 		// no way to tell which of this receiver's mirrors are still
@@ -1169,10 +1173,8 @@ func (r *Reconciler) markPending(ctx context.Context, recv *mxlv1alpha1.MxlRecei
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
-// setServing names the MxlFlowRedundancySet whose output ref is, unless
-// the set was judged invalid, or is empty when none is or sets are off.
-// A set refused because a producer still holds the id serves nothing
-// yet; the producer's flow is mirrored as any other until it goes.
+// setServing names the MxlFlowRedundancySet that serves ref as its
+// output, or is empty when none does or sets are off.
 func (r *Reconciler) setServing(ctx context.Context, ref mxlv1alpha1.FlowRef) (string, error) {
 	if !r.RedundancySets {
 		return "", nil
@@ -1181,15 +1183,30 @@ func (r *Reconciler) setServing(ctx context.Context, ref mxlv1alpha1.FlowRef) (s
 	if err := r.List(ctx, &sets); err != nil {
 		return "", fmt.Errorf("list MxlFlowRedundancySets: %w", err)
 	}
-	for _, s := range sets.Items {
-		if (mxlv1alpha1.FlowRef{Domain: s.Spec.Output.Domain, ID: s.Spec.Output.FlowID}) != ref {
-			continue
-		}
-		if c := meta.FindStatusCondition(s.Status.Conditions, mxlv1alpha1.ConditionTypeValid); c == nil || c.Status != metav1.ConditionFalse {
-			return s.Name, nil
+	for i := range sets.Items {
+		if setOutput(&sets.Items[i]) == ref && serves(&sets.Items[i]) {
+			return sets.Items[i].Name, nil
 		}
 	}
 	return "", nil
+}
+
+func setOutput(s *mxlv1alpha1.MxlFlowRedundancySet) mxlv1alpha1.FlowRef {
+	return mxlv1alpha1.FlowRef{Domain: s.Spec.Output.Domain, ID: s.Spec.Output.FlowID}
+}
+
+// serves reports whether the set serves its output: Valid at its current
+// generation. It is the gateway's valid(), the rule the gateway builds a
+// merge engine by, so a receiver is bound through a set exactly when the
+// gateway merges the set's output on the nodes it is read on. A set not
+// judged yet, judged before a spec change, or refused, OutputIsAFlow
+// included, is not served. The agent and the mirror controller ask
+// whether a set owns the id instead, and count one not judged yet or
+// refused only as OutputIsAFlow as its owner: that rule hands the id
+// over from a producer, before the set serves anything.
+func serves(s *mxlv1alpha1.MxlFlowRedundancySet) bool {
+	c := meta.FindStatusCondition(s.Status.Conditions, mxlv1alpha1.ConditionTypeValid)
+	return c != nil && c.Status == metav1.ConditionTrue && c.ObservedGeneration == s.Generation
 }
 
 // markBound records the receiver as served: through primary, the first
@@ -1313,7 +1330,7 @@ func (r *Reconciler) setToReceivers(ctx context.Context, obj client.Object) []re
 	if !ok {
 		return nil
 	}
-	out := mxlv1alpha1.FlowRef{Domain: set.Spec.Output.Domain, ID: set.Spec.Output.FlowID}
+	out := setOutput(set)
 	var receivers mxlv1alpha1.MxlReceiverList
 	if err := r.List(ctx, &receivers, client.MatchingFields{flowIDIndex: out.Name()}); err != nil {
 		return nil
