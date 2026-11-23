@@ -502,9 +502,7 @@ func (r *SourceReconciler) reapOrphanedFinalizer(ctx context.Context, mirror *mx
 	if !gone {
 		return ctrl.Result{RequeueAfter: orphanRecheckInterval}, nil
 	}
-	if err := deleteHeartbeat(ctx, r.Client, client.ObjectKeyFromObject(mirror), mxlv1alpha1.MirrorSideSource); err != nil {
-		return ctrl.Result{}, err
-	}
+	deleteHeartbeat(ctx, r.Client, client.ObjectKeyFromObject(mirror), mxlv1alpha1.MirrorSideSource)
 
 	controllerutil.RemoveFinalizer(mirror, SourceFinalizerName)
 	if err := r.Update(ctx, mirror); err != nil {
@@ -564,9 +562,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		r.closeEntry(req.NamespacedName)
 		r.clearRedials(req.NamespacedName)
 		r.retire(req.NamespacedName)
-		if err := deleteHeartbeat(ctx, r.Client, req.NamespacedName, mxlv1alpha1.MirrorSideSource); err != nil {
-			return ctrl.Result{}, err
-		}
+		deleteHeartbeat(ctx, r.Client, req.NamespacedName, mxlv1alpha1.MirrorSideSource)
 		controllerutil.RemoveFinalizer(&mirror, SourceFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
 			// The other side's gateway removed its finalizer first and
@@ -1750,7 +1746,7 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 
 		// A reader that has stopped feeding the fabric is the one wedge
 		// neither side of the mirror resolves on its own. The target's
-		// stuck-handshake watchdog is gated on status.lastSentAt
+		// stuck-handshake watchdog is gated on the source's heartbeat
 		// postdating its own fabric open, and a reader that transfers
 		// nothing never advances lastSentAt, so the target reads the
 		// mirror as an idle producer and declines to rebuild.
@@ -2247,11 +2243,18 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// A cluster whose CRDs predate the kind serves the descriptor in
 	// status.targetInfo alone, and a watch on a kind the API server
 	// does not serve would keep the controller from starting.
+	// The kind is looked up once, so a gateway started before its CRD
+	// was applied reads descriptors from status.targetInfo until it
+	// restarts.
 	gvk := mxlv1alpha1.GroupVersion.WithKind("MxlFlowMirrorTarget")
-	if _, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version); err == nil {
+	_, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
+	switch {
+	case err == nil:
 		b = b.Watches(&mxlv1alpha1.MxlFlowMirrorTarget{}, &handler.EnqueueRequestForObject{})
-	} else {
-		ctrl.Log.WithName("source").Info("MxlFlowMirrorTarget is not served; reading target descriptors from status.targetInfo", "reason", err.Error())
+	case apimeta.IsNoMatchError(err):
+		ctrl.Log.WithName("source").Info("MxlFlowMirrorTarget is not served; reading target descriptors from status.targetInfo")
+	default:
+		return fmt.Errorf("look up MxlFlowMirrorTarget: %w", err)
 	}
 	return b.Named("mxlflowmirror-source").Complete(r)
 }

@@ -295,8 +295,8 @@ type TargetReconciler struct {
 	// DegradedAfter is the duration of grain-commit inactivity after
 	// which the flusher demotes the mirror from Ready to Degraded.
 	// The same threshold gates the Reconcile fast-path: a Ready
-	// status whose LastGrainAt is older than this falls through to
-	// re-establish instead of short-circuiting. Defaults to 10s.
+	// mirror whose target heartbeat is older than this falls through
+	// to re-establish instead of short-circuiting. Defaults to 10s.
 	DegradedAfter time.Duration
 
 	// StuckHandshakeAfter is the duration without any grain commit
@@ -636,9 +636,7 @@ func (r *TargetReconciler) reapOrphanedFinalizer(ctx context.Context, mirror *mx
 	if !gone {
 		return ctrl.Result{RequeueAfter: orphanRecheckInterval}, nil
 	}
-	if err := deleteHeartbeat(ctx, r.Client, client.ObjectKeyFromObject(mirror), mxlv1alpha1.MirrorSideTarget); err != nil {
-		return ctrl.Result{}, err
-	}
+	deleteHeartbeat(ctx, r.Client, client.ObjectKeyFromObject(mirror), mxlv1alpha1.MirrorSideTarget)
 
 	controllerutil.RemoveFinalizer(mirror, TargetFinalizerName)
 	if err := r.Update(ctx, mirror); err != nil {
@@ -711,9 +709,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			r.Recorders.ReleaseTarget(req.NamespacedName)
 		}
 		r.published.forget(req.NamespacedName)
-		if err := deleteHeartbeat(ctx, r.Client, req.NamespacedName, mxlv1alpha1.MirrorSideTarget); err != nil {
-			return ctrl.Result{}, err
-		}
+		deleteHeartbeat(ctx, r.Client, req.NamespacedName, mxlv1alpha1.MirrorSideTarget)
 		controllerutil.RemoveFinalizer(&mirror, TargetFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
 			// The other side's gateway removed its finalizer first and
@@ -753,9 +749,9 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// FlowWriter (closing it removes the on-disk flow definition);
 	// re-opening here restores the flow file and rotates TargetInfo,
 	// which the source side picks up via the MxlFlowMirror watch.
-	// The freshness check forces a re-establish when LastGrainAt has
-	// fallen outside the degraded window: a Ready status without
-	// recent commits means the fabric side has likely died silently
+	// The freshness check forces a re-establish when the target's
+	// heartbeat has fallen outside the degraded window: a Ready
+	// status without recent commits means the fabric side has likely died silently
 	// (no fatal ReadGrain error to trigger recoverFromFatalError) and
 	// the flow file in the consumer pod is no longer being filled.
 	r.replaceOtherGeometry(ctx, req.NamespacedName, mirror.Ref().Name())
@@ -2683,7 +2679,11 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// The recovery path owns Phase + Conditions while it rebuilds
 		// the fabric side. Skip the tick so the flusher's Degraded
 		// write does not race the recovery's Materializing publish.
+		// Its phase-only writes release TargetProgress and lastGrainAt,
+		// so the state is published again once it is done, changed or
+		// not: a moving commit time no longer writes the status.
 		if entry.recovering.Load() {
+			unsent = true
 			continue
 		}
 		// Stuck-handshake watchdog. Two wedge shapes need recovery:
@@ -2791,7 +2791,7 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 				// budget and would be visible as an extra
 				// recoveryAttempts bump after the reset. Re-fetching
 				// the mirror covers the post-handshake variant: a
-				// LastSentAt change that lands in the same window
+				// source heartbeat that lands in the same window
 				// must be observed before the spawn commits.
 				if !r.wedged(ctx, key, entry, &watch) {
 					entry.recovering.Store(false)

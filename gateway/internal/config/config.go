@@ -137,13 +137,13 @@ type Config struct {
 	ReaderStallAfter time.Duration
 
 	// KubeAPIQPS is the sustained request rate the Kubernetes API
-	// client allows before throttling. The per-mirror status flushers
-	// publish roughly one PATCH per second per flowing mirror, so the
-	// sustained write rate scales with the flowing mirrors on the
-	// node. client-go falls back to 5 QPS when the limit is unset,
-	// which saturates at a handful of mirrors and queues status
-	// writes behind second-long delays - stale LastSentAt/LastGrainAt
-	// then skews the cross-side stuck-handshake comparison.
+	// client allows before throttling. Each flowing mirror side renews
+	// its heartbeat Lease every few seconds, so the sustained write
+	// rate scales with the flowing mirrors on the node. client-go falls
+	// back to 5 QPS when the limit is unset, which saturates at a few
+	// dozen mirrors and queues heartbeat writes behind second-long
+	// delays - a late heartbeat then skews the cross-side
+	// stuck-handshake comparison.
 	KubeAPIQPS float64
 
 	// KubeAPIBurst is the burst ceiling of the Kubernetes API client

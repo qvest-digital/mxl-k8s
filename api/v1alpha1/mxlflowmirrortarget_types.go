@@ -29,8 +29,9 @@ type MxlFlowMirrorTargetSpec struct {
 // The descriptor lists every memory region the target registered, so
 // for a video flow it runs to hundreds of kilobytes, and it changes
 // only when the target's fabric side is opened or rebuilt. Kept on the
-// mirror, it was stored again with every revision of the mirror's
-// status. The target gateway writes this object first and then
+// mirror, it is stored again with every revision of the mirror's
+// status, which is what this object ends once status.targetInfo is no
+// longer written. The target gateway writes this object first and then
 // status.targetInfoHash on the mirror; the source gateway dials the
 // descriptor only once its hash matches the mirror's.
 type MxlFlowMirrorTarget struct {

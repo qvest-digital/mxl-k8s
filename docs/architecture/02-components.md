@@ -147,7 +147,8 @@ takes the same rebuild for the new provider and republishes
 
 Each side's progress timestamp -- the last committed grain on the
 target, the last completed transfer on the source -- goes to a
-heartbeat Lease per mirror side in the release namespace, renewed every
+heartbeat Lease per mirror side in `mxl-system`, beside the Origin
+Leases, renewed every
 five seconds while grains move. The mirror's status changes only with
 its phase or a progress reason. The target's stuck-handshake watchdog
 and its `Ready` fast path read the heartbeats.

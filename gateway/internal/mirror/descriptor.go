@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -26,8 +27,9 @@ import (
 
 // applyMirrorTarget writes info into the MxlFlowMirrorTarget of
 // mirror. It reports false without an error when the API server does
-// not serve the kind, which is a cluster whose CRDs predate it: the
-// mirror then carries the descriptor in status.targetInfo alone.
+// not serve the kind, which is a cluster whose CRDs predate it, or
+// denies this gateway access to it, which is RBAC that predates it:
+// the mirror then carries the descriptor in status.targetInfo alone.
 func applyMirrorTarget(ctx context.Context, c client.Client, mirror *mxlv1alpha1.MxlFlowMirror, info string) (bool, error) {
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(mxlv1alpha1.GroupVersion.WithKind("MxlFlowMirrorTarget"))
@@ -46,7 +48,9 @@ func applyMirrorTarget(ctx context.Context, c client.Client, mirror *mxlv1alpha1
 		return false, fmt.Errorf("build MxlFlowMirrorTarget payload: %w", err)
 	}
 	err := c.Patch(ctx, obj, client.Apply, client.FieldOwner(targetInfoFieldOwner), client.ForceOwnership)
-	if meta.IsNoMatchError(err) {
+	if meta.IsNoMatchError(err) || apierrors.IsForbidden(err) {
+		ctrl.Log.WithName("target").Info("MxlFlowMirrorTarget not writable; publishing the descriptor in status.targetInfo only",
+			"mirror", client.ObjectKeyFromObject(mirror), "reason", err.Error())
 		return false, nil
 	}
 	if err != nil {

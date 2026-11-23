@@ -2,6 +2,7 @@ package mirror
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -313,4 +314,67 @@ func TestLeasePredicate_IgnoresMirrorHeartbeats(t *testing.T) {
 	origin := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: mxlv1alpha1.LeaseNamespace, Name: "mxl-flow-x"}}
 	assert.False(t, p.Generic(event.GenericEvent{Object: beat}))
 	assert.True(t, p.Generic(event.GenericEvent{Object: origin}))
+}
+
+// A recovery's phase-only writes release TargetProgress and lastGrainAt
+// under the flusher's field manager. A moving commit time no longer
+// writes the status, so the flusher has to publish its state again once
+// the recovery is done, or the mirror reads Ready with neither until its
+// next phase change.
+func TestRunFlusher_RepublishesAfterRecovery(t *testing.T) {
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1",
+		mxlv1alpha1.MxlFlowMirrorStatus{Phase: mxlv1alpha1.MxlFlowMirrorReady, TargetInfo: "info-1"})
+	var w writeCounter
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).WithInterceptorFuncs(w.funcs()).Build()
+	r := &TargetReconciler{Client: c, Scheme: scheme, NodeName: "node-a",
+		FlushInterval: time.Millisecond, targets: map[types.NamespacedName]*targetEntry{}}
+	entry := &targetEntry{infoStr: "info-1"}
+	now := time.Now()
+	entry.lastCommitAt.Store(&now)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go r.runFlusher(ctx, done, key, entry)
+	defer func() { cancel(); <-done }()
+	require.Eventually(t, func() bool { s, _ := w.counts(); return s == 1 }, time.Second, time.Millisecond)
+
+	entry.recovering.Store(true)
+	time.Sleep(20 * time.Millisecond)
+	entry.recovering.Store(false)
+	require.Eventually(t, func() bool { s, _ := w.counts(); return s == 2 }, time.Second, time.Millisecond,
+		"the unchanged state is published again after the recovery")
+}
+
+// The Lease delete runs ahead of a finalizer's removal and must not hold
+// it: a leaked Lease is collected by the operator, a finalizer that
+// never comes off leaves a mirror no delete can clear.
+func TestTeardown_FailedHeartbeatDeleteKeepsTheFinalizerMoving(t *testing.T) {
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	now := metav1.Now()
+	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{})
+	mirror.Finalizers = append(mirror.Finalizers, "test/hold")
+	mirror.DeletionTimestamp = &now
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).WithObjects(mirror).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if _, ok := obj.(*coordinationv1.Lease); ok {
+					return apierrors.NewForbidden(coordinationv1.Resource("leases"), obj.GetName(), errors.New("denied"))
+				}
+				return cl.Delete(ctx, obj, opts...)
+			},
+		}).Build()
+	r := &TargetReconciler{Client: c, Scheme: scheme, NodeName: "node-a",
+		targets: map[types.NamespacedName]*targetEntry{}, attempts: attemptTable[targetOpenInputs]{}}
+
+	_, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	require.NoError(t, err)
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(context.Background(), key, &got))
+	assert.NotContains(t, got.Finalizers, TargetFinalizerName)
 }

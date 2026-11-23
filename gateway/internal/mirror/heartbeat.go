@@ -77,16 +77,21 @@ func applyHeartbeat(ctx context.Context, c client.Client, mirror types.Namespace
 // deleteHeartbeat removes one side's heartbeat Lease. The Lease lives
 // in another namespace than most mirrors, so no owner reference
 // collects it: the gateway that renews it deletes it when it releases
-// the mirror.
-func deleteHeartbeat(ctx context.Context, c client.Client, mirror types.NamespacedName, side mxlv1alpha1.MirrorSide) error {
+// the mirror, and the operator collects one whose mirror is gone.
+//
+// Best effort, because it runs ahead of a finalizer's removal: a Lease
+// left behind costs a few hundred bytes until it is collected and reads
+// as an old heartbeat, while a finalizer held on it would leave a
+// mirror no delete can clear.
+func deleteHeartbeat(ctx context.Context, c client.Client, mirror types.NamespacedName, side mxlv1alpha1.MirrorSide) {
 	lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
 		Namespace: mxlv1alpha1.LeaseNamespace,
 		Name:      mxlv1alpha1.MirrorLeaseName(mirror.Namespace, mirror.Name, side),
 	}}
 	if err := c.Delete(ctx, lease); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete %s heartbeat: %w", side, err)
+		ctrl.Log.WithName("heartbeat").Error(err, "delete; left for the operator to collect",
+			"mirror", mirror, "side", side)
 	}
-	return nil
 }
 
 // heartbeatAt is one side's latest progress time: the later of its

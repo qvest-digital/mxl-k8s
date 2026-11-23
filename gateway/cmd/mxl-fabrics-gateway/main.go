@@ -79,8 +79,8 @@ func run(args []string) error {
 		return fmt.Errorf("build kubeconfig: %w", err)
 	}
 	// client-go defaults to 5 QPS / 10 burst when the limits are left
-	// zero; the per-mirror status flushers alone exceed that with a
-	// handful of flowing mirrors on the node.
+	// zero; the per-mirror heartbeat Leases alone exceed that with a
+	// few dozen flowing mirrors on the node.
 	restCfg.QPS = float32(cfg.KubeAPIQPS)
 	restCfg.Burst = cfg.KubeAPIBurst
 

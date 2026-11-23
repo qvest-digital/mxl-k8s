@@ -149,7 +149,8 @@ lack the kind or the field reads and writes `status.targetInfo` alone.
 Apply the chart's CRDs for the hash to be published.
 
 The same release moves each side's progress timestamp into a heartbeat
-Lease in the release namespace, renewed every five seconds while grains
+Lease in `mxl-system`, beside the Origin Leases, renewed every five
+seconds while grains
 move; `status.lastGrainAt` and `status.lastSentAt` change only with the
 mirror's phase or progress reason. A target gateway of an earlier
 release reads the source's progress from `status.lastSentAt` only, so
