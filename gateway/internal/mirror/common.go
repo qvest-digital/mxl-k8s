@@ -27,6 +27,8 @@ import (
 	"slices"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
@@ -320,3 +322,39 @@ func sourceIsDelivering(mirror *mxlv1alpha1.MxlFlowMirror, openedAt time.Time) b
 	}
 	return false
 }
+
+// carryTransitionTime returns cond as it reads once merged into conds:
+// with the transition time of the live condition of the same type when
+// its status is unchanged, and with cond's own, or now when that is
+// unset, when it is not. That is meta.SetStatusCondition's rule and
+// what a transition time means; stamping now on every publish would
+// move it whenever the reason, message or a heartbeat beside it did.
+func carryTransitionTime(conds []metav1.Condition, cond metav1.Condition) metav1.Condition {
+	merged := slices.Clone(conds)
+	meta.SetStatusCondition(&merged, cond)
+	return *meta.FindStatusCondition(merged, cond.Type)
+}
+
+// publishBackoff spaces a status flusher's retries after a failed
+// write. A flusher ticks every second for every mirror it owns, so an
+// apiserver that rejects writes, such as one whose etcd has run out of
+// space, would otherwise take a retry per mirror per tick for as long
+// as the outage lasts. The wait doubles from the flush interval and
+// stops growing at statusQuantum, the longest a heartbeat waits anyway.
+// Only the flusher goroutine touches it.
+type publishBackoff struct {
+	wait time.Duration
+	next time.Time
+}
+
+// due reports whether a publish may be attempted at now.
+func (b *publishBackoff) due(now time.Time) bool { return !now.Before(b.next) }
+
+// failed records a failed publish at now and schedules the next try.
+func (b *publishBackoff) failed(now time.Time, interval time.Duration) {
+	b.wait = min(max(2*b.wait, interval), statusQuantum)
+	b.next = now.Add(b.wait)
+}
+
+// succeeded clears the backoff, so the next change publishes at once.
+func (b *publishBackoff) succeeded() { *b = publishBackoff{} }
