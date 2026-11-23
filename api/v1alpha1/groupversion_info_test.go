@@ -23,6 +23,7 @@ var expectedKinds = map[string]struct {
 	"MxlDomain":            {&MxlDomain{}, &MxlDomainList{}},
 	"MxlFlow":              {&MxlFlow{}, &MxlFlowList{}},
 	"MxlFlowMirror":        {&MxlFlowMirror{}, &MxlFlowMirrorList{}},
+	"MxlFlowMirrorTarget":  {&MxlFlowMirrorTarget{}, &MxlFlowMirrorTargetList{}},
 	"MxlReceiver":          {&MxlReceiver{}, &MxlReceiverList{}},
 	"MxlNodeCapabilities":  {&MxlNodeCapabilities{}, &MxlNodeCapabilitiesList{}},
 	"MxlFlowRedundancySet": {&MxlFlowRedundancySet{}, &MxlFlowRedundancySetList{}},

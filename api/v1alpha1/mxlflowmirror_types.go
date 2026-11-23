@@ -115,8 +115,21 @@ type MxlFlowMirrorStatus struct {
 	// mxlFabricsTargetSetup and serialized via
 	// mxlFabricsTargetInfoToString. The initiator-side gateway parses
 	// it with mxlFabricsTargetInfoFromString.
+	//
+	// Deprecated: the descriptor is published in the MxlFlowMirrorTarget
+	// of the same name, identified here by TargetInfoHash. The target
+	// gateway still writes this field for source gateways that predate
+	// that object.
 	// +optional
 	TargetInfo string `json:"targetInfo,omitempty"`
+
+	// TargetInfoHash identifies the current target descriptor: the
+	// TargetInfoHash of the MxlFlowMirrorTarget of the same name that
+	// the source gateway dials. Written after that object, so a
+	// matching object is the descriptor this hash names. A change of
+	// hash is a rotation of the target's fabric side.
+	// +optional
+	TargetInfoHash string `json:"targetInfoHash,omitempty"`
 
 	// TargetMaxSyncBatchSizeHint is the maxSyncBatchSizeHint of the
 	// flow the target gateway writes, published with TargetInfo. For a
@@ -141,19 +154,21 @@ type MxlFlowMirrorStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// LastGrainAt is the wall-clock time of the most recent grain
-	// commit observed by the target gateway. Used to demote Ready
-	// to Degraded when no grains have flowed for the freshness
-	// window.
+	// commit observed by the target gateway, as of the target's last
+	// status change. While the status holds, the target's heartbeat
+	// Lease (see MirrorLeaseName) carries it, refreshed every few
+	// seconds while grains commit.
 	// +optional
 	LastGrainAt *metav1.Time `json:"lastGrainAt,omitempty"`
 
 	// LastSentAt is the wall-clock time of the most recent grain
 	// the source-side gateway successfully handed to libmxl-fabrics
-	// for transfer. Set on every source-side flusher tick once the
-	// initiator is live. Target-side recovery uses the delta between
-	// LastSentAt and LastGrainAt to distinguish "source is sending
-	// but target is wedged" (rebuild) from "source is idle"
-	// (leave alone). Unset before the first transfer.
+	// for transfer, as of the source's last status change. The
+	// source's heartbeat Lease (MirrorLeaseName) carries it while the
+	// status holds. Target-side recovery uses the delta between the
+	// two sides' heartbeats to distinguish "source is sending but
+	// target is wedged" (rebuild) from "source is idle" (leave alone).
+	// Unset before the first transfer.
 	// +optional
 	// +nullable
 	LastSentAt *metav1.Time `json:"lastSentAt,omitempty"`
