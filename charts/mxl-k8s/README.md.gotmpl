@@ -140,6 +140,22 @@ upgrade: the old label set ends and one with `variant` begins, which a
 as two series. Pods of the base gateway carry no variant and keep their
 label sets.
 
+The release that adds `MxlFlowMirrorTarget` publishes each mirror's
+target descriptor in an object of that kind, names it on the mirror by
+`status.targetInfoHash`, and still writes `status.targetInfo` for
+gateways that predate it, so a source and target gateway of different
+releases keep dialing each other. A gateway on a cluster whose CRDs
+lack the kind or the field reads and writes `status.targetInfo` alone.
+Apply the chart's CRDs for the hash to be published.
+
+The same release moves each side's progress timestamp into a heartbeat
+Lease in the release namespace, renewed every five seconds while grains
+move; `status.lastGrainAt` and `status.lastSentAt` change only with the
+mirror's phase or progress reason. A target gateway of an earlier
+release reads the source's progress from `status.lastSentAt` only, so
+until it is upgraded it does not see a wedge that starts after the
+handshake on a mirror whose source runs the newer release.
+
 ## Bundled image versions
 
 Operator, agent, and gateway are released together with this chart
@@ -238,6 +254,7 @@ kubectl delete crd \
   mxldomains.mxl.qvest-digital.com \
   mxlflows.mxl.qvest-digital.com \
   mxlflowmirrors.mxl.qvest-digital.com \
+  mxlflowmirrortargets.mxl.qvest-digital.com \
   mxlflowredundancysets.mxl.qvest-digital.com \
   mxlnodecapabilities.mxl.qvest-digital.com \
   mxlreceivers.mxl.qvest-digital.com

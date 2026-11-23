@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assert the five mxl.qvest-digital.com CRDs reach the Established
+# Assert the mxl.qvest-digital.com CRDs reach the Established
 # condition. The operator's reconcilers cannot bind to the API
 # objects they manage until each CRD's schema is registered.
 
@@ -11,6 +11,7 @@ CRDS=(
   mxldomains.mxl.qvest-digital.com
   mxlflows.mxl.qvest-digital.com
   mxlflowmirrors.mxl.qvest-digital.com
+  mxlflowmirrortargets.mxl.qvest-digital.com
   mxlreceivers.mxl.qvest-digital.com
   mxlnodecapabilities.mxl.qvest-digital.com
 )

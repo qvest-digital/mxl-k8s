@@ -1467,9 +1467,12 @@ func (r *Reconciler) leaseToReceivers(ctx context.Context, obj client.Object) []
 // the agent publishes Origin Leases in. Other Leases (kube-system
 // leader election, kube-node-lease) would otherwise wake every
 // receiver on every renew tick.
+// The mirror heartbeat Leases in the same namespace renew every few
+// seconds per mirror side and are left out as well.
 func leaseInMxlSystem() predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
-		return obj.GetNamespace() == mxlv1alpha1.LeaseNamespace
+		return obj.GetNamespace() == mxlv1alpha1.LeaseNamespace &&
+			!mxlv1alpha1.IsMirrorLease(obj.GetLabels())
 	})
 }
 

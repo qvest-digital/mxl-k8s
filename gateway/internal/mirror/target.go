@@ -64,16 +64,16 @@ const targetFieldOwner = "mxl-target-gateway"
 // descriptor. Splitting the managers lets the progress payload omit
 // targetInfo without the apiserver stripping it. It keeps the
 // descriptor out of the request only: etcd stores every revision of
-// the object whole, descriptor included, which is what statusQuantum
-// bounds.
+// the object whole, descriptor included, which is why the descriptor
+// itself is published in an MxlFlowMirrorTarget (applyMirrorTarget).
 const targetInfoFieldOwner = "mxl-target-gateway-info"
 
 // statusQuantum is the resolution at which grain-progress timestamps
-// are published. Within one quantum a moving timestamp is not worth an
-// etcd write and a watch fan-out to every controller in the cluster:
-// the fine-grained signal already exists as flow metrics, which is
-// where a per-grain view belongs. Coarsening only the timestamp keeps
-// every phase and reason transition immediate.
+// are published, which both sides do by renewing their heartbeat
+// Lease. Within one quantum a moving timestamp is not worth an etcd
+// write: the fine-grained signal already exists as flow metrics, which
+// is where a per-grain view belongs. Phase and reason transitions go
+// to the mirror's status immediately and are not quantised.
 //
 // Well inside defaultStuckHandshakeAfter, so the cross-side wedge
 // discriminators that compare these timestamps keep their meaning.
@@ -636,6 +636,9 @@ func (r *TargetReconciler) reapOrphanedFinalizer(ctx context.Context, mirror *mx
 	if !gone {
 		return ctrl.Result{RequeueAfter: orphanRecheckInterval}, nil
 	}
+	if err := deleteHeartbeat(ctx, r.Client, client.ObjectKeyFromObject(mirror), mxlv1alpha1.MirrorSideTarget); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	controllerutil.RemoveFinalizer(mirror, TargetFinalizerName)
 	if err := r.Update(ctx, mirror); err != nil {
@@ -708,6 +711,9 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			r.Recorders.ReleaseTarget(req.NamespacedName)
 		}
 		r.published.forget(req.NamespacedName)
+		if err := deleteHeartbeat(ctx, r.Client, req.NamespacedName, mxlv1alpha1.MirrorSideTarget); err != nil {
+			return ctrl.Result{}, err
+		}
 		controllerutil.RemoveFinalizer(&mirror, TargetFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
 			// The other side's gateway removed its finalizer first and
@@ -759,8 +765,9 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	r.mu.Lock()
 	live := r.targets[req.NamespacedName] != nil
 	r.mu.Unlock()
-	if live && mirror.Status.Phase == mxlv1alpha1.MxlFlowMirrorReady && mirror.Status.TargetInfo != "" &&
-		r.lastGrainFresh(mirror.Status.LastGrainAt) {
+	published := mirror.Status.TargetInfoHash != "" || mirror.Status.TargetInfo != ""
+	if live && mirror.Status.Phase == mxlv1alpha1.MxlFlowMirrorReady && published &&
+		r.lastGrainFresh(heartbeatAt(ctx, r.Client, &mirror, mxlv1alpha1.MirrorSideTarget)) {
 		return ctrl.Result{}, nil
 	}
 
@@ -2410,12 +2417,17 @@ func closeTargetHandles(e *targetEntry, disp flowDisposition, grace time.Duratio
 	return true
 }
 
-// applyTargetInfo writes status.targetInfo under its own field
-// manager. Called only where the descriptor is produced - the initial
-// open and each fabric-side rebuild - so an unchanged descriptor costs
-// nothing for the life of the mirror. targetMaxSyncBatchSizeHint, the
-// sync hint of the writer the descriptor serves, goes in the same
-// payload, so a source never reads one without the other.
+// applyTargetInfo publishes a new descriptor: first into the mirror's
+// MxlFlowMirrorTarget, then its hash into status.targetInfoHash, so a
+// source that sees the hash finds the object it names or one about to
+// reach its cache. status.targetInfo still carries the descriptor for
+// source gateways that predate the object; the hash is left out when
+// the cluster does not serve the object's kind. Called only where the
+// descriptor is produced - the initial open and each fabric-side
+// rebuild - so an unchanged descriptor costs nothing for the life of
+// the mirror. targetMaxSyncBatchSizeHint, the sync hint of the writer
+// the descriptor serves, goes in the same payload, so a source never
+// reads one without the other.
 //
 // Owning the field alone is what makes that safe. SSA releases a field
 // its manager omits, but only that manager's claim: progress payloads
@@ -2425,11 +2437,18 @@ func closeTargetHandles(e *targetEntry, disp flowDisposition, grace time.Duratio
 // targetInterface, the address the descriptor's endpoint is bound to,
 // goes in the same payload for the same reason.
 func (r *TargetReconciler) applyTargetInfo(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, info string, syncHint uint32, bound string) error {
+	served, err := applyMirrorTarget(ctx, r.Client, mirror, info)
+	if err != nil {
+		return err
+	}
 	patch := &unstructured.Unstructured{}
 	patch.SetGroupVersionKind(mxlv1alpha1.GroupVersion.WithKind("MxlFlowMirror"))
 	patch.SetNamespace(mirror.Namespace)
 	patch.SetName(mirror.Name)
 	status := map[string]any{"targetInfo": info}
+	if served {
+		status["targetInfoHash"] = mxlv1alpha1.TargetInfoHash(info)
+	}
 	if syncHint > 0 {
 		status["targetMaxSyncBatchSizeHint"] = int64(syncHint)
 	}
@@ -2591,11 +2610,11 @@ func (r *TargetReconciler) flushInterval() time.Duration {
 // is within the degraded window. A nil pointer (no grain ever
 // observed) counts as stale - the fast-path must fall through so a
 // fresh handshake gets a chance to produce one.
-func (r *TargetReconciler) lastGrainFresh(t *metav1.Time) bool {
+func (r *TargetReconciler) lastGrainFresh(t *time.Time) bool {
 	if t == nil {
 		return false
 	}
-	return time.Since(t.Time) < r.degradedAfter()
+	return time.Since(*t) < r.degradedAfter()
 }
 
 // targetProgressState is the TargetProgress condition + status
@@ -2653,6 +2672,7 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 	var last targetProgressState
 	var watch handshakeWatch
 	var retry publishBackoff
+	beat := heartbeat{side: mxlv1alpha1.MirrorSideTarget, owner: targetFieldOwner, mirror: key, holder: r.NodeName}
 	first, unsent := true, false
 	for {
 		select {
@@ -2675,7 +2695,7 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// flusher would otherwise just oscillate between Ready and
 		// Degraded as time goes by. Spawn recovery when no commit has
 		// landed since the fabric side opened, the source is sending
-		// into it (mirror.Status.LastSentAt postdates the open, or the
+		// into it (its heartbeat postdates the open, or the
 		// source reports TransfersNotLanding), *and* either the
 		// stuck-handshake window has passed since the open or the
 		// shorter sending-into-silence window has passed since the
@@ -2692,7 +2712,7 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// one grain committed, then the fabric side wedged silently.
 		// commits > commitsAtFabricOpen makes neverHandshook false
 		// forever, so it cannot catch this. Cross-side coordination
-		// via mirror.Status.LastSentAt distinguishes a wedge ("source
+		// via the source's heartbeat distinguishes a wedge ("source
 		// is sending but target is not committing") from a legitimately
 		// idle flow ("source is not sending either"); idle flows must
 		// not trigger recovery.
@@ -2799,6 +2819,9 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		if state.reason == "" {
 			continue
 		}
+		if state.lastCommitAt != nil {
+			beat.renew(ctx, r.Client, *state.lastCommitAt, r.flushInterval())
+		}
 		if !first && !unsent && targetStateEqual(state, last) {
 			continue
 		}
@@ -2835,7 +2858,7 @@ func (r *TargetReconciler) wedged(ctx context.Context, key types.NamespacedName,
 	commits, atOpen := entry.commits.Load(), entry.commitsAtFabricOpen.Load()
 	if commits == atOpen {
 		mirror, err := r.fetchMirror(ctx, key)
-		if err != nil || !sourceIsDelivering(mirror, *openedAt) {
+		if err != nil || !sourceIsDelivering(mirror, heartbeatAt(ctx, r.Client, mirror, mxlv1alpha1.MirrorSideSource), *openedAt) {
 			w.reset()
 			return false
 		}
@@ -2848,8 +2871,11 @@ func (r *TargetReconciler) wedged(ctx context.Context, key types.NamespacedName,
 		return false
 	}
 	mirror, err := r.fetchMirror(ctx, key)
-	return err == nil && mirror.Status.LastSentAt != nil &&
-		mirror.Status.LastSentAt.Time.Sub(*lastCommit) > r.stuckHandshakeAfter()
+	if err != nil {
+		return false
+	}
+	sent := heartbeatAt(ctx, r.Client, mirror, mxlv1alpha1.MirrorSideSource)
+	return sent != nil && sent.Sub(*lastCommit) > r.stuckHandshakeAfter()
 }
 
 // handshakeWatch remembers, for the fabric side opened at openedAt,
@@ -2939,23 +2965,19 @@ func observedTargetState(entry *targetEntry, degradedAfter time.Duration, previo
 	}
 }
 
-// targetStateEqual reports whether two states would render the same
-// SSA patch. lastCommitAt is included because publishing a fresher
-// LastGrainAt is the flusher's primary job - the Ready/Ready ticks
-// must keep moving status forward even when phase and reason are
-// stable, otherwise an external observer cannot distinguish a stuck
-// gateway from a live one.
+// targetStateEqual reports whether two states would publish a status
+// an observer could tell apart, leaving the value of lastCommitAt out.
+// A moving commit time is the target's heartbeat, which the flusher
+// renews in the target's heartbeat Lease, so a stuck gateway is still
+// told from a live one; written into the status, it rewrote the whole
+// mirror, descriptor included, every few seconds. The status carries
+// LastGrainAt as of its last change, and its first appearance is a
+// change.
 func targetStateEqual(a, b targetProgressState) bool {
 	if a.phase != b.phase || a.status != b.status || a.reason != b.reason || a.message != b.message {
 		return false
 	}
-	if (a.lastCommitAt == nil) != (b.lastCommitAt == nil) {
-		return false
-	}
-	if a.lastCommitAt != nil && !sameQuantum(*a.lastCommitAt, *b.lastCommitAt) {
-		return false
-	}
-	return true
+	return (a.lastCommitAt == nil) == (b.lastCommitAt == nil)
 }
 
 // sameQuantum reports whether two progress timestamps are close enough

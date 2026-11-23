@@ -145,6 +145,13 @@ follows a repoint ahead of the `Ready` fast path: a new
 takes the same rebuild for the new provider and republishes
 `TargetInfo`.
 
+Each side's progress timestamp -- the last committed grain on the
+target, the last completed transfer on the source -- goes to a
+heartbeat Lease per mirror side in the release namespace, renewed every
+five seconds while grains move. The mirror's status changes only with
+its phase or a progress reason. The target's stuck-handshake watchdog
+and its `Ready` fast path read the heartbeats.
+
 ![Gateway: TargetReconciler state, including recovery](./diagrams/02-gateway-lifecycle.drawio.svg)
 
 Three transitions in particular are easy to miss:
@@ -311,9 +318,11 @@ The eight steps in order:
    `MxlFlowMirror` event and walks the libmxl-fabrics handshake:
    `mxl.Instance.NewWriter` -> `fabrics.RegionsForFlowWriter` ->
    `fabrics.Instance.NewTarget` -> `Target.Setup` ->
-   `TargetInfo.MarshalString`. It patches
-   `MxlFlowMirror.status.targetInfo` and `phase=Ready`, then starts
-   the progress goroutine.
+   `TargetInfo.MarshalString`. It writes the descriptor into the
+   mirror's `MxlFlowMirrorTarget`, then its hash into
+   `status.targetInfoHash` (with the descriptor itself in
+   `status.targetInfo` for older source gateways) and `phase=Ready`,
+   then starts the progress goroutine.
 7. **Source-node gateway's `SourceReconciler` wakes** on the
    mirror's status update -- it has `Watches(MxlFlowMirror)` *and*
    `Watches(MxlFlow)`. It opens `mxl.Instance.NewReader`, shared by

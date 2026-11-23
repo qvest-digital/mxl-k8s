@@ -115,10 +115,10 @@ func TestTarget_ProgressWritesCarryNoTargetInfo(t *testing.T) {
 	assert.True(t, progress.has("lastGrainAt"))
 }
 
-func TestTarget_StatusQuantumSuppressesSubQuantumTicks(t *testing.T) {
-	// Grains commit far faster than anything reading this status
-	// reacts, so a timestamp that moved a few milliseconds is not worth
-	// an etcd write and a watch fan-out to every controller.
+func TestTarget_StatusIgnoresMovingCommitTimes(t *testing.T) {
+	// A moving commit time is the target's heartbeat, which goes to its
+	// heartbeat Lease. In the status it rewrote the whole mirror every
+	// few seconds, however far it moved.
 	base := targetProgressState{
 		phase:   mxlv1alpha1.MxlFlowMirrorReady,
 		status:  metav1.ConditionTrue,
@@ -130,21 +130,18 @@ func TestTarget_StatusQuantumSuppressesSubQuantumTicks(t *testing.T) {
 	t0 := now
 	a.lastCommitAt = &t0
 
-	nudged := now.Add(20 * time.Millisecond)
-	b.lastCommitAt = &nudged
-	assert.True(t, targetStateEqual(a, b),
-		"a sub-quantum move must not trigger a publish")
-
-	later := now.Add(statusQuantum)
+	later := now.Add(time.Hour)
 	b.lastCommitAt = &later
-	assert.False(t, targetStateEqual(a, b),
-		"a move of a full quantum must publish: an observer has to be able "+
-			"to tell a live mirror from a stopped one")
+	assert.True(t, targetStateEqual(a, b),
+		"a moving commit time alone must not write the mirror's status")
 
-	assert.Less(t, statusQuantum, defaultDegradedAfter,
-		"the quantum must stay inside the degraded window, or a healthy "+
-			"mirror could be demoted for a timestamp merely waiting to be "+
-			"published")
+	b.lastCommitAt = nil
+	assert.False(t, targetStateEqual(a, b),
+		"the first commit time is published with the status")
+
+	assert.Less(t, statusQuantum, defaultStuckHandshakeAfter,
+		"heartbeats move at the quantum, which has to stay inside the "+
+			"stuck-handshake window the watchdog compares them against")
 }
 
 func TestTarget_PhaseChangeIsNeverQuantised(t *testing.T) {

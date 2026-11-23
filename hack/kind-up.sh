@@ -359,6 +359,7 @@ log "Waiting for CRDs to establish"
   mxldomains.mxl.qvest-digital.com \
   mxlflows.mxl.qvest-digital.com \
   mxlflowmirrors.mxl.qvest-digital.com \
+  mxlflowmirrortargets.mxl.qvest-digital.com \
   mxlreceivers.mxl.qvest-digital.com \
   mxlnodecapabilities.mxl.qvest-digital.com
 
