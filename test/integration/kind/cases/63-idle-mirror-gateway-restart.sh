@@ -144,8 +144,17 @@ bounce() {
   fail "no replacement gateway pod came up on $1"
 }
 
+# target_heartbeat: the renewTime of the mirror's target heartbeat Lease,
+# cut to whole seconds. The target renews it while grains commit;
+# status.lastGrainAt changes only with the mirror's phase or reason.
+target_heartbeat() {
+  "${KUBECTL[@]}" -n "$NAMESPACE" get leases -l mxl.qvest-digital.com/mirror-side=target \
+      -o jsonpath='{range .items[*]}{.metadata.annotations.mxl\.qvest-digital\.com/mirror}{" "}{.spec.renewTime}{"\n"}{end}' \
+    | awk -v m="${NAMESPACE}/${mirror#mxlflowmirror/}" '$1 == m { print substr($2, 1, 19) "Z" }'
+}
+
 # resumes <what>: continue the writer and require a grain committed on
-# the target after the resume. lastGrainAt is RFC 3339 in UTC at
+# the target after the resume. The heartbeat is RFC 3339 in UTC at
 # second precision, so a later stamp compares greater as a string.
 resumes() {
   local since deadline last
@@ -153,14 +162,15 @@ resumes() {
   resume_writer || fail "could not continue the writer"
   deadline=$(( $(date +%s) + RESUME_TIMEOUT_SECS ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    last=$("${KUBECTL[@]}" -n "$NAMESPACE" get "$mirror" -o 'jsonpath={.status.lastGrainAt}')
+    last=$(target_heartbeat)
     if [[ "$last" > "$since" ]]; then
-      echo "   grains land again after $1: lastGrainAt ${last}, resumed ${since}"
+      echo "   grains land again after $1: target heartbeat ${last}, resumed ${since}"
       return 0
     fi
     sleep 2
   done
   "${KUBECTL[@]}" -n "$NAMESPACE" get "$mirror" -o yaml >&2 || true
+  "${KUBECTL[@]}" -n "$NAMESPACE" get leases -l mxl.qvest-digital.com/mirror-side -o yaml >&2 || true
   fail "no grain reached ${tgt_node} within ${RESUME_TIMEOUT_SECS}s of resuming after $1"
 }
 
