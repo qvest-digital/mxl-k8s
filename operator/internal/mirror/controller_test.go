@@ -11,6 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -20,6 +21,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -919,4 +921,47 @@ func capsFor(node string, providers ...mxlv1alpha1.MxlFabricsProvider) *mxlv1alp
 			mxlv1alpha1.MxlFabricsProviderCapability{Name: p, DeviceCount: 1})
 	}
 	return caps
+}
+
+// --- status writes ---------------------------------------------------
+
+// Every gateway status write is an event that reconciles the mirror
+// here. An apply that restates conditions the mirror already carries
+// is not free: the apiserver decodes and merges the whole stored
+// object, descriptor included, to find nothing changed. Only a pass
+// whose answer moved may write.
+func TestWriteConditions_UnchangedJudgement_SendsNoApply(t *testing.T) {
+	m := newMirror(withIntentLabel(), withRequestor("consumer", "uid-1"))
+	applies := 0
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}, &mxlv1alpha1.MxlFlow{}).
+		WithObjects(node(srcNode), node(tgtNode), m, flowOriginAt(srcNode), pod("consumer", "uid-1")).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourcePatch: func(ctx context.Context, cl client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if _, ok := obj.(*unstructured.Unstructured); ok && patch.Type() == types.ApplyPatchType {
+					applies++
+				}
+				return cl.SubResource(sub).Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+	lease := &fakeLease{fresh: map[string]bool{flowID + "/" + srcNode: true}}
+	r := &Reconciler{Client: c, Recorder: record.NewFakeRecorder(32), Lease: lease, GracePeriod: time.Hour}
+
+	reconcileOnce(t, r, m.Name)
+	require.Equal(t, 1, applies, "the first pass has conditions to publish")
+	first := getMirror(t, c, m.Name)
+
+	reconcileOnce(t, r, m.Name)
+	reconcileOnce(t, r, m.Name)
+	assert.Equal(t, 1, applies, "passes that reach the same judgement must not write")
+	assert.Equal(t, first.ResourceVersion, getMirror(t, c, m.Name).ResourceVersion)
+
+	lease.fresh[flowID+"/"+srcNode] = false
+	reconcileOnce(t, r, m.Name)
+	assert.Equal(t, 2, applies, "a changed judgement is written")
+	src := condition(t, getMirror(t, c, m.Name), mxlv1alpha1.ConditionTypeSourceable)
+	require.NotNil(t, src)
+	assert.Equal(t, metav1.ConditionFalse, src.Status)
 }

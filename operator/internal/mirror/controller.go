@@ -696,9 +696,15 @@ func (r *Reconciler) writeConditions(ctx context.Context, m *mxlv1alpha1.MxlFlow
 		ObservedGeneration: m.Generation,
 	})
 
+	// Nothing to say is nothing to send. This runs on every event for
+	// the mirror, and the gateways' status writes are most of those: an
+	// apply that changes nothing still makes the apiserver decode and
+	// merge the whole stored object, targetInfo included, to find out.
 	ours := make([]any, 0, 2)
+	current := true
 	for _, t := range []string{mxlv1alpha1.ConditionTypeClaimed, mxlv1alpha1.ConditionTypeSourceable} {
 		c := meta.FindStatusCondition(conditions, t)
+		current = current && sameCondition(meta.FindStatusCondition(m.Status.Conditions, t), c)
 		ours = append(ours, map[string]any{
 			"type":               c.Type,
 			"status":             string(c.Status),
@@ -707,6 +713,10 @@ func (r *Reconciler) writeConditions(ctx context.Context, m *mxlv1alpha1.MxlFlow
 			"observedGeneration": int64(c.ObservedGeneration),
 			"lastTransitionTime": c.LastTransitionTime.UTC().Format(time.RFC3339),
 		})
+	}
+
+	if current {
+		return m, nil
 	}
 
 	patch := &unstructured.Unstructured{}
@@ -735,6 +745,14 @@ func (r *Reconciler) writeConditions(ctx context.Context, m *mxlv1alpha1.MxlFlow
 		out.ResourceVersion = rv
 	}
 	return out, nil
+}
+
+// sameCondition reports whether the live condition prev already says
+// what c says. The transition time is left out: SetStatusCondition
+// carries it over whenever the status is unchanged.
+func sameCondition(prev, c *metav1.Condition) bool {
+	return prev != nil && prev.Status == c.Status && prev.Reason == c.Reason &&
+		prev.Message == c.Message && prev.ObservedGeneration == c.ObservedGeneration
 }
 
 // collect deletes a mirror that has been unjustified for longer than
