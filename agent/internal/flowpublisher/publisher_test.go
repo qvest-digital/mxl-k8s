@@ -170,7 +170,10 @@ func TestPublishAppeared_NonFlowEntryIsIgnoredQuietly(t *testing.T) {
 	assert.Empty(t, list.Items)
 }
 
-func TestPublishVanished_MarksLocationStale(t *testing.T) {
+// A location records a copy on a node. Once the directory is gone there
+// is none, and every reader treats a missing entry as it treats Stale, so
+// the entry goes rather than staying behind Stale for good.
+func TestPublishVanished_RemovesThisNodesLocation(t *testing.T) {
 	scheme := newScheme(t)
 	existing := &mxlv1alpha1.MxlFlow{
 		ObjectMeta: ObjectMeta(validFlowID),
@@ -193,16 +196,37 @@ func TestPublishVanished_MarksLocationStale(t *testing.T) {
 
 	var got mxlv1alpha1.MxlFlow
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
-	require.Len(t, got.Status.Locations, 2)
-
-	byNode := map[string]mxlv1alpha1.MxlFlowLocationPhase{}
-	for _, l := range got.Status.Locations {
-		byNode[l.NodeName] = l.Phase
-	}
-	assert.Equal(t, mxlv1alpha1.MxlFlowLocationStale, byNode["n1"],
-		"vanishing on this node flips this node's phase to Stale only; "+
+	assert.Equal(t, []mxlv1alpha1.MxlFlowLocation{
+		{NodeName: "other", Phase: mxlv1alpha1.MxlFlowLocationReady},
+	}, got.Status.Locations,
+		"vanishing on this node removes this node's entry only; "+
 			"other nodes' locations must stay intact")
-	assert.Equal(t, mxlv1alpha1.MxlFlowLocationReady, byNode["other"])
+}
+
+// A directory that goes while the entry already reads Stale -- one a
+// writer had left, then libmxl's sweep reclaimed -- goes the same way.
+func TestPublishVanished_RemovesAStaleLocation(t *testing.T) {
+	existing := &mxlv1alpha1.MxlFlow{
+		ObjectMeta: ObjectMeta(validFlowID),
+		Spec:       mxlv1alpha1.MxlFlowSpec{ID: validFlowID},
+		Status: mxlv1alpha1.MxlFlowStatus{
+			Locations: []mxlv1alpha1.MxlFlowLocation{
+				{NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationStale},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(existing).
+		Build()
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: "/tmp", NodeName: "n1"}
+
+	require.NoError(t, p.PublishVanished(context.Background(), validFlowID+".mxl-flow"))
+
+	var got mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
+	assert.Empty(t, got.Status.Locations)
 }
 
 // On mxlfs the gateway holds a placeholder for a flow on every node
@@ -381,7 +405,7 @@ func TestPublishAppeared_MirrorTargetDoesNotDemoteAClaimedOrigin(t *testing.T) {
 			"until the renew loop's next tick")
 }
 
-func TestInitialSync_DemotesOriginForFlowsNoLongerOnDisk(t *testing.T) {
+func TestInitialSync_RemovesLocationForFlowsNoLongerOnDisk(t *testing.T) {
 	scheme := newScheme(t)
 	domain := t.TempDir()
 	// no flow dirs on disk
@@ -411,8 +435,8 @@ func TestInitialSync_DemotesOriginForFlowsNoLongerOnDisk(t *testing.T) {
 	for _, l := range got.Status.Locations {
 		byNode[l.NodeName] = l.Phase
 	}
-	assert.Equal(t, mxlv1alpha1.MxlFlowLocationStale, byNode["n1"],
-		"an agent that owns a Origin location must demote it on cold "+
+	assert.NotContains(t, byNode, "n1",
+		"an agent that owns an Origin location must retire it on cold "+
 			"start when the on-disk flow is gone; leaving the stale "+
 			"Origin behind misdirects resolveSourceNode to a node that "+
 			"no longer holds the flow")
@@ -653,7 +677,7 @@ func TestPublisher_ReleasesLeaseOnVanished(t *testing.T) {
 	require.NoError(t, p.PublishVanished(context.Background(), validFlowID+".mxl-flow"))
 	assert.Equal(t, []string{validFlowID}, lease.released,
 		"the publisher must release the Origin Lease when the on-disk "+
-			"flow vanishes so consumers stop treating the now-Stale Origin "+
+			"flow vanishes so consumers stop treating the departed Origin "+
 			"as a fresh source")
 }
 

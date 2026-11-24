@@ -1,4 +1,5 @@
-{{- if and .Values.exporter.enabled .Values.exporter.topology.enabled .Values.rbac.create }}
+{{- if and .Values.exporter.enabled .Values.rbac.create }}
+{{- if .Values.exporter.topology.enabled }}
 # Read-only, and only MxlFlow: the exporter derives which node produces
 # a flow from status.locations and writes nothing back. Disabling
 # exporter.topology drops both this role and the metric it feeds.
@@ -27,4 +28,38 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "exporter" "values" .Values.exporter) }}
     namespace: {{ include "mxlk8s.namespace" . }}
+{{- end }}
+{{- if .Values.exporter.mirrorHeartbeats.enabled }}
+---
+# Read-only, and only the Leases in this namespace, where the gateways
+# renew the mirror heartbeats. Disabling exporter.mirrorHeartbeats drops
+# both this role and the metric it feeds.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "exporter" "values" .Values.exporter) }}-leases
+  namespace: {{ include "mxlk8s.namespace" . }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "exporter") | nindent 4 }}
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "exporter" "values" .Values.exporter) }}-leases
+  namespace: {{ include "mxlk8s.namespace" . }}
+  labels:
+    {{- include "mxlk8s.componentLabels" (dict "Context" . "component" "exporter") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "exporter" "values" .Values.exporter) }}-leases
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mxlk8s.serviceAccountName" (dict "Context" . "component" "exporter" "values" .Values.exporter) }}
+    namespace: {{ include "mxlk8s.namespace" . }}
+{{- end }}
 {{- end }}

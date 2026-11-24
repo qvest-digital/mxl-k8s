@@ -20,8 +20,10 @@ const (
 	// MxlFlowLocationReady marks a node where a complete mirror is
 	// available to local readers.
 	MxlFlowLocationReady MxlFlowLocationPhase = "Ready"
-	// MxlFlowLocationStale marks a node where a mirror exists but the
-	// agent has not confirmed it recently.
+	// MxlFlowLocationStale marks a node whose flow directory is still on
+	// disk while nothing feeds it, so no consumer is sent there. The
+	// node's agent removes the entry once the directory is gone; a node
+	// with no entry holds no copy.
 	MxlFlowLocationStale MxlFlowLocationPhase = "Stale"
 )
 
@@ -36,9 +38,11 @@ type MxlFlowLocation struct {
 	Phase MxlFlowLocationPhase `json:"phase"`
 
 	// LastObserved is when the local agent last confirmed the flow's
-	// presence on this node. It is refreshed on every agent rescan
-	// while the flow is present, so a recent value means "seen just
-	// now" and a value drifting into the past means the agent has
+	// presence on this node. While the flow is present the agent
+	// stamps it again once it is older than its
+	// --observed-refresh-interval (5m by default), so a value up to
+	// that interval plus one 30s rescan old means "still confirmed"
+	// and one drifting further into the past means the agent has
 	// stopped confirming it. It says nothing about when this copy
 	// arrived, which is AppearedAt.
 	// +optional
@@ -90,7 +94,10 @@ type MxlFlowSpec struct {
 // MxlFlowStatus reports where the flow is materialized.
 type MxlFlowStatus struct {
 	// Locations lists the nodes where the flow's data is currently
-	// available, including the origin and any active mirrors.
+	// available, including the origin and any active mirrors, and the
+	// nodes whose copy is still on disk but Stale. Each entry is
+	// written by the agent on its node, which removes it once the
+	// copy's directory is gone.
 	// +optional
 	// +listType=map
 	// +listMapKey=nodeName

@@ -24,6 +24,8 @@ func TestFromFlagsDefaults(t *testing.T) {
 	require.Equal(t, ":8080", cfg.MetricsAddr)
 	require.Equal(t, ":8081", cfg.ProbeAddr)
 	require.True(t, cfg.TopologyEnabled)
+	require.True(t, cfg.MirrorHeartbeats)
+	require.Equal(t, "mxl-system", cfg.LeaseNamespace)
 }
 
 // The node name labels every series. Without it two nodes' exporters
@@ -52,4 +54,21 @@ func TestFromFlagsMxlfsNumaMetrics(t *testing.T) {
 	cfg, err = parse(t, "--node-name=node-a", "--domain-path=/run/mxl/domain", "--mxlfs-numa-metrics")
 	require.NoError(t, err)
 	require.True(t, cfg.MxlfsNumaMetrics)
+}
+
+// The chart passes the namespace its Role is in, so the watch never
+// lists where the exporter has no access.
+func TestFromFlagsLeaseNamespace(t *testing.T) {
+	cfg, err := parse(t, "--node-name=node-a", "--domain-path=/run/mxl/domain", "--lease-namespace=media")
+	require.NoError(t, err)
+	require.Equal(t, "media", cfg.LeaseNamespace)
+
+	_, err = parse(t, "--node-name=node-a", "--domain-path=/run/mxl/domain", "--lease-namespace=")
+	require.ErrorContains(t, err, "--lease-namespace")
+}
+
+func TestFromFlagsMirrorHeartbeatsCanBeTurnedOff(t *testing.T) {
+	cfg, err := parse(t, "--node-name=node-a", "--domain-path=/run/mxl/domain", "--mirror-heartbeats=false")
+	require.NoError(t, err)
+	require.False(t, cfg.MirrorHeartbeats)
 }

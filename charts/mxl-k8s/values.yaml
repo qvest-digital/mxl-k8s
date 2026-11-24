@@ -550,6 +550,16 @@ agent:
     # @schema
     intentMirrorBurstWindow: 10s
     resyncPeriod: 30s
+    # @schema
+    # type: string
+    # pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+    # @schema
+    # -- How old a flow location's lastObserved may grow before the
+    # agent stamps it again; must be positive. Each stamp is a write of
+    # the whole MxlFlow status. Flow directories appearing and vanishing
+    # are rescanned every 30s regardless, so 30s or less stamps on every
+    # rescan.
+    observedRefreshInterval: 5m
     # -- Client-side request rate to the API server. A node holding
     # many flows spends one Get and one Update per flow per renewal
     # pass; at the client-go default of 5 the loop blocks rather than
@@ -1222,7 +1232,16 @@ exporter:
     # -- Publish mxl_flow_location_info from the MxlFlow CRs. That is
     # what names the producing node (phase Origin), so dashboards do
     # not need media functions to label themselves. Disabling it drops
-    # the metric and the exporter's only API access.
+    # the metric and the exporter's API access to MxlFlow.
+    enabled: true
+  mirrorHeartbeats:
+    # -- Publish mxl_mirror_heartbeat_age_seconds from the heartbeat
+    # Leases the gateways renew in the release namespace: seconds since
+    # each mirror side last made progress, reported by the exporter on
+    # the node of the gateway serving that side. Disabling it drops the
+    # metric and the exporter's read access to those Leases. Where the
+    # exporter cannot read them, as with rbac.create=false and no grant
+    # of its own, the metric stays empty and the rest is served.
     enabled: true
   serviceAccount:
     create: true

@@ -197,7 +197,7 @@ func TestRescan_WriterDetachedAfterMirrorTeardown_DemotesInsteadOfClaimingOrigin
 	held := p.heldFlowIDs(context.Background(), onDisk)
 	assert.Empty(t, held, "a directory with no writer is not a flow this node holds")
 
-	require.NoError(t, p.demoteVanishedLocalOrigins(context.Background(), held))
+	require.NoError(t, p.retireUnheldLocations(context.Background(), onDisk, held))
 	require.NoError(t, p.promoteStaleLocalOrigins(context.Background(), held))
 
 	assert.Equal(t, mxlv1alpha1.MxlFlowLocationStale, phaseOnNode(t, c, "n1"))
@@ -260,4 +260,111 @@ func TestPublishAppeared_OnlyTheOriginCreatesTheMxlFlow(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The rescan settles every location this node owns by what is on disk.
+// Stale is the state of a directory nothing feeds; once the directory
+// is gone the entry goes too, including the ones earlier agents left
+// Stale for good, while other nodes' entries are theirs to settle.
+func TestRetireUnheldLocations_StaleWhileOnDiskRemovedOnceGone(t *testing.T) {
+	const goneID = "22222222-3333-4444-5555-666666666666"
+	stale := func(id string, nodes ...string) *mxlv1alpha1.MxlFlow {
+		f := &mxlv1alpha1.MxlFlow{ObjectMeta: ObjectMeta(id), Spec: mxlv1alpha1.MxlFlowSpec{ID: id}}
+		for _, n := range nodes {
+			f.Status.Locations = append(f.Status.Locations,
+				mxlv1alpha1.MxlFlowLocation{NodeName: n, Phase: mxlv1alpha1.MxlFlowLocationStale})
+		}
+		return f
+	}
+	domain := t.TempDir()
+	writeFlowDir(t, domain, validFlowID)
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).
+		WithObjects(stale(validFlowID, "n1"), stale(goneID, "n1", "n2")).
+		Build()
+	lease := &fakeLease{}
+	p := &Publisher{Client: c, WriterAttached: writerDetached, DomainPath: domain, NodeName: "n1", Lease: lease}
+
+	onDisk, err := p.localFlowIDs()
+	require.NoError(t, err)
+	require.NoError(t, p.retireUnheldLocations(context.Background(), onDisk, p.heldFlowIDs(context.Background(), onDisk)))
+
+	assert.Equal(t, mxlv1alpha1.MxlFlowLocationStale, phaseOnNode(t, c, "n1"),
+		"a directory still on disk with no writer stays Stale")
+
+	var gone mxlv1alpha1.MxlFlow
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: goneID}, &gone))
+	assert.Equal(t, []mxlv1alpha1.MxlFlowLocation{
+		{NodeName: "n2", Phase: mxlv1alpha1.MxlFlowLocationStale},
+	}, gone.Status.Locations,
+		"this node's entry for a directory that is gone is removed; n2's is n2's agent's")
+	assert.Equal(t, []string{goneID}, lease.released,
+		"the removed location gives up its Lease; the one already Stale was written nowhere")
+}
+
+// The rescan decides from a listing taken before it writes. A flow that
+// appears in between has published a fresh entry by the time the
+// removal is written, and removing it would leave the new copy
+// unlisted until the promote pass of the next rescan.
+func TestRetireUnheldLocations_KeepsAnEntryWhoseDirectoryCameBack(t *testing.T) {
+	domain := t.TempDir()
+	existing := existingFlow()
+	existing.Status.Locations = []mxlv1alpha1.MxlFlowLocation{
+		{NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).WithObjects(existing).Build()
+	lease := &fakeLease{}
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1", Lease: lease}
+
+	onDisk, err := p.localFlowIDs()
+	require.NoError(t, err)
+	require.Empty(t, onDisk)
+	writeFlowDir(t, domain, validFlowID)
+
+	require.NoError(t, p.retireUnheldLocations(context.Background(), onDisk, p.heldFlowIDs(context.Background(), onDisk)))
+	assert.Equal(t, mxlv1alpha1.MxlFlowLocationOrigin, phaseOnNode(t, c, "n1"))
+	assert.Empty(t, lease.released, "a copy still on disk keeps its Lease")
+}
+
+// A vanish event for a directory that is back by the time it is handled
+// demotes rather than removes, as before; the appearance queued behind
+// it publishes the copy again.
+func TestPublishVanished_DirectoryBackOnDiskDemotes(t *testing.T) {
+	domain := t.TempDir()
+	writeFlowDir(t, domain, validFlowID)
+	existing := existingFlow()
+	existing.Status.Locations = []mxlv1alpha1.MxlFlowLocation{
+		{NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).WithObjects(existing).Build()
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
+
+	require.NoError(t, p.PublishVanished(context.Background(), validFlowID+".mxl-flow"))
+	assert.Equal(t, mxlv1alpha1.MxlFlowLocationStale, phaseOnNode(t, c, "n1"))
+}
+
+// On mxlfs a placeholder directory stays for a flow with no copy on the
+// node, and its marker appearing is published as a vanish. It is no
+// copy, so the entry goes as for a directory that is gone.
+func TestPublishVanished_PlaceholderCountsAsGone(t *testing.T) {
+	domain := t.TempDir()
+	writeFlowDir(t, domain, validFlowID)
+	marker := mxlv1alpha1.PlaceholderMarker(domain, validFlowID)
+	require.NoError(t, os.MkdirAll(filepath.Dir(marker), 0o755))
+	require.NoError(t, os.WriteFile(marker, nil, 0o644))
+	existing := existingFlow()
+	existing.Status.Locations = []mxlv1alpha1.MxlFlowLocation{
+		{NodeName: "n1", Phase: mxlv1alpha1.MxlFlowLocationReady},
+		{NodeName: "n2", Phase: mxlv1alpha1.MxlFlowLocationOrigin},
+	}
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).WithObjects(existing).Build()
+	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
+
+	require.NoError(t, p.PublishVanished(context.Background(), validFlowID+".mxl-flow"))
+	assert.Equal(t, mxlv1alpha1.MxlFlowLocationPhase(""), phaseOnNode(t, c, "n1"))
+	assert.Equal(t, mxlv1alpha1.MxlFlowLocationOrigin, phaseOnNode(t, c, "n2"))
 }

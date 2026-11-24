@@ -290,6 +290,13 @@
               "required": [],
               "title": "metricsBindAddress"
             },
+            "observedRefreshInterval": {
+              "default": "5m",
+              "description": "How old a flow location's lastObserved may grow before the agent stamps it again; must be positive. Each stamp is a write of the whole MxlFlow status. Flow directories appearing and vanishing are rescanned every 30s regardless, so 30s or less stamps on every rescan.",
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$",
+              "title": "observedRefreshInterval",
+              "type": "string"
+            },
             "provider": {
               "default": "",
               "description": "Explicit libmxl-fabrics provider stamped onto on-demand (intent-driven) mirrors, bypassing per-node resolution. Empty (or \"auto\") resolves a concrete provider from the source and target nodes' MxlNodeCapabilities; set a concrete value to force one cluster-wide.",
@@ -1262,6 +1269,19 @@
           "title": "metrics",
           "type": "object"
         },
+        "mirrorHeartbeats": {
+          "properties": {
+            "enabled": {
+              "default": "true",
+              "description": "Publish mxl_mirror_heartbeat_age_seconds from the heartbeat Leases the gateways renew in the release namespace: seconds since each mirror side last made progress, reported by the exporter on the node of the gateway serving that side. Disabling it drops the metric and the exporter's read access to those Leases. Where the exporter cannot read them, as with rbac.create=false and no grant of its own, the metric stays empty and the rest is served.",
+              "required": [],
+              "title": "enabled"
+            }
+          },
+          "required": [],
+          "title": "mirrorHeartbeats",
+          "type": "object"
+        },
         "nodeSelector": {
           "required": [],
           "title": "nodeSelector",
@@ -1412,7 +1432,7 @@
           "properties": {
             "enabled": {
               "default": "true",
-              "description": "Publish mxl_flow_location_info from the MxlFlow CRs. That is what names the producing node (phase Origin), so dashboards do not need media functions to label themselves. Disabling it drops the metric and the exporter's only API access.",
+              "description": "Publish mxl_flow_location_info from the MxlFlow CRs. That is what names the producing node (phase Origin), so dashboards do not need media functions to label themselves. Disabling it drops the metric and the exporter's API access to MxlFlow.",
               "required": [],
               "title": "enabled"
             }
@@ -1455,6 +1475,7 @@
         "updateStrategy",
         "image",
         "topology",
+        "mirrorHeartbeats",
         "serviceAccount",
         "podAnnotations",
         "podLabels",

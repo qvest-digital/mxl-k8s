@@ -93,7 +93,16 @@ type Publisher struct {
 	// ReadLocks reads the node's lock table for Producer and Ours to be
 	// asked about. Nil reads /proc/locks through agent/internal/flowlock.
 	ReadLocks func() (flowlock.Locks, error)
+
+	// ObservedRefresh is how old a location's LastObserved may grow
+	// before the rescan stamps it again. Zero takes
+	// DefaultObservedRefresh.
+	ObservedRefresh time.Duration
 }
+
+// DefaultObservedRefresh is the ObservedRefresh a Publisher without one
+// uses.
+const DefaultObservedRefresh = 5 * time.Minute
 
 // ref is the flow a directory id names in this publisher's domain.
 func (p *Publisher) ref(flowID string) mxlv1alpha1.FlowRef {
@@ -507,35 +516,107 @@ func (p *Publisher) ClaimOrigin(ctx context.Context, flowID string) error {
 	return nil
 }
 
-// PublishVanished updates the MxlFlow status to mark this node's
-// location as Stale. The MxlFlow itself is left in place -- other
-// nodes may still hold a mirror.
+// PublishVanished removes this node's location from the MxlFlow
+// status. The MxlFlow itself is left in place -- other nodes may still
+// hold a copy. A directory found back on disk by the time the entry is
+// written, recreated after the event was queued, is demoted to Stale
+// instead: the appearance event behind it settles it from there.
 func (p *Publisher) PublishVanished(ctx context.Context, dirName string) error {
 	flowID, ok := FlowIDFromDirName(dirName)
 	if !ok {
 		return nil
 	}
+	dropped, err := p.dropLocation(ctx, flowID)
+	if err != nil || dropped {
+		return err
+	}
 	return p.markStale(ctx, flowID)
 }
 
 // markStale demotes this node's location and gives up the Lease that
-// says this node holds the flow. Shared by every path that concludes
-// the local copy is not one a consumer can be sent to: the directory
-// vanished, the rescan found it gone, or a writer is no longer
-// attached to it. Releasing the Lease is half the point -- a location
-// demoted while its Lease is still being renewed leaves the flow
-// looking live to everything that reads the Lease instead.
+// says this node holds the flow. Shared by every path that finds the
+// directory still on disk but not a copy a consumer can be sent to: no
+// writer is attached to it, or only mxl-k8s's own. Releasing the Lease
+// is half the point -- a location demoted while its Lease is still
+// being renewed leaves the flow looking live to everything that reads
+// the Lease instead.
 func (p *Publisher) markStale(ctx context.Context, flowID string) error {
 	if _, err := p.upsertLocation(ctx, flowID, mxlv1alpha1.MxlFlowLocationStale, nil, nil); err != nil {
 		return err
 	}
-	if p.Lease != nil {
-		if err := p.Lease.Release(ctx, p.key(flowID)); err != nil {
-			log.FromContext(ctx).WithName("flowpublisher").
-				Error(err, "release origin lease", "flowID", flowID)
-		}
-	}
+	p.releaseLease(ctx, flowID)
 	return nil
+}
+
+// dropLocation removes this node's location, whatever its phase, and
+// gives up the Lease. It is what a directory that is gone leaves
+// behind: a location records a copy on a node, and with the directory
+// gone there is none. Every reader of the locations treats a missing
+// entry the way it treats a Stale one, while an entry kept for a
+// directory that is gone is never written again, so a flow that once
+// reached every node would list every node for as long as it exists.
+//
+// Only this node's agent writes its entry, and only it can see whether
+// the directory exists, which is why the operator does not prune these.
+//
+// The directory is looked at again right before the write, and a flow
+// back on disk keeps its entry: the caller decided from a listing or an
+// event that may predate a new appearance, whose fresh entry this would
+// otherwise remove. dropped reports whether the entry is gone.
+func (p *Publisher) dropLocation(ctx context.Context, flowID string) (dropped bool, err error) {
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		dropped = false
+		var obj mxlv1alpha1.MxlFlow
+		if err := p.Client.Get(ctx, types.NamespacedName{Name: p.key(flowID)}, &obj); err != nil {
+			if apierrors.IsNotFound(err) {
+				dropped = !p.onDisk(flowID)
+				return nil
+			}
+			return fmt.Errorf("get MxlFlow %s: %w", flowID, err)
+		}
+		kept := make([]mxlv1alpha1.MxlFlowLocation, 0, len(obj.Status.Locations))
+		for _, loc := range obj.Status.Locations {
+			if loc.NodeName != p.NodeName {
+				kept = append(kept, loc)
+			}
+		}
+		if p.onDisk(flowID) {
+			return nil
+		}
+		dropped = true
+		if len(kept) == len(obj.Status.Locations) {
+			return nil
+		}
+		obj.Status.Locations = kept
+		return p.Client.Status().Update(ctx, &obj)
+	})
+	if err != nil {
+		return false, fmt.Errorf("remove MxlFlow %s location: %w", flowID, err)
+	}
+	if dropped {
+		p.releaseLease(ctx, flowID)
+	}
+	return dropped, nil
+}
+
+// onDisk reports whether flowID's directory is in the domain as a flow,
+// by the rule localFlowIDs lists them by: a placeholder is not one.
+func (p *Publisher) onDisk(flowID string) bool {
+	fi, err := os.Stat(filepath.Join(p.DomainPath, flowID+FlowDirSuffix))
+	return err == nil && fi.IsDir() && !mxlv1alpha1.IsPlaceholder(p.DomainPath, flowID)
+}
+
+// releaseLease gives up the Origin Lease for a flow this node no
+// longer serves. A failure is logged: the Lease then expires on its
+// own, as it does for an agent that stops.
+func (p *Publisher) releaseLease(ctx context.Context, flowID string) {
+	if p.Lease == nil {
+		return
+	}
+	if err := p.Lease.Release(ctx, p.key(flowID)); err != nil {
+		log.FromContext(ctx).WithName("flowpublisher").
+			Error(err, "release origin lease", "flowID", flowID)
+	}
 }
 
 // upsertLocation is retried on a conflict: status.locations is read-
@@ -633,12 +714,12 @@ func (p *Publisher) upsertLocation(ctx context.Context, flowID string, phase mxl
 }
 
 // InitialSync walks the domain directory at startup and calls
-// PublishAppeared for each flow directory it finds, then demotes any
-// MxlFlow.status.locations entry that claims this node but whose
-// on-disk directory is gone. Without the demote step a node that
-// restarts after a writer pod cleaned up its flow leaves a permanent
-// Origin entry behind, and downstream resolveSourceNode picks it as
-// the source for a flow that no longer lives here.
+// PublishAppeared for each flow directory it finds, then retires any
+// MxlFlow.status.locations entry that claims this node for a flow it
+// no longer holds. Without that step a node that restarts after a
+// writer pod cleaned up its flow leaves a permanent Origin entry
+// behind, and downstream resolveSourceNode picks it as the source for
+// a flow that no longer lives here.
 func (p *Publisher) InitialSync(ctx context.Context) error {
 	onDisk, err := p.localFlowIDs()
 	if err != nil {
@@ -649,7 +730,7 @@ func (p *Publisher) InitialSync(ctx context.Context) error {
 			log.FromContext(ctx).Error(err, "initial sync entry failed", "flowID", id)
 		}
 	}
-	return p.demoteVanishedLocalOrigins(ctx, p.heldFlowIDs(ctx, onDisk))
+	return p.retireUnheldLocations(ctx, onDisk, p.heldFlowIDs(ctx, onDisk))
 }
 
 // heldFlowIDs narrows a set of on-disk flow ids to the ones a writer
@@ -728,20 +809,22 @@ func (p *Publisher) localFlowIDs() (map[string]struct{}, error) {
 	return out, nil
 }
 
-// demoteVanishedLocalOrigins flips any non-Stale location this node
-// owns whose flow it no longer holds. Shared between InitialSync and
+// retireUnheldLocations settles every location this node owns whose
+// flow it no longer holds. Shared between InitialSync and
 // RunLocalRescan so a missed fanotify delete and a crash-recovery cold
 // start both converge on the same fix.
 //
-// held is the set of flows a writer is still attached to, so this one
-// pass covers a directory that was removed and a directory whose
-// writer has detached. The two are the same thing to a consumer and
-// telling them apart here would buy nothing.
-func (p *Publisher) demoteVanishedLocalOrigins(ctx context.Context, held map[string]struct{}) error {
+// onDisk is the set of flow directories on the node and held the subset
+// a writer is still attached to. A directory that is still there with
+// no writer is demoted to Stale; a location whose directory is gone is
+// removed, Stale or not, which also clears the entries earlier agents
+// left Stale for good.
+func (p *Publisher) retireUnheldLocations(ctx context.Context, onDisk, held map[string]struct{}) error {
 	var flows mxlv1alpha1.MxlFlowList
 	if err := p.Client.List(ctx, &flows); err != nil {
 		return fmt.Errorf("list MxlFlows: %w", err)
 	}
+	l := log.FromContext(ctx).WithName("flowpublisher")
 	for i := range flows.Items {
 		flow := &flows.Items[i]
 		if flow.Spec.Domain != p.Domain {
@@ -755,16 +838,17 @@ func (p *Publisher) demoteVanishedLocalOrigins(ctx context.Context, held map[str
 			if loc.NodeName != p.NodeName {
 				continue
 			}
-			if loc.Phase == mxlv1alpha1.MxlFlowLocationStale {
-				continue
-			}
-			if _, err := p.upsertLocation(ctx, flow.Spec.ID, mxlv1alpha1.MxlFlowLocationStale, nil, nil); err != nil {
-				log.FromContext(ctx).Error(err, "demote vanished local origin failed", "flowID", flow.Spec.ID)
-			}
-			if p.Lease != nil {
-				if err := p.Lease.Release(ctx, p.key(flow.Spec.ID)); err != nil {
-					log.FromContext(ctx).Error(err, "release vanished origin lease", "flowID", flow.Spec.ID)
+			if _, there := onDisk[flow.Spec.ID]; !there {
+				if _, err := p.dropLocation(ctx, flow.Spec.ID); err != nil {
+					l.Error(err, "remove vanished local location failed", "flowID", flow.Spec.ID)
 				}
+				break
+			}
+			if loc.Phase == mxlv1alpha1.MxlFlowLocationStale {
+				break
+			}
+			if err := p.markStale(ctx, flow.Spec.ID); err != nil {
+				l.Error(err, "demote unheld local location failed", "flowID", flow.Spec.ID)
 			}
 			break
 		}
@@ -806,7 +890,7 @@ func (p *Publisher) producerTookOver(ctx context.Context, locks flowlock.Locks, 
 // location entry for this node is unhealthy per localLocationHealthy
 // -- missing, Stale, or timestamp-less -- or that a local producer
 // writes while it reads other than Origin. It is the symmetric repair to
-// demoteVanishedLocalOrigins: that function heals a location that
+// retireUnheldLocations: that function heals a location that
 // outlived its directory, this one heals a directory whose location
 // never landed or got stuck, most commonly a status-update conflict
 // that exhausted upsertLocation's retries, or a fanotify event lost
@@ -934,9 +1018,9 @@ func (p *Publisher) localOrigins(ctx context.Context) (map[string]struct{}, erro
 	return out, nil
 }
 
-// RunLocalRescan periodically re-runs the demote-stale-Origin pass
-// from InitialSync so a missed fanotify delete event does not leave
-// a permanent Origin location pointing at this node.
+// RunLocalRescan periodically re-runs the retire pass from
+// InitialSync so a missed fanotify delete event does not leave a
+// permanent Origin location pointing at this node.
 func (p *Publisher) RunLocalRescan(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 30 * time.Second
@@ -955,8 +1039,8 @@ func (p *Publisher) RunLocalRescan(ctx context.Context, interval time.Duration) 
 				continue
 			}
 			held := p.heldFlowIDs(ctx, ids)
-			if err := p.demoteVanishedLocalOrigins(ctx, held); err != nil {
-				l.Error(err, "demote pass failed")
+			if err := p.retireUnheldLocations(ctx, ids, held); err != nil {
+				l.Error(err, "retire pass failed")
 			}
 			if err := p.promoteStaleLocalOrigins(ctx, held); err != nil {
 				l.Error(err, "promote pass failed")
@@ -969,8 +1053,17 @@ func (p *Publisher) RunLocalRescan(ctx context.Context, interval time.Duration) 
 }
 
 // refreshLocalObservations stamps LastObserved on every flow this node
-// still holds on disk, so the field means what it says: the agent
-// confirmed this copy just now.
+// still holds on disk once the stamp is ObservedRefresh old, so the
+// field means what it says: the agent confirmed this copy at most that
+// long ago.
+//
+// Each stamp is a full write of the MxlFlow's status, which etcd stores
+// again and every watcher of MxlFlow receives. Stamped on every rescan,
+// that was two writes a minute per location, the largest single source
+// of MxlFlow writes, for a field nothing in the control plane reads.
+// The rescan itself keeps its interval: it is what notices a copy
+// appearing or vanishing and repairs a wrong phase, and the stamp is
+// only spaced out.
 //
 // This is the whole point of splitting AppearedAt out. LastObserved
 // used to double as the source gateway's rotation signal, so
@@ -988,6 +1081,10 @@ func (p *Publisher) RunLocalRescan(ctx context.Context, interval time.Duration) 
 // node does not already claim is skipped for the same reason.
 func (p *Publisher) refreshLocalObservations(ctx context.Context, onDisk map[string]struct{}) error {
 	now := metav1.Now()
+	every := p.ObservedRefresh
+	if every <= 0 {
+		every = DefaultObservedRefresh
+	}
 	var errs []error
 	for id := range onDisk {
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -1003,6 +1100,9 @@ func (p *Publisher) refreshLocalObservations(ctx context.Context, onDisk map[str
 					continue
 				}
 				if flow.Status.Locations[i].Phase == mxlv1alpha1.MxlFlowLocationStale {
+					return nil
+				}
+				if last := flow.Status.Locations[i].LastObserved; last != nil && now.Sub(last.Time) < every {
 					return nil
 				}
 				stamp := now

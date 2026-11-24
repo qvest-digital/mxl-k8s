@@ -39,6 +39,9 @@ func TestFromFlags_DefaultsFireWhenArgsProvided(t *testing.T) {
 			"silently disables every pod's probes on upgrade")
 	assert.Equal(t, ":8080", c.MetricsAddr)
 	assert.Equal(t, 30*time.Second, c.ResyncPeriod)
+	assert.Equal(t, 5*time.Minute, c.ObservedRefreshInterval,
+		"every lastObserved stamp is a write of the whole MxlFlow status; "+
+			"at the 30s rescan it was the largest source of MxlFlow writes")
 	assert.Equal(t, "/run/mxl/agent.sock", c.IntentSocketPath)
 	assert.Equal(t, "/run/mxl/libmxl-intent.so", c.ShimPath,
 		"consumer pods hardcode this path in LD_PRELOAD; moving it "+
@@ -94,6 +97,7 @@ func TestFromFlags_OverridesAreRespected(t *testing.T) {
 		"--health-probe-bind-address=:9081",
 		"--metrics-bind-address=:9080",
 		"--resync-period=15s",
+		"--observed-refresh-interval=90s",
 		"--intent-socket=/tmp/mxl.sock",
 		"--shim-path=/tmp/libmxl-intent.so",
 		"--materialize-timeout=2s",
@@ -105,6 +109,7 @@ func TestFromFlags_OverridesAreRespected(t *testing.T) {
 	assert.Equal(t, ":9081", c.ProbeAddr)
 	assert.Equal(t, ":9080", c.MetricsAddr)
 	assert.Equal(t, 15*time.Second, c.ResyncPeriod)
+	assert.Equal(t, 90*time.Second, c.ObservedRefreshInterval)
 	assert.Equal(t, "/tmp/mxl.sock", c.IntentSocketPath)
 	assert.Equal(t, "/tmp/libmxl-intent.so", c.ShimPath)
 	assert.Equal(t, 2*time.Second, c.MaterializeTimeout)
@@ -152,28 +157,40 @@ func TestValidate(t *testing.T) {
 			wantErr: "--node-name",
 		},
 		{
-			name:    "valid",
+			name:    "negative observed refresh interval",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: -time.Second},
+			wantErr: "--observed-refresh-interval must be positive",
+		},
+		{
+			// The publisher reads zero as its 5m default, so a zero
+			// passed through would quietly mean something else.
+			name:    "zero observed refresh interval",
 			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100},
+			wantErr: "--observed-refresh-interval must be positive",
+		},
+		{
+			name:    "valid",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
 			wantErr: "",
 		},
 		{
 			name:    "explicit provider override",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", Provider: "verbs", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", Provider: "verbs", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
 			wantErr: "",
 		},
 		{
 			name:    "auto provider is accepted (resolves per node)",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", Provider: "auto", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", Provider: "auto", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
 			wantErr: "",
 		},
 		{
 			name:    "zero qps rejected",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
 			wantErr: "--kube-api-qps",
 		},
 		{
 			name:    "zero intent qps rejected",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIBurst: 100},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
 			wantErr: "--intent-api-qps",
 		},
 		{
@@ -183,48 +200,48 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:    "zero burst rejected",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIQPS: 50, IntentAPIQPS: 50, IntentAPIBurst: 100},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIQPS: 50, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
 			wantErr: "--kube-api-burst",
 		},
 		{
 			name:    "relative shim path rejected",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", ShimPath: "libmxl-intent.so", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", ShimPath: "libmxl-intent.so", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
 			wantErr: "--shim-path must be absolute",
 		},
 		{
 			name:    "empty shim path disables the drop",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
 			wantErr: "",
 		},
 		{
 			name:    "huge=always passes",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsHuge: "always", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsHuge: "always", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
 			wantErr: "",
 		},
 		{
 			// tmpfs's never and advise are values mxlfs refuses.
 			name:    "a huge= value mxlfs does not have is rejected",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsHuge: "never", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsHuge: "never", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
 			wantErr: "--mxlfs-huge",
 		},
 		{
 			name:    "a NUMA node passes",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNodeDefault: "1", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNodeDefault: "1", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
 			wantErr: "",
 		},
 		{
 			name:    "numa node auto passes",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNodeDefault: "auto", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNodeDefault: "auto", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
 			wantErr: "",
 		},
 		{
 			name:    "a negative NUMA node is rejected",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNodeDefault: "-1", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNodeDefault: "-1", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
 			wantErr: "--mxlfs-numa-placement-node-default",
 		},
 		{
 			name:    "a NUMA node that is no number is rejected",
-			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNodeDefault: "near", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100},
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNodeDefault: "near", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
 			wantErr: "--mxlfs-numa-placement-node-default",
 		},
 		{

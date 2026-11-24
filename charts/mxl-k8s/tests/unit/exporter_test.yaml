@@ -52,14 +52,90 @@ tests:
 
   # Turning topology off has to drop the API access with it, not just
   # the flag: a role granted but unused is a role nobody notices.
-  - it: grants no API access when topology is off
+  - it: grants no MxlFlow access when topology is off
     set:
       exporter.enabled: true
       exporter.topology.enabled: false
     template: templates/rbac-exporter.yaml
     asserts:
       - hasDocuments:
+          count: 2
+      - isKind:
+          of: Role
+        documentIndex: 0
+      - isKind:
+          of: RoleBinding
+        documentIndex: 1
+
+  - it: grants no API access when topology and mirror heartbeats are off
+    set:
+      exporter.enabled: true
+      exporter.topology.enabled: false
+      exporter.mirrorHeartbeats.enabled: false
+    template: templates/rbac-exporter.yaml
+    asserts:
+      - hasDocuments:
           count: 0
+
+  # The heartbeat Leases live in the release namespace beside the Origin
+  # Leases; reading them needs no cluster-wide grant and no write.
+  - it: grants read-only access to the Leases in the release namespace for mirror heartbeats
+    set:
+      exporter.enabled: true
+    release:
+      namespace: mxl-system
+    template: templates/rbac-exporter.yaml
+    asserts:
+      - hasDocuments:
+          count: 4
+      - isKind:
+          of: Role
+        documentIndex: 2
+      - equal:
+          path: metadata.namespace
+          value: mxl-system
+        documentIndex: 2
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [coordination.k8s.io]
+              resources: [leases]
+              verbs: [get, list, watch]
+        documentIndex: 2
+      - equal:
+          path: roleRef.name
+          value: mxl-k8s-exporter-leases
+        documentIndex: 3
+
+  # The Role is rendered in the chart's namespace; a watch in any other
+  # would be forbidden.
+  - it: watches the heartbeat Leases in the namespace the Role is in
+    set:
+      exporter.enabled: true
+      namespace.name: media
+    templates:
+      - templates/daemonset-exporter.yaml
+      - templates/rbac-exporter.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --lease-namespace=media
+        template: templates/daemonset-exporter.yaml
+      - equal:
+          path: metadata.namespace
+          value: media
+        template: templates/rbac-exporter.yaml
+        documentIndex: 2
+
+  - it: renders the mirror heartbeats flag from the same value as the role
+    set:
+      exporter.enabled: true
+      exporter.mirrorHeartbeats.enabled: false
+    template: templates/daemonset-exporter.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mirror-heartbeats=false
 
   - it: renders the topology flag from the same value as the role
     set:

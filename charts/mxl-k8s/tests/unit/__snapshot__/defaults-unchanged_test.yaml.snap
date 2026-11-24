@@ -43,6 +43,7 @@ renders every gateway variant unchanged with mxlfs:
                 - --kube-api-qps=50
                 - --materialize-timeout=5s
                 - --metrics-bind-address=:8080
+                - --observed-refresh-interval=5m
                 - --resync-period=30s
                 - --shim-path=/run/mxl/libmxl-intent.so
                 - --zap-log-level=info
@@ -594,6 +595,7 @@ renders the agent and gateway unchanged at defaults:
                 - --kube-api-qps=50
                 - --materialize-timeout=5s
                 - --metrics-bind-address=:8080
+                - --observed-refresh-interval=5m
                 - --resync-period=30s
                 - --shim-path=/run/mxl/libmxl-intent.so
                 - --zap-log-level=info
@@ -802,6 +804,7 @@ renders the agent and gateway unchanged with mxlfs:
                 - --kube-api-qps=50
                 - --materialize-timeout=5s
                 - --metrics-bind-address=:8080
+                - --observed-refresh-interval=5m
                 - --resync-period=30s
                 - --shim-path=/run/mxl/libmxl-intent.so
                 - --zap-log-level=info
@@ -1077,6 +1080,7 @@ renders the agent and gateway unchanged with rdma:
                 - --kube-api-qps=50
                 - --materialize-timeout=5s
                 - --metrics-bind-address=:8080
+                - --observed-refresh-interval=5m
                 - --resync-period=30s
                 - --shim-path=/run/mxl/libmxl-intent.so
                 - --zap-log-level=info
@@ -1297,6 +1301,7 @@ renders the site's own init containers unchanged with mxlfs:
                 - --kube-api-qps=50
                 - --materialize-timeout=5s
                 - --metrics-bind-address=:8080
+                - --observed-refresh-interval=5m
                 - --resync-period=30s
                 - --shim-path=/run/mxl/libmxl-intent.so
                 - --zap-log-level=info
