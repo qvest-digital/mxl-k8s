@@ -60,8 +60,8 @@ func TestSourceIsDeliveringAcceptsAReportedWedge(t *testing.T) {
 	openedAt := time.Now()
 
 	sending := &mxlv1alpha1.MxlFlowMirror{}
-	sending.Status.LastSentAt = &metav1.Time{Time: openedAt.Add(time.Second)}
-	require.True(t, sourceIsDelivering(sending, openedAt),
+	sentAt := openedAt.Add(time.Second)
+	require.True(t, sourceIsDelivering(sending, &sentAt, openedAt),
 		"a transfer after the open is still the direct signal")
 
 	idle := &mxlv1alpha1.MxlFlowMirror{}
@@ -71,7 +71,8 @@ func TestSourceIsDeliveringAcceptsAReportedWedge(t *testing.T) {
 		Status: metav1.ConditionTrue,
 		Reason: mxlv1alpha1.ReasonHandshakeComplete,
 	}}
-	require.False(t, sourceIsDelivering(idle, openedAt),
+	before := openedAt.Add(-time.Hour)
+	require.False(t, sourceIsDelivering(idle, &before, openedAt),
 		"a producer with nothing to send must not provoke a rebuild")
 
 	wedged := &mxlv1alpha1.MxlFlowMirror{}
@@ -81,9 +82,9 @@ func TestSourceIsDeliveringAcceptsAReportedWedge(t *testing.T) {
 		Status: metav1.ConditionFalse,
 		Reason: mxlv1alpha1.ReasonTransfersNotLanding,
 	}}
-	require.True(t, sourceIsDelivering(wedged, openedAt),
+	require.True(t, sourceIsDelivering(wedged, &before, openedAt),
 		"a source reporting that it cannot deliver is trying, and is the "+
 			"only evidence available once lastSentAt has stopped moving")
 
-	require.False(t, sourceIsDelivering(nil, openedAt))
+	require.False(t, sourceIsDelivering(nil, &sentAt, openedAt))
 }

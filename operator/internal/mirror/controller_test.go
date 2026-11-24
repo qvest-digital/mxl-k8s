@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -1013,4 +1014,19 @@ func TestWriteConditions_MessageOrGenerationAloneStillApplies(t *testing.T) {
 			assert.Equal(t, tc.want, applies)
 		})
 	}
+}
+
+// Mirror heartbeat Leases share the Origin Leases' namespace and renew
+// every few seconds per mirror side. None of them bears on a mirror's
+// judgement, so the Lease watch leaves them out.
+func TestLeasePredicate_IgnoresMirrorHeartbeats(t *testing.T) {
+	p := leaseInMxlSystem()
+	origin := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Namespace: mxlv1alpha1.LeaseNamespace, Name: mxlv1alpha1.LeaseName(flowID, srcNode)}}
+	beat := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Namespace: mxlv1alpha1.LeaseNamespace,
+		Name:      mxlv1alpha1.MirrorLeaseName(testNS, "m1", mxlv1alpha1.MirrorSideSource),
+		Labels:    map[string]string{mxlv1alpha1.LabelMirrorSide: string(mxlv1alpha1.MirrorSideSource)}}}
+	assert.True(t, p.Update(event.UpdateEvent{ObjectOld: origin, ObjectNew: origin}))
+	assert.False(t, p.Update(event.UpdateEvent{ObjectOld: beat, ObjectNew: beat}))
 }

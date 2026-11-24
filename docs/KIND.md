@@ -10,7 +10,7 @@ demo gets stuck.
 
 `make kind-up` installs the [`charts/mxl-k8s`](../charts/mxl-k8s/)
 Helm chart (operator Deployment, agent and gateway DaemonSets,
-the five CRDs, RBAC) into the cluster and applies a thin demo
+the CRDs, RBAC) into the cluster and applies a thin demo
 overlay at [`examples/kind/demo/`](../examples/kind/demo/) on
 top. The overlay references the writer/receiver/reader manifests
 in [`examples/tcp-demo/`](../examples/tcp-demo/) directly, so the
@@ -56,7 +56,7 @@ idempotent and re-runnable:
    gateway.image.tag=<TAG>`. Helm 3 installs the chart's
    `crds/` directory on first install automatically; no separate
    `kubectl apply` pass.
-5. Waits for the five CRDs to reach `Established` before
+5. Waits for the CRDs to reach `Established` before
    applying any custom resources; without that gate the demo
    overlay can fail discovery on its own CRs.
 6. Applies the demo overlay at `examples/kind/demo/`, which
@@ -233,11 +233,12 @@ anything.
 
 `make kind-test` runs the bash suite under
 [`test/integration/kind/`](../test/integration/kind/) against an
-already-running cluster. Cases assert the five CRDs reach
+already-running cluster. Cases assert the CRDs reach
 `Established`, the operator and the agent / gateway DaemonSets
 finish rolling out, `/healthz` and `/readyz` on each probe port
 answer `200`, every `MxlFlowMirror` reaches `phase=Ready` with a
-non-empty `status.targetInfo`, and the reader pod's `idx=` log
+target descriptor whose hash `status.targetInfoHash` carries and a
+heartbeat Lease per side, and the reader pod's `idx=` log
 lines actually advance over a sample window (catches the "Ready
 but no grains flowing" failure mode).
 

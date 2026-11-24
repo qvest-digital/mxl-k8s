@@ -21,6 +21,7 @@ package leasegc
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -49,6 +50,7 @@ type Reconciler struct {
 
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflows,verbs=get;list;watch
+// +kubebuilder:rbac:groups=mxl.qvest-digital.com,resources=mxlflowmirrors,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 
 // Reconcile deletes one Lease if it can never be renewed again.
@@ -65,6 +67,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	var lease coordinationv1.Lease
 	if err := r.Get(ctx, req.NamespacedName, &lease); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	if mxlv1alpha1.IsMirrorLease(lease.Labels) {
+		return ctrl.Result{}, r.collectHeartbeat(ctx, &lease)
 	}
 
 	ref, nodeName, ok := mxlv1alpha1.ParseLeaseNameFor(lease.Name)
@@ -113,6 +119,35 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		"lease", lease.Name, "flowID", flowID, "node", nodeName, "reason", why,
 		"expiredFor", time.Since(deadline).Truncate(time.Second))
 	return ctrl.Result{}, nil
+}
+
+// collectHeartbeat deletes a mirror heartbeat Lease whose mirror is
+// gone. The gateway that renews one deletes it when it releases the
+// mirror, but only as far as that delete succeeds, and a Lease in
+// another namespace than its mirror has no owner reference to be
+// collected by. A mirror that exists keeps its Lease however old: its
+// gateway will renew or delete it, and an old heartbeat is what an
+// idle mirror is supposed to show.
+func (r *Reconciler) collectHeartbeat(ctx context.Context, lease *coordinationv1.Lease) error {
+	ns, name, ok := strings.Cut(lease.Annotations[mxlv1alpha1.AnnotationMirror], "/")
+	if !ok {
+		return nil
+	}
+	var mirror mxlv1alpha1.MxlFlowMirror
+	err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &mirror)
+	switch {
+	case err == nil:
+		return nil
+	case !apierrors.IsNotFound(err):
+		return fmt.Errorf("look up MxlFlowMirror %s/%s: %w", ns, name, err)
+	}
+	err = r.Delete(ctx, lease, client.Preconditions{UID: &lease.UID})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete Lease %s: %w", lease.Name, err)
+	}
+	log.FromContext(ctx).Info("collected heartbeat Lease of a deleted mirror",
+		"lease", lease.Name, "mirror", ns+"/"+name)
+	return nil
 }
 
 // orphaned reports whether the Lease can no longer be renewed by
@@ -175,8 +210,25 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.flowToLeases),
 			builder.WithPredicates(deletedOnly()),
 		).
+		Watches(
+			&mxlv1alpha1.MxlFlowMirror{},
+			handler.EnqueueRequestsFromMapFunc(mirrorToHeartbeats),
+			builder.WithPredicates(deletedOnly()),
+		).
 		Named("mxlflowlease").
 		Complete(r)
+}
+
+// mirrorToHeartbeats enqueues the heartbeat Leases of a deleted mirror.
+func mirrorToHeartbeats(_ context.Context, obj client.Object) []reconcile.Request {
+	out := make([]reconcile.Request, 0, 2)
+	for _, side := range []mxlv1alpha1.MirrorSide{mxlv1alpha1.MirrorSideSource, mxlv1alpha1.MirrorSideTarget} {
+		out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: mxlv1alpha1.LeaseNamespace,
+			Name:      mxlv1alpha1.MirrorLeaseName(obj.GetNamespace(), obj.GetName(), side),
+		}})
+	}
+	return out
 }
 
 // nodeToLeases enqueues every Origin Lease the departed node held.
@@ -238,7 +290,7 @@ func createOnly() predicate.Predicate {
 }
 
 // deletedOnly passes only deletions, which is the only transition of a
-// Node or an MxlFlow that can orphan a Lease.
+// Node, an MxlFlow or an MxlFlowMirror that can orphan a Lease.
 func deletedOnly() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc:  func(event.CreateEvent) bool { return false },

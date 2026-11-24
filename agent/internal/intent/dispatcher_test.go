@@ -381,6 +381,30 @@ func TestWaitReady_Ready_ReturnsNil(t *testing.T) {
 	require.NoError(t, d.waitReady(ctx, mirror))
 }
 
+// A target gateway that publishes the descriptor as an
+// MxlFlowMirrorTarget names it on the mirror by hash. Once the legacy
+// status.targetInfo is no longer written, the hash is the only sign
+// the descriptor exists, and a mirror carrying it is ready.
+func TestWaitReady_ReadyWithTargetInfoHash_ReturnsNil(t *testing.T) {
+	mirror := &mxlv1alpha1.MxlFlowMirror{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "m"},
+		Status: mxlv1alpha1.MxlFlowMirrorStatus{
+			Phase:          mxlv1alpha1.MxlFlowMirrorReady,
+			TargetInfoHash: mxlv1alpha1.TargetInfoHash("info"),
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).
+		Build()
+	d := &Dispatcher{Client: c, PollInterval: 5 * time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	require.NoError(t, d.waitReady(ctx, mirror))
+}
+
 func TestWaitReady_ReadyButMissingTargetInfo_KeepsPolling(t *testing.T) {
 	// A Ready phase with an empty TargetInfo is a half-published
 	// state from the gateway. The dispatcher must keep polling so a

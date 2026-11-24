@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -56,4 +57,32 @@ func TestDefaultLeaseDuration_MatchesRenewerAndCheckerExpectation(t *testing.T) 
 	// the window would make the two sides disagree about where a
 	// flow's Origin is.
 	assert.Equal(t, "30s", DefaultLeaseDuration.String())
+}
+
+// Each side renews its own heartbeat, so the two names differ, and
+// two mirrors that share a name in different namespaces must not share
+// a Lease.
+func TestMirrorLeaseName(t *testing.T) {
+	src := MirrorLeaseName("ns-a", "m", MirrorSideSource)
+	assert.NotEqual(t, src, MirrorLeaseName("ns-a", "m", MirrorSideTarget))
+	assert.NotEqual(t, src, MirrorLeaseName("ns-b", "m", MirrorSideSource))
+	assert.Equal(t, src, MirrorLeaseName("ns-a", "m", MirrorSideSource), "the name is deterministic")
+	assert.True(t, strings.HasPrefix(src, "mxl-mirror-"))
+	_, _, isOrigin := ParseLeaseName(src)
+	assert.False(t, isOrigin, "a heartbeat Lease never parses as an Origin Lease")
+
+	long := strings.Repeat("a", 63)
+	assert.LessOrEqual(t, len(MirrorLeaseName(long, strings.Repeat("b", 253), MirrorSideTarget)), 63,
+		"the name fits the longest namespace and mirror name")
+}
+
+func TestTargetInfoHash(t *testing.T) {
+	assert.Len(t, TargetInfoHash("x"), 64)
+	assert.Equal(t, TargetInfoHash("x"), TargetInfoHash("x"))
+	assert.NotEqual(t, TargetInfoHash("x"), TargetInfoHash("y"))
+}
+
+func TestIsMirrorLease(t *testing.T) {
+	assert.True(t, IsMirrorLease(map[string]string{LabelMirrorSide: string(MirrorSideSource)}))
+	assert.False(t, IsMirrorLease(nil), "an Origin Lease carries no side")
 }

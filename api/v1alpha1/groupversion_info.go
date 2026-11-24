@@ -20,6 +20,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&MxlDomain{}, &MxlDomainList{},
 		&MxlFlow{}, &MxlFlowList{},
 		&MxlFlowMirror{}, &MxlFlowMirrorList{},
+		&MxlFlowMirrorTarget{}, &MxlFlowMirrorTargetList{},
 		&MxlReceiver{}, &MxlReceiverList{},
 		&MxlNodeCapabilities{}, &MxlNodeCapabilitiesList{},
 		&MxlFlowRedundancySet{}, &MxlFlowRedundancySetList{},

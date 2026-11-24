@@ -309,11 +309,13 @@ func (t attemptTable[I]) count(key types.NamespacedName) uint32 { return t[key].
 // producer with nothing to send. The source publishes
 // ReasonTransfersNotLanding for that case, which is the same claim
 // lastSentAt would have made had a transfer been possible.
-func sourceIsDelivering(mirror *mxlv1alpha1.MxlFlowMirror, openedAt time.Time) bool {
+//
+// sentAt is the source's latest heartbeat (heartbeatAt).
+func sourceIsDelivering(mirror *mxlv1alpha1.MxlFlowMirror, sentAt *time.Time, openedAt time.Time) bool {
 	if mirror == nil {
 		return false
 	}
-	if mirror.Status.LastSentAt != nil && mirror.Status.LastSentAt.Time.After(openedAt) {
+	if sentAt != nil && sentAt.After(openedAt) {
 		return true
 	}
 	for _, c := range mirror.Status.Conditions {

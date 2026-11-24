@@ -238,3 +238,40 @@ func TestExpiry_UsesTheDeclaredWindow(t *testing.T) {
 	l.Spec.RenewTime = nil
 	assert.True(t, expiry(l).IsZero())
 }
+
+func heartbeatLease(mirrorNS, mirrorName string, side mxlv1alpha1.MirrorSide) *coordinationv1.Lease {
+	return &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{
+		Namespace:   mxlv1alpha1.LeaseNamespace,
+		Name:        mxlv1alpha1.MirrorLeaseName(mirrorNS, mirrorName, side),
+		Labels:      map[string]string{mxlv1alpha1.LabelMirrorSide: string(side)},
+		Annotations: map[string]string{mxlv1alpha1.AnnotationMirror: mirrorNS + "/" + mirrorName},
+	}}
+}
+
+// A gateway deletes its heartbeat Lease when it releases the mirror, but
+// only as far as that delete succeeds, and the Lease lives in another
+// namespace than most mirrors, so no owner reference collects it. One
+// whose mirror is gone is collected here; one whose mirror exists is
+// kept however long ago it was renewed, because an idle mirror's
+// heartbeat is supposed to stand still.
+func TestCollect_HeartbeatOfADeletedMirror_IsDeleted(t *testing.T) {
+	live := &mxlv1alpha1.MxlFlowMirror{ObjectMeta: metav1.ObjectMeta{Namespace: "p-a", Name: "live"}}
+	gone := heartbeatLease("p-a", "gone", mxlv1alpha1.MirrorSideSource)
+	kept := heartbeatLease("p-a", "live", mxlv1alpha1.MirrorSideTarget)
+	r, c := harness(t, live, gone, kept)
+
+	reconcileLease(t, r, gone.Name)
+	reconcileLease(t, r, kept.Name)
+	assert.True(t, leaseGone(t, c, gone.Name), "the Lease of a deleted mirror is collected")
+	assert.False(t, leaseGone(t, c, kept.Name), "the Lease of an existing mirror is kept")
+}
+
+// A mirror's deletion wakes both of its heartbeat Leases.
+func TestWatches_MirrorDeletionEnqueuesBothHeartbeats(t *testing.T) {
+	m := &mxlv1alpha1.MxlFlowMirror{ObjectMeta: metav1.ObjectMeta{Namespace: "p-a", Name: "m"}}
+	got := mirrorToHeartbeats(context.Background(), m)
+	require.Len(t, got, 2)
+	assert.Equal(t, mxlv1alpha1.MirrorLeaseName("p-a", "m", mxlv1alpha1.MirrorSideSource), got[0].Name)
+	assert.Equal(t, mxlv1alpha1.MirrorLeaseName("p-a", "m", mxlv1alpha1.MirrorSideTarget), got[1].Name)
+	assert.Equal(t, mxlv1alpha1.LeaseNamespace, got[0].Namespace)
+}

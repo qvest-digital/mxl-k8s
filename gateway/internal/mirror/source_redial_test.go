@@ -41,12 +41,24 @@ func TestRunFlusher_DroppedTarget_IsAddedAgainWithBackoff(t *testing.T) {
 	)
 	f.r.FlushInterval = 5 * time.Millisecond
 
+	// Each add of info-b records the re-add run as the pass that made
+	// it armed it. The schedule is read off the reconciler's own
+	// bookkeeping rather than off wall-clock gaps between adds: an add
+	// lands some time after its pass armed the next wait (the pass
+	// first closes the old entry and waits out its flusher), and that
+	// time is nothing the backoff promises.
 	var mu sync.Mutex
-	var addedAt []time.Time
+	var addedAt []redial
 	f.opener.attachFn = func(_ *sharedSource, info string) error {
 		if info == "info-b" {
+			f.r.mu.Lock()
+			var d redial
+			for _, rd := range f.r.redials {
+				d = rd
+			}
+			f.r.mu.Unlock()
 			mu.Lock()
-			addedAt = append(addedAt, time.Now())
+			addedAt = append(addedAt, d)
 			mu.Unlock()
 		}
 		return nil
@@ -57,10 +69,10 @@ func TestRunFlusher_DroppedTarget_IsAddedAgainWithBackoff(t *testing.T) {
 	w.enqueue("m1")
 	w.enqueue("m2")
 
-	adds := func() []time.Time {
+	adds := func() []redial {
 		mu.Lock()
 		defer mu.Unlock()
-		return append([]time.Time(nil), addedAt...)
+		return append([]redial(nil), addedAt...)
 	}
 	require.Eventually(t, func() bool { return len(adds()) >= 4 }, 3*time.Second, 5*time.Millisecond,
 		"a dropped target was not added again")
@@ -79,15 +91,23 @@ func TestRunFlusher_DroppedTarget_IsAddedAgainWithBackoff(t *testing.T) {
 		return !counting
 	}, 3*time.Second, 5*time.Millisecond, "the re-added target never completed a transfer")
 
-	// The wait is armed when a re-add starts, and the fake records the
-	// AddTarget a little later in the same pass, so the gap between two
-	// recorded adds may fall short of the backoff by that much.
-	const slack = 25 * time.Millisecond
+	// The first add is the initial one and runs no re-add. Each re-add
+	// after it is counted, and none starts before the wait the previous
+	// one armed has passed: a re-add is armed at the pass's now, which
+	// is notBefore minus the backoff it armed.
 	got := adds()
-	gaps := []time.Duration{got[1].Sub(got[0]), got[2].Sub(got[1]), got[3].Sub(got[2])}
-	assert.Less(t, gaps[0], time.Second, "the first re-add waits for nothing but the flusher's tick; gaps %v", gaps)
-	assert.GreaterOrEqual(t, gaps[1], backoffFor(1)-slack, "a target dropped again is added again later; gaps %v", gaps)
-	assert.GreaterOrEqual(t, gaps[2], backoffFor(2)-slack, "and later still the time after; gaps %v", gaps)
+	require.GreaterOrEqual(t, len(got), 4)
+	assert.Zero(t, got[0].count, "the initial add is no re-add")
+	for i := 1; i < 4; i++ {
+		assert.Equal(t, uint32(i), got[i].count, "re-adds are counted one by one; got %+v", got)
+	}
+	for i := 2; i < 4; i++ {
+		armed := got[i].notBefore.Add(-backoffFor(got[i].count))
+		assert.False(t, armed.Before(got[i-1].notBefore),
+			"re-add %d ran before the %s backoff of the previous one had passed; got %+v",
+			i, backoffFor(got[i-1].count), got)
+	}
+	assert.Less(t, backoffFor(1), backoffFor(2), "a target dropped again waits longer")
 
 	for _, info := range f.opener.removedTargets() {
 		assert.Equal(t, "info-b", info, "a target still delivering was taken off")

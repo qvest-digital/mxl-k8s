@@ -350,6 +350,9 @@ type sourceEntry struct {
 	// re-opened the FlowWriter) and re-add it against the fresh address
 	// before the source's writes keep getting refused.
 	infoStr string
+	// infoHash is mxlv1alpha1.TargetInfoHash(infoStr), compared with
+	// the hash the mirror publishes.
+	infoHash string
 
 	// rec is the mirror's source recorder, set before attach and kept
 	// across its links.
@@ -499,6 +502,7 @@ func (r *SourceReconciler) reapOrphanedFinalizer(ctx context.Context, mirror *mx
 	if !gone {
 		return ctrl.Result{RequeueAfter: orphanRecheckInterval}, nil
 	}
+	deleteHeartbeat(ctx, r.Client, client.ObjectKeyFromObject(mirror), mxlv1alpha1.MirrorSideSource)
 
 	controllerutil.RemoveFinalizer(mirror, SourceFinalizerName)
 	if err := r.Update(ctx, mirror); err != nil {
@@ -558,6 +562,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		r.closeEntry(req.NamespacedName)
 		r.clearRedials(req.NamespacedName)
 		r.retire(req.NamespacedName)
+		deleteHeartbeat(ctx, r.Client, req.NamespacedName, mxlv1alpha1.MirrorSideSource)
 		controllerutil.RemoveFinalizer(&mirror, SourceFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
 			// The other side's gateway removed its finalizer first and
@@ -590,8 +595,13 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	// Wait for the target side to publish its TargetInfo. The status
-	// update will trigger another reconcile.
-	if mirror.Status.TargetInfo == "" {
+	// update, or the MxlFlowMirrorTarget landing in the cache, triggers
+	// another reconcile.
+	info, published, err := r.targetDescriptor(ctx, &mirror)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !published {
 		return ctrl.Result{}, nil
 	}
 
@@ -682,7 +692,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// the flow inline, which is not this mirror's re-add.
 	sw.lap("originReopen")
 
-	if existing != nil && existing.infoStr == mirror.Status.TargetInfo && existing.dropped.Load() {
+	if existing != nil && existing.servesDescriptorOf(&mirror) && existing.dropped.Load() {
 		// The loop gave this target up; only adding it again resumes
 		// the mirror. The same TargetInfo is added again with a backoff
 		// of its own, because it may name a target that is gone until
@@ -696,7 +706,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		existing = nil
 	}
 	if existing != nil {
-		if existing.infoStr == mirror.Status.TargetInfo {
+		if existing.servesDescriptorOf(&mirror) {
 			return ctrl.Result{}, nil
 		}
 		r.clearRedials(req.NamespacedName)
@@ -721,7 +731,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// Only the counter is restored: the next attempt fires immediately
 	// rather than waiting out a remembered backoff window, which keeps
 	// the design's "one free retry on restart" budget intact.
-	inputs := sourceAddInputs{targetInfo: mirror.Status.TargetInfo, provider: provider}
+	inputs := sourceAddInputs{targetInfo: info, provider: provider}
 	r.mu.Lock()
 	r.attempts.seed(req.NamespacedName, uint32(mirror.Status.AttemptCount))
 	remaining, gated := r.attempts.wait(req.NamespacedName, inputs, r.now())
@@ -771,7 +781,8 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	entry := &sourceEntry{
 		key:      req.NamespacedName,
 		shared:   shared,
-		infoStr:  mirror.Status.TargetInfo,
+		infoStr:  info,
+		infoHash: mxlv1alpha1.TargetInfoHash(info),
 		peerNode: mirror.Spec.TargetNode,
 		// wantInterface is read by attach.
 		wantInterface: want,
@@ -783,9 +794,8 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	// entry has no transfers of its own, and an omitted field is one
 	// SSA releases and the apiserver strips, erasing the timestamp the
 	// target's stuck-handshake watchdog discriminates on.
-	if mirror.Status.LastSentAt != nil {
-		t := mirror.Status.LastSentAt.Time
-		entry.lastSentAt.Store(&t)
+	if t := heartbeatAt(ctx, r.Client, &mirror, mxlv1alpha1.MirrorSideSource); t != nil {
+		entry.lastSentAt.Store(t)
 	}
 
 	if r.Recorders != nil {
@@ -796,7 +806,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		entry.rec = r.Recorders.Source(req.NamespacedName, shared.key.flowID, shared.cfg, span)
 	}
 
-	link, err := r.opener.attach(shared, mirror.Status.TargetInfo, entry)
+	link, err := r.opener.attach(shared, info, entry)
 	sw.lap("attach")
 	if err != nil {
 		r.releaseIfUnused(shared)
@@ -812,7 +822,7 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// Another pass attached this mirror first. One that read an
 		// older TargetInfo leaves an entry the flusher publishes nothing
 		// for, so the mirror is looked at again rather than left on it.
-		stale := dup.infoStr != mirror.Status.TargetInfo
+		stale := !dup.servesDescriptorOf(&mirror)
 		r.mu.Unlock()
 		r.opener.detach(link)
 		r.releaseIfUnused(shared)
@@ -1704,6 +1714,7 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 
 	var last sourceProgressState
 	var retry publishBackoff
+	beat := heartbeat{side: mxlv1alpha1.MirrorSideSource, owner: sourceFieldOwner, mirror: key, holder: r.NodeName}
 	first := true
 	for {
 		select {
@@ -1735,7 +1746,7 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 
 		// A reader that has stopped feeding the fabric is the one wedge
 		// neither side of the mirror resolves on its own. The target's
-		// stuck-handshake watchdog is gated on status.lastSentAt
+		// stuck-handshake watchdog is gated on the source's heartbeat
 		// postdating its own fabric open, and a reader that transfers
 		// nothing never advances lastSentAt, so the target reads the
 		// mirror as an idle producer and declines to rebuild.
@@ -1802,6 +1813,9 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 			r.clearReaderRebuilds(entry.sourceKey())
 		}
 
+		if state.lastSentAt != nil {
+			beat.renew(ctx, r.Client, *state.lastSentAt, interval)
+		}
 		if !first && sourceStateEqual(state, last) {
 			continue
 		}
@@ -1885,7 +1899,7 @@ func (r *SourceReconciler) attachedToReplacedTarget(ctx context.Context, entry *
 	if err := r.Get(ctx, entry.key, &mirror); err != nil {
 		return false
 	}
-	return mirror.Status.TargetInfo != entry.infoStr
+	return !entry.servesDescriptorOf(&mirror)
 }
 
 // bumpReaderRebuilds records one more consecutive reopen of the shared
@@ -2008,30 +2022,18 @@ func (r *SourceReconciler) readerStallAfter() time.Duration {
 }
 
 // sourceStateEqual reports whether two sourceProgressState values
-// would publish a status an observer could tell apart. lastSentAt is
-// compared by value rather than pointer identity: observedState
-// allocates a fresh *time.Time on every tick (copying the
-// atomic-loaded value), so a struct-level == on the two states would
-// always disagree once lastSentAt is set, defeating the dedupe and
-// turning a single successful transfer into a status write every
-// flusher tick.
-//
-// The comparison is quantised for the same reason the target side
-// quantises its commit timestamp: at 50 grains a second the exact
-// value is never the same twice, and publishing it turns a healthy
-// mirror into a permanent etcd write stream.
+// would publish a status an observer could tell apart, leaving the
+// value of lastSentAt out. A moving lastSentAt is the source's
+// heartbeat, which the flusher renews in the source's heartbeat Lease;
+// written into the status, it rewrote the whole mirror every few
+// seconds. The status carries lastSentAt as of its last change, and
+// its first appearance is a change.
 func sourceStateEqual(a, b sourceProgressState) bool {
 	if a.status != b.status || a.reason != b.reason ||
 		a.message != b.message || a.attempts != b.attempts || a.boundInterface != b.boundInterface {
 		return false
 	}
-	if (a.lastSentAt == nil) != (b.lastSentAt == nil) {
-		return false
-	}
-	if a.lastSentAt != nil && !sameQuantum(*a.lastSentAt, *b.lastSentAt) {
-		return false
-	}
-	return true
+	return (a.lastSentAt == nil) == (b.lastSentAt == nil)
 }
 
 // observedState derives the SourceProgress condition the flusher
@@ -2224,7 +2226,7 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	); err != nil {
 		return fmt.Errorf("index MxlFlowMirror by %s: %w", mirrorFlowIDIndex, err)
 	}
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&mxlv1alpha1.MxlFlowMirror{}).
 		Watches(
 			&mxlv1alpha1.MxlFlow{},
@@ -2235,9 +2237,26 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.leaseToMirrors),
 			builder.WithPredicates(leaseInMxlSystem()),
 		).
-		WatchesRawSource(source.Channel(r.redialEvents, &handler.EnqueueRequestForObject{})).
-		Named("mxlflowmirror-source").
-		Complete(r)
+		WatchesRawSource(source.Channel(r.redialEvents, &handler.EnqueueRequestForObject{}))
+	// A descriptor reaching the cache after the mirror's hash is what
+	// wakes the mirror that waits for it. It shares the mirror's name.
+	// A cluster whose CRDs predate the kind serves the descriptor in
+	// status.targetInfo alone, and a watch on a kind the API server
+	// does not serve would keep the controller from starting.
+	// The kind is looked up once, so a gateway started before its CRD
+	// was applied reads descriptors from status.targetInfo until it
+	// restarts.
+	gvk := mxlv1alpha1.GroupVersion.WithKind("MxlFlowMirrorTarget")
+	_, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
+	switch {
+	case err == nil:
+		b = b.Watches(&mxlv1alpha1.MxlFlowMirrorTarget{}, &handler.EnqueueRequestForObject{})
+	case apimeta.IsNoMatchError(err):
+		ctrl.Log.WithName("source").Info("MxlFlowMirrorTarget is not served; reading target descriptors from status.targetInfo")
+	default:
+		return fmt.Errorf("look up MxlFlowMirrorTarget: %w", err)
+	}
+	return b.Named("mxlflowmirror-source").Complete(r)
 }
 
 // leaseInMxlSystem confines the Lease watch to the namespace the
@@ -2247,9 +2266,12 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // reconciler uses the same predicate; the two packages cannot share
 // it because gateway and operator are separate modules with no
 // shared internal package.
+// The mirror heartbeat Leases in the same namespace renew every few
+// seconds per mirror side and are left out as well.
 func leaseInMxlSystem() predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
-		return obj.GetNamespace() == mxlv1alpha1.LeaseNamespace
+		return obj.GetNamespace() == mxlv1alpha1.LeaseNamespace &&
+			!mxlv1alpha1.IsMirrorLease(obj.GetLabels())
 	})
 }
 

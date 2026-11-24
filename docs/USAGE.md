@@ -97,7 +97,7 @@ prerequisite, not a suggestion.
   never loads. A module loaded at boot needs no wait.
 - Routable inter-node networking on whatever interface the
   libfabric endpoints bind to. The gateway runs `hostNetwork`, so
-  the address it publishes in `MxlFlowMirror.status.targetInfo` is
+  the address it publishes in the mirror's target descriptor is
   the node's own IP.
 - Time synchronised across nodes via NTP, or PTP for tight media
   timing. `mxl-k8s` does not configure clocks; missing sync leaves
@@ -123,8 +123,9 @@ That installs:
 - the `mxl-operator` Deployment (cluster-scoped reconciler);
 - the `mxl-domain-agent` and `mxl-fabrics-gateway` DaemonSets,
   one Pod per node;
-- the five CRDs (`MxlFlow`, `MxlReceiver`, `MxlFlowMirror`,
-  `MxlDomain`, `MxlNodeCapabilities`);
+- the CRDs (`MxlFlow`, `MxlReceiver`, `MxlFlowMirror`,
+  `MxlFlowMirrorTarget`, `MxlFlowRedundancySet`, `MxlDomain`,
+  `MxlNodeCapabilities`);
 - ClusterRoles and ClusterRoleBindings for the above;
 - one `MxlDomain` per entry in `domains` (by default `default`, in
   the `domain` directory the agent and gateway watch).

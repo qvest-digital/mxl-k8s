@@ -217,7 +217,8 @@ Three details from the diagram are worth pulling out:
   ([`target.go:375`](../../gateway/internal/mirror/target.go))
   rebuilds only the fabric triple. The writer is retained so the
   on-disk flow definition and any consumer `FlowReader` handles
-  point at it. The new `TargetInfo` is published into status; the
+  point at it. The new `TargetInfo` is published as the mirror's
+  `MxlFlowMirrorTarget` and its hash into status; the
   source side detects the rotation through its existing watch and
   swaps that one target on its initiator.
 - **One initiator per mirror on the source side.** A flow mirrored

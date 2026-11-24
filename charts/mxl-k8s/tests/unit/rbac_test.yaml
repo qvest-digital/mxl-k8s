@@ -24,13 +24,54 @@ tests:
     template: templates/rbac-gateway.yaml
     asserts:
       - hasDocuments:
-          count: 2
+          count: 4
       - isKind:
           of: ClusterRole
         documentIndex: 0
       - isKind:
           of: ClusterRoleBinding
         documentIndex: 1
+      - isKind:
+          of: Role
+        documentIndex: 2
+      - isKind:
+          of: RoleBinding
+        documentIndex: 3
+
+  - it: gateway writes mirror heartbeat Leases in its own namespace only
+    template: templates/rbac-gateway.yaml
+    release:
+      namespace: mxl-system
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: mxl-system
+        documentIndex: 2
+      - contains:
+          path: rules
+          content:
+            apiGroups: [coordination.k8s.io]
+            resources: [leases]
+            verbs: [get, list, watch, create, update, patch, delete]
+        documentIndex: 2
+      - notContains:
+          path: rules
+          content:
+            apiGroups: [coordination.k8s.io]
+            resources: [leases]
+            verbs: [get, list, watch, create, update, patch, delete]
+        documentIndex: 0
+
+  - it: gateway role can publish and read mirror target descriptors
+    template: templates/rbac-gateway.yaml
+    documentIndex: 0
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [mxl.qvest-digital.com]
+            resources: [mxlflowmirrortargets]
+            verbs: [get, list, watch, create, update, patch]
 
   - it: agent role can list pods so the intent dispatcher can resolve SO_PEERCRED PIDs
     template: templates/rbac-agent.yaml

@@ -1359,20 +1359,13 @@ func TestSourceStateEqual_DereferencesLastSentAtPointers(t *testing.T) {
 			"on, and republishing it costs an etcd write and a cluster-wide "+
 			"watch fan-out")
 
-	// A move of a full quantum or more is published: the target-side
-	// stuck-handshake watchdog discriminates on this field, so the
-	// freshness has to keep reaching it well inside its own window.
-	later := now.Add(statusQuantum)
+	// Nor is a move of a full quantum or more: a moving lastSentAt is
+	// the source's heartbeat, which lives in its heartbeat Lease. In
+	// the status it rewrote the whole mirror every few seconds.
+	later := now.Add(time.Hour)
 	b.lastSentAt = &later
-	assert.False(t, sourceStateEqual(a, b),
-		"a lastSentAt that advanced by a full quantum must defeat the "+
-			"dedupe so the next SSA payload carries it; the target-side "+
-			"watchdog reads this field to tell a wedged source from an "+
-			"idle one")
-	assert.Less(t, statusQuantum, defaultStuckHandshakeAfter,
-		"the publish quantum has to stay well inside the stuck-handshake "+
-			"window, or the watchdog would trip on a timestamp that is "+
-			"merely waiting to be published")
+	assert.True(t, sourceStateEqual(a, b),
+		"a moving lastSentAt alone must not write the mirror's status")
 
 	// nil/non-nil asymmetry is not equal.
 	b.lastSentAt = nil
