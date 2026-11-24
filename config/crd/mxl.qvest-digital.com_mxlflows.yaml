@@ -157,7 +157,10 @@ spec:
               locations:
                 description: |-
                   Locations lists the nodes where the flow's data is currently
-                  available, including the origin and any active mirrors.
+                  available, including the origin and any active mirrors, and the
+                  nodes whose copy is still on disk but Stale. Each entry is
+                  written by the agent on its node, which removes it once the
+                  copy's directory is gone.
                 items:
                   description: MxlFlowLocation reports a flow's state on one node.
                   properties:

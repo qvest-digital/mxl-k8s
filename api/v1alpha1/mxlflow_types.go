@@ -20,8 +20,10 @@ const (
 	// MxlFlowLocationReady marks a node where a complete mirror is
 	// available to local readers.
 	MxlFlowLocationReady MxlFlowLocationPhase = "Ready"
-	// MxlFlowLocationStale marks a node where a mirror exists but the
-	// agent has not confirmed it recently.
+	// MxlFlowLocationStale marks a node whose flow directory is still on
+	// disk while nothing feeds it, so no consumer is sent there. The
+	// node's agent removes the entry once the directory is gone; a node
+	// with no entry holds no copy.
 	MxlFlowLocationStale MxlFlowLocationPhase = "Stale"
 )
 
@@ -90,7 +92,10 @@ type MxlFlowSpec struct {
 // MxlFlowStatus reports where the flow is materialized.
 type MxlFlowStatus struct {
 	// Locations lists the nodes where the flow's data is currently
-	// available, including the origin and any active mirrors.
+	// available, including the origin and any active mirrors, and the
+	// nodes whose copy is still on disk but Stale. Each entry is
+	// written by the agent on its node, which removes it once the
+	// copy's directory is gone.
 	// +optional
 	// +listType=map
 	// +listMapKey=nodeName

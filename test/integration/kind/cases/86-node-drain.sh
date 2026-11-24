@@ -10,11 +10,12 @@
 # the gateway keeps serving; nothing about the flow changes.
 #
 # Drain evicts the workload but skips DaemonSets, which is why
-# --ignore-daemonsets exists. The agent survives to notice its flow
-# directory vanish and demote its own location to Stale. The entry
-# stays on the flow, because the node is still there -- that is what
-# separates a drained node from a departed one, whose entry the
-# operator removes outright.
+# --ignore-daemonsets exists. The agent survives to settle its own
+# locations: Stale while a flow directory is still on disk with nothing
+# feeding it, removed once the directory is gone. The operator has no
+# part in it, because the node is still there -- that is what separates
+# a drained node from a departed one, whose entries the operator prunes
+# and records as LocationsPruned.
 #
 # bash 3.2 compatible: no associative arrays, no mapfile.
 
@@ -71,6 +72,8 @@ after_cordon="$(location_count "$victim")"
 echo "  cordoned: ${after_cordon} location(s) intact, agent and gateway still running"
 
 # --- drain -------------------------------------------------------
+# Second precision, as the event timestamps compared against it.
+drain_start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 "${KUBECTL[@]}" drain "$victim" \
   --ignore-daemonsets --delete-emptydir-data --force \
   --timeout="${DRAIN_TIMEOUT_SECS}s" >/dev/null 2>&1 \
@@ -84,9 +87,9 @@ echo "  cordoned: ${after_cordon} location(s) intact, agent and gateway still ru
 [ -n "$(daemonset_pod_on gateway "$victim")" ] \
   || fail "gateway pod gone from ${victim} after drain --ignore-daemonsets"
 
-# The entry must survive: the node is still registered, so the
-# operator's departed-node prune has no business touching it. Only
-# its phase moves, and only the agent moves it.
+# Nothing on the drained node may stay published as a copy a consumer
+# can be sent to. What is left is Stale or gone, and only the agent
+# moves it.
 deadline=$(( $(date +%s) + SETTLE_TIMEOUT_SECS ))
 non_stale=-1
 while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -95,16 +98,35 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   sleep 3
 done
 
-remaining="$(location_count "$victim")"
-[ "$remaining" -eq "$before_count" ] \
-  || fail "drain removed location entries for ${victim} (${before_count} -> ${remaining}); a drained node is not a departed one"
-
 if [ "$non_stale" -ne 0 ]; then
   echo "phases still recorded for ${victim}:" >&2
   location_phases "$victim" >&2
-  fail "after ${SETTLE_TIMEOUT_SECS}s, ${non_stale} location(s) on drained ${victim} are still not Stale"
+  fail "after ${SETTLE_TIMEOUT_SECS}s, ${non_stale} location(s) on drained ${victim} are still neither Stale nor removed"
 fi
-echo "  drained: ${remaining} location(s) retained and demoted to Stale, DaemonSets kept"
+
+# The node is still registered, so the operator's departed-node prune
+# has no business touching its entries. The case before this one
+# departs a node, possibly this one, so only events since the drain
+# count.
+need python3
+pruned="$("${KUBECTL[@]}" get events -A --field-selector reason=LocationsPruned -o json 2>/dev/null \
+  | python3 -c '
+import json, sys
+since, node = sys.argv[1], sys.argv[2]
+for e in json.load(sys.stdin).get("items", []):
+    at = e.get("lastTimestamp") or e.get("eventTime") or e["metadata"]["creationTimestamp"]
+    msg = e.get("message", "")
+    # "Dropped locations for departed nodes: [a b]". Matched by name:
+    # one kind worker name is a prefix of the next.
+    names = msg[msg.find("[") + 1:msg.rfind("]")].split()
+    if at[:19] >= since[:19] and node in names:
+        print(msg)
+' "$drain_start" "$victim")" || fail "could not list LocationsPruned events"
+[ -z "$pruned" ] \
+  || fail "the operator pruned locations of drained ${victim} as departed: ${pruned}"
+
+remaining="$(location_count "$victim")"
+echo "  drained: ${before_count} -> ${remaining} location(s), every one left Stale, none pruned by the operator, DaemonSets kept"
 
 # --- uncordon ----------------------------------------------------
 uncordon_node

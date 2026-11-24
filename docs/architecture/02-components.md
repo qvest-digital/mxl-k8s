@@ -120,7 +120,8 @@ question -- whether an exclusive lock can be taken on the flow's `data`
 file, which an attached writer holds shared. No writer means the
 location is `Stale` and the Lease is released. A writer plus a mirror
 naming this node as its target means `Ready`; a writer and no mirror
-means `Origin`.
+means `Origin`. Once the directory is gone the agent removes its
+location, so a node a flow does not list holds no copy of it.
 
 ## Gateway
 

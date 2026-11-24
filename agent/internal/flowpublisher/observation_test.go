@@ -128,7 +128,7 @@ func TestRefreshLocalObservations_SkipsStaleAndForeignLocations(t *testing.T) {
 	}
 }
 
-func TestPublishVanished_ClearsAppearedAtSoTheNextAppearanceRotates(t *testing.T) {
+func TestPublishVanished_NextAppearanceRotates(t *testing.T) {
 	// The gateway compares AppearedAt against the value it captured at
 	// reader open. If a vanish left the old stamp behind, a producer
 	// that restarts and republishes the same second would be
@@ -159,10 +159,15 @@ func TestPublishVanished_ClearsAppearedAtSoTheNextAppearanceRotates(t *testing.T
 
 	var got mxlv1alpha1.MxlFlow
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
+	assert.Empty(t, got.Status.Locations,
+		"a vanished copy leaves no entry, and with it no appearance")
+
+	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
 	require.Len(t, got.Status.Locations, 1)
-	assert.Equal(t, mxlv1alpha1.MxlFlowLocationStale, got.Status.Locations[0].Phase)
-	assert.Nil(t, got.Status.Locations[0].AppearedAt,
-		"a vanished copy carries no appearance, so the next one reads as a rotation")
+	require.NotNil(t, got.Status.Locations[0].AppearedAt)
+	assert.True(t, got.Status.Locations[0].AppearedAt.After(old.Time),
+		"the next appearance carries a new stamp, so it reads as a rotation")
 }
 
 func TestPublishAppeared_StampsBothTimestamps(t *testing.T) {

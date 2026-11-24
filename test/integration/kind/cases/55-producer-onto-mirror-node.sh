@@ -222,8 +222,8 @@ echo "  mxlfm/${mirror} removed once its origin and target became the same node"
 # down closes the gateway's FlowWriter, and libmxl deletes a flow on
 # release only when the departing writer can take an exclusive flock,
 # which the local producer's shared lock denies. Had it been deleted,
-# the agent's fanotify watch would demote this node to Stale, so the
-# settle window is what gives that demotion time to land and makes the
+# the agent's fanotify watch would remove this node's location, so the
+# settle window is what gives that removal time to land and makes the
 # assertion mean something.
 sleep "$SURVIVAL_SETTLE_SECS"
 still="$(phase_for "$flow" "$target")"
