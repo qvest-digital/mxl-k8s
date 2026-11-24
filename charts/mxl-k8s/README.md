@@ -156,6 +156,15 @@ gateway refuses to start where the cluster does not serve
 Anything that reads a mirror's progress or descriptor reads the
 heartbeat Leases and the `MxlFlowMirrorTarget` instead.
 
+A release after the one that deprecated them removes the three fields
+from the `MxlFlowMirror` CRD; its changelog lists the removal as a
+breaking change. The API server
+rejects a server-side apply that names a field the schema does not
+declare, so a gateway still writing them has every descriptor, progress
+and phase write refused. Every gateway, agent and operator must run the
+release that deprecated the fields, or a later one, before upgrading to
+the release that removes them.
+
 ## Bundled image versions
 
 Operator, agent, and gateway are released together with this chart
