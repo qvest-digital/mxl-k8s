@@ -124,3 +124,53 @@ func TestSource_ProgressKeepsTransitionTimeWhileStatusHolds(t *testing.T) {
 	assert.WithinDuration(t, time.Now(), cond.LastTransitionTime.Time, 2*time.Second,
 		"True to False is a transition and is stamped as one")
 }
+
+// The source reads the mirror from the cache before it publishes, and the
+// cache can trail its own last write. A flip back to the status the cache
+// still shows takes a new transition time.
+func TestSource_FlipBackWithAStaleCacheIsATransition(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	old := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
+	stale := mirrorWithFinalizer(key.Name, key.Namespace, "node-a", "flow-1", "info-1")
+	stale.Status.Conditions = []metav1.Condition{{
+		Type: mxlv1alpha1.ConditionTypeSourceProgress, Status: metav1.ConditionTrue,
+		Reason: mxlv1alpha1.ReasonHandshakeComplete, LastTransitionTime: old,
+	}}
+	r, c, _, _ := newFlakySource(t, stale)
+	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, k client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if m, ok := obj.(*mxlv1alpha1.MxlFlowMirror); ok {
+				stale.DeepCopyInto(m)
+				return nil
+			}
+			return cl.Get(ctx, k, obj, opts...)
+		},
+	})
+	ctx := context.Background()
+	require.NoError(t, r.publishSourceProgress(ctx, key, sourceProgressState{
+		status: metav1.ConditionFalse, reason: mxlv1alpha1.ReasonTransfersNotLanding, message: "m"}))
+	require.NoError(t, r.publishSourceProgress(ctx, key, sourceProgressState{
+		status: metav1.ConditionTrue, reason: mxlv1alpha1.ReasonRecovered, message: "m"}))
+
+	var got mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(ctx, key, &got))
+	assert.WithinDuration(t, time.Now(), got.Status.Conditions[0].LastTransitionTime.Time, 2*time.Second,
+		"the flip back to True is stamped now, not carried from the stale cache")
+}
+
+// Only a mirror that is not there seeds the transition time with now.
+// Any other read error fails the publish, which the flusher retries,
+// rather than restamping a condition whose status has not changed.
+func TestSource_PublishFailsOnAnUnreadableMirror(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	r, c, attempts, _ := newFlakySource(t, mirrorWithFinalizer(key.Name, key.Namespace, "node-a", "flow-1", "info-1"))
+	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return errors.New("cache not synced")
+		},
+	})
+	err := r.publishSourceProgress(context.Background(), key, sourceProgressState{
+		status: metav1.ConditionTrue, reason: mxlv1alpha1.ReasonRecovered, message: "m"})
+	require.Error(t, err)
+	assert.Zero(t, attempts.Load(), "nothing is written on a mirror that could not be read")
+}

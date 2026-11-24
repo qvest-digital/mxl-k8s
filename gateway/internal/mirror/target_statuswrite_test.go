@@ -311,3 +311,39 @@ func TestTarget_FlusherRetriesALostPublishOnABackoff(t *testing.T) {
 		"the Degraded state is published once writes go through again, "+
 			"although it has not changed since the publish that failed")
 }
+
+// The flusher publishes against the mirror the cache hands it, which can
+// trail the gateway's own last write. Degraded and then Ready again,
+// published while the cache still shows the Ready from before, is two
+// transitions: the second takes a new transition time.
+func TestTarget_FlipBackWithAStaleCacheIsATransition(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	old := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
+	stale := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1",
+		mxlv1alpha1.MxlFlowMirrorStatus{
+			Phase: mxlv1alpha1.MxlFlowMirrorReady,
+			Conditions: []metav1.Condition{{
+				Type: mxlv1alpha1.ConditionTypeTargetProgress, Status: metav1.ConditionTrue,
+				Reason: mxlv1alpha1.ReasonHandshakeComplete, LastTransitionTime: old,
+			}},
+		})
+	r, seen := newCapturingTarget(t, stale)
+	ctx := context.Background()
+	cond := func(status metav1.ConditionStatus, reason string) *metav1.Condition {
+		return &metav1.Condition{Type: mxlv1alpha1.ConditionTypeTargetProgress, Status: status, Reason: reason, Message: "m"}
+	}
+	require.NoError(t, r.applyTargetStatus(ctx, stale.DeepCopy(), mxlv1alpha1.MxlFlowMirrorDegraded, nil,
+		cond(metav1.ConditionFalse, mxlv1alpha1.ReasonNoGrains)))
+	require.NoError(t, r.applyTargetStatus(ctx, stale.DeepCopy(), mxlv1alpha1.MxlFlowMirrorReady, nil,
+		cond(metav1.ConditionTrue, mxlv1alpha1.ReasonRecovered)))
+
+	require.Len(t, *seen, 2)
+	ltt := func(p capturedPatch) time.Time {
+		v := p.status["conditions"].([]any)[0].(map[string]any)["lastTransitionTime"].(string)
+		at, err := time.Parse(time.RFC3339, v)
+		require.NoError(t, err)
+		return at
+	}
+	assert.WithinDuration(t, time.Now(), ltt((*seen)[1]), 2*time.Second,
+		"the flip back to True is stamped now, not carried from the stale cache")
+}

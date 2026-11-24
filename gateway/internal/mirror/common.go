@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -323,16 +324,60 @@ func sourceIsDelivering(mirror *mxlv1alpha1.MxlFlowMirror, openedAt time.Time) b
 	return false
 }
 
-// carryTransitionTime returns cond as it reads once merged into conds:
-// with the transition time of the live condition of the same type when
-// its status is unchanged, and with cond's own, or now when that is
-// unset, when it is not. That is meta.SetStatusCondition's rule and
-// what a transition time means; stamping now on every publish would
-// move it whenever the reason, message or a heartbeat beside it did.
-func carryTransitionTime(conds []metav1.Condition, cond metav1.Condition) metav1.Condition {
-	merged := slices.Clone(conds)
+// carryTransitionTime returns cond with the transition time of prev,
+// the condition of the same type the mirror carries, when its status
+// is unchanged, and with now when it is not or when there is none.
+// That is meta.SetStatusCondition's rule and what a transition time
+// means; stamping now on every publish would move it whenever the
+// reason, message or a heartbeat beside it did.
+func carryTransitionTime(prev *metav1.Condition, cond metav1.Condition) metav1.Condition {
+	merged := []metav1.Condition{}
+	if prev != nil {
+		merged = append(merged, *prev)
+	}
 	meta.SetStatusCondition(&merged, cond)
 	return *meta.FindStatusCondition(merged, cond.Type)
+}
+
+// publishedConditions remembers, per mirror, the progress condition a
+// gateway last wrote. Each gateway is the only writer of its own
+// condition type, so what it wrote is what the mirror carries, and the
+// transition time is carried from there rather than from the informer
+// cache: a cache that has not caught up with the last write still shows
+// the status before it, and a flip back to that status would then keep
+// a transition time from before the flip it reverses.
+type publishedConditions struct {
+	mu   sync.Mutex
+	last map[types.NamespacedName]metav1.Condition
+}
+
+// carry returns cond with its transition time carried from what was
+// last written for key, or, before the first write, from cached: the
+// condition the mirror carried when the gateway started serving it.
+func (p *publishedConditions) carry(key types.NamespacedName, cached *metav1.Condition, cond metav1.Condition) metav1.Condition {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if prev, ok := p.last[key]; ok {
+		return carryTransitionTime(&prev, cond)
+	}
+	return carryTransitionTime(cached, cond)
+}
+
+// written records cond as what key's mirror now carries.
+func (p *publishedConditions) written(key types.NamespacedName, cond metav1.Condition) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.last == nil {
+		p.last = make(map[types.NamespacedName]metav1.Condition)
+	}
+	p.last[key] = cond
+}
+
+// forget drops key, whose mirror this gateway no longer serves.
+func (p *publishedConditions) forget(key types.NamespacedName) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.last, key)
 }
 
 // publishBackoff spaces a status flusher's retries after a failed

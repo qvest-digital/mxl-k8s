@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
@@ -17,12 +18,12 @@ import (
 // been degraded.
 func TestCarryTransitionTime(t *testing.T) {
 	since := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
-	live := []metav1.Condition{{
+	live := &metav1.Condition{
 		Type:               mxlv1alpha1.ConditionTypeTargetProgress,
 		Status:             metav1.ConditionTrue,
 		Reason:             mxlv1alpha1.ReasonHandshakeComplete,
 		LastTransitionTime: since,
-	}}
+	}
 
 	got := carryTransitionTime(live, metav1.Condition{
 		Type:   mxlv1alpha1.ConditionTypeTargetProgress,
@@ -48,7 +49,7 @@ func TestCarryTransitionTime(t *testing.T) {
 	})
 	assert.WithinDuration(t, time.Now(), got.LastTransitionTime.Time, 2*time.Second,
 		"a first publish has nothing to carry")
-	assert.Len(t, live, 1, "the live conditions are not modified")
+	assert.Equal(t, mxlv1alpha1.ReasonHandshakeComplete, live.Reason, "the live condition is not modified")
 }
 
 // An apiserver that rejects writes, as one does once its etcd is out of
@@ -79,4 +80,29 @@ func TestPublishBackoff_GrowsToTheQuantumAndResetsOnSuccess(t *testing.T) {
 	assert.True(t, b.due(now), "a success clears the backoff")
 	b.failed(now, interval)
 	assert.Equal(t, interval, b.wait, "a failure after a success starts over")
+}
+
+// The informer cache can trail the gateway's own last write. A flip back
+// to the status the cache still shows is a transition all the same, and
+// takes a new transition time rather than the one from before the flip
+// it reverses.
+func TestPublishedConditions_CarryFromTheLastWriteNotTheCache(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	old := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
+	cached := &metav1.Condition{Type: mxlv1alpha1.ConditionTypeTargetProgress,
+		Status: metav1.ConditionTrue, LastTransitionTime: old}
+	var p publishedConditions
+
+	seeded := p.carry(key, cached, metav1.Condition{Type: cached.Type, Status: metav1.ConditionTrue})
+	assert.True(t, seeded.LastTransitionTime.Equal(&old), "before any write, the cache seeds the carry")
+
+	down := p.carry(key, cached, metav1.Condition{Type: cached.Type, Status: metav1.ConditionFalse})
+	p.written(key, down)
+	up := p.carry(key, cached, metav1.Condition{Type: cached.Type, Status: metav1.ConditionTrue})
+	assert.WithinDuration(t, time.Now(), up.LastTransitionTime.Time, 2*time.Second,
+		"False then True is a transition, whatever the cache still shows")
+
+	p.forget(key)
+	again := p.carry(key, cached, metav1.Condition{Type: cached.Type, Status: metav1.ConditionTrue})
+	assert.True(t, again.LastTransitionTime.Equal(&old), "a forgotten mirror is seeded from the cache again")
 }

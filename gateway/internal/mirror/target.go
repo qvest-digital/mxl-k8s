@@ -252,6 +252,9 @@ type TargetReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// published is the TargetProgress condition last written per mirror.
+	published publishedConditions
+
 	// Recorders receives what each mirror's progress loop observes. Nil
 	// records nothing.
 	Recorders Recorders
@@ -675,6 +678,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		if r.Recorders != nil {
 			r.Recorders.ReleaseTarget(req.NamespacedName)
 		}
+		r.published.forget(req.NamespacedName)
 		return r.reapOrphanedFinalizer(ctx, &mirror)
 	}
 
@@ -703,6 +707,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		if r.Recorders != nil {
 			r.Recorders.ReleaseTarget(req.NamespacedName)
 		}
+		r.published.forget(req.NamespacedName)
 		controllerutil.RemoveFinalizer(&mirror, TargetFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
 			// The other side's gateway removed its finalizer first and
@@ -2483,7 +2488,7 @@ func (r *TargetReconciler) applyTargetStatus(
 	key := client.ObjectKeyFromObject(mirror)
 	if cond != nil {
 		recordProgress(r.Recorder, key, cond.Type, cond.Reason, cond.Message)
-		c := carryTransitionTime(mirror.Status.Conditions, *cond)
+		c := r.published.carry(key, meta.FindStatusCondition(mirror.Status.Conditions, cond.Type), *cond)
 		cond = &c
 	}
 	if phase != "" && phase != mirror.Status.Phase {
@@ -2509,10 +2514,16 @@ func (r *TargetReconciler) applyTargetStatus(
 	if err := unstructured.SetNestedField(patch.Object, status, "status"); err != nil {
 		return fmt.Errorf("build SSA payload: %w", err)
 	}
-	return r.Status().Patch(ctx, patch, client.Apply,
+	if err := r.Status().Patch(ctx, patch, client.Apply,
 		client.FieldOwner(targetFieldOwner),
 		client.ForceOwnership,
-	)
+	); err != nil {
+		return err
+	}
+	if cond != nil {
+		r.published.written(key, *cond)
+	}
+	return nil
 }
 
 // surfaceTargetFailure publishes phase plus a TargetProgress=False

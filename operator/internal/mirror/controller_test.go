@@ -965,3 +965,52 @@ func TestWriteConditions_UnchangedJudgement_SendsNoApply(t *testing.T) {
 	require.NotNil(t, src)
 	assert.Equal(t, metav1.ConditionFalse, src.Status)
 }
+
+// The skip compares every field the apply would write except the
+// transition time. A judgement that differs from what the mirror carries
+// only in its message, or only in the generation it was made against,
+// is written all the same.
+func TestWriteConditions_MessageOrGenerationAloneStillApplies(t *testing.T) {
+	claimed := judgement{ok: true, reason: mxlv1alpha1.ReasonRequestorLive, message: "consumer is live"}
+	src := sourceJudgement{judgement: judgement{ok: true, reason: "OriginLive", message: "origin on n-src"}}
+	current := func(gen int64) []metav1.Condition {
+		return []metav1.Condition{
+			{Type: mxlv1alpha1.ConditionTypeClaimed, Status: metav1.ConditionTrue, Reason: claimed.reason,
+				Message: claimed.message, ObservedGeneration: gen, LastTransitionTime: metav1.Now()},
+			{Type: mxlv1alpha1.ConditionTypeSourceable, Status: metav1.ConditionTrue, Reason: src.reason,
+				Message: src.message, ObservedGeneration: gen, LastTransitionTime: metav1.Now()},
+		}
+	}
+	cases := map[string]struct {
+		gen     int64
+		claimed judgement
+		want    int
+	}{
+		"unchanged":               {gen: 1, claimed: claimed, want: 0},
+		"message only":            {gen: 1, claimed: judgement{ok: true, reason: claimed.reason, message: "another consumer is live"}, want: 1},
+		"observedGeneration only": {gen: 2, claimed: claimed, want: 1},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := newMirror()
+			m.Generation = tc.gen
+			m.Status.Conditions = current(1)
+			applies := 0
+			c := fake.NewClientBuilder().
+				WithScheme(newScheme(t)).
+				WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+				WithObjects(m).
+				WithInterceptorFuncs(interceptor.Funcs{
+					SubResourcePatch: func(ctx context.Context, cl client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+						applies++
+						return cl.SubResource(sub).Patch(ctx, obj, patch, opts...)
+					},
+				}).
+				Build()
+			r := &Reconciler{Client: c}
+			_, err := r.writeConditions(context.Background(), m, tc.claimed, src)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, applies)
+		})
+	}
+}
