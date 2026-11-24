@@ -12,6 +12,9 @@
 
 KIND_CLUSTER="${KIND_CLUSTER:-mxl-k8s-demo}"
 NAMESPACE="${MXL_NAMESPACE:-mxl-system}"
+# Where the Origin and mirror heartbeat Leases live: api/v1alpha1
+# LeaseNamespace, fixed whatever namespace the chart is installed in.
+LEASE_NAMESPACE="mxl-system"
 KUBECTL=(kubectl --context "kind-${KIND_CLUSTER}")
 KIND_DIAG_DIR="${KIND_DIAG_DIR:-${PWD}/kind-diagnostics}"
 ROLLOUT_TIMEOUT_SECS="${ROLLOUT_TIMEOUT_SECS:-180}"

@@ -35,7 +35,7 @@ cleanup() {
   "${KUBECTL[@]}" delete mxlflow "$GC_FLOW" --ignore-not-found >/dev/null 2>&1 || true
   "${KUBECTL[@]}" -n "$NAMESPACE" delete mxlflowmirror "$GC_MIRROR" "$GC_UNCLAIMED" \
     --ignore-not-found >/dev/null 2>&1 || true
-  "${KUBECTL[@]}" -n mxl-system delete lease "$GC_LEASE" "${GC_LEASE_FLOWGONE}${live_node:-x}" \
+  "${KUBECTL[@]}" -n "$LEASE_NAMESPACE" delete lease "$GC_LEASE" "${GC_LEASE_FLOWGONE}${live_node:-x}" \
     --ignore-not-found >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -232,12 +232,12 @@ echo "  flow with no live copy collected"
 # wrote it is the only other thing that deletes one, and a node removed
 # from the cluster takes its agent with it -- which is how a showcase
 # cluster accumulated eight of these over a week.
-"${KUBECTL[@]}" -n mxl-system apply -f - <<EOF >/dev/null
+"${KUBECTL[@]}" -n "$LEASE_NAMESPACE" apply -f - <<EOF >/dev/null
 apiVersion: coordination.k8s.io/v1
 kind: Lease
 metadata:
   name: $GC_LEASE
-  namespace: mxl-system
+  namespace: ${LEASE_NAMESPACE}
 spec:
   holderIdentity: node-that-left
   leaseDurationSeconds: 30
@@ -247,7 +247,7 @@ print((datetime.datetime.now(datetime.timezone.utc)
        - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000000Z"))')"
 EOF
 
-gone -n mxl-system "lease/$GC_LEASE" \
+gone -n "$LEASE_NAMESPACE" "lease/$GC_LEASE" \
   || fail "an expired origin Lease naming a node that left the cluster survived. Check the operator's delete verb on coordination.k8s.io/leases"
 echo "  origin Lease whose holder node is gone: collected"
 
@@ -258,12 +258,12 @@ echo "  origin Lease whose holder node is gone: collected"
 # because it releases by walking what is on its own disk.
 live_node=$("${KUBECTL[@]}" get nodes -o jsonpath='{.items[0].metadata.name}')
 [ -n "$live_node" ] || fail "could not read a node name"
-"${KUBECTL[@]}" -n mxl-system apply -f - <<EOF >/dev/null
+"${KUBECTL[@]}" -n "$LEASE_NAMESPACE" apply -f - <<EOF >/dev/null
 apiVersion: coordination.k8s.io/v1
 kind: Lease
 metadata:
   name: ${GC_LEASE_FLOWGONE}${live_node}
-  namespace: mxl-system
+  namespace: ${LEASE_NAMESPACE}
 spec:
   holderIdentity: $live_node
   leaseDurationSeconds: 30
@@ -273,7 +273,7 @@ print((datetime.datetime.now(datetime.timezone.utc)
        - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000000Z"))')"
 EOF
 
-gone -n mxl-system "lease/${GC_LEASE_FLOWGONE}${live_node}" \
+gone -n "$LEASE_NAMESPACE" "lease/${GC_LEASE_FLOWGONE}${live_node}" \
   || fail "an expired origin Lease whose flow no longer exists survived, though its holder node is still here"
 echo "  origin Lease whose flow is gone: collected"
 
@@ -286,7 +286,7 @@ echo "  origin Lease whose flow is gone: collected"
 
 # The collectors are cluster-wide, so the last thing to establish is
 # that the pass which removed three objects removed only those three.
-live=$("${KUBECTL[@]}" -n mxl-system get leases -o name 2>/dev/null | grep -c '^lease.coordination.k8s.io/mxl-flow-' || true)
+live=$("${KUBECTL[@]}" -n "$LEASE_NAMESPACE" get leases -o name 2>/dev/null | grep -c '^lease.coordination.k8s.io/mxl-flow-' || true)
 [ "${live:-0}" -gt 0 ] \
   || fail "no origin Lease left in mxl-system; the demo's producers hold flows, so their Leases must survive"
 echo "  ${live} live origin Lease(s) untouched"

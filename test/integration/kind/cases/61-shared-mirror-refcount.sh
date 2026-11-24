@@ -130,7 +130,7 @@ LEASE_NAME="mxl-flow-${TEST_FLOW}-${SOURCE_NODE}"
 # semantically irrelevant here. Hard-code .000000 because GNU date's
 # %N is not portable to BSD date and the precision is unused.
 NOW_MICROTIME="$(date -u +%Y-%m-%dT%H:%M:%S).000000Z"
-"${KUBECTL[@]}" -n mxl-system apply -f - <<EOF >/dev/null \
+"${KUBECTL[@]}" -n "$LEASE_NAMESPACE" apply -f - <<EOF >/dev/null \
   || fail "create origin lease ${LEASE_NAME} failed"
 apiVersion: coordination.k8s.io/v1
 kind: Lease
@@ -143,7 +143,7 @@ spec:
   renewTime: ${NOW_MICROTIME}
 EOF
 trap '
-  "${KUBECTL[@]}" -n mxl-system delete lease "${LEASE_NAME}" --ignore-not-found >/dev/null 2>&1 || true
+  "${KUBECTL[@]}" -n "$LEASE_NAMESPACE" delete lease "${LEASE_NAME}" --ignore-not-found >/dev/null 2>&1 || true
   "${KUBECTL[@]}" delete mxlflow "$TEST_FLOW" --ignore-not-found >/dev/null 2>&1 || true
   cleanup
 ' EXIT

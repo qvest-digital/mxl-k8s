@@ -194,7 +194,7 @@ echo "  ${target} claimed Origin for ${flow}"
 # Only the Origin renews the Lease, so the claim has to bring one with
 # it or consumers read the new Origin as stale.
 lease="mxl-flow-${flow}-${target}"
-"${KUBECTL[@]}" -n "$NAMESPACE" get "lease/${lease}" >/dev/null 2>&1 \
+"${KUBECTL[@]}" -n "$LEASE_NAMESPACE" get "lease/${lease}" >/dev/null 2>&1 \
   || fail "no origin Lease ${lease} after ${target} claimed Origin"
 echo "  origin Lease ${lease} present"
 

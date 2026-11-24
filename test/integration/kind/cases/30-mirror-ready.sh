@@ -37,7 +37,7 @@ sha256() {
 # heartbeat <side> <mirror>: whether that side's heartbeat Lease for the
 # mirror exists.
 heartbeat() {
-  "${KUBECTL[@]}" -n "$NAMESPACE" get leases -l "mxl.qvest-digital.com/mirror-side=$1" \
+  "${KUBECTL[@]}" -n "$LEASE_NAMESPACE" get leases -l "mxl.qvest-digital.com/mirror-side=$1" \
       -o jsonpath='{range .items[*]}{.metadata.annotations.mxl\.qvest-digital\.com/mirror}{"\n"}{end}' \
     | grep -Fxq "${NAMESPACE}/$2"
 }

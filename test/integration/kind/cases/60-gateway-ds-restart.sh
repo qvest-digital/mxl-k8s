@@ -74,7 +74,7 @@ sha256() {
 target_beat() {
   local hash
   hash=$(printf '%s' "${NAMESPACE}/$1" | sha256 | cut -c1-32)
-  "${KUBECTL[@]}" -n mxl-system get lease "mxl-mirror-${hash}-target" \
+  "${KUBECTL[@]}" -n "$LEASE_NAMESPACE" get lease "mxl-mirror-${hash}-target" \
       -o jsonpath='{.spec.renewTime}' 2>/dev/null || true
 }
 
