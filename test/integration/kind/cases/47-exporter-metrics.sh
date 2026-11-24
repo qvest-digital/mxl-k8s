@@ -54,7 +54,7 @@ metric_line() {
 # The mxl_mirror_heartbeat_age_seconds sample for one side of a mirror,
 # empty when the exporter reports none.
 heartbeat_age() {
-  awk -v m="mirror=\"$2\"" -v n="namespace=\"$3\"" -v s="side=\"$4\"" '
+  awk -v m="mirror=\"$2\"" -v n="mirror_namespace=\"$3\"" -v s="side=\"$4\"" '
     index($0, "mxl_mirror_heartbeat_age_seconds{") == 1 &&
       index($0, m) > 0 && index($0, n) > 0 && index($0, s) > 0 { print $NF; exit }
   ' "$1"

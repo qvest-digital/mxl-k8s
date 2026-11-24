@@ -206,7 +206,7 @@ every pod on its node, so one exporter per node reports each flow once.
 `mxl_flow_location_info`, read from the `MxlFlow` CRs, gives the phase
 per node -- `Origin` on the node the writer runs on -- which separates a
 produced flow from a mirrored one without a media function labelling
-itself. `mxl_mirror_heartbeat_age_seconds{namespace,mirror,side,node}`,
+itself. `mxl_mirror_heartbeat_age_seconds{mirror_namespace,mirror,side,node}`,
 read from the heartbeat Leases the gateways renew, is the time since
 each mirror side last made progress, reported by the exporter on the
 node of the gateway serving that side.

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr/testr"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -61,12 +62,12 @@ func TestCollectReportsOnlyTheSidesThisNodeServes(t *testing.T) {
 	}
 
 	require.NoError(t, testutil.CollectAndCompare(newCollector(t, "node-a", objs...), strings.NewReader(help+`
-mxl_mirror_heartbeat_age_seconds{mirror="audio--node-a",namespace="prod",side="target"} 90
-mxl_mirror_heartbeat_age_seconds{mirror="video--node-b",namespace="prod",side="source"} 2
+mxl_mirror_heartbeat_age_seconds{mirror="audio--node-a",mirror_namespace="prod",side="target"} 90
+mxl_mirror_heartbeat_age_seconds{mirror="video--node-b",mirror_namespace="prod",side="source"} 2
 `), "mxl_mirror_heartbeat_age_seconds"))
 
 	require.NoError(t, testutil.CollectAndCompare(newCollector(t, "node-b", objs...), strings.NewReader(help+`
-mxl_mirror_heartbeat_age_seconds{mirror="video--node-b",namespace="prod",side="target"} 3
+mxl_mirror_heartbeat_age_seconds{mirror="video--node-b",mirror_namespace="prod",side="target"} 3
 `), "mxl_mirror_heartbeat_age_seconds"))
 }
 
@@ -89,4 +90,40 @@ func TestCollectSkipsLeasesThatAreNoHeartbeat(t *testing.T) {
 
 	c := newCollector(t, "node-a", origin, unrenewed, unnamed, elsewhere)
 	require.Equal(t, 0, testutil.CollectAndCount(c, "mxl_mirror_heartbeat_age_seconds"))
+}
+
+// Two mirrors may share a name in two namespaces, both served by one
+// node. Each is its own series, told apart by the mirror's namespace.
+func TestCollectSeparatesSameNamedMirrorsByNamespace(t *testing.T) {
+	c := newCollector(t, "node-a",
+		heartbeat("prod", "video--node-b", mxlv1alpha1.MirrorSideSource, "node-a", now.Add(-2*time.Second)),
+		heartbeat("staging", "video--node-b", mxlv1alpha1.MirrorSideSource, "node-a", now.Add(-40*time.Second)),
+	)
+
+	require.NoError(t, testutil.CollectAndCompare(c, strings.NewReader(help+`
+mxl_mirror_heartbeat_age_seconds{mirror="video--node-b",mirror_namespace="prod",side="source"} 2
+mxl_mirror_heartbeat_age_seconds{mirror="video--node-b",mirror_namespace="staging",side="source"} 40
+`), "mxl_mirror_heartbeat_age_seconds"))
+}
+
+// A ServiceMonitor scrape sets these labels on every series to the
+// scraped pod's own, and a series that already carries one keeps its
+// value only as exported_<label>. The mirror's namespace under
+// "namespace" would be read as the exporter's, and same-named mirrors
+// of two namespaces would only be told apart by a label no query uses.
+func TestCollectUsesNoLabelAScrapeOverwrites(t *testing.T) {
+	c := newCollector(t, "node-a",
+		heartbeat("prod", "video--node-b", mxlv1alpha1.MirrorSideSource, "node-a", now))
+	reg := prometheus.NewPedanticRegistry()
+	require.NoError(t, reg.Register(c))
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	require.Len(t, families, 1)
+	for _, m := range families[0].GetMetric() {
+		for _, l := range m.GetLabel() {
+			require.NotContains(t,
+				[]string{"namespace", "pod", "service", "container", "endpoint", "job", "instance"},
+				l.GetName())
+		}
+	}
 }
