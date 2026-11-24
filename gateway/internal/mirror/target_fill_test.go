@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -93,6 +94,41 @@ func TestTargetFillEndsWithTheEntry(t *testing.T) {
 		r.recoverFromFatalError(key)
 		_, unfilled := f.counts()
 		require.Equal(t, 1, unfilled, "the cap dropped the entry")
+	})
+
+	// A progress loop parked inside libmxl-fabrics keeps the writer it
+	// may be using, and the entry is given up without it. The fill is
+	// not the loop's, and goes with the entry.
+	t.Run("dropped with a wedged progress loop", func(t *testing.T) {
+		r, entry, f := filledTarget(t, ready)
+		entry.done = make(chan struct{})
+		entry.cancel = func() {}
+		r.TeardownGrace = time.Millisecond
+		entry.recoveryAttempts.Store(maxStuckRebuilds)
+		r.recoverFromFatalError(key)
+		_, unfilled := f.counts()
+		require.Equal(t, 1, unfilled)
+	})
+
+	t.Run("flusher cap with a wedged progress loop", func(t *testing.T) {
+		w := newTargetWatchdogFixture(t, 1)
+		f := &fills{}
+		w.r.Filled = func(string, string) { f.mu.Lock(); f.filled++; f.mu.Unlock() }
+		w.r.Unfilled = func(string, string) { f.mu.Lock(); f.unfilled++; f.mu.Unlock() }
+		w.r.TeardownGrace = time.Millisecond
+		w.entry.ringRelease = w.r.fill("/domain", "flow-1", func() {})
+		w.entry.done = make(chan struct{})
+		w.entry.recoveryAttempts.Store(maxStuckRebuilds)
+		w.stampSourceActivity(t, time.Now())
+		w.startFlusher(t)
+		select {
+		case <-w.done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the flusher's cap branch never ran")
+		}
+		w.cancel = nil
+		_, unfilled := f.counts()
+		require.Equal(t, 1, unfilled)
 	})
 
 	t.Run("closed for another open", func(t *testing.T) {

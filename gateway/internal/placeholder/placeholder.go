@@ -219,6 +219,10 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 
 	m.mu.Lock()
 	e := m.held[req.Name]
+	var filled bool
+	if e != nil {
+		filled = e.filled
+	}
 	m.mu.Unlock()
 	// The marker of a placeholder being replaced stays until the new one
 	// is held. The agent reads the marker, the definition and the writers
@@ -233,7 +237,7 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	}()
 	if e != nil {
 		// A placeholder a mirror fills is that mirror's copy until it goes.
-		if e.filled {
+		if filled {
 			return reconcile.Result{}, nil
 		}
 		// The writer's flock is advisory and does not keep the directory:
@@ -365,8 +369,10 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	// it not written yet; one whose fill also ended found none to mark
 	// again. The marker is settled here, under the lock Filled and
 	// Unfilled change it under, so neither lands between the decision
-	// and the file.
-	filled := m.fills[keyOf(domain, e.id)] > 0
+	// and the file. The I/O under the lock is one file in the marker
+	// directory, never a lookup of a flow name, so nothing in it waits on
+	// mxlfs.
+	filled = m.fills[keyOf(domain, e.id)] > 0
 	e.filled = filled
 	if filled {
 		_ = os.Remove(MarkerPath(domain, e.id))

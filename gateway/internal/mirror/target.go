@@ -604,6 +604,20 @@ func (e *targetEntry) abandon() *mxl.Writer {
 	return writer
 }
 
+// releaseRing drops the holds on the entry's ring and ends its fill,
+// once, leaving the writer alone. An entry given up while its progress
+// loop still runs keeps the writer the loop may be using, but its ring
+// and fill go with it as on every other way out.
+func (e *targetEntry) releaseRing() {
+	e.lifecycle.Lock()
+	release := e.ringRelease
+	e.ringRelease = nil
+	e.lifecycle.Unlock()
+	if release != nil {
+		release()
+	}
+}
+
 // waitClosed reports whether ch closed within d. A nil channel counts
 // as closed: an entry whose goroutine was never started has nothing to
 // wait for.
@@ -2329,6 +2343,7 @@ func (r *TargetReconciler) dropFailedEntry(key types.NamespacedName, entry *targ
 	// the grace keeps the writer: an orphaned handle beats a double
 	// free.
 	if !entry.stopProgressLoop(r.teardownGrace()) {
+		entry.releaseRing()
 		return
 	}
 	if writer := entry.abandon(); writer != nil {
@@ -2391,12 +2406,8 @@ func closeTargetHandles(e *targetEntry, disp flowDisposition, grace time.Duratio
 	flusherCancel, flusherDone := e.flusherCancel, e.flusherDone
 	info, target, writer := e.info, e.target, e.writer
 	e.info, e.target, e.writer = nil, nil, nil
-	ringRelease := e.ringRelease
-	e.ringRelease = nil
 	e.lifecycle.Unlock()
-	if ringRelease != nil {
-		defer ringRelease()
-	}
+	defer e.releaseRing()
 
 	if flusherCancel != nil {
 		flusherCancel()
@@ -2785,6 +2796,7 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 					log.FromContext(ctx).Info(
 						"stuck handshake cap: progress loop did not exit, abandoning libmxl handles",
 						"mirror", key, "grace", r.teardownGrace())
+					entry.releaseRing()
 					return
 				}
 				if writer := entry.abandon(); writer != nil {
