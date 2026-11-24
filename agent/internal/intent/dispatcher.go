@@ -838,7 +838,7 @@ func (d *Dispatcher) waitReady(ctx context.Context, mirror *mxlv1alpha1.MxlFlowM
 				return err
 			}
 		} else if current.Status.Phase == mxlv1alpha1.MxlFlowMirrorReady &&
-			(current.Status.TargetInfoHash != "" || current.Status.TargetInfo != "") {
+			current.Status.TargetInfoHash != "" {
 			return nil
 		} else if current.Status.Phase == mxlv1alpha1.MxlFlowMirrorFailed {
 			return errors.New("mirror entered Failed phase")

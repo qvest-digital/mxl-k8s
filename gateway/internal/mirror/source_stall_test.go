@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -26,7 +27,7 @@ func stalledEntry(head uint64, headAt *time.Time, transfers uint64, sentAt time.
 	// reader rebuild budget and the writer-liveness seam through it.
 	// Added against the TargetInfo the test mirrors publish, so the
 	// flusher treats it as attached to the current fabric side.
-	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1"}
+	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1", infoHash: descriptorHash("info-1")}
 	e.lastHead.Store(head)
 	if headAt != nil {
 		t := *headAt
@@ -268,17 +269,16 @@ func TestRunSampleTransferLoop_RecordsProbedHead(t *testing.T) {
 	assert.True(t, state.rebuildReader)
 }
 
-func TestReconcile_PreservesLastSentAtAcrossReopen(t *testing.T) {
-	// publishSourceProgress omits lastSentAt when the entry carries
-	// none, and SSA releases an omitted field, so the apiserver
-	// strips the published value. A reopened entry starts with zero
-	// transfers, so without seeding, a reopen erases the timestamp
-	// the target-side stuck-handshake watchdog discriminates on.
+func TestReconcile_SeedsLastSentAtFromTheHeartbeat(t *testing.T) {
+	// The flusher renews the source heartbeat from the entry's
+	// lastSentAt, and a reopened entry starts with zero transfers.
+	// Without seeding it from the Lease, the target-side
+	// stuck-handshake watchdog would read a source that had been
+	// sending as one that never did until the next transfer.
 	scheme := newSourceTestScheme(t)
 	flowID := "flow-1"
 	mirror := mirrorWithFinalizer("m1", "ns1", "node-a", flowID, "info-1")
 	sentAt := metav1.NewTime(time.Now().Add(-time.Minute).Truncate(time.Second))
-	mirror.Status.LastSentAt = &sentAt
 
 	opened := metav1.NewTime(time.Now().Add(-2 * time.Minute))
 	flow := &mxlv1alpha1.MxlFlow{
@@ -295,8 +295,10 @@ func TestReconcile_PreservesLastSentAtAcrossReopen(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}, &mxlv1alpha1.MxlFlow{}).
-		WithObjects(mirror, flow).
+		WithObjects(withDescriptors(mirror, flow)...).
 		Build()
+	require.NoError(t, applyHeartbeat(context.Background(), c, client.ObjectKeyFromObject(mirror),
+		mxlv1alpha1.MirrorSideSource, sourceFieldOwner, "node-a", sentAt.Time))
 
 	opener := &fakeOpener{
 		openFn: func(string, fabrics.Provider) (*sharedSource, error) {
@@ -324,7 +326,7 @@ func TestReconcile_PreservesLastSentAtAcrossReopen(t *testing.T) {
 	require.NotNil(t, entry)
 
 	got := entry.lastSentAt.Load()
-	require.NotNil(t, got, "a rebuilt entry must inherit the published lastSentAt")
+	require.NotNil(t, got, "a rebuilt entry must inherit the source heartbeat")
 	assert.True(t, got.Equal(sentAt.Time))
 
 	state := observedState(entry, defaultReaderStallAfter)
@@ -335,8 +337,8 @@ func TestReconcile_PreservesLastSentAtAcrossReopen(t *testing.T) {
 
 func TestRunFlusher_ReopensWedgedReader(t *testing.T) {
 	// The wedge neither side resolves alone: the target's watchdog is
-	// gated on status.lastSentAt postdating its own fabric open, and a
-	// reader that has transferred nothing never advances lastSentAt,
+	// gated on the source heartbeat postdating its own fabric open, and
+	// a reader that has transferred nothing never advances it,
 	// so the target treats the mirror as an idle producer. Publishing
 	// ReaderNotAdvancing and waiting leaves it Degraded forever.
 	scheme := newSourceTestScheme(t)
@@ -344,7 +346,7 @@ func TestRunFlusher_ReopensWedgedReader(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	rebuilt := make(chan types.NamespacedName, 4)
@@ -404,7 +406,7 @@ func TestRunFlusher_ReopensReaderStuckOutsideTheRing(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	rebuilt := make(chan types.NamespacedName, 4)
@@ -455,7 +457,7 @@ func TestRunFlusher_StopsReopeningAtCap(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
@@ -499,7 +501,7 @@ func TestRunFlusher_ClearsRebuildBudgetOnProgress(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
@@ -534,7 +536,7 @@ func ptrTime(t time.Time) *time.Time { return &t }
 // A post the initiator rejects for good is published with the error
 // the loop received, which go-mxl carries as the libmxl status alone.
 func TestObservedState_CarriesAPostRejectedForGood(t *testing.T) {
-	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1"}
+	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1", infoHash: descriptorHash("info-1")}
 	e.openedAt = time.Now()
 	e.recordPostFailed(fmt.Errorf("%w: %w", errPost, mxl.ErrInvalidArg))
 
@@ -556,7 +558,7 @@ func TestObservedState_AllInvalidSourceDeliversHeaders(t *testing.T) {
 	}
 	dst := &recordingSender{}
 	h := &headScript{heads: []uint64{1000, 1003}}
-	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1"}
+	e := &sourceEntry{shared: &sharedSource{key: testFlowKey}, infoStr: "info-1", infoHash: descriptorHash("info-1")}
 	e.openedAt = time.Now().Add(-time.Minute)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

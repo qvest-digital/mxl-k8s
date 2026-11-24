@@ -29,6 +29,23 @@ func heartbeatKey(mirror types.NamespacedName, side mxlv1alpha1.MirrorSide) type
 	}
 }
 
+// heartbeatLease is the heartbeat Lease a gateway on holder would have
+// renewed for one side of the mirror at at, for a fixture to start
+// from.
+func heartbeatLease(mirror types.NamespacedName, side mxlv1alpha1.MirrorSide, holder string, at time.Time) *coordinationv1.Lease {
+	k := heartbeatKey(mirror, side)
+	renew := metav1.NewMicroTime(at)
+	return &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   k.Namespace,
+			Name:        k.Name,
+			Labels:      map[string]string{mxlv1alpha1.LabelMirrorSide: string(side)},
+			Annotations: map[string]string{mxlv1alpha1.AnnotationMirror: mirror.String()},
+		},
+		Spec: coordinationv1.LeaseSpec{HolderIdentity: &holder, RenewTime: &renew},
+	}
+}
+
 func readHeartbeat(t *testing.T, c client.Client, mirror types.NamespacedName, side mxlv1alpha1.MirrorSide) *coordinationv1.Lease {
 	t.Helper()
 	var lease coordinationv1.Lease
@@ -82,11 +99,11 @@ func TestTarget_FlusherBeatsTheLeaseNotTheStatus(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1",
-		mxlv1alpha1.MxlFlowMirrorStatus{Phase: mxlv1alpha1.MxlFlowMirrorReady, TargetInfo: "info-1"})
+		mxlv1alpha1.MxlFlowMirrorStatus{Phase: mxlv1alpha1.MxlFlowMirrorReady, TargetInfoHash: descriptorHash("info-1")})
 	var w writeCounter
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).WithInterceptorFuncs(w.funcs()).Build()
+		WithObjects(withDescriptors(mirror)...).WithInterceptorFuncs(w.funcs()).Build()
 	r := &TargetReconciler{Client: c, Scheme: scheme, NodeName: "node-a",
 		FlushInterval: time.Millisecond, targets: map[types.NamespacedName]*targetEntry{}}
 
@@ -131,7 +148,7 @@ func TestSource_FlusherBeatsTheLeaseNotTheStatus(t *testing.T) {
 	var w writeCounter
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirrorWithFinalizer(key.Name, key.Namespace, "node-a", "flow-1", "info-1")).
+		WithObjects(withDescriptors(mirrorWithFinalizer(key.Name, key.Namespace, "node-a", "flow-1", "info-1"))...).
 		WithInterceptorFuncs(w.funcs()).Build()
 	r := &SourceReconciler{Client: c, Scheme: scheme, NodeName: "node-a",
 		sources: map[types.NamespacedName]*sourceEntry{}, attempts: attemptTable[sourceAddInputs]{},
@@ -163,35 +180,25 @@ func TestSource_FlusherBeatsTheLeaseNotTheStatus(t *testing.T) {
 	assert.WithinDuration(t, start.Add(statusQuantum), lease.Spec.RenewTime.Time, time.Millisecond)
 }
 
-// heartbeatAt takes the later of the Lease and the status, so a target
-// reads a source that predates the Lease, and a Lease left behind by an
-// earlier holder does not hide a newer status.
-func TestHeartbeatAt_TakesTheLaterOfLeaseAndStatus(t *testing.T) {
+// heartbeatAt is the renew time of the side's Lease, and nil without
+// one: a side that has not progressed since its gateway took the
+// mirror up. Each side reads its own.
+func TestHeartbeatAt_ReadsTheLease(t *testing.T) {
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithFinalizer(key.Name, key.Namespace, "node-a", "flow-1", "info-1")
 	c := fake.NewClientBuilder().WithScheme(newSourceTestScheme(t)).Build()
 	ctx := context.Background()
 
-	assert.Nil(t, heartbeatAt(ctx, c, mirror, mxlv1alpha1.MirrorSideSource), "neither is set")
+	assert.Nil(t, heartbeatAt(ctx, c, mirror, mxlv1alpha1.MirrorSideSource), "no Lease is no progress")
 
-	status := time.Now().Add(-time.Minute).Truncate(time.Second)
-	mirror.Status.LastSentAt = &metav1.Time{Time: status}
+	beat := time.Now().Add(-time.Minute)
+	require.NoError(t, applyHeartbeat(ctx, c, key, mxlv1alpha1.MirrorSideSource, sourceFieldOwner, "node-a", beat))
 	got := heartbeatAt(ctx, c, mirror, mxlv1alpha1.MirrorSideSource)
 	require.NotNil(t, got)
-	assert.True(t, got.Equal(status), "a source without a Lease is read from the status")
-
-	beat := status.Add(30 * time.Second)
-	require.NoError(t, applyHeartbeat(ctx, c, key, mxlv1alpha1.MirrorSideSource, sourceFieldOwner, "node-a", beat))
-	got = heartbeatAt(ctx, c, mirror, mxlv1alpha1.MirrorSideSource)
-	require.NotNil(t, got)
-	assert.WithinDuration(t, beat, *got, time.Microsecond, "a newer Lease wins")
-
-	mirror.Status.LastSentAt = &metav1.Time{Time: beat.Add(time.Minute).Truncate(time.Second)}
-	got = heartbeatAt(ctx, c, mirror, mxlv1alpha1.MirrorSideSource)
-	assert.True(t, got.Equal(mirror.Status.LastSentAt.Time), "a newer status wins")
+	assert.WithinDuration(t, beat, *got, time.Microsecond)
 
 	assert.Nil(t, heartbeatAt(ctx, c, mirror, mxlv1alpha1.MirrorSideTarget),
-		"each side reads its own Lease and field")
+		"each side reads its own Lease")
 }
 
 // The post-handshake wedge watchdog reads the source's progress from its
@@ -210,7 +217,6 @@ func TestRunFlusher_PostHandshakeWedge_ReadsTheSourceHeartbeat(t *testing.T) {
 	f.entry.lastCommitAt.Store(&commitAt)
 	require.NoError(t, applyHeartbeat(context.Background(), f.c, f.key, mxlv1alpha1.MirrorSideSource,
 		sourceFieldOwner, "node-x", commitAt.Add(4*time.Second)))
-	require.Nil(t, getMirrorStatus(t, f.c, f.key).LastSentAt, "the status carries no lastSentAt")
 
 	f.startFlusher(t)
 	defer f.stopFlusher(t)
@@ -237,21 +243,18 @@ func TestRunFlusher_NeverHandshook_ReadsTheSourceHeartbeat(t *testing.T) {
 	}
 }
 
-// The Reconcile fast path reads the target's own heartbeat. A mirror
-// whose status carries a lastGrainAt from its last transition, long
-// ago, is still live while its Lease is fresh, and falling through
-// would open a second fabric side for it.
+// The Reconcile fast path reads the target's own heartbeat. A Ready
+// mirror whose Lease is fresh is live, and falling through would open a
+// second fabric side for it.
 func TestReconcile_FastPathReadsTheTargetHeartbeat(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
-	old := metav1.NewTime(time.Now().Add(-time.Hour))
 	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{
-		Phase:       mxlv1alpha1.MxlFlowMirrorReady,
-		TargetInfo:  "info-1",
-		LastGrainAt: &old,
+		Phase:          mxlv1alpha1.MxlFlowMirrorReady,
+		TargetInfoHash: descriptorHash("info-1"),
 	})
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).WithObjects(mirror).Build()
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).WithObjects(withDescriptors(mirror)...).Build()
 	require.NoError(t, applyHeartbeat(context.Background(), c, key, mxlv1alpha1.MirrorSideTarget,
 		targetFieldOwner, "node-a", time.Now()))
 	r := &TargetReconciler{Client: c, Scheme: scheme, NodeName: "node-a",
@@ -276,7 +279,7 @@ func TestTeardown_DeletesTheHeartbeat(t *testing.T) {
 	mirror.Spec.SourceNode = "node-a"
 	mirror.DeletionTimestamp = &now
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).WithObjects(mirror).Build()
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).WithObjects(withDescriptors(mirror)...).Build()
 	ctx := context.Background()
 	for _, side := range []mxlv1alpha1.MirrorSide{mxlv1alpha1.MirrorSideSource, mxlv1alpha1.MirrorSideTarget} {
 		require.NoError(t, applyHeartbeat(ctx, c, key, side, "test", "node-a", time.Now()))
@@ -316,20 +319,20 @@ func TestLeasePredicate_IgnoresMirrorHeartbeats(t *testing.T) {
 	assert.True(t, p.Generic(event.GenericEvent{Object: origin}))
 }
 
-// A recovery's phase-only writes release TargetProgress and lastGrainAt
-// under the flusher's field manager. A moving commit time no longer
-// writes the status, so the flusher has to publish its state again once
-// the recovery is done, or the mirror reads Ready with neither until its
-// next phase change.
+// A recovery's phase-only writes release TargetProgress under the
+// flusher's field manager. A moving commit time does not write the
+// status, so the flusher has to publish its state again once the
+// recovery is done, or the mirror reads Ready without the condition
+// until its next phase change.
 func TestRunFlusher_RepublishesAfterRecovery(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1",
-		mxlv1alpha1.MxlFlowMirrorStatus{Phase: mxlv1alpha1.MxlFlowMirrorReady, TargetInfo: "info-1"})
+		mxlv1alpha1.MxlFlowMirrorStatus{Phase: mxlv1alpha1.MxlFlowMirrorReady, TargetInfoHash: descriptorHash("info-1")})
 	var w writeCounter
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).WithInterceptorFuncs(w.funcs()).Build()
+		WithObjects(withDescriptors(mirror)...).WithInterceptorFuncs(w.funcs()).Build()
 	r := &TargetReconciler{Client: c, Scheme: scheme, NodeName: "node-a",
 		FlushInterval: time.Millisecond, targets: map[types.NamespacedName]*targetEntry{}}
 	entry := &targetEntry{infoStr: "info-1"}
@@ -360,7 +363,7 @@ func TestTeardown_FailedHeartbeatDeleteKeepsTheFinalizerMoving(t *testing.T) {
 	mirror.Finalizers = append(mirror.Finalizers, "test/hold")
 	mirror.DeletionTimestamp = &now
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).WithObjects(mirror).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).WithObjects(withDescriptors(mirror)...).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
 				if _, ok := obj.(*coordinationv1.Lease); ok {
@@ -379,7 +382,7 @@ func TestTeardown_FailedHeartbeatDeleteKeepsTheFinalizerMoving(t *testing.T) {
 	assert.NotContains(t, got.Finalizers, TargetFinalizerName)
 }
 
-// Every phase-only status write releases TargetProgress and lastGrainAt,
+// Every phase-only status write releases TargetProgress,
 // not only a rebuild's: the slow path's Materializing and Ready for a
 // mirror whose entry is live do the same. The flusher publishes its
 // state again after any of them.
@@ -387,11 +390,11 @@ func TestRunFlusher_RepublishesAfterAPhaseOnlyWrite(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1",
-		mxlv1alpha1.MxlFlowMirrorStatus{Phase: mxlv1alpha1.MxlFlowMirrorReady, TargetInfo: "info-1"})
+		mxlv1alpha1.MxlFlowMirrorStatus{Phase: mxlv1alpha1.MxlFlowMirrorReady, TargetInfoHash: descriptorHash("info-1")})
 	var w writeCounter
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).WithInterceptorFuncs(w.funcs()).Build()
+		WithObjects(withDescriptors(mirror)...).WithInterceptorFuncs(w.funcs()).Build()
 	entry := &targetEntry{infoStr: "info-1"}
 	now := time.Now()
 	entry.lastCommitAt.Store(&now)
@@ -404,9 +407,9 @@ func TestRunFlusher_RepublishesAfterAPhaseOnlyWrite(t *testing.T) {
 	defer func() { cancel(); <-done }()
 	require.Eventually(t, func() bool { s, _ := w.counts(); return s == 1 }, time.Second, time.Millisecond)
 
-	require.NoError(t, r.applyTargetStatus(context.Background(), mirror, mxlv1alpha1.MxlFlowMirrorReady, nil, nil))
+	require.NoError(t, r.applyTargetStatus(context.Background(), mirror, mxlv1alpha1.MxlFlowMirrorReady, nil))
 	require.Eventually(t, func() bool {
 		st := getMirrorStatus(t, c, key)
-		return st.LastGrainAt != nil && len(st.Conditions) == 1
-	}, time.Second, time.Millisecond, "the released condition and lastGrainAt are published again")
+		return len(st.Conditions) == 1
+	}, time.Second, time.Millisecond, "the released condition is published again")
 }

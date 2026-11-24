@@ -43,7 +43,7 @@ func newCapturingTarget(t *testing.T, mirror *mxlv1alpha1.MxlFlowMirror) (*Targe
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourcePatch: func(ctx context.Context, cl client.Client, sub string,
 				obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption,
@@ -72,23 +72,21 @@ func newCapturingTarget(t *testing.T, mirror *mxlv1alpha1.MxlFlowMirror) (*Targe
 	}, &seen
 }
 
-func TestTarget_ProgressWritesCarryNoTargetInfo(t *testing.T) {
-	// The descriptor is the largest field on the object - a 12-channel
-	// audio flow serialises around 23 kB of bounce-buffer regions - and
-	// it does not change while the fabric side stays up. While one
-	// field manager owned both it and the progress fields, SSA's
-	// release-on-omit rule forced every progress write to re-stamp the
-	// whole descriptor, so a healthy mirror rewrote it into etcd on
-	// every flusher tick.
+func TestTarget_ProgressWritesCarryNoDescriptorFields(t *testing.T) {
+	// The descriptor fields change only when the fabric side is opened
+	// or rebuilt. One field manager owning both them and the progress
+	// fields would, by SSA's release-on-omit rule, have every progress
+	// write carry them again. Neither write carries the descriptor
+	// itself, which lives in the MxlFlowMirrorTarget, nor a progress
+	// time, which lives in the heartbeat Lease.
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1",
 		mxlv1alpha1.MxlFlowMirrorStatus{})
 	r, seen := newCapturingTarget(t, mirror)
 
 	require.NoError(t, r.applyTargetInfo(context.Background(), mirror, "info-1", 0, ""))
-	commit := time.Now()
 	require.NoError(t, r.applyTargetStatus(context.Background(), mirror,
-		mxlv1alpha1.MxlFlowMirrorReady, &commit, &metav1.Condition{
+		mxlv1alpha1.MxlFlowMirrorReady, &metav1.Condition{
 			Type:               mxlv1alpha1.ConditionTypeTargetProgress,
 			Status:             metav1.ConditionTrue,
 			Reason:             mxlv1alpha1.ReasonHandshakeComplete,
@@ -100,19 +98,22 @@ func TestTarget_ProgressWritesCarryNoTargetInfo(t *testing.T) {
 	info, progress := (*seen)[0], (*seen)[1]
 
 	assert.Equal(t, targetInfoFieldOwner, info.owner)
-	assert.True(t, info.has("targetInfo"),
-		"the descriptor write must carry the descriptor")
+	assert.True(t, info.has("targetInfoHash"),
+		"the descriptor write must name the descriptor")
+	assert.False(t, info.has("targetInfo"),
+		"the descriptor itself lives in the MxlFlowMirrorTarget only")
 	assert.False(t, info.has("phase"),
 		"the descriptor manager must not claim the phase; a manager that "+
 			"claims a field it later omits releases it, and the phase "+
 			"changes far more often than the descriptor")
 
 	assert.Equal(t, targetFieldOwner, progress.owner)
-	assert.False(t, progress.has("targetInfo"),
-		"a progress write must never carry the descriptor; re-stamping it "+
-			"per tick is the write volume this split removes")
+	assert.False(t, progress.has("targetInfoHash"),
+		"a progress write must never carry the descriptor fields; it "+
+			"would release them on the next write that omits them")
 	assert.True(t, progress.has("phase"))
-	assert.True(t, progress.has("lastGrainAt"))
+	assert.False(t, progress.has("lastGrainAt"),
+		"the commit time is the heartbeat Lease's, never the status's")
 }
 
 func TestTarget_StatusIgnoresMovingCommitTimes(t *testing.T) {
@@ -136,8 +137,8 @@ func TestTarget_StatusIgnoresMovingCommitTimes(t *testing.T) {
 		"a moving commit time alone must not write the mirror's status")
 
 	b.lastCommitAt = nil
-	assert.False(t, targetStateEqual(a, b),
-		"the first commit time is published with the status")
+	assert.True(t, targetStateEqual(a, b),
+		"nor does the first one: the status carries no commit time at all")
 
 	assert.Less(t, statusQuantum, defaultStuckHandshakeAfter,
 		"heartbeats move at the quantum, which has to stay inside the "+
@@ -183,7 +184,7 @@ func TestTarget_TargetInfoCarriesTheWritersSyncHint(t *testing.T) {
 
 	require.Len(t, *seen, 2)
 	assert.Equal(t, targetInfoFieldOwner, (*seen)[0].owner)
-	assert.Equal(t, "info-1", (*seen)[0].status["targetInfo"])
+	assert.Equal(t, mxlv1alpha1.TargetInfoHash("info-1"), (*seen)[0].status["targetInfoHash"])
 	assert.EqualValues(t, 960, (*seen)[0].status["targetMaxSyncBatchSizeHint"])
 	assert.False(t, (*seen)[1].has("targetMaxSyncBatchSizeHint"))
 	assert.False(t, (*seen)[1].has("targetInterface"))
@@ -256,14 +257,14 @@ func TestTarget_FlusherRetriesALostPublishOnABackoff(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1",
-		mxlv1alpha1.MxlFlowMirrorStatus{Phase: mxlv1alpha1.MxlFlowMirrorReady, TargetInfo: "info-1"})
+		mxlv1alpha1.MxlFlowMirrorStatus{Phase: mxlv1alpha1.MxlFlowMirrorReady, TargetInfoHash: descriptorHash("info-1")})
 	var attempts atomic.Int32
 	var failing atomic.Bool
 	failing.Store(true)
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourcePatch: func(ctx context.Context, cl client.Client, sub string,
 				obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption,
@@ -329,9 +330,9 @@ func TestTarget_FlipBackWithAStaleCacheIsATransition(t *testing.T) {
 	cond := func(status metav1.ConditionStatus, reason string) *metav1.Condition {
 		return &metav1.Condition{Type: mxlv1alpha1.ConditionTypeTargetProgress, Status: status, Reason: reason, Message: "m"}
 	}
-	require.NoError(t, r.applyTargetStatus(ctx, stale.DeepCopy(), mxlv1alpha1.MxlFlowMirrorDegraded, nil,
+	require.NoError(t, r.applyTargetStatus(ctx, stale.DeepCopy(), mxlv1alpha1.MxlFlowMirrorDegraded,
 		cond(metav1.ConditionFalse, mxlv1alpha1.ReasonNoGrains)))
-	require.NoError(t, r.applyTargetStatus(ctx, stale.DeepCopy(), mxlv1alpha1.MxlFlowMirrorReady, nil,
+	require.NoError(t, r.applyTargetStatus(ctx, stale.DeepCopy(), mxlv1alpha1.MxlFlowMirrorReady,
 		cond(metav1.ConditionTrue, mxlv1alpha1.ReasonRecovered)))
 
 	require.Len(t, *seen, 2)

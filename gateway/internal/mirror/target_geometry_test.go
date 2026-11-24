@@ -93,9 +93,8 @@ func TestReconcile_ReplacesALiveTargetOfAnotherGeometry(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := newSourceTestScheme(t)
 			key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
-			fresh := metav1.NewTime(time.Now())
 			mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", geometryFlowID,
-				mxlv1alpha1.MxlFlowMirrorStatus{Phase: mxlv1alpha1.MxlFlowMirrorReady, TargetInfo: "info-1", LastGrainAt: &fresh})
+				mxlv1alpha1.MxlFlowMirrorStatus{Phase: mxlv1alpha1.MxlFlowMirrorReady, TargetInfoHash: descriptorHash("info-1")})
 			mirror.Spec.Provider = mxlv1alpha1.ProviderTCP
 			flow := &mxlv1alpha1.MxlFlow{
 				ObjectMeta: metav1.ObjectMeta{Name: geometryFlowID},
@@ -103,7 +102,7 @@ func TestReconcile_ReplacesALiveTargetOfAnotherGeometry(t *testing.T) {
 			}
 			c := fake.NewClientBuilder().WithScheme(scheme).
 				WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}, &mxlv1alpha1.MxlFlow{}).
-				WithObjects(mirror, flow).Build()
+				WithObjects(withDescriptors(mirror, flow, heartbeatLease(key, mxlv1alpha1.MirrorSideTarget, "node-a", time.Now()))...).Build()
 			var opened []string
 			r := &TargetReconciler{
 				Client: c, Scheme: scheme, NodeName: "node-a", DegradedAfter: time.Hour,

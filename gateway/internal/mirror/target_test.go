@@ -337,13 +337,13 @@ func TestTarget_FlusherPublishesDegradedAfterIdle(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{
-		Phase:      mxlv1alpha1.MxlFlowMirrorReady,
-		TargetInfo: "info-1",
+		Phase:          mxlv1alpha1.MxlFlowMirrorReady,
+		TargetInfoHash: descriptorHash("info-1"),
 	})
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	r := &TargetReconciler{
@@ -385,9 +385,9 @@ func TestTarget_FlusherPublishesDegradedAfterIdle(t *testing.T) {
 	assert.Equal(t, mxlv1alpha1.ReasonNoGrains, cond.Reason,
 		"the Degraded transition must carry reason=NoGrains so the "+
 			"operator can distinguish a stall from an AddTarget failure")
-	require.NotNil(t, got.Status.LastGrainAt,
-		"the flusher must publish LastGrainAt so a consumer can decide "+
-			"how stale the last commit was")
+	require.NotNil(t, readHeartbeat(t, c, key, mxlv1alpha1.MirrorSideTarget),
+		"the flusher must renew the target heartbeat with the last commit "+
+			"so a consumer can decide how stale it was")
 }
 
 func TestTarget_FlusherPublishesReadyOnGrainResume(t *testing.T) {
@@ -398,13 +398,13 @@ func TestTarget_FlusherPublishesReadyOnGrainResume(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{
-		Phase:      mxlv1alpha1.MxlFlowMirrorReady,
-		TargetInfo: "info-1",
+		Phase:          mxlv1alpha1.MxlFlowMirrorReady,
+		TargetInfoHash: descriptorHash("info-1"),
 	})
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	r := &TargetReconciler{
@@ -463,24 +463,22 @@ func TestTarget_FlusherPublishesReadyOnGrainResume(t *testing.T) {
 	<-done
 }
 
-func TestTarget_FlusherPreservesTargetInfo(t *testing.T) {
-	// The unified SSA writer routes every status mutation through one
-	// FieldOwner. SSA releases ownership of any field a subsequent
-	// patch from the same owner omits, so a flusher tick that did not
-	// re-stamp status.targetInfo would let the apiserver strip the
-	// field after the second tick. Consumers polling status.targetInfo
-	// would then see it vanish from under a still-Ready mirror, which
-	// the 30-mirror-ready kind-integration case caught in CI.
+func TestTarget_FlusherPreservesTheDescriptorHash(t *testing.T) {
+	// SSA releases ownership of any field a later patch from the same
+	// owner omits. The flusher's progress payloads never carry the
+	// descriptor hash, which applyTargetInfo owns under its own field
+	// manager, so however many ticks run, a Ready mirror keeps naming
+	// the descriptor its source dials.
 	scheme := newSourceTestScheme(t)
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{
-		Phase:      mxlv1alpha1.MxlFlowMirrorReady,
-		TargetInfo: "info-1",
+		Phase:          mxlv1alpha1.MxlFlowMirrorReady,
+		TargetInfoHash: descriptorHash("info-1"),
 	})
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	r := &TargetReconciler{
@@ -517,17 +515,15 @@ func TestTarget_FlusherPreservesTargetInfo(t *testing.T) {
 
 	var got mxlv1alpha1.MxlFlowMirror
 	require.NoError(t, c.Get(context.Background(), key, &got))
-	assert.Equal(t, "info-1", got.Status.TargetInfo,
-		"flusher must re-stamp status.targetInfo on every SSA payload; "+
-			"omitting it releases FieldOwner ownership and the apiserver "+
-			"strips the field, leaving a Ready mirror that consumers "+
-			"cannot dial")
+	assert.Equal(t, mxlv1alpha1.TargetInfoHash("info-1"), got.Status.TargetInfoHash,
+		"the flusher's progress payloads must leave the descriptor hash "+
+			"alone; a Ready mirror without it is one no source can dial")
 }
 
-func TestReconcile_FastPathBypassedWhenLastGrainStale(t *testing.T) {
+func TestReconcile_FastPathBypassedWhenHeartbeatStale(t *testing.T) {
 	// The Reconcile fast-path may only short-circuit when the cached
-	// status is both Ready AND fresh: a Ready status whose
-	// LastGrainAt is older than DegradedAfter means the libmxl-fabrics
+	// status is Ready AND the target's heartbeat is fresh: a heartbeat
+	// older than DegradedAfter means the libmxl-fabrics
 	// side has died silently (no fatal ReadGrain to trigger
 	// recoverFromFatalError) and the writer is no longer being filled.
 	// Falling through forces re-establish through openTarget.
@@ -539,16 +535,19 @@ func TestReconcile_FastPathBypassedWhenLastGrainStale(t *testing.T) {
 	// through, the Reconcile loop hits the IsNotFound branch and
 	// flips Phase to Materializing - that is the observable proof
 	// the short-circuit did not engage.
-	build := func(lastGrainAt *metav1.Time, window time.Duration) (*TargetReconciler, types.NamespacedName) {
+	build := func(beat *time.Time, window time.Duration) (*TargetReconciler, types.NamespacedName) {
 		mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", flowID, mxlv1alpha1.MxlFlowMirrorStatus{
-			Phase:       mxlv1alpha1.MxlFlowMirrorReady,
-			TargetInfo:  "info-1",
-			LastGrainAt: lastGrainAt,
+			Phase:          mxlv1alpha1.MxlFlowMirrorReady,
+			TargetInfoHash: descriptorHash("info-1"),
 		})
+		objs := []client.Object{mirror}
+		if beat != nil {
+			objs = append(objs, heartbeatLease(key, mxlv1alpha1.MirrorSideTarget, "node-a", *beat))
+		}
 		c := fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-			WithObjects(mirror).
+			WithObjects(withDescriptors(objs...)...).
 			Build()
 		r := &TargetReconciler{
 			Client:        c,
@@ -562,8 +561,8 @@ func TestReconcile_FastPathBypassedWhenLastGrainStale(t *testing.T) {
 		return r, key
 	}
 
-	t.Run("fresh LastGrainAt short-circuits", func(t *testing.T) {
-		fresh := metav1.NewTime(time.Now())
+	t.Run("fresh heartbeat short-circuits", func(t *testing.T) {
+		fresh := time.Now()
 		r, k := build(&fresh, time.Hour)
 		req := reconcile.Request{NamespacedName: k}
 		_, err := r.Reconcile(context.Background(), req)
@@ -576,8 +575,8 @@ func TestReconcile_FastPathBypassedWhenLastGrainStale(t *testing.T) {
 				"falling through here would tear down the live writer on every tick")
 	})
 
-	t.Run("stale LastGrainAt falls through", func(t *testing.T) {
-		stale := metav1.NewTime(time.Now().Add(-time.Hour))
+	t.Run("stale heartbeat falls through", func(t *testing.T) {
+		stale := time.Now().Add(-time.Hour)
 		r, k := build(&stale, 50*time.Millisecond)
 		req := reconcile.Request{NamespacedName: k}
 		_, err := r.Reconcile(context.Background(), req)
@@ -586,11 +585,11 @@ func TestReconcile_FastPathBypassedWhenLastGrainStale(t *testing.T) {
 		var got mxlv1alpha1.MxlFlowMirror
 		require.NoError(t, r.Get(context.Background(), k, &got))
 		assert.Equal(t, mxlv1alpha1.MxlFlowMirrorMaterializing, got.Status.Phase,
-			"a stale LastGrainAt must defeat the fast-path; otherwise a "+
+			"a stale heartbeat must defeat the fast-path; otherwise a "+
 				"silently-dead fabric side never gets re-established")
 	})
 
-	t.Run("nil LastGrainAt falls through", func(t *testing.T) {
+	t.Run("no heartbeat Lease falls through", func(t *testing.T) {
 		r, k := build(nil, 50*time.Millisecond)
 		req := reconcile.Request{NamespacedName: k}
 		_, err := r.Reconcile(context.Background(), req)
@@ -599,7 +598,7 @@ func TestReconcile_FastPathBypassedWhenLastGrainStale(t *testing.T) {
 		var got mxlv1alpha1.MxlFlowMirror
 		require.NoError(t, r.Get(context.Background(), k, &got))
 		assert.Equal(t, mxlv1alpha1.MxlFlowMirrorMaterializing, got.Status.Phase,
-			"a Ready status with no LastGrainAt yet must also fall through; "+
+			"a Ready status with no heartbeat yet must also fall through; "+
 				"otherwise a crashed gateway whose status survived but whose "+
 				"writer is gone never re-establishes")
 	})
@@ -617,7 +616,7 @@ func TestTarget_StatusStampsObservedGeneration(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	r := &TargetReconciler{
@@ -642,9 +641,9 @@ func TestTarget_StatusStampsObservedGeneration(t *testing.T) {
 			"observers think a fresh spec is still being processed")
 }
 
-func TestTarget_FlowNotFoundOmitsTargetInfoAndLastGrain(t *testing.T) {
+func TestTarget_FlowNotFoundOmitsDescriptorAndHeartbeat(t *testing.T) {
 	// The flow-not-found pre-open branch publishes Phase=Materializing
-	// only. Stamping a TargetInfo or LastGrainAt at this point would
+	// only. Naming a descriptor or renewing a heartbeat at this point would
 	// fabricate fields the gateway has not yet earned: there is no
 	// fabrics.Target, and no grain has ever landed.
 	scheme := newSourceTestScheme(t)
@@ -654,7 +653,7 @@ func TestTarget_FlowNotFoundOmitsTargetInfoAndLastGrain(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	r := &TargetReconciler{
@@ -672,13 +671,11 @@ func TestTarget_FlowNotFoundOmitsTargetInfoAndLastGrain(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), key, &got))
 	assert.Equal(t, mxlv1alpha1.MxlFlowMirrorMaterializing, got.Status.Phase)
 	assert.Equal(t, int64(3), got.Status.ObservedGeneration)
-	assert.Empty(t, got.Status.TargetInfo,
-		"pre-open Materializing must not claim a TargetInfo; the SSA "+
-			"payload omits the key so the field stays unset until the "+
-			"handshake produces one")
-	assert.Nil(t, got.Status.LastGrainAt,
-		"pre-open Materializing must not claim a LastGrainAt; the SSA "+
-			"payload omits the key so the field stays unset until the "+
+	assert.Empty(t, got.Status.TargetInfoHash,
+		"pre-open Materializing must not name a descriptor; the field "+
+			"stays unset until the handshake produces one")
+	assert.Nil(t, readHeartbeat(t, c, key, mxlv1alpha1.MirrorSideTarget),
+		"pre-open Materializing must not renew a heartbeat before the "+
 			"flusher records a real commit")
 }
 
@@ -702,7 +699,7 @@ func TestTarget_EmptyFlowDefinitionSurfacesConditionAndRequeues(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}, &mxlv1alpha1.MxlFlow{}).
-		WithObjects(mirror, flow).
+		WithObjects(withDescriptors(mirror, flow)...).
 		Build()
 
 	r := &TargetReconciler{
@@ -740,13 +737,13 @@ func TestTarget_RecoverFromFatalErrorClearsRecoveringOnRebuildFailure(t *testing
 	scheme := newSourceTestScheme(t)
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{
-		Phase:      mxlv1alpha1.MxlFlowMirrorReady,
-		TargetInfo: "info-1",
+		Phase:          mxlv1alpha1.MxlFlowMirrorReady,
+		TargetInfoHash: descriptorHash("info-1"),
 	})
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	entry := &targetEntry{}
@@ -796,13 +793,13 @@ func TestTarget_RecoverFromFatalErrorCancelsRunningProgressLoop(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{
-		Phase:      mxlv1alpha1.MxlFlowMirrorReady,
-		TargetInfo: "info-1",
+		Phase:          mxlv1alpha1.MxlFlowMirrorReady,
+		TargetInfoHash: descriptorHash("info-1"),
 	})
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	// done stays open until entry.cancel runs: the test asserts that
@@ -895,13 +892,13 @@ func newTargetWatchdogFixture(t *testing.T, spawnBufLen int) *targetWatchdogFixt
 	scheme := newSourceTestScheme(t)
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{
-		Phase:      mxlv1alpha1.MxlFlowMirrorReady,
-		TargetInfo: "info-1",
+		Phase:          mxlv1alpha1.MxlFlowMirrorReady,
+		TargetInfoHash: descriptorHash("info-1"),
 	})
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	entry := &targetEntry{infoStr: "info-1"}
@@ -983,25 +980,14 @@ func (f *targetWatchdogFixture) stopFlusher(t *testing.T) {
 	f.cancel = nil
 }
 
-// stampSourceActivity publishes a LastSentAt onto the fixture's
-// mirror status. The neverHandshook branch requires source activity
-// after fabricOpenedAt before it escalates, so watchdog tests that
-// want the branch to fire stamp a fresh LastSentAt first.
-//
-// The status is re-fetched before each attempt so concurrent flusher
-// writes do not collide on resourceVersion (same shape as
-// armPostHandshakeWedge).
+// stampSourceActivity renews the source heartbeat Lease of the
+// fixture's mirror at at. The neverHandshook branch requires source
+// activity after fabricOpenedAt before it escalates, so watchdog tests
+// that want the branch to fire stamp a fresh heartbeat first.
 func (f *targetWatchdogFixture) stampSourceActivity(t *testing.T, at time.Time) {
 	t.Helper()
-	for i := 0; i < 5; i++ {
-		var current mxlv1alpha1.MxlFlowMirror
-		require.NoError(t, f.c.Get(context.Background(), f.key, &current))
-		current.Status.LastSentAt = &metav1.Time{Time: at}
-		if err := f.c.Status().Update(context.Background(), &current); err == nil {
-			return
-		}
-	}
-	t.Fatal("stampSourceActivity: status update raced concurrent writes after 5 attempts")
+	require.NoError(t, applyHeartbeat(context.Background(), f.c, f.key, mxlv1alpha1.MirrorSideSource,
+		sourceFieldOwner, "node-x", at))
 }
 
 func TestRunFlusher_StuckHandshake_TriggersRecovery(t *testing.T) {
@@ -1031,7 +1017,7 @@ func TestRunFlusher_StuckHandshake_TriggersRecovery(t *testing.T) {
 
 func TestRunFlusher_NeverHandshook_IdleSource_DoesNotTrigger(t *testing.T) {
 	// Zero commits since the fabric open is not enough to call a
-	// target wedged: a mirror status without any LastSentAt means the
+	// target wedged: a mirror without any source heartbeat means the
 	// producer has never pushed a grain at this fabric side, and a
 	// rebuild cannot attract data that is not being sent. Without the
 	// source-activity gate an idle flow loops spawn->cap->drop->reopen
@@ -1044,7 +1030,7 @@ func TestRunFlusher_NeverHandshook_IdleSource_DoesNotTrigger(t *testing.T) {
 	select {
 	case <-f.spawnCh:
 		t.Fatal("watchdog spawned recovery for a flow whose source never " +
-			"sent; neverHandshook requires LastSentAt after fabricOpenedAt")
+			"sent; neverHandshook requires a source heartbeat after fabricOpenedAt")
 	case <-time.After(100 * time.Millisecond):
 	}
 
@@ -1053,7 +1039,7 @@ func TestRunFlusher_NeverHandshook_IdleSource_DoesNotTrigger(t *testing.T) {
 }
 
 func TestRunFlusher_NeverHandshook_StaleSource_DoesNotTrigger(t *testing.T) {
-	// A LastSentAt that predates fabricOpenedAt belongs to a previous
+	// A source heartbeat that predates fabricOpenedAt belongs to a previous
 	// fabric side: those grains can never commit here, so they say
 	// nothing about the current handshake. Only source activity after
 	// the current open marks a genuine wedge.
@@ -1067,7 +1053,7 @@ func TestRunFlusher_NeverHandshook_StaleSource_DoesNotTrigger(t *testing.T) {
 	select {
 	case <-f.spawnCh:
 		t.Fatal("watchdog spawned recovery on pre-open source activity; " +
-			"neverHandshook requires LastSentAt after fabricOpenedAt")
+			"neverHandshook requires a source heartbeat after fabricOpenedAt")
 	case <-time.After(100 * time.Millisecond):
 	}
 
@@ -1076,7 +1062,7 @@ func TestRunFlusher_NeverHandshook_StaleSource_DoesNotTrigger(t *testing.T) {
 }
 
 // A source whose initiator cannot reach the target transfers nothing,
-// so lastSentAt stays where the previous fabric side left it, and the
+// so its heartbeat stays where the previous fabric side left it, and the
 // source says so with TransfersNotLanding. sourceIsDelivering counts
 // that as a source trying to deliver; the watchdog has to act on it
 // at the re-check it makes after taking the recovery gate as well as
@@ -1084,9 +1070,9 @@ func TestRunFlusher_NeverHandshook_StaleSource_DoesNotTrigger(t *testing.T) {
 // on every tick and the mirror waits forever.
 func TestRunFlusher_NeverHandshook_TransfersNotLanding_TriggersRecovery(t *testing.T) {
 	f := newTargetWatchdogFixture(t, 4)
+	f.stampSourceActivity(t, time.Now().Add(-2*time.Hour))
 	var current mxlv1alpha1.MxlFlowMirror
 	require.NoError(t, f.c.Get(context.Background(), f.key, &current))
-	current.Status.LastSentAt = &metav1.Time{Time: time.Now().Add(-2 * time.Hour)}
 	current.Status.Conditions = []metav1.Condition{{
 		Type:               mxlv1alpha1.ConditionTypeSourceProgress,
 		Status:             metav1.ConditionFalse,
@@ -1413,14 +1399,10 @@ func TestRunFlusher_RecoveryGate_NoDoubleSpawnUnderRace(t *testing.T) {
 // armPostHandshakeWedge configures the fixture so the watchdog's
 // post-handshake branch trips on the next tick: one commit landed
 // after the fabric side opened, then commits stopped while
-// mirror.Status.LastSentAt kept advancing past the stuck-handshake
-// window. fabricOpenedAt sits inside the window so the
-// neverHandshook predicate stays false; the discrimination has to
-// come from the cross-side LastSentAt delta alone.
-//
-// The mirror status is re-fetched from the fake client before each
-// update so concurrent flusher writes (and a re-arm inside the
-// recoverFn callback) do not collide on resourceVersion.
+// the source heartbeat kept advancing past the stuck-handshake window.
+// fabricOpenedAt sits inside the window so the neverHandshook
+// predicate stays false; the discrimination has to come from the
+// cross-side heartbeat delta alone.
 func (f *targetWatchdogFixture) armPostHandshakeWedge(t *testing.T, sentAfterCommit time.Duration) {
 	t.Helper()
 	now := time.Now()
@@ -1431,16 +1413,7 @@ func (f *targetWatchdogFixture) armPostHandshakeWedge(t *testing.T, sentAfterCom
 	commitAt := now.Add(-sentAfterCommit - 50*time.Millisecond)
 	f.entry.lastCommitAt.Store(&commitAt)
 
-	sentAt := commitAt.Add(sentAfterCommit)
-	for i := 0; i < 5; i++ {
-		var current mxlv1alpha1.MxlFlowMirror
-		require.NoError(t, f.c.Get(context.Background(), f.key, &current))
-		current.Status.LastSentAt = &metav1.Time{Time: sentAt}
-		if err := f.c.Status().Update(context.Background(), &current); err == nil {
-			return
-		}
-	}
-	t.Fatal("armPostHandshakeWedge: status update raced concurrent writes after 5 attempts")
+	f.stampSourceActivity(t, commitAt.Add(sentAfterCommit))
 }
 
 func TestRunFlusher_PostHandshakeWedge_TriggersRecovery(t *testing.T) {
@@ -1449,7 +1422,7 @@ func TestRunFlusher_PostHandshakeWedge_TriggersRecovery(t *testing.T) {
 	// watchdog blind to a wedge that develops *after* the handshake -
 	// the exact pattern kind testcase 60 hits when a fresh target
 	// receives one grain, the fabric stalls, and recovery never fires.
-	// LastSentAt > lastCommitAt + window means the source is still
+	// A source heartbeat > lastCommitAt + window means the source is still
 	// sending; the target must rebuild.
 	f := newTargetWatchdogFixture(t, 4)
 	f.r.StuckHandshakeAfter = 10 * time.Millisecond
@@ -1461,7 +1434,7 @@ func TestRunFlusher_PostHandshakeWedge_TriggersRecovery(t *testing.T) {
 	case <-f.spawnCh:
 	case <-time.After(time.Second):
 		t.Fatal("watchdog did not spawn recovery on a post-handshake wedge; " +
-			"the discriminator must also trigger when lastSentAt outpaces " +
+			"the discriminator must also trigger when the source heartbeat outpaces " +
 			"lastCommitAt by more than the stuck-handshake window")
 	}
 
@@ -1474,13 +1447,13 @@ func TestRunFlusher_PostHandshakeWedge_TriggersRecovery(t *testing.T) {
 
 func TestRunFlusher_PostHandshakeIdleFlow_DoesNotTrigger(t *testing.T) {
 	// The discriminator must not fire when the source is genuinely
-	// idle: LastSentAt absent (or trailing lastCommitAt) means no
+	// idle: a source heartbeat absent (or trailing lastCommitAt) means no
 	// grains are being sent, and rebuilding the fabric side in that
 	// state would churn perfectly healthy mirrors on every quiet
 	// window. Codifies the "idle is not a wedge" half of the design.
 	f := newTargetWatchdogFixture(t, 4)
 	f.r.StuckHandshakeAfter = 10 * time.Millisecond
-	// One commit landed after open; lastSentAt is left unset on the
+	// One commit landed after open; the source heartbeat is left unset on the
 	// mirror status (the typical "source has stopped pushing" shape).
 	now := time.Now()
 	openedAt := now.Add(-100 * time.Millisecond)
@@ -1496,7 +1469,7 @@ func TestRunFlusher_PostHandshakeIdleFlow_DoesNotTrigger(t *testing.T) {
 	select {
 	case <-f.spawnCh:
 		t.Fatal("watchdog spawned recovery on an idle flow; the post-handshake " +
-			"branch must require mirror.Status.LastSentAt to outpace " +
+			"branch must require the source heartbeat to outpace " +
 			"lastCommitAt before triggering a rebuild")
 	case <-time.After(100 * time.Millisecond):
 	}
@@ -1517,7 +1490,7 @@ func TestRunFlusher_PostHandshakeWedge_RespectsCapAndPublishesFailed(t *testing.
 	f.r.StuckHandshakeAfter = 10 * time.Millisecond
 	f.armPostHandshakeWedge(t, 5*time.Second)
 	// Re-arm only the entry-side state on every spawn: the mirror
-	// status already carries a LastSentAt far ahead of lastCommitAt
+	// source heartbeat is already far ahead of lastCommitAt
 	// from the initial armPostHandshakeWedge, so the post-handshake
 	// branch keeps tripping without further Status writes (which
 	// would race the flusher's fetchMirror on the fake client).
@@ -1592,7 +1565,7 @@ func TestTarget_RecoveryCapsFatalDrivenRebuilds(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	loopCtx, loopCancel := context.WithCancel(context.Background())
@@ -1685,7 +1658,7 @@ func TestTarget_RecoveryDropsEntryWhenTargetInfoPublishFails(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		WithInterceptorFuncs(interceptor.Funcs{SubResourcePatch: failInfoWrites}).
 		Build()
 
@@ -1735,7 +1708,7 @@ func TestTarget_RecoveryDropsEntryWhenTargetInfoPublishFails(t *testing.T) {
 // A connection-based initiator whose connection fails just after it is
 // set up goes to its done state and never dials again, and its source
 // keeps transferring to the other targets of the shared initiator, so
-// lastSentAt keeps moving for this mirror too. The target is the only
+// its heartbeat keeps moving for this mirror too. The target is the only
 // side that sees nothing arrive, and it has to set up again well before
 // the stuck-handshake window: that window is sized for a handshake
 // that is still being retried, not for one that has been abandoned.

@@ -16,6 +16,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -23,6 +24,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -800,7 +802,7 @@ func mirrorWithFinalizer(name, ns, node, flowID, targetInfo string) *mxlv1alpha1
 			Provider: mxlv1alpha1.ProviderTCP,
 		},
 		Status: mxlv1alpha1.MxlFlowMirrorStatus{
-			TargetInfo: targetInfo,
+			TargetInfoHash: descriptorHash(targetInfo),
 		},
 	}
 }
@@ -817,7 +819,7 @@ func TestReconcile_AddTargetFailureSurfacesConditionAndCapsBackoffAt30s(t *testi
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	addErr := errors.New("connect: target offline")
@@ -903,7 +905,7 @@ func TestReconcile_FlowOriginRotationReopensReader(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}, &mxlv1alpha1.MxlFlow{}).
-		WithObjects(mirror, flow).
+		WithObjects(withDescriptors(mirror, flow)...).
 		Build()
 
 	opener := &fakeOpener{
@@ -983,7 +985,7 @@ func TestReconcile_SourceNodeMutatedAwayClosesEntry(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	r := &SourceReconciler{
@@ -1028,7 +1030,7 @@ func TestSource_SeedAttemptsFromStatus(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	r := &SourceReconciler{
@@ -1136,7 +1138,7 @@ func TestSource_LeaseWatch_NodeFiltered(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithIndex(&mxlv1alpha1.MxlFlowMirror{}, mirrorFlowIDIndex, mirrorFlowIDIndexer).
-		WithObjects(managed, otherFlow, foreignSource).
+		WithObjects(withDescriptors(managed, otherFlow, foreignSource)...).
 		Build()
 	r := &SourceReconciler{Client: c, NodeName: myNode}
 
@@ -1212,14 +1214,14 @@ func TestSource_LeaseToMirrors_MalformedNameDropped(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithIndex(&mxlv1alpha1.MxlFlowMirror{}, mirrorFlowIDIndex, mirrorFlowIDIndexer).
-		WithObjects(&mxlv1alpha1.MxlFlowMirror{
+		WithObjects(withDescriptors(&mxlv1alpha1.MxlFlowMirror{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "m1"},
 			Spec: mxlv1alpha1.MxlFlowMirrorSpec{
 				FlowID:     "flow-id",
 				SourceNode: "node-a",
 				TargetNode: "node-b",
 			},
-		}).
+		})...).
 		Build()
 	r := &SourceReconciler{Client: c, NodeName: "node-a"}
 
@@ -1256,23 +1258,28 @@ func TestSource_LeaseToMirrors_NonLeaseObjectReturnsNil(t *testing.T) {
 			"ParseLeaseName a pod name")
 }
 
-func TestPublishSourceProgress_IncludesLastSentAt(t *testing.T) {
-	// The target-side stuck-handshake watchdog discriminates a wedged
-	// post-handshake target from a legitimately idle flow by comparing
-	// mirror.Status.LastSentAt against the local lastCommitAt. The
-	// source-side SSA payload must carry that timestamp on every
-	// publish that has one; omitting it after the first publish would
-	// release SSA field-ownership and let the apiserver strip the
-	// field on the next tick.
+// The source's progress time is its heartbeat, renewed into its Lease.
+// Written into the status it rewrote the whole mirror every few
+// seconds, so the status payload carries none, however recent.
+func TestPublishSourceProgress_WritesNoProgressTime(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithFinalizer(key.Name, key.Namespace, "node-a", "flow-1", "info-1")
+	var payloads []map[string]any
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourcePatch: func(ctx context.Context, cl client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if u, ok := obj.(*unstructured.Unstructured); ok {
+					st, _, _ := unstructured.NestedMap(u.Object, "status")
+					payloads = append(payloads, st)
+				}
+				return cl.SubResource(sub).Patch(ctx, obj, patch, opts...)
+			},
+		}).
 		Build()
-
 	r := &SourceReconciler{
 		Client:   c,
 		Scheme:   scheme,
@@ -1289,15 +1296,9 @@ func TestPublishSourceProgress_IncludesLastSentAt(t *testing.T) {
 		lastSentAt: &sent,
 	}))
 
-	var got mxlv1alpha1.MxlFlowMirror
-	require.NoError(t, c.Get(context.Background(), key, &got))
-	require.NotNil(t, got.Status.LastSentAt,
-		"publishSourceProgress with a non-nil lastSentAt must stamp "+
-			"status.lastSentAt; without it the target-side watchdog cannot "+
-			"tell a wedged post-handshake target from an idle flow")
-	assert.True(t, got.Status.LastSentAt.Time.Equal(sent),
-		"the stamped timestamp must round-trip: target-side recovery "+
-			"compares it against lastCommitAt to decide whether to rebuild")
+	require.Len(t, payloads, 1)
+	assert.NotContains(t, payloads[0], "lastSentAt")
+	assert.Contains(t, payloads[0], "conditions", "the condition itself is published")
 }
 
 // The interface an initiator is bound to is published with its
@@ -1307,7 +1308,7 @@ func TestPublishSourceProgress_ReportsTheBoundInterface(t *testing.T) {
 	scheme := newSourceTestScheme(t)
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirrorWithFinalizer(key.Name, key.Namespace, "node-a", "flow-1", "info-1")).Build()
+		WithObjects(withDescriptors(mirrorWithFinalizer(key.Name, key.Namespace, "node-a", "flow-1", "info-1"))...).Build()
 	r := &SourceReconciler{Client: c, Scheme: scheme, NodeName: "node-a"}
 
 	require.NoError(t, r.publishSourceProgress(context.Background(), key, sourceProgressState{
@@ -1367,9 +1368,9 @@ func TestSourceStateEqual_DereferencesLastSentAtPointers(t *testing.T) {
 	assert.True(t, sourceStateEqual(a, b),
 		"a moving lastSentAt alone must not write the mirror's status")
 
-	// nil/non-nil asymmetry is not equal.
+	// Nor its first appearance: the status carries no progress time.
 	b.lastSentAt = nil
-	assert.False(t, sourceStateEqual(a, b))
+	assert.True(t, sourceStateEqual(a, b))
 	a.lastSentAt = nil
 	assert.True(t, sourceStateEqual(a, b),
 		"two states both missing lastSentAt must compare equal regardless "+
@@ -1390,7 +1391,7 @@ func TestSource_FlusherSuppressesIdenticalTicksAfterFirstTransfer(t *testing.T) 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	r := &SourceReconciler{
@@ -1402,7 +1403,7 @@ func TestSource_FlusherSuppressesIdenticalTicksAfterFirstTransfer(t *testing.T) 
 		attempts:      attemptTable[sourceAddInputs]{},
 	}
 
-	entry := &sourceEntry{key: key, shared: testShared("flow-1", fabrics.ProviderTCP), infoStr: "info-1"}
+	entry := &sourceEntry{key: key, shared: testShared("flow-1", fabrics.ProviderTCP), infoStr: "info-1", infoHash: descriptorHash("info-1")}
 	entry.progress.Store(1)
 	transferAt := time.Now()
 	entry.lastSentAt.Store(&transferAt)
@@ -1419,7 +1420,7 @@ func TestSource_FlusherSuppressesIdenticalTicksAfterFirstTransfer(t *testing.T) 
 		if err := c.Get(context.Background(), key, &got); err != nil {
 			return false
 		}
-		return got.Status.LastSentAt != nil
+		return len(got.Status.Conditions) > 0
 	}, time.Second, time.Millisecond,
 		"flusher must publish the first state so the dedupe has a baseline")
 
@@ -1441,42 +1442,6 @@ func TestSource_FlusherSuppressesIdenticalTicksAfterFirstTransfer(t *testing.T) 
 			"entry; a comparison that treated fresh *time.Time allocations as "+
 			"distinct would write status on every flusher tick and let the "+
 			"source gateway flood the apiserver with redundant patches")
-}
-
-func TestPublishSourceProgress_OmitsLastSentAtWhenNeverTransferred(t *testing.T) {
-	// Before any grain has been transferred, lastSentAt must stay
-	// absent: a zero-time stamp would let the target-side watchdog
-	// compute a delta against an arbitrary point in 0001-01-01 and
-	// trip the wedge condition immediately.
-	scheme := newSourceTestScheme(t)
-	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
-	mirror := mirrorWithFinalizer(key.Name, key.Namespace, "node-a", "flow-1", "info-1")
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
-		Build()
-
-	r := &SourceReconciler{
-		Client:   c,
-		Scheme:   scheme,
-		NodeName: "node-a",
-		sources:  map[types.NamespacedName]*sourceEntry{},
-		attempts: attemptTable[sourceAddInputs]{},
-	}
-
-	require.NoError(t, r.publishSourceProgress(context.Background(), key, sourceProgressState{
-		status:  metav1.ConditionTrue,
-		reason:  mxlv1alpha1.ReasonHandshakeComplete,
-		message: "initiator running",
-	}))
-
-	var got mxlv1alpha1.MxlFlowMirror
-	require.NoError(t, c.Get(context.Background(), key, &got))
-	assert.Nil(t, got.Status.LastSentAt,
-		"a sourceProgressState with nil lastSentAt must omit the key from "+
-			"the SSA payload; stamping a zero time would trigger an immediate "+
-			"target-side rebuild on every freshly created mirror")
 }
 
 // A target the initiator evicted is marked so: removeTarget in

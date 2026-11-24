@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -30,7 +31,7 @@ func newAddBackoffFixture(t *testing.T, targetInfo string) *addBackoffFixture {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	opener := &fakeOpener{
@@ -123,11 +124,10 @@ func TestSource_AddTargetBackoffReleasedWhenTargetInfoRotates(t *testing.T) {
 		"the same endpoint inside the backoff stays gated")
 
 	m := f.mirror(t)
-	m.Status.TargetInfo = "info-2"
-	require.NoError(t, f.r.Status().Update(ctx, &m))
+	publishDescriptor(t, f.r.Client, client.ObjectKeyFromObject(&m), "info-2")
 
 	_, err = f.r.Reconcile(ctx, f.req)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), f.opener.opens.Load(),
-		"a rotated TargetInfo must be attempted at once")
+		"a rotated descriptor must be attempted at once")
 }

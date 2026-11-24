@@ -699,7 +699,7 @@ func (r *Reconciler) writeConditions(ctx context.Context, m *mxlv1alpha1.MxlFlow
 	// Nothing to say is nothing to send. This runs on every event for
 	// the mirror, and the gateways' status writes are most of those: an
 	// apply that changes nothing still makes the apiserver decode and
-	// merge the whole stored object, targetInfo included, to find out.
+	// merge the whole stored object to find out.
 	ours := make([]any, 0, 2)
 	current := true
 	for _, t := range []string{mxlv1alpha1.ConditionTypeClaimed, mxlv1alpha1.ConditionTypeSourceable} {

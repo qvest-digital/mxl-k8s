@@ -49,7 +49,7 @@ func TestReconcile_SourceFinalizerReapedWhenSourceNodeGone(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	r := &SourceReconciler{
@@ -85,7 +85,7 @@ func TestReconcile_SourceFinalizerKeptWhileSourceNodeExists(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror, node).
+		WithObjects(withDescriptors(mirror, node)...).
 		Build()
 
 	r := &SourceReconciler{
@@ -118,7 +118,7 @@ func TestReconcile_TargetFinalizerReapedWhenTargetNodeGone(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	r := &TargetReconciler{
@@ -150,7 +150,7 @@ func TestReconcile_TargetFinalizerKeptWhileTargetNodeExists(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror, node).
+		WithObjects(withDescriptors(mirror, node)...).
 		Build()
 
 	r := &TargetReconciler{
@@ -193,7 +193,7 @@ func TestReconcile_LastOrphanedFinalizerCompletesDeletion(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	r := &SourceReconciler{

@@ -64,7 +64,7 @@ func TestLocalFlowDisposition(t *testing.T) {
 				Spec:       mxlv1alpha1.MxlFlowSpec{ID: flowID},
 				Status:     mxlv1alpha1.MxlFlowStatus{Locations: tc.locs},
 			}
-			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(flow).Build()
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(withDescriptors(flow)...).Build()
 			r := &TargetReconciler{Client: c, Scheme: scheme, NodeName: node}
 			assert.Equal(t, tc.want, r.localFlowDisposition(context.Background(), flowID))
 		})

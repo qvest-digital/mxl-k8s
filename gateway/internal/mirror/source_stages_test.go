@@ -61,7 +61,7 @@ func TestSourceReconcile_TargetAddedReportsStageDurations(t *testing.T) {
 // while the source still holds the entry it added against the old one,
 // queued behind other re-adds. The entry's loop goes on transferring,
 // and an initiator completes transfers for a target it is not
-// connected to. Publishing that lastSentAt would tell the target a
+// connected to. Renewing its heartbeat would tell the target a
 // source is sending into its new fabric side before any source has
 // been added to it, and the target would set itself up again before the
 // re-add lands.
@@ -72,7 +72,7 @@ func TestRunFlusher_EntryOnAReplacedTargetInfo_PublishesNothing(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 	r := &SourceReconciler{
 		Client:   c,
@@ -81,7 +81,7 @@ func TestRunFlusher_EntryOnAReplacedTargetInfo_PublishesNothing(t *testing.T) {
 		sources:  map[types.NamespacedName]*sourceEntry{},
 		attempts: attemptTable[sourceAddInputs]{},
 	}
-	entry := &sourceEntry{key: key, shared: testShared("flow-1", fabrics.ProviderTCP), infoStr: "info-old"}
+	entry := &sourceEntry{key: key, shared: testShared("flow-1", fabrics.ProviderTCP), infoStr: "info-old", infoHash: descriptorHash("info-old")}
 	entry.progress.Store(1)
 	sent := time.Now()
 	entry.lastSentAt.Store(&sent)
@@ -93,8 +93,9 @@ func TestRunFlusher_EntryOnAReplacedTargetInfo_PublishesNothing(t *testing.T) {
 	cancel()
 	<-done
 
+	require.Nil(t, readHeartbeat(t, c, key, mxlv1alpha1.MirrorSideSource),
+		"an entry added against a replaced descriptor renewed the source heartbeat")
 	var got mxlv1alpha1.MxlFlowMirror
 	require.NoError(t, c.Get(context.Background(), key, &got))
-	require.Nil(t, got.Status.LastSentAt,
-		"an entry added against a replaced TargetInfo published lastSentAt")
+	require.Empty(t, got.Status.Conditions, "nor may it publish its progress")
 }

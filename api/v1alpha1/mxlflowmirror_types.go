@@ -111,15 +111,14 @@ type MxlFlowMirrorStatus struct {
 	// +optional
 	Phase MxlFlowMirrorPhase `json:"phase,omitempty"`
 
-	// TargetInfo is the libmxl-fabrics target descriptor produced by
-	// mxlFabricsTargetSetup and serialized via
-	// mxlFabricsTargetInfoToString. The initiator-side gateway parses
-	// it with mxlFabricsTargetInfoFromString.
+	// TargetInfo is no longer written or read by any component; the
+	// target descriptor lives in the MxlFlowMirrorTarget of the same
+	// name, which TargetInfoHash names.
 	//
-	// Deprecated: the descriptor is published in the MxlFlowMirrorTarget
-	// of the same name, identified here by TargetInfoHash. The target
-	// gateway still writes this field for source gateways that predate
-	// that object.
+	// Deprecated: kept in the schema so that a gateway of an earlier
+	// release, which still writes it, is not rejected by the API server
+	// while gateways are upgraded node by node. A later release removes
+	// it.
 	// +optional
 	TargetInfo string `json:"targetInfo,omitempty"`
 
@@ -132,7 +131,7 @@ type MxlFlowMirrorStatus struct {
 	TargetInfoHash string `json:"targetInfoHash,omitempty"`
 
 	// TargetMaxSyncBatchSizeHint is the maxSyncBatchSizeHint of the
-	// flow the target gateway writes, published with TargetInfo. For a
+	// flow the target gateway writes, published with TargetInfoHash. For a
 	// continuous flow libmxl-fabrics sizes the target's bounce-buffer
 	// entries from it and rejects a larger sample batch, so the source
 	// gateway sends none. A target gateway that does not publish it
@@ -153,22 +152,19 @@ type MxlFlowMirrorStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// LastGrainAt is the wall-clock time of the most recent grain
-	// commit observed by the target gateway, as of the target's last
-	// status change. While the status holds, the target's heartbeat
-	// Lease (see MirrorLeaseName) carries it, refreshed every few
-	// seconds while grains commit.
+	// LastGrainAt is no longer written or read by any component; the
+	// target's heartbeat Lease (see MirrorLeaseName) carries its
+	// progress time.
+	//
+	// Deprecated: kept in the schema for the same reason as TargetInfo.
 	// +optional
 	LastGrainAt *metav1.Time `json:"lastGrainAt,omitempty"`
 
-	// LastSentAt is the wall-clock time of the most recent grain
-	// the source-side gateway successfully handed to libmxl-fabrics
-	// for transfer, as of the source's last status change. The
-	// source's heartbeat Lease (MirrorLeaseName) carries it while the
-	// status holds. Target-side recovery uses the delta between the
-	// two sides' heartbeats to distinguish "source is sending but
-	// target is wedged" (rebuild) from "source is idle" (leave alone).
-	// Unset before the first transfer.
+	// LastSentAt is no longer written or read by any component; the
+	// source's heartbeat Lease (see MirrorLeaseName) carries its
+	// progress time.
+	//
+	// Deprecated: kept in the schema for the same reason as TargetInfo.
 	// +optional
 	// +nullable
 	LastSentAt *metav1.Time `json:"lastSentAt,omitempty"`

@@ -66,8 +66,8 @@ func TestDeepCopy_MxlFlowMirror_StatusFieldsAreNotAliased(t *testing.T) {
 			Requestor:  &PodRef{Name: "pod", Namespace: "ns"},
 		},
 		Status: MxlFlowMirrorStatus{
-			Phase:      MxlFlowMirrorReady,
-			TargetInfo: "info-a",
+			Phase:          MxlFlowMirrorReady,
+			TargetInfoHash: "hash-a",
 			Conditions: []metav1.Condition{
 				{Type: "Materialized", Status: metav1.ConditionTrue},
 			},
@@ -288,7 +288,7 @@ func TestDeepCopy_RoundTrip_Equals(t *testing.T) {
 				TargetNode: "b",
 				Provider:   ProviderVerbs,
 			},
-			Status: MxlFlowMirrorStatus{Phase: MxlFlowMirrorReady, TargetInfo: "info"},
+			Status: MxlFlowMirrorStatus{Phase: MxlFlowMirrorReady, TargetInfoHash: "hash"},
 		},
 		&MxlDomain{
 			Spec: MxlDomainSpec{ID: "1ac254d9-a5eb-475f-a2b6-3d02a5cfbc82", Directory: "domain"},

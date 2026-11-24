@@ -6,11 +6,12 @@
 //   - TargetReconciler is the receiving half. For mirrors whose
 //     targetNode is this gateway's node, it opens a libmxl FlowWriter
 //     on the flow, registers its memory regions with libmxl-fabrics,
-//     sets up a fabrics.Target, and writes the serialized TargetInfo
-//     back to status.targetInfo with phase=Ready.
+//     sets up a fabrics.Target, and publishes the serialized TargetInfo
+//     in an MxlFlowMirrorTarget, its hash in status.targetInfoHash,
+//     with phase=Ready.
 //   - SourceReconciler is the sending half. For mirrors whose
-//     sourceNode is this gateway's node and that already carry a
-//     status.targetInfo, it opens a FlowReader on the local flow,
+//     sourceNode is this gateway's node and whose
+//     status.targetInfoHash names a descriptor, it opens a FlowReader on the local flow,
 //     shared by every mirror of that flow, and gives each mirror its
 //     own fabrics.Initiator and transfer loop: one transfer, then
 //     MakeProgress until it completes.
@@ -303,12 +304,12 @@ func (t attemptTable[I]) count(key types.NamespacedName) uint32 { return t[key].
 // fabric side opened.
 //
 // The target's stuck-handshake watchdog needs this to tell a wedge
-// from an idle producer, and status.lastSentAt alone cannot answer it:
+// from an idle producer, and the source's heartbeat alone cannot answer it:
 // the timestamp only moves on a successful transfer, so a source that
 // cannot reach the target never advances it and reads exactly like a
 // producer with nothing to send. The source publishes
 // ReasonTransfersNotLanding for that case, which is the same claim
-// lastSentAt would have made had a transfer been possible.
+// the heartbeat would have made had a transfer been possible.
 //
 // sentAt is the source's latest heartbeat (heartbeatAt).
 func sourceIsDelivering(mirror *mxlv1alpha1.MxlFlowMirror, sentAt *time.Time, openedAt time.Time) bool {
