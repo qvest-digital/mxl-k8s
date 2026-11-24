@@ -56,7 +56,7 @@ func TestTarget_DeletionCompletesWhenProgressLoopNeverExits(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	cancel, done, cancelled := wedgedLoop()
@@ -126,7 +126,7 @@ func TestTarget_DeletionDuringRecoveryDoesNotDeadlockOrLeaveALoop(t *testing.T) 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	// Generation one: a real goroutine that exits when cancelled, so

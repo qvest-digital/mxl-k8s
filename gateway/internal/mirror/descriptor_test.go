@@ -2,13 +2,16 @@ package mirror
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -30,13 +33,13 @@ func mirrorTarget(key types.NamespacedName, info string) *mxlv1alpha1.MxlFlowMir
 
 // The descriptor is written into its own object before its hash goes
 // on the mirror, so a source that sees the hash finds the object it
-// names. It stays in status.targetInfo for sources that predate the
-// object.
+// names. The mirror's status carries the hash and never the descriptor.
 func TestTarget_PublishesTheDescriptorBeforeItsHash(t *testing.T) {
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{})
 	mirror.UID = "mirror-uid"
 	var order []string
+	var statusPayloads []map[string]any
 	c := fake.NewClientBuilder().WithScheme(newSourceTestScheme(t)).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).WithObjects(mirror).
 		WithInterceptorFuncs(interceptor.Funcs{
@@ -46,6 +49,10 @@ func TestTarget_PublishesTheDescriptorBeforeItsHash(t *testing.T) {
 			},
 			SubResourcePatch: func(ctx context.Context, cl client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
 				order = append(order, "status")
+				if u, ok := obj.(*unstructured.Unstructured); ok {
+					st, _, _ := unstructured.NestedMap(u.Object, "status")
+					statusPayloads = append(statusPayloads, st)
+				}
 				return cl.SubResource(sub).Patch(ctx, obj, patch, opts...)
 			},
 		}).Build()
@@ -61,13 +68,15 @@ func TestTarget_PublishesTheDescriptorBeforeItsHash(t *testing.T) {
 	assert.Equal(t, types.UID("mirror-uid"), obj.OwnerReferences[0].UID)
 	st := getMirrorStatus(t, c, key)
 	assert.Equal(t, mxlv1alpha1.TargetInfoHash("info-1"), st.TargetInfoHash)
-	assert.Equal(t, "info-1", st.TargetInfo, "sources that predate the object still read the status")
+	require.Len(t, statusPayloads, 1)
+	assert.NotContains(t, statusPayloads[0], "targetInfo",
+		"the descriptor runs to hundreds of kilobytes and lives in its own object only")
 }
 
-// A cluster whose CRDs predate MxlFlowMirrorTarget does not serve it.
-// The mirror then carries the descriptor in status.targetInfo alone,
-// with no hash a source would wait on forever.
-func TestTarget_WithoutTheKindPublishesNoHash(t *testing.T) {
+// The kind ships with the chart. A cluster that does not serve it has
+// nowhere to put the descriptor, so the publish fails and no hash is
+// written that a source would wait on forever.
+func TestTarget_UnservedKindFailsThePublish(t *testing.T) {
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{})
 	c := fake.NewClientBuilder().WithScheme(newSourceTestScheme(t)).
@@ -79,10 +88,8 @@ func TestTarget_WithoutTheKindPublishesNoHash(t *testing.T) {
 		}).Build()
 	r := &TargetReconciler{Client: c, NodeName: "node-a", attempts: attemptTable[targetOpenInputs]{}}
 
-	require.NoError(t, r.applyTargetInfo(context.Background(), mirror, "info-1", 0, ""))
-	st := getMirrorStatus(t, c, key)
-	assert.Empty(t, st.TargetInfoHash)
-	assert.Equal(t, "info-1", st.TargetInfo)
+	require.Error(t, r.applyTargetInfo(context.Background(), mirror, "info-1", 0, ""))
+	assert.Empty(t, getMirrorStatus(t, c, key).TargetInfoHash)
 }
 
 func TestTargetDescriptor(t *testing.T) {
@@ -109,23 +116,12 @@ func TestTargetDescriptor(t *testing.T) {
 	_, ok = resolve(t, mxlv1alpha1.MxlFlowMirrorStatus{TargetInfoHash: h("new")})
 	assert.False(t, ok, "nor is a missing one")
 
-	info, ok = resolve(t, mxlv1alpha1.MxlFlowMirrorStatus{TargetInfoHash: h("new"), TargetInfo: "new"}, mirrorTarget(key, "old"))
-	assert.True(t, ok)
-	assert.Equal(t, "new", info, "the legacy field serves while it matches the hash")
-
-	_, ok = resolve(t, mxlv1alpha1.MxlFlowMirrorStatus{TargetInfoHash: h("new"), TargetInfo: "old"})
-	assert.False(t, ok, "a legacy field that does not match the hash is stale")
-
-	info, ok = resolve(t, mxlv1alpha1.MxlFlowMirrorStatus{TargetInfo: "legacy"})
-	assert.True(t, ok)
-	assert.Equal(t, "legacy", info, "a target that writes no hash is read from the status")
-
-	_, ok = resolve(t, mxlv1alpha1.MxlFlowMirrorStatus{})
-	assert.False(t, ok)
+	_, ok = resolve(t, mxlv1alpha1.MxlFlowMirrorStatus{}, mirrorTarget(key, "new"))
+	assert.False(t, ok, "an object the mirror names no hash of is not published yet")
 }
 
-// Once status.targetInfo is no longer written, the mirror carries only
-// the hash, and the source dials the descriptor from the object.
+// The mirror carries only the hash, and the source dials the descriptor
+// from the object.
 func TestReconcile_SourceDialsTheDescriptorObject(t *testing.T) {
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
 	mirror := mirrorWithFinalizer(key.Name, key.Namespace, "node-a", "flow-1", "")
@@ -163,17 +159,70 @@ func TestReconcile_SourceDialsTheDescriptorObject(t *testing.T) {
 	assert.Equal(t, []string{"info-obj", "info-rotated"}, opener.addedTargets())
 }
 
-// An entry is compared with the mirror by hash, so a rotation is seen
-// whichever way either side published.
+// An entry is compared with the mirror by hash, so a new hash is a
+// rotation and no hash is a target that has nothing published.
 func TestServesDescriptorOf(t *testing.T) {
 	e := &sourceEntry{infoStr: "a", infoHash: mxlv1alpha1.TargetInfoHash("a")}
 	m := &mxlv1alpha1.MxlFlowMirror{}
-	m.Status.TargetInfo = "a"
-	assert.True(t, e.servesDescriptorOf(m))
+	assert.False(t, e.servesDescriptorOf(m))
 	m.Status.TargetInfoHash = mxlv1alpha1.TargetInfoHash("a")
 	assert.True(t, e.servesDescriptorOf(m))
 	m.Status.TargetInfoHash = mxlv1alpha1.TargetInfoHash("b")
-	assert.False(t, e.servesDescriptorOf(m), "a new hash is a rotation, whatever the legacy field says")
-	m.Status = mxlv1alpha1.MxlFlowMirrorStatus{TargetInfo: "b"}
-	assert.False(t, e.servesDescriptorOf(m))
+	assert.False(t, e.servesDescriptorOf(m), "a new hash is a rotation")
+}
+
+// descriptors maps each hash a fixture put on a mirror to the
+// descriptor it names, so withDescriptors can create the
+// MxlFlowMirrorTarget a source dials.
+var descriptors sync.Map
+
+// descriptorHash is TargetInfoHash(info), remembered for
+// withDescriptors. An empty info is a mirror the target has published
+// nothing for.
+func descriptorHash(info string) string {
+	if info == "" {
+		return ""
+	}
+	h := mxlv1alpha1.TargetInfoHash(info)
+	descriptors.Store(h, info)
+	return h
+}
+
+// withDescriptors returns objs plus, for each mirror among them whose
+// hash a fixture took from descriptorHash, the MxlFlowMirrorTarget the
+// target gateway would have written for it.
+func withDescriptors(objs ...client.Object) []client.Object {
+	out := append([]client.Object(nil), objs...)
+	for _, o := range objs {
+		m, ok := o.(*mxlv1alpha1.MxlFlowMirror)
+		if !ok || m.Status.TargetInfoHash == "" {
+			continue
+		}
+		if info, ok := descriptors.Load(m.Status.TargetInfoHash); ok {
+			out = append(out, mirrorTarget(client.ObjectKeyFromObject(m), info.(string)))
+		}
+	}
+	return out
+}
+
+// publishDescriptor publishes info for the mirror key the way the
+// target gateway does: the MxlFlowMirrorTarget first, then its hash on
+// the mirror's status.
+func publishDescriptor(t *testing.T, c client.Client, key types.NamespacedName, info string) {
+	t.Helper()
+	ctx := context.Background()
+	var obj mxlv1alpha1.MxlFlowMirrorTarget
+	switch err := c.Get(ctx, key, &obj); {
+	case err == nil:
+		obj.Spec.TargetInfo = info
+		require.NoError(t, c.Update(ctx, &obj))
+	case apierrors.IsNotFound(err):
+		require.NoError(t, c.Create(ctx, mirrorTarget(key, info)))
+	default:
+		require.NoError(t, err)
+	}
+	var m mxlv1alpha1.MxlFlowMirror
+	require.NoError(t, c.Get(ctx, key, &m))
+	m.Status.TargetInfoHash = descriptorHash(info)
+	require.NoError(t, c.Status().Update(ctx, &m))
 }

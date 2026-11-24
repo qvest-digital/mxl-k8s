@@ -28,9 +28,10 @@ gateway -> `libmxl-fabrics` TCP transfer between two k3s nodes.
    answers `{"ok":true}` to the shim.
 6. While the agent waits, the gateway on node-2 sees the new
    mirror, opens a libmxl `FlowWriter` for the flow on its local
-   domain, sets up a `fabrics.Target`, and writes the resulting
-   `TargetInfo` back to `mirror.status.targetInfo`. The gateway on
-   node-1 picks that up, sets up a `fabrics.Initiator`, and starts
+   domain, sets up a `fabrics.Target`, and publishes the resulting
+   `TargetInfo` in the mirror's `MxlFlowMirrorTarget`, named on the
+   mirror by `status.targetInfoHash`. The gateway on node-1 picks
+   that up, sets up a `fabrics.Initiator`, and starts
    streaming grains.
 7. The shim retries the open. It now succeeds; the reader proceeds
    to `mxl-info` and prints the flow metadata.

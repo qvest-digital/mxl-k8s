@@ -28,7 +28,7 @@ func newFlakySource(t *testing.T, mirror *mxlv1alpha1.MxlFlowMirror) (*SourceRec
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourcePatch: func(ctx context.Context, cl client.Client, sub string,
 				obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption,

@@ -53,7 +53,7 @@ func fanoutMirror(name, flowID, targetNode, targetInfo string, provider mxlv1alp
 			TargetNode: targetNode,
 			Provider:   provider,
 		},
-		Status: mxlv1alpha1.MxlFlowMirrorStatus{TargetInfo: targetInfo},
+		Status: mxlv1alpha1.MxlFlowMirrorStatus{TargetInfoHash: descriptorHash(targetInfo)},
 	}
 }
 
@@ -77,7 +77,7 @@ func newFanoutFixture(t *testing.T, mirrors ...*mxlv1alpha1.MxlFlowMirror) *fano
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(objs...).
+		WithObjects(withDescriptors(objs...)...).
 		Build()
 
 	opener := &fakeOpener{
@@ -297,8 +297,7 @@ func TestSource_TargetInfoRotationDoesNotDisturbTheOtherMirrors(t *testing.T) {
 	key := types.NamespacedName{Namespace: "ns1", Name: "m2"}
 	var m mxlv1alpha1.MxlFlowMirror
 	require.NoError(t, f.c.Get(ctx, key, &m))
-	m.Status.TargetInfo = "info-c2"
-	require.NoError(t, f.c.Status().Update(ctx, &m))
+	publishDescriptor(t, f.c, key, "info-c2")
 	f.reconcile(t, "m2")
 
 	assert.Equal(t, int32(1), f.opener.opens.Load(),

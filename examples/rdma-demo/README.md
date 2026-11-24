@@ -61,8 +61,9 @@ kubectl -n mxl-system logs ds/mxl-fabrics-gateway | grep -i verbs
 
 The `MxlNodeCapabilities` resource for each node should list
 `verbs` under `status.providers`. The `MxlFlowMirror` for this
-demo should reach `phase: Ready` with a `status.targetInfo`
-populated by libmxl-fabrics' verbs endpoint encoding.
+demo should reach `phase: Ready` with a `status.targetInfoHash`
+naming its `MxlFlowMirrorTarget`, whose `spec.targetInfo` holds
+libmxl-fabrics' verbs endpoint encoding.
 
 ## EFA variant
 

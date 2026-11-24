@@ -322,9 +322,8 @@ The eight steps in order:
    `fabrics.Instance.NewTarget` -> `Target.Setup` ->
    `TargetInfo.MarshalString`. It writes the descriptor into the
    mirror's `MxlFlowMirrorTarget`, then its hash into
-   `status.targetInfoHash` (with the descriptor itself in
-   `status.targetInfo` for older source gateways) and `phase=Ready`,
-   then starts the progress goroutine.
+   `status.targetInfoHash` and `phase=Ready`, then starts the
+   progress goroutine.
 7. **Source-node gateway's `SourceReconciler` wakes** on the
    mirror's status update -- it has `Watches(MxlFlowMirror)` *and*
    `Watches(MxlFlow)`. It opens `mxl.Instance.NewReader`, shared by

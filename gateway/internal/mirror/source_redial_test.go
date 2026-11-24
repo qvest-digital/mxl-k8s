@@ -217,14 +217,11 @@ func TestSourceReconcile_LostAttachRaceOnANewerTargetInfo_Requeues(t *testing.T)
 	assert.Equal(t, "info-new", f.entry("m1").infoStr)
 }
 
-// publishTargetInfo writes info as the mirror's TargetInfo, as the
+// publishTargetInfo publishes info as the mirror's descriptor, as the
 // target side does when it is set up again.
 func publishTargetInfo(t *testing.T, f *fanoutFixture, name, info string) {
 	t.Helper()
-	var m mxlv1alpha1.MxlFlowMirror
-	require.NoError(t, f.c.Get(context.Background(), types.NamespacedName{Namespace: "ns1", Name: name}, &m))
-	m.Status.TargetInfo = info
-	require.NoError(t, f.c.Status().Update(context.Background(), &m))
+	publishDescriptor(t, f.c, types.NamespacedName{Namespace: "ns1", Name: name}, info)
 }
 
 func countOf(list []string, s string) int {

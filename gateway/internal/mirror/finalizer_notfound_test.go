@@ -24,7 +24,7 @@ func notFoundOnUpdate(t *testing.T, mirror *mxlv1alpha1.MxlFlowMirror) client.Cl
 	t.Helper()
 	return fake.NewClientBuilder().
 		WithScheme(newSourceTestScheme(t)).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Update: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.UpdateOption) error {
 				return apierrors.NewNotFound(

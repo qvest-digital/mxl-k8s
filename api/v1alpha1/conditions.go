@@ -189,12 +189,12 @@ const (
 	// head is advancing, so the producer is alive, while nothing has
 	// reached the target since the initiator opened.
 	//
-	// It exists because status.lastSentAt cannot express this: the
-	// timestamp only moves on a successful transfer, so a source that
-	// cannot reach its target suppresses the very evidence that it is
-	// trying. The target's stuck-handshake watchdog reads this reason
-	// as the source-activity signal it would otherwise take from
-	// lastSentAt.
+	// It exists because the source's heartbeat cannot express this:
+	// the heartbeat only moves on a successful transfer, so a source
+	// that cannot reach its target suppresses the very evidence that it
+	// is trying. The target's stuck-handshake watchdog reads this
+	// reason as the source-activity signal it would otherwise take from
+	// the heartbeat.
 	ReasonTransfersNotLanding = "TransfersNotLanding"
 
 	// ReasonSourceWriterGone marks a source-side mirror whose flow has

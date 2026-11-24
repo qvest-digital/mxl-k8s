@@ -356,35 +356,9 @@ func TestWaitReady_ContextDeadline_PropagatesError(t *testing.T) {
 			"never materializes the mirror")
 }
 
-func TestWaitReady_Ready_ReturnsNil(t *testing.T) {
-	scheme := newScheme(t)
-	mirror := &mxlv1alpha1.MxlFlowMirror{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "m"},
-		Status: mxlv1alpha1.MxlFlowMirrorStatus{
-			Phase:      mxlv1alpha1.MxlFlowMirrorReady,
-			TargetInfo: "info",
-		},
-	}
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
-		Build()
-
-	d := &Dispatcher{
-		Client:       c,
-		PollInterval: 5 * time.Millisecond,
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	require.NoError(t, d.waitReady(ctx, mirror))
-}
-
-// A target gateway that publishes the descriptor as an
-// MxlFlowMirrorTarget names it on the mirror by hash. Once the legacy
-// status.targetInfo is no longer written, the hash is the only sign
-// the descriptor exists, and a mirror carrying it is ready.
+// A target gateway publishes the descriptor as an MxlFlowMirrorTarget
+// and names it on the mirror by hash, the only sign the descriptor
+// exists, so a Ready mirror carrying it is ready.
 func TestWaitReady_ReadyWithTargetInfoHash_ReturnsNil(t *testing.T) {
 	mirror := &mxlv1alpha1.MxlFlowMirror{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "m"},
@@ -405,16 +379,15 @@ func TestWaitReady_ReadyWithTargetInfoHash_ReturnsNil(t *testing.T) {
 	require.NoError(t, d.waitReady(ctx, mirror))
 }
 
-func TestWaitReady_ReadyButMissingTargetInfo_KeepsPolling(t *testing.T) {
-	// A Ready phase with an empty TargetInfo is a half-published
+func TestWaitReady_ReadyButNoDescriptorHash_KeepsPolling(t *testing.T) {
+	// A Ready phase with no descriptor hash is a half-published
 	// state from the gateway. The dispatcher must keep polling so a
 	// transient missing-field race doesn't return success early.
 	scheme := newScheme(t)
 	mirror := &mxlv1alpha1.MxlFlowMirror{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "m"},
 		Status: mxlv1alpha1.MxlFlowMirrorStatus{
-			Phase:      mxlv1alpha1.MxlFlowMirrorReady,
-			TargetInfo: "",
+			Phase: mxlv1alpha1.MxlFlowMirrorReady,
 		},
 	}
 	c := fake.NewClientBuilder().

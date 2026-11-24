@@ -44,7 +44,7 @@ func TestReconcile_FlowOriginRotation_DetectedAfterStaleOpen(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}, &mxlv1alpha1.MxlFlow{}).
-		WithObjects(mirror, flow).
+		WithObjects(withDescriptors(mirror, flow)...).
 		Build()
 
 	opener := &fakeOpener{

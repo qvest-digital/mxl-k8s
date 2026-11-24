@@ -594,9 +594,9 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Wait for the target side to publish its TargetInfo. The status
-	// update, or the MxlFlowMirrorTarget landing in the cache, triggers
-	// another reconcile.
+	// Wait for the target side to publish its descriptor. The hash in
+	// the status, or the MxlFlowMirrorTarget landing in the cache,
+	// triggers another reconcile.
 	info, published, err := r.targetDescriptor(ctx, &mirror)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -715,8 +715,8 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// port). This mirror's link is replaced by one against the new
 		// address; the other mirrors of the flow are not touched. The
 		// target side also lands here after recoverFromFatalError
-		// republishes status.targetInfo via SSA on its Ready
-		// transition -- the infoStr comparison above is the source
+		// republishes status.targetInfoHash via SSA on its Ready
+		// transition -- the hash comparison above is the source
 		// initiator's only wake-up signal for that rotation, so do
 		// not add a spec-only predicate to the MxlFlowMirror watch or
 		// recovery wakes will be silently dropped.
@@ -786,14 +786,16 @@ func (r *SourceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		peerNode: mirror.Spec.TargetNode,
 		// wantInterface is read by attach.
 		wantInterface: want,
-		// Published with TargetInfo, so it describes the same target.
+		// Published with the descriptor's hash, so it describes the
+		// same target.
 		targetSyncHint: uint32(mirror.Status.TargetMaxSyncBatchSizeHint),
 		openedAt:       time.Now(),
 	}
-	// Carry the published lastSentAt onto the fresh entry: a rebuilt
-	// entry has no transfers of its own, and an omitted field is one
-	// SSA releases and the apiserver strips, erasing the timestamp the
-	// target's stuck-handshake watchdog discriminates on.
+	// Carry the source's heartbeat onto the fresh entry: a rebuilt
+	// entry has no transfers of its own, and the flusher renews the
+	// Lease only from the entry's lastSentAt, so without this the
+	// target's stuck-handshake watchdog would read a source that had
+	// been sending as one that never did until the next transfer.
 	if t := heartbeatAt(ctx, r.Client, &mirror, mxlv1alpha1.MirrorSideSource); t != nil {
 		entry.lastSentAt.Store(t)
 	}
@@ -1601,11 +1603,11 @@ type sourceProgressState struct {
 	// and kept delivering and for one stuck outside the ring, and only
 	// the second is a wedge.
 	rebuildReader bool
-	// lastSentAt carries the wall-clock of the most recent successful
-	// TransferGrain forward into the SSA payload. The target-side
-	// stuck-handshake watchdog reads it to discriminate "source is
-	// sending but target is wedged" from "source is idle". Unset
-	// before the first transfer.
+	// lastSentAt is the wall-clock of the most recent successful
+	// TransferGrain, which the flusher renews into the source's
+	// heartbeat Lease. The target-side stuck-handshake watchdog reads
+	// it there to discriminate "source is sending but target is
+	// wedged" from "source is idle". Unset before the first transfer.
 	lastSentAt *time.Time
 	// boundInterface is the address the initiator is bound to, empty
 	// when no initiator is.
@@ -1658,14 +1660,6 @@ func (r *SourceReconciler) publishSourceProgress(ctx context.Context, key types.
 	} else {
 		status["attemptCount"] = int64(0)
 		status["lastError"] = ""
-	}
-	if state.lastSentAt != nil {
-		// Re-stamped on every publish that carries it: SSA with a
-		// single FieldOwner releases ownership of fields omitted from
-		// a later payload, so dropping the key after the first
-		// publish would let the apiserver strip it and break the
-		// target-side stuck-handshake discriminator.
-		status["lastSentAt"] = state.lastSentAt.UTC().Format(time.RFC3339)
 	}
 	if state.boundInterface != "" {
 		// Omitted when no initiator is bound, which releases the field.
@@ -2022,25 +2016,18 @@ func (r *SourceReconciler) readerStallAfter() time.Duration {
 }
 
 // sourceStateEqual reports whether two sourceProgressState values
-// would publish a status an observer could tell apart, leaving the
-// value of lastSentAt out. A moving lastSentAt is the source's
-// heartbeat, which the flusher renews in the source's heartbeat Lease;
-// written into the status, it rewrote the whole mirror every few
-// seconds. The status carries lastSentAt as of its last change, and
-// its first appearance is a change.
+// would publish a status an observer could tell apart. lastSentAt is
+// not part of the status: it is the source's heartbeat, which the
+// flusher renews in the source's heartbeat Lease.
 func sourceStateEqual(a, b sourceProgressState) bool {
-	if a.status != b.status || a.reason != b.reason ||
-		a.message != b.message || a.attempts != b.attempts || a.boundInterface != b.boundInterface {
-		return false
-	}
-	return (a.lastSentAt == nil) == (b.lastSentAt == nil)
+	return a.status == b.status && a.reason == b.reason &&
+		a.message == b.message && a.attempts == b.attempts && a.boundInterface == b.boundInterface
 }
 
 // observedState derives the SourceProgress condition the flusher
 // should publish from the atomics on the entry. lastSentAt is
-// propagated into every state so the target-side watchdog gets a
-// freshness signal regardless of which condition is currently being
-// published.
+// propagated into every state so the flusher renews the heartbeat
+// regardless of which condition is currently being published.
 //
 // Every fault here is judged against the last grain that reached the
 // target rather than against the lifetime transfer count. A mirror
@@ -2238,24 +2225,9 @@ func (r *SourceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			builder.WithPredicates(leaseInMxlSystem()),
 		).
 		WatchesRawSource(source.Channel(r.redialEvents, &handler.EnqueueRequestForObject{}))
-	// A descriptor reaching the cache after the mirror's hash is what
-	// wakes the mirror that waits for it. It shares the mirror's name.
-	// A cluster whose CRDs predate the kind serves the descriptor in
-	// status.targetInfo alone, and a watch on a kind the API server
-	// does not serve would keep the controller from starting.
-	// The kind is looked up once, so a gateway started before its CRD
-	// was applied reads descriptors from status.targetInfo until it
-	// restarts.
-	gvk := mxlv1alpha1.GroupVersion.WithKind("MxlFlowMirrorTarget")
-	_, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
-	switch {
-	case err == nil:
-		b = b.Watches(&mxlv1alpha1.MxlFlowMirrorTarget{}, &handler.EnqueueRequestForObject{})
-	case apimeta.IsNoMatchError(err):
-		ctrl.Log.WithName("source").Info("MxlFlowMirrorTarget is not served; reading target descriptors from status.targetInfo")
-	default:
-		return fmt.Errorf("look up MxlFlowMirrorTarget: %w", err)
-	}
+	// The descriptor reaching the cache after the mirror's hash is what
+	// wakes a mirror that waits for it. It shares the mirror's name.
+	b = b.Watches(&mxlv1alpha1.MxlFlowMirrorTarget{}, &handler.EnqueueRequestForObject{})
 	return b.Named("mxlflowmirror-source").Complete(r)
 }
 

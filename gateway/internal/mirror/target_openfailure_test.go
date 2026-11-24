@@ -69,7 +69,7 @@ func newOpenFailureFixture(t *testing.T, openErr error, locPhase mxlv1alpha1.Mxl
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}, &mxlv1alpha1.MxlFlow{}).
-		WithObjects(mirror, flow).
+		WithObjects(withDescriptors(mirror, flow)...).
 		Build()
 
 	clock, advance := fixedClock(time.Now())

@@ -82,7 +82,7 @@ func awaitFixture(t *testing.T, n int, created time.Time, conds ...metav1.Condit
 	caps.Status.Providers = []mxlv1alpha1.MxlFabricsProviderCapability{{Name: mxlv1alpha1.ProviderTCP, Interfaces: ifs}}
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}, &mxlv1alpha1.MxlNodeCapabilities{}).
-		WithObjects(m, caps).Build()
+		WithObjects(withDescriptors(m, caps)...).Build()
 	now := time.Unix(1_000_002, 0)
 	return &TargetReconciler{Client: c, NodeName: "node-a", PlacementWait: 10 * time.Second,
 		nowFn: func() time.Time { return now }}, m

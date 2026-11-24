@@ -48,7 +48,7 @@ func TestRunFlusher_ReleasesReaderWhenWriterGoneWithoutARebuildState(t *testing.
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
@@ -99,7 +99,7 @@ func TestRunFlusher_KeepsReaderWhileTheWriterIsLive(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
@@ -147,7 +147,7 @@ func TestReconcile_DoesNotOpenAReaderWhileTheWriterIsGone(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	opener := &fakeOpener{
@@ -194,7 +194,7 @@ func TestReconcile_OpensAReaderOnceTheWriterIsBack(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	opener := &fakeOpener{
@@ -244,7 +244,7 @@ func TestReconcile_ParksAMirrorWhoseFlowIsNotInTheDomain(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror)...).
 		Build()
 
 	// What libmxl answers on both paths for a flow that is not in the

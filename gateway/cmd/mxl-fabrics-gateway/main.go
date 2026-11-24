@@ -190,6 +190,11 @@ func run(args []string) error {
 		Recorders:     replication,
 		Placer:        placer,
 	}
+	// Both halves of a mirror exchange the target descriptor only
+	// through MxlFlowMirrorTarget.
+	if err := requireKind(mgr.GetRESTMapper(), "MxlFlowMirrorTarget"); err != nil {
+		return fmt.Errorf("mirrors need the MxlFlowMirrorTarget CRD: %w", err)
+	}
 	if err := targetReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup target reconciler: %w", err)
 	}

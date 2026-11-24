@@ -20,8 +20,8 @@ import (
 // side, rather than in the mirror's status. Every status write stores
 // the whole mirror again in etcd and wakes every controller watching
 // mirrors; a Lease is a few hundred bytes that nothing reconciles on.
-// The mirror's status still changes on every phase or reason
-// transition, and carries the timestamps as of that transition.
+// The mirror's status changes on phase and reason transitions only,
+// and carries no progress time.
 
 // heartbeat renews one side's heartbeat Lease on behalf of a flusher,
 // whose goroutine is the only one to touch it.
@@ -94,30 +94,20 @@ func deleteHeartbeat(ctx context.Context, c client.Client, mirror types.Namespac
 	}
 }
 
-// heartbeatAt is one side's latest progress time: the later of its
-// heartbeat Lease and the timestamp the mirror's status carries for
-// it. The status is consulted as well because a gateway that predates
-// the Lease writes only the status, and because a transition writes
-// the status first.
+// heartbeatAt is one side's latest progress time, the renew time of its
+// heartbeat Lease. It is nil while that side has not progressed: no
+// Lease yet, which is a side that has not completed a transfer or
+// committed a grain since its gateway took the mirror up, or one that
+// cannot be read. Every reader takes nil as no progress.
 func heartbeatAt(ctx context.Context, c client.Reader, mirror *mxlv1alpha1.MxlFlowMirror, side mxlv1alpha1.MirrorSide) *time.Time {
-	var latest *time.Time
-	field := mirror.Status.LastGrainAt
-	if side == mxlv1alpha1.MirrorSideSource {
-		field = mirror.Status.LastSentAt
-	}
-	if field != nil {
-		t := field.Time
-		latest = &t
-	}
 	var lease coordinationv1.Lease
 	key := types.NamespacedName{
 		Namespace: mxlv1alpha1.LeaseNamespace,
 		Name:      mxlv1alpha1.MirrorLeaseName(mirror.Namespace, mirror.Name, side),
 	}
-	if err := c.Get(ctx, key, &lease); err == nil && lease.Spec.RenewTime != nil {
-		if t := lease.Spec.RenewTime.Time; latest == nil || t.After(*latest) {
-			latest = &t
-		}
+	if err := c.Get(ctx, key, &lease); err != nil || lease.Spec.RenewTime == nil {
+		return nil
 	}
-	return latest
+	t := lease.Spec.RenewTime.Time
+	return &t
 }

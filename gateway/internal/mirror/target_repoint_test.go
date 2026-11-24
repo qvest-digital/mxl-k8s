@@ -11,7 +11,6 @@ import (
 	"github.com/qvest-digital/go-mxl/mxl"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -36,18 +35,16 @@ func newRepointFixture(t *testing.T, sourceNode string, provider mxlv1alpha1.Mxl
 	t.Helper()
 	scheme := newSourceTestScheme(t)
 	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
-	fresh := metav1.NewTime(time.Now())
 	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1", mxlv1alpha1.MxlFlowMirrorStatus{
-		Phase:       mxlv1alpha1.MxlFlowMirrorReady,
-		TargetInfo:  "info-1",
-		LastGrainAt: &fresh,
+		Phase:          mxlv1alpha1.MxlFlowMirrorReady,
+		TargetInfoHash: descriptorHash("info-1"),
 	})
 	mirror.Spec.SourceNode = sourceNode
 	mirror.Spec.Provider = provider
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
-		WithObjects(mirror).
+		WithObjects(withDescriptors(mirror, heartbeatLease(key, mxlv1alpha1.MirrorSideTarget, "node-a", time.Now()))...).
 		Build()
 
 	// The progress loop has already exited, so a rebuild does not wait.
@@ -249,8 +246,8 @@ func TestReconcile_RepointedProviderSettlesAfterTheRebuild(t *testing.T) {
 	var mirror mxlv1alpha1.MxlFlowMirror
 	require.Eventually(t, func() bool {
 		require.NoError(t, f.r.Get(ctx, f.req.NamespacedName, &mirror))
-		return mirror.Status.TargetInfo == "info-2"
-	}, 5*time.Second, 10*time.Millisecond, "the rebuilt fabric side's targetInfo was never published")
+		return mirror.Status.TargetInfoHash == mxlv1alpha1.TargetInfoHash("info-2")
+	}, 5*time.Second, 10*time.Millisecond, "the rebuilt fabric side's descriptor was never published")
 
 	f.entry.lifecycle.Lock()
 	provider := f.entry.provider
