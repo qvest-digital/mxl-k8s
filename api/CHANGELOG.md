@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.0-rc.49](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.48...api/v1.1.0-rc.49) (2026-11-24)
+
+
+### Features
+
+* **api:** add MxlFlowMirrorTarget and mirror heartbeat Lease names ([efd7adb](https://github.com/qvest-digital/mxl-k8s/commit/efd7adb1d9accad6e2bcceb71d920d4d0a945cf0))
+* **gateway:** publish target descriptors in MxlFlowMirrorTarget ([efd7adb](https://github.com/qvest-digital/mxl-k8s/commit/efd7adb1d9accad6e2bcceb71d920d4d0a945cf0))
+* **gateway:** renew mirror heartbeats in Leases instead of the status ([efd7adb](https://github.com/qvest-digital/mxl-k8s/commit/efd7adb1d9accad6e2bcceb71d920d4d0a945cf0))
+
 ## [1.1.0-rc.48](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.47...api/v1.1.0-rc.48) (2026-11-22)
 
 
