@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.0-rc.60](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.50...api/v1.1.0-rc.60) (2026-11-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **gateway:** MxlFlowMirror status.targetInfo, lastGrainAt and lastSentAt are deprecated and no longer populated; read MxlFlowMirrorTarget and the mirror heartbeat Leases, and run every gateway and agent on 1.1.0-rc.57 or later before upgrading.
+
+### Features
+
+* **gateway:** stop writing and reading the legacy mirror status fields ([#479](https://github.com/qvest-digital/mxl-k8s/issues/479)) ([48576aa](https://github.com/qvest-digital/mxl-k8s/commit/48576aa48575fc86013b7d3c57231db197906c91))
+
 ## [1.1.0-rc.50](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.49...api/v1.1.0-rc.50) (2026-11-24)
 
 
