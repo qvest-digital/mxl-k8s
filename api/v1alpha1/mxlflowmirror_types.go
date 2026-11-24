@@ -111,17 +111,6 @@ type MxlFlowMirrorStatus struct {
 	// +optional
 	Phase MxlFlowMirrorPhase `json:"phase,omitempty"`
 
-	// TargetInfo is no longer written or read by any component; the
-	// target descriptor lives in the MxlFlowMirrorTarget of the same
-	// name, which TargetInfoHash names.
-	//
-	// Deprecated: kept in the schema so that a gateway of an earlier
-	// release, which still writes it, is not rejected by the API server
-	// while gateways are upgraded node by node. A later release removes
-	// it.
-	// +optional
-	TargetInfo string `json:"targetInfo,omitempty"`
-
 	// TargetInfoHash identifies the current target descriptor: the
 	// TargetInfoHash of the MxlFlowMirrorTarget of the same name that
 	// the source gateway dials. Written after that object, so a
@@ -151,23 +140,6 @@ type MxlFlowMirrorStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
-
-	// LastGrainAt is no longer written or read by any component; the
-	// target's heartbeat Lease (see MirrorLeaseName) carries its
-	// progress time.
-	//
-	// Deprecated: kept in the schema for the same reason as TargetInfo.
-	// +optional
-	LastGrainAt *metav1.Time `json:"lastGrainAt,omitempty"`
-
-	// LastSentAt is no longer written or read by any component; the
-	// source's heartbeat Lease (see MirrorLeaseName) carries its
-	// progress time.
-	//
-	// Deprecated: kept in the schema for the same reason as TargetInfo.
-	// +optional
-	// +nullable
-	LastSentAt *metav1.Time `json:"lastSentAt,omitempty"`
 
 	// LastError is the most recent reconcile error message recorded
 	// by the source gateway when bounded backoff is engaged. Empty

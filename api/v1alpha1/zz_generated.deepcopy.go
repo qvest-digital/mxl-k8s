@@ -427,14 +427,6 @@ func (in *MxlFlowMirrorStatus) DeepCopyInto(out *MxlFlowMirrorStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
-	if in.LastGrainAt != nil {
-		in, out := &in.LastGrainAt, &out.LastGrainAt
-		*out = (*in).DeepCopy()
-	}
-	if in.LastSentAt != nil {
-		in, out := &in.LastSentAt, &out.LastSentAt
-		*out = (*in).DeepCopy()
-	}
 	if in.SourceRetargetedAt != nil {
 		in, out := &in.SourceRetargetedAt, &out.SourceRetargetedAt
 		*out = (*in).DeepCopy()

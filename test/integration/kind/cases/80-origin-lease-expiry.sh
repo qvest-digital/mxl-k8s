@@ -122,7 +122,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
 done
 if [ "$cond_status" != "False" ]; then
   echo "  lease ${lease_name} state:" >&2
-  "${KUBECTL[@]}" -n "$NAMESPACE" get "lease/${lease_name}" -o yaml >&2 \
+  "${KUBECTL[@]}" -n "$LEASE_NAMESPACE" get "lease/${lease_name}" -o yaml >&2 \
       2>/dev/null || true
   fail "MxlFlow/${flow_id} OriginFresh did not become False within ${LEASE_EXPIRY_TIMEOUT_SECS}s (last=${cond_status})"
 fi

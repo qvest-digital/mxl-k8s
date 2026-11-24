@@ -271,25 +271,6 @@ spec:
                   by the source gateway when bounded backoff is engaged. Empty
                   after a successful reconcile.
                 type: string
-              lastGrainAt:
-                description: |-
-                  LastGrainAt is no longer written or read by any component; the
-                  target's heartbeat Lease (see MirrorLeaseName) carries its
-                  progress time.
-
-                  Deprecated: kept in the schema for the same reason as TargetInfo.
-                format: date-time
-                type: string
-              lastSentAt:
-                description: |-
-                  LastSentAt is no longer written or read by any component; the
-                  source's heartbeat Lease (see MirrorLeaseName) carries its
-                  progress time.
-
-                  Deprecated: kept in the schema for the same reason as TargetInfo.
-                format: date-time
-                nullable: true
-                type: string
               observedGeneration:
                 description: ObservedGeneration is the spec generation last reconciled.
                 format: int64
@@ -340,17 +321,6 @@ spec:
                   have each side's server-side apply reset the other's value.
                 format: int32
                 type: integer
-              targetInfo:
-                description: |-
-                  TargetInfo is no longer written or read by any component; the
-                  target descriptor lives in the MxlFlowMirrorTarget of the same
-                  name, which TargetInfoHash names.
-
-                  Deprecated: kept in the schema so that a gateway of an earlier
-                  release, which still writes it, is not rejected by the API server
-                  while gateways are upgraded node by node. A later release removes
-                  it.
-                type: string
               targetInfoHash:
                 description: |-
                   TargetInfoHash identifies the current target descriptor: the

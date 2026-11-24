@@ -130,7 +130,7 @@ func TestReconcile_UnchangedMirrorLeavesTheLiveTargetAlone(t *testing.T) {
 // A mirror moved onto another fabric cannot be served by the fabric
 // side the target opened: the new source dials the provider the spec
 // names. The target rebuilds for that provider through the recovery
-// path, which keeps the writer and republishes targetInfo.
+// path, which keeps the writer and publishes a new descriptor.
 func TestReconcile_RepointedProviderRebuildsTheLiveTarget(t *testing.T) {
 	f := newRepointFixture(t, "node-y", mxlv1alpha1.ProviderVerbs)
 
@@ -193,10 +193,11 @@ func TestTarget_RecoveryRebuildsForTheProviderTheSpecNames(t *testing.T) {
 }
 
 // Once the rebuild for a new provider has succeeded, the entry carries
-// that provider and the new targetInfo is published, so the next pass
+// that provider and the new descriptor is published, so the next pass
 // finds nothing left to follow. An entry left on the old provider
 // would read as changed on every pass and rebuild the target, rotating
-// targetInfo under the source, every providerRecheckInterval for good.
+// the descriptor under the source, every providerRecheckInterval for
+// good.
 //
 // The zero-value fabric target the rebuild hands back makes the
 // progress loop it starts fail at once, and that loop's own recovery

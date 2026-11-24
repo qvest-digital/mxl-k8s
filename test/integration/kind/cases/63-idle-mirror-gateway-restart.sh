@@ -126,7 +126,7 @@ wait_phase "$mirror" '{.status.phase}' '^Ready$' "$MIRROR_TIMEOUT_SECS" >/dev/nu
 # cut to whole seconds, empty without one. The target renews it while
 # grains commit; the mirror's status carries no progress time.
 target_heartbeat() {
-  "${KUBECTL[@]}" -n "$NAMESPACE" get leases -l mxl.qvest-digital.com/mirror-side=target \
+  "${KUBECTL[@]}" -n "$LEASE_NAMESPACE" get leases -l mxl.qvest-digital.com/mirror-side=target \
       -o jsonpath='{range .items[*]}{.metadata.annotations.mxl\.qvest-digital\.com/mirror}{" "}{.spec.renewTime}{"\n"}{end}' \
     | awk -v m="${NAMESPACE}/${mirror#mxlflowmirror/}" '$1 == m { print substr($2, 1, 19) "Z" }'
 }
@@ -177,7 +177,7 @@ resumes() {
     sleep 2
   done
   "${KUBECTL[@]}" -n "$NAMESPACE" get "$mirror" -o yaml >&2 || true
-  "${KUBECTL[@]}" -n "$NAMESPACE" get leases -l mxl.qvest-digital.com/mirror-side -o yaml >&2 || true
+  "${KUBECTL[@]}" -n "$LEASE_NAMESPACE" get leases -l mxl.qvest-digital.com/mirror-side -o yaml >&2 || true
   fail "no grain reached ${tgt_node} within ${RESUME_TIMEOUT_SECS}s of resuming after $1"
 }
 

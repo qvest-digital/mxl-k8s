@@ -7,10 +7,8 @@
 # status.targetInfoHash; a missing or mismatching one means the target
 # plumbing never materialised even if the phase string reads Ready.
 #
-# The schema still declares the deprecated status.targetInfo,
-# status.lastGrainAt and status.lastSentAt, so a gateway that kept
-# writing them would leave them on the mirror; nothing does. Both
-# gateways renew a heartbeat Lease per mirror once grains move.
+# The status carries no progress time: both gateways renew a heartbeat
+# Lease per mirror once grains move.
 
 set -euo pipefail
 # shellcheck source=../lib.sh
@@ -39,7 +37,7 @@ sha256() {
 # heartbeat <side> <mirror>: whether that side's heartbeat Lease for the
 # mirror exists.
 heartbeat() {
-  "${KUBECTL[@]}" -n "$NAMESPACE" get leases -l "mxl.qvest-digital.com/mirror-side=$1" \
+  "${KUBECTL[@]}" -n "$LEASE_NAMESPACE" get leases -l "mxl.qvest-digital.com/mirror-side=$1" \
       -o jsonpath='{range .items[*]}{.metadata.annotations.mxl\.qvest-digital\.com/mirror}{"\n"}{end}' \
     | grep -Fxq "${NAMESPACE}/$2"
 }
@@ -49,10 +47,6 @@ for name in $names; do
         -o jsonpath='{.status.targetInfoHash}')
   [ -n "$hash" ] \
     || fail "MxlFlowMirror/${name} has empty status.targetInfoHash (target side never opened)"
-  legacy=$("${KUBECTL[@]}" -n "$NAMESPACE" get "mxlflowmirror/${name}" \
-        -o jsonpath='{.status.targetInfo}{.status.lastGrainAt}{.status.lastSentAt}')
-  [ -z "$legacy" ] \
-    || fail "MxlFlowMirror/${name} status carries a deprecated descriptor or progress time, which no gateway may write"
   obj=$("${KUBECTL[@]}" -n "$NAMESPACE" get "mxlflowmirrortarget/${name}" \
         -o jsonpath='{.spec.targetInfo}') \
     || fail "MxlFlowMirror/${name} has no MxlFlowMirrorTarget"

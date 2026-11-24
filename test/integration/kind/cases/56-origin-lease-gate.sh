@@ -22,7 +22,7 @@ set -uo pipefail
 # shellcheck source=../lib.sh
 . "${KIND_TEST_LIB:?KIND_TEST_LIB not set}"
 
-LEASES_NAMESPACE="${LEASES_NAMESPACE:-$NAMESPACE}"
+LEASES_NAMESPACE="${LEASES_NAMESPACE:-$LEASE_NAMESPACE}"
 
 # One "<flowID>|<node>=<phase>,..." per line. Written to a file rather
 # than piped so the counters below survive: a pipeline would run the
