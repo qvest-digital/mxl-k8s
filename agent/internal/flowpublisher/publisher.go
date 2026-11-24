@@ -93,7 +93,16 @@ type Publisher struct {
 	// ReadLocks reads the node's lock table for Producer and Ours to be
 	// asked about. Nil reads /proc/locks through agent/internal/flowlock.
 	ReadLocks func() (flowlock.Locks, error)
+
+	// ObservedRefresh is how old a location's LastObserved may grow
+	// before the rescan stamps it again. Zero takes
+	// DefaultObservedRefresh.
+	ObservedRefresh time.Duration
 }
+
+// DefaultObservedRefresh is the ObservedRefresh a Publisher without one
+// uses.
+const DefaultObservedRefresh = 5 * time.Minute
 
 // ref is the flow a directory id names in this publisher's domain.
 func (p *Publisher) ref(flowID string) mxlv1alpha1.FlowRef {
@@ -1018,8 +1027,17 @@ func (p *Publisher) RunLocalRescan(ctx context.Context, interval time.Duration) 
 }
 
 // refreshLocalObservations stamps LastObserved on every flow this node
-// still holds on disk, so the field means what it says: the agent
-// confirmed this copy just now.
+// still holds on disk once the stamp is ObservedRefresh old, so the
+// field means what it says: the agent confirmed this copy at most that
+// long ago.
+//
+// Each stamp is a full write of the MxlFlow's status, which etcd stores
+// again and every watcher of MxlFlow receives. Stamped on every rescan,
+// that was two writes a minute per location, the largest single source
+// of MxlFlow writes, for a field nothing in the control plane reads.
+// The rescan itself keeps its interval: it is what notices a copy
+// appearing or vanishing and repairs a wrong phase, and the stamp is
+// only spaced out.
 //
 // This is the whole point of splitting AppearedAt out. LastObserved
 // used to double as the source gateway's rotation signal, so
@@ -1037,6 +1055,10 @@ func (p *Publisher) RunLocalRescan(ctx context.Context, interval time.Duration) 
 // node does not already claim is skipped for the same reason.
 func (p *Publisher) refreshLocalObservations(ctx context.Context, onDisk map[string]struct{}) error {
 	now := metav1.Now()
+	every := p.ObservedRefresh
+	if every <= 0 {
+		every = DefaultObservedRefresh
+	}
 	var errs []error
 	for id := range onDisk {
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -1052,6 +1074,9 @@ func (p *Publisher) refreshLocalObservations(ctx context.Context, onDisk map[str
 					continue
 				}
 				if flow.Status.Locations[i].Phase == mxlv1alpha1.MxlFlowLocationStale {
+					return nil
+				}
+				if last := flow.Status.Locations[i].LastObserved; last != nil && now.Sub(last.Time) < every {
 					return nil
 				}
 				stamp := now

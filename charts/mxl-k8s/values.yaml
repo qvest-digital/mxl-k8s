@@ -550,6 +550,15 @@ agent:
     # @schema
     intentMirrorBurstWindow: 10s
     resyncPeriod: 30s
+    # @schema
+    # type: string
+    # pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+    # @schema
+    # -- How old a flow location's lastObserved may grow before the
+    # agent stamps it again. Each stamp is a write of the whole MxlFlow
+    # status. Flow directories appearing and vanishing are rescanned
+    # every 30s regardless.
+    observedRefreshInterval: 5m
     # -- Client-side request rate to the API server. A node holding
     # many flows spends one Get and one Update per flow per renewal
     # pass; at the client-go default of 5 the loop blocks rather than

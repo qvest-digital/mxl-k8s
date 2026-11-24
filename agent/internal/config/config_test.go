@@ -39,6 +39,9 @@ func TestFromFlags_DefaultsFireWhenArgsProvided(t *testing.T) {
 			"silently disables every pod's probes on upgrade")
 	assert.Equal(t, ":8080", c.MetricsAddr)
 	assert.Equal(t, 30*time.Second, c.ResyncPeriod)
+	assert.Equal(t, 5*time.Minute, c.ObservedRefreshInterval,
+		"every lastObserved stamp is a write of the whole MxlFlow status; "+
+			"at the 30s rescan it was the largest source of MxlFlow writes")
 	assert.Equal(t, "/run/mxl/agent.sock", c.IntentSocketPath)
 	assert.Equal(t, "/run/mxl/libmxl-intent.so", c.ShimPath,
 		"consumer pods hardcode this path in LD_PRELOAD; moving it "+
@@ -94,6 +97,7 @@ func TestFromFlags_OverridesAreRespected(t *testing.T) {
 		"--health-probe-bind-address=:9081",
 		"--metrics-bind-address=:9080",
 		"--resync-period=15s",
+		"--observed-refresh-interval=90s",
 		"--intent-socket=/tmp/mxl.sock",
 		"--shim-path=/tmp/libmxl-intent.so",
 		"--materialize-timeout=2s",
@@ -105,6 +109,7 @@ func TestFromFlags_OverridesAreRespected(t *testing.T) {
 	assert.Equal(t, ":9081", c.ProbeAddr)
 	assert.Equal(t, ":9080", c.MetricsAddr)
 	assert.Equal(t, 15*time.Second, c.ResyncPeriod)
+	assert.Equal(t, 90*time.Second, c.ObservedRefreshInterval)
 	assert.Equal(t, "/tmp/mxl.sock", c.IntentSocketPath)
 	assert.Equal(t, "/tmp/libmxl-intent.so", c.ShimPath)
 	assert.Equal(t, 2*time.Second, c.MaterializeTimeout)
@@ -150,6 +155,11 @@ func TestValidate(t *testing.T) {
 			name:    "missing node name",
 			c:       Config{DomainPath: "/run/mxl/domain"},
 			wantErr: "--node-name",
+		},
+		{
+			name:    "negative observed refresh interval",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: -time.Second},
+			wantErr: "--observed-refresh-interval must not be negative",
 		},
 		{
 			name:    "valid",

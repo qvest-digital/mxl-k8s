@@ -36,6 +36,12 @@ type Config struct {
 	// ResyncPeriod is how often the agent refreshes MxlDomain status.
 	ResyncPeriod time.Duration
 
+	// ObservedRefreshInterval is how old a flow location's lastObserved
+	// may grow before the agent stamps it again. The rescan that finds
+	// flow directories appearing and vanishing runs every 30s
+	// regardless; each stamp is a write of the whole MxlFlow status.
+	ObservedRefreshInterval time.Duration
+
 	// IntentSocketPath is the UDS the agent serves for libmxl-
 	// intent.so to request on-demand mirror materialization. Empty
 	// disables the intent endpoint.
@@ -162,6 +168,9 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"Address the metrics endpoint binds to.")
 	fs.DurationVar(&c.ResyncPeriod, "resync-period", 30*time.Second,
 		"How often to refresh MxlDomain status.")
+	fs.DurationVar(&c.ObservedRefreshInterval, "observed-refresh-interval", 5*time.Minute,
+		"How old a flow location's lastObserved may grow before the agent stamps it again. "+
+			"Flow directories appearing and vanishing are still rescanned every 30s.")
 	fs.StringVar(&c.IntentSocketPath, "intent-socket", "/run/mxl/agent.sock",
 		"UDS path for the on-demand intent endpoint. Empty disables.")
 	fs.StringVar(&c.ShimPath, "shim-path", "/run/mxl/libmxl-intent.so",
@@ -282,6 +291,9 @@ func (c *Config) Validate() error {
 	}
 	if c.IntentAPIBurst <= 0 {
 		return fmt.Errorf("--intent-api-burst must be positive, got %d", c.IntentAPIBurst)
+	}
+	if c.ObservedRefreshInterval < 0 {
+		return fmt.Errorf("--observed-refresh-interval must not be negative, got %v", c.ObservedRefreshInterval)
 	}
 	return nil
 }

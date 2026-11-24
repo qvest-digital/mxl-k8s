@@ -991,10 +991,10 @@ func backoffFor(attempts uint32) time.Duration {
 // location entry on r.NodeName for the given flow, or nil if the
 // flow or location is missing.
 //
-// AppearedAt, not LastObserved: the latter is refreshed on every
-// agent rescan to report liveness, so keying rotation on it would
+// AppearedAt, not LastObserved: the agent refreshes the latter
+// periodically to report liveness, so keying rotation on it would
 // read every steady-state flow as a restarted producer once per
-// rescan. AppearedAt moves only when a flow directory actually
+// refresh. AppearedAt moves only when a flow directory actually
 // appears, which is the event this is trying to detect. Errors are logged but not fatal: a
 // missing flow means the reconciler will wait for the MxlFlow watch
 // to fire.

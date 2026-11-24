@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,6 +39,31 @@ func TestNewFlowPublisherConsultsSetsOnlyWithMxlfs(t *testing.T) {
 	fp, sets = newFlowPublisher(&config.Config{DomainPath: "/run/mxl/domain", NodeName: "n1", Mxlfs: true}, c, nil)
 	assert.NotNil(t, fp.IsOutput)
 	assert.NotNil(t, sets)
+}
+
+// --observed-refresh-interval reaches the publisher of the primary
+// domain and of every tracked one.
+func TestObservedRefreshReachesEveryPublisher(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	fp, _ := newFlowPublisher(&config.Config{DomainPath: "/run/mxl/domain", NodeName: "n1",
+		ObservedRefreshInterval: 7 * time.Minute}, c, nil)
+	assert.Equal(t, 7*time.Minute, fp.ObservedRefresh)
+
+	var watched *flowpublisher.Publisher
+	tracking := domainTracking{
+		Client:          c,
+		Node:            "n1",
+		ObservedRefresh: 7 * time.Minute,
+		WatchFlows: func(_ context.Context, _ string, fp *flowpublisher.Publisher) (func(), error) {
+			watched = fp
+			return func() {}, nil
+		},
+	}
+	tr, err := tracking.start(context.Background(), "studio", t.TempDir())
+	require.NoError(t, err)
+	tr.Stop()
+	require.NotNil(t, watched)
+	assert.Equal(t, 7*time.Minute, watched.ObservedRefresh)
 }
 
 func TestRequireKindNamesTheMissingCRD(t *testing.T) {

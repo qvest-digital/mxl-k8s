@@ -38,9 +38,11 @@ type MxlFlowLocation struct {
 	Phase MxlFlowLocationPhase `json:"phase"`
 
 	// LastObserved is when the local agent last confirmed the flow's
-	// presence on this node. It is refreshed on every agent rescan
-	// while the flow is present, so a recent value means "seen just
-	// now" and a value drifting into the past means the agent has
+	// presence on this node. While the flow is present the agent
+	// stamps it again once it is older than its
+	// --observed-refresh-interval (5m by default), so a value up to
+	// that interval plus one 30s rescan old means "still confirmed"
+	// and one drifting further into the past means the agent has
 	// stopped confirming it. It says nothing about when this copy
 	// arrived, which is AppearedAt.
 	// +optional

@@ -79,9 +79,14 @@ trap 'rm -f "$check"' EXIT
 cat >"$check" <<'PYEOF'
 import datetime
 import json
+import re
 import sys
 
 d = json.load(sys.stdin)
+# The agent's --observed-refresh-interval, a Go duration such as 5m or
+# 1m30s.
+refresh = sum(float(n) * {"h": 3600, "m": 60, "s": 1, "ms": 1e-3}[u]
+              for n, u in re.findall(r"([0-9.]+)(h|ms|m|s)", sys.argv[1]))
 items = d.get("items", [])
 if not items:
     sys.exit("no MxlFlow objects")
@@ -137,12 +142,14 @@ for f in items:
     if lo < ap:
         sys.exit("%s: lastObserved %s predates appearedAt %s" % (name, lo, ap))
     age = (now - lo).total_seconds()
-    # The agent rescans every 30s; three windows is generous and still
-    # catches a refresh that never runs at all.
-    if age > 95:
-        sys.exit("%s: Origin lastObserved is %.0fs old, so the agent is not "
-                 "confirming the copy -- the refresh pass is not running"
-                 % (name, age))
+    # The agent stamps a copy once its stamp is the refresh interval
+    # old, on its next 30s rescan; three rescans past the interval is
+    # generous and still catches a refresh that never runs at all.
+    if age > refresh + 95:
+        sys.exit("%s: Origin lastObserved is %.0fs old, past the %.0fs "
+                 "refresh interval, so the agent is not confirming the "
+                 "copy -- the refresh pass is not running"
+                 % (name, age, refresh))
     print("    %s... origin=%s lastObserved=%.0fs ago appearedAt=%.0fs ago"
           % (name, o["nodeName"], age, (now - ap).total_seconds()))
 
@@ -151,7 +158,15 @@ if checked == 0:
 print("    checked %d flow(s) with an Origin" % checked)
 PYEOF
 
-"${KUBECTL[@]}" get mxlflows -o json 2>/dev/null | python3 "$check" \
+# The interval the agent runs with, or its built-in default when the
+# chart passes none.
+refresh=$("${KUBECTL[@]}" -n "$NAMESPACE" get daemonset mxl-k8s-agent \
+  -o 'jsonpath={.spec.template.spec.containers[?(@.name=="agent")].args}' 2>/dev/null \
+  | tr ',' '\n' | sed -n 's/.*--observed-refresh-interval=\([0-9a-z.]*\).*/\1/p')
+refresh="${refresh:-5m}"
+echo "  agent observed-refresh-interval: ${refresh}"
+
+"${KUBECTL[@]}" get mxlflows -o json 2>/dev/null | python3 "$check" "$refresh" \
   || fail "flow origin record or location timestamps are wrong"
 
 echo "  lifecycle events reach the API and the origin record is consistent"

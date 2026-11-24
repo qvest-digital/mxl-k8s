@@ -165,9 +165,10 @@ func run(args []string) error {
 		return runMxlfs(ctx, dir, fp, intentDispatcher, claim, ours(pods, own))
 	}
 	tracking := domainTracking{
-		Client: kClient,
-		Node:   cfg.NodeName,
-		Lease:  leaseMgr,
+		Client:          kClient,
+		Node:            cfg.NodeName,
+		Lease:           leaseMgr,
+		ObservedRefresh: cfg.ObservedRefreshInterval,
 		WatchFlows: func(ctx context.Context, dir string, fp *flowpublisher.Publisher) (func(), error) {
 			return watchFlows(ctx, dir, fp, ctrl.Log.WithName("tracker").WithValues("directory", dir))
 		},
@@ -429,10 +430,11 @@ func run(args []string) error {
 // and asks the API server about no set.
 func newFlowPublisher(cfg *config.Config, c client.Client, lease *originlease.Manager) (*flowpublisher.Publisher, *redundancy.Sets) {
 	fp := &flowpublisher.Publisher{
-		Client:     c,
-		DomainPath: cfg.DomainPath,
-		NodeName:   cfg.NodeName,
-		Lease:      lease,
+		Client:          c,
+		DomainPath:      cfg.DomainPath,
+		NodeName:        cfg.NodeName,
+		Lease:           lease,
+		ObservedRefresh: cfg.ObservedRefreshInterval,
 	}
 	if !cfg.Mxlfs {
 		return fp, nil
@@ -540,6 +542,8 @@ type domainTracking struct {
 	Client client.Client
 	Node   string
 	Lease  flowpublisher.LeaseRenewer
+	// ObservedRefresh is the publisher's.
+	ObservedRefresh time.Duration
 	// WatchFlows feeds fp the flow directories coming and going in dir
 	// until ctx ends. It returns once they are watched, with what waits
 	// for the watch to end.
@@ -581,11 +585,12 @@ func (m *trackerMxlfs) on(dir string, fp *flowpublisher.Publisher) bool {
 func (d domainTracking) start(ctx context.Context, name, dir string) (tracker.Tracker, error) {
 	l := ctrl.Log.WithName("tracker").WithValues("domain", name, "directory", dir)
 	fp := &flowpublisher.Publisher{
-		Client:     d.Client,
-		DomainPath: dir,
-		Domain:     name,
-		NodeName:   d.Node,
-		Lease:      d.Lease,
+		Client:          d.Client,
+		DomainPath:      dir,
+		Domain:          name,
+		NodeName:        d.Node,
+		Lease:           d.Lease,
+		ObservedRefresh: d.ObservedRefresh,
 	}
 	onMxlfs := d.Mxlfs.on(dir, fp)
 
