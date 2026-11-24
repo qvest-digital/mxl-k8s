@@ -518,13 +518,19 @@ func (p *Publisher) ClaimOrigin(ctx context.Context, flowID string) error {
 
 // PublishVanished removes this node's location from the MxlFlow
 // status. The MxlFlow itself is left in place -- other nodes may still
-// hold a copy.
+// hold a copy. A directory found back on disk by the time the entry is
+// written, recreated after the event was queued, is demoted to Stale
+// instead: the appearance event behind it settles it from there.
 func (p *Publisher) PublishVanished(ctx context.Context, dirName string) error {
 	flowID, ok := FlowIDFromDirName(dirName)
 	if !ok {
 		return nil
 	}
-	return p.dropLocation(ctx, flowID)
+	dropped, err := p.dropLocation(ctx, flowID)
+	if err != nil || dropped {
+		return err
+	}
+	return p.markStale(ctx, flowID)
 }
 
 // markStale demotes this node's location and gives up the Lease that
@@ -552,11 +558,18 @@ func (p *Publisher) markStale(ctx context.Context, flowID string) error {
 //
 // Only this node's agent writes its entry, and only it can see whether
 // the directory exists, which is why the operator does not prune these.
-func (p *Publisher) dropLocation(ctx context.Context, flowID string) error {
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+//
+// The directory is looked at again right before the write, and a flow
+// back on disk keeps its entry: the caller decided from a listing or an
+// event that may predate a new appearance, whose fresh entry this would
+// otherwise remove. dropped reports whether the entry is gone.
+func (p *Publisher) dropLocation(ctx context.Context, flowID string) (dropped bool, err error) {
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		dropped = false
 		var obj mxlv1alpha1.MxlFlow
 		if err := p.Client.Get(ctx, types.NamespacedName{Name: p.key(flowID)}, &obj); err != nil {
 			if apierrors.IsNotFound(err) {
+				dropped = !p.onDisk(flowID)
 				return nil
 			}
 			return fmt.Errorf("get MxlFlow %s: %w", flowID, err)
@@ -567,6 +580,10 @@ func (p *Publisher) dropLocation(ctx context.Context, flowID string) error {
 				kept = append(kept, loc)
 			}
 		}
+		if p.onDisk(flowID) {
+			return nil
+		}
+		dropped = true
 		if len(kept) == len(obj.Status.Locations) {
 			return nil
 		}
@@ -574,10 +591,19 @@ func (p *Publisher) dropLocation(ctx context.Context, flowID string) error {
 		return p.Client.Status().Update(ctx, &obj)
 	})
 	if err != nil {
-		return fmt.Errorf("remove MxlFlow %s location: %w", flowID, err)
+		return false, fmt.Errorf("remove MxlFlow %s location: %w", flowID, err)
 	}
-	p.releaseLease(ctx, flowID)
-	return nil
+	if dropped {
+		p.releaseLease(ctx, flowID)
+	}
+	return dropped, nil
+}
+
+// onDisk reports whether flowID's directory is in the domain as a flow,
+// by the rule localFlowIDs lists them by: a placeholder is not one.
+func (p *Publisher) onDisk(flowID string) bool {
+	fi, err := os.Stat(filepath.Join(p.DomainPath, flowID+FlowDirSuffix))
+	return err == nil && fi.IsDir() && !mxlv1alpha1.IsPlaceholder(p.DomainPath, flowID)
 }
 
 // releaseLease gives up the Origin Lease for a flow this node no
@@ -813,7 +839,7 @@ func (p *Publisher) retireUnheldLocations(ctx context.Context, onDisk, held map[
 				continue
 			}
 			if _, there := onDisk[flow.Spec.ID]; !there {
-				if err := p.dropLocation(ctx, flow.Spec.ID); err != nil {
+				if _, err := p.dropLocation(ctx, flow.Spec.ID); err != nil {
 					l.Error(err, "remove vanished local location failed", "flowID", flow.Spec.ID)
 				}
 				break

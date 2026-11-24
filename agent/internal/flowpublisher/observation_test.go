@@ -211,6 +211,8 @@ func TestPublishVanished_NextAppearanceRotates(t *testing.T) {
 		WithStatusSubresource(&mxlv1alpha1.MxlFlow{}).WithObjects(existing).Build()
 
 	p := &Publisher{Client: c, WriterAttached: writerAttached, DomainPath: domain, NodeName: "n1"}
+	dir := filepath.Join(domain, validFlowID+".mxl-flow")
+	require.NoError(t, os.RemoveAll(dir))
 	require.NoError(t, p.PublishVanished(context.Background(), validFlowID+".mxl-flow"))
 
 	var got mxlv1alpha1.MxlFlow
@@ -218,6 +220,7 @@ func TestPublishVanished_NextAppearanceRotates(t *testing.T) {
 	assert.Empty(t, got.Status.Locations,
 		"a vanished copy leaves no entry, and with it no appearance")
 
+	writeFlowDir(t, domain, validFlowID)
 	require.NoError(t, p.PublishAppeared(context.Background(), validFlowID+".mxl-flow"))
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: validFlowID}, &got))
 	require.Len(t, got.Status.Locations, 1)

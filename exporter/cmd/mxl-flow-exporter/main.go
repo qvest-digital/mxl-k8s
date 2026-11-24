@@ -16,10 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	coordinationv1 "k8s.io/api/coordination/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/selection"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -30,7 +27,6 @@ import (
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/collector"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/config"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/domain"
-	"github.com/qvest-digital/mxl-k8s/exporter/internal/heartbeat"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/numa"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/topology"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/wanted"
@@ -117,17 +113,12 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) error {
 		collector.NewDomainCollector(domains, log.WithName("domain")),
 	)
 
-	if cfg.TopologyEnabled || cfg.MirrorHeartbeats {
-		reader, err := startCache(ctx, cfg, log)
+	if cfg.TopologyEnabled {
+		reader, err := startTopologyCache(ctx, cfg, log)
 		if err != nil {
 			return err
 		}
-		if cfg.TopologyEnabled {
-			nodeReg.MustRegister(topology.New(reader, cfg.NodeName, log.WithName("topology")))
-		}
-		if cfg.MirrorHeartbeats {
-			nodeReg.MustRegister(heartbeat.New(reader, cfg.NodeName, log.WithName("heartbeat")))
-		}
+		nodeReg.MustRegister(topology.New(reader, cfg.NodeName, log.WithName("topology")))
 	}
 
 	counters := mxlfsCounters(cfg.MxlfsNumaMetrics, log)
@@ -156,16 +147,10 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) error {
 	return serve(ctx, cfg, reg, log)
 }
 
-// startCache brings up a controller-runtime cache over what the
-// enabled collectors read, MxlFlow and the mirror heartbeat Leases, so
-// a scrape reads from a watch-backed store instead of listing against
-// the API server. Both are watched from the start, so the exporter
-// serves only once they have synced.
-//
-// The Leases are watched in their namespace and only those carrying
-// the mirror side label: the Origin Leases there are none of the
-// exporter's business.
-func startCache(ctx context.Context, cfg *config.Config, log logr.Logger) (client.Reader, error) {
+// startTopologyCache brings up a controller-runtime cache over
+// MxlFlow so a scrape reads from a watch-backed store instead of
+// listing against the API server.
+func startTopologyCache(ctx context.Context, cfg *config.Config, log logr.Logger) (client.Reader, error) {
 	restCfg, err := ctrl.GetConfig()
 	if err != nil {
 		return nil, err
@@ -177,41 +162,17 @@ func startCache(ctx context.Context, cfg *config.Config, log logr.Logger) (clien
 	if err := mxlv1alpha1.AddToScheme(scheme); err != nil {
 		return nil, err
 	}
-	mirrorSide, err := labels.NewRequirement(mxlv1alpha1.LabelMirrorSide, selection.Exists, nil)
+	c, err := cache.New(restCfg, cache.Options{Scheme: scheme})
 	if err != nil {
 		return nil, err
-	}
-	c, err := cache.New(restCfg, cache.Options{
-		Scheme: scheme,
-		ByObject: map[client.Object]cache.ByObject{
-			&coordinationv1.Lease{}: {
-				Namespaces: map[string]cache.Config{mxlv1alpha1.LeaseNamespace: {}},
-				Label:      labels.NewSelector().Add(*mirrorSide),
-			},
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	var watched []client.Object
-	if cfg.TopologyEnabled {
-		watched = append(watched, &mxlv1alpha1.MxlFlow{})
-	}
-	if cfg.MirrorHeartbeats {
-		watched = append(watched, &coordinationv1.Lease{})
-	}
-	for _, obj := range watched {
-		if _, err := c.GetInformer(ctx, obj); err != nil {
-			return nil, err
-		}
 	}
 	go func() {
 		if err := c.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Error(err, "API cache")
+			log.Error(err, "topology cache")
 		}
 	}()
 	if !c.WaitForCacheSync(ctx) {
-		return nil, errors.New("API cache did not sync")
+		return nil, errors.New("topology cache did not sync")
 	}
 	return c, nil
 }
