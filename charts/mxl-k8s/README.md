@@ -140,12 +140,11 @@ and moves each side's progress timestamp into a heartbeat Lease in
 grains move. It still wrote `status.targetInfo`, `status.lastGrainAt`
 and `status.lastSentAt` for gateways and agents that predate it.
 
-The release after 1.1.0-rc.57 that lists those three fields as
-deprecated in its changelog no longer writes or reads them. They stay
-in the CRD, so a 1.1.0-rc.57 gateway on a node not yet upgraded is not
-rejected for writing them, but nothing fills them any more, and the
-first write of each side's manager removes what the previous release
-left there. Every gateway and agent must run 1.1.0-rc.57 or later
+1.1.0-rc.60 deprecates those three fields and no longer writes or
+reads them. They stay in the CRD, so a 1.1.0-rc.57 gateway on a node
+not yet upgraded is not rejected for writing them, but nothing fills
+them any more, and the first write of each side's manager removes what
+the previous release left there. Every gateway and agent must run 1.1.0-rc.57 or later
 before upgrading to it: an older source gateway dials only
 `status.targetInfo` and never reaches its target, an older target
 gateway reads the source's progress only from `status.lastSentAt` and
@@ -156,14 +155,12 @@ gateway refuses to start where the cluster does not serve
 Anything that reads a mirror's progress or descriptor reads the
 heartbeat Leases and the `MxlFlowMirrorTarget` instead.
 
-A release after the one that deprecated them removes the three fields
-from the `MxlFlowMirror` CRD; its changelog lists the removal as a
-breaking change. The API server
-rejects a server-side apply that names a field the schema does not
-declare, so a gateway still writing them has every descriptor, progress
-and phase write refused. Every gateway, agent and operator must run the
-release that deprecated the fields, or a later one, before upgrading to
-the release that removes them.
+A release after 1.1.0-rc.60 removes the three fields from the
+`MxlFlowMirror` CRD; its changelog lists the removal as a breaking
+change. The API server rejects a server-side apply that names a field
+the schema does not declare, so a gateway still writing them has every
+descriptor, progress and phase write refused. Every gateway, agent and operator must run
+1.1.0-rc.60 or later before upgrading to the release that removes them.
 
 ## Bundled image versions
 
