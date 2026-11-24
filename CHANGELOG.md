@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.0-rc.61](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.60...v1.1.0-rc.61) (2026-11-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **api:** MxlFlowMirror status drops targetInfo, lastGrainAt and lastSentAt; every gateway, agent and operator must run 1.1.0-rc.60 or later before upgrading, as the API server rejects a write naming them.
+
+### Features
+
+* **api:** remove the deprecated MxlFlowMirror status fields ([#480](https://github.com/qvest-digital/mxl-k8s/issues/480)) ([3104557](https://github.com/qvest-digital/mxl-k8s/commit/3104557ac7ab11175ffb0034bfb210f4546075d4))
+
 ## [1.1.0-rc.60](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.59...v1.1.0-rc.60) (2026-11-24)
 
 
