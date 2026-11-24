@@ -27,6 +27,7 @@ import (
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/collector"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/config"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/domain"
+	"github.com/qvest-digital/mxl-k8s/exporter/internal/heartbeat"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/numa"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/topology"
 	"github.com/qvest-digital/mxl-k8s/exporter/internal/wanted"
@@ -120,6 +121,13 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) error {
 		}
 		nodeReg.MustRegister(topology.New(reader, cfg.NodeName, log.WithName("topology")))
 	}
+	if cfg.MirrorHeartbeats {
+		if err := startHeartbeats(ctx, cfg, nodeReg, log.WithName("heartbeat")); err != nil {
+			// The domain and topology metrics do not depend on it, so
+			// the exporter serves them without this one.
+			log.Error(err, "mirror heartbeats left out")
+		}
+	}
 
 	counters := mxlfsCounters(cfg.MxlfsNumaMetrics, log)
 	for _, c := range counters {
@@ -175,6 +183,22 @@ func startTopologyCache(ctx context.Context, cfg *config.Config, log logr.Logger
 		return nil, errors.New("topology cache did not sync")
 	}
 	return c, nil
+}
+
+// startHeartbeats registers the mirror heartbeat collector on reg. Its
+// Lease cache syncs in the background: until it has, and for as long as
+// the Leases cannot be read, the collector reports nothing and the
+// exporter serves everything else.
+func startHeartbeats(ctx context.Context, cfg *config.Config, reg prometheus.Registerer, log logr.Logger) error {
+	restCfg, err := ctrl.GetConfig()
+	if err != nil {
+		return err
+	}
+	c, err := heartbeat.Start(ctx, restCfg, cfg.LeaseNamespace, cfg.NodeName, log)
+	if err != nil {
+		return err
+	}
+	return reg.Register(c)
 }
 
 // scanLoop re-lists the domains until ctx is done.

@@ -10,16 +10,27 @@ package heartbeat
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
+
+// syncWarnAfter is how long the Lease cache may take to sync before
+// the exporter says why the metric is missing.
+const syncWarnAfter = time.Minute
 
 var descAge = prometheus.NewDesc("mxl_mirror_heartbeat_age_seconds",
 	"Seconds since this side of the mirror last made progress, as renewed into its heartbeat Lease by the "+
@@ -34,6 +45,60 @@ type Collector struct {
 	nodeName string
 	now      func() time.Time
 	log      logr.Logger
+	// synced reports whether reader can answer. Nil means it always
+	// can.
+	synced func() bool
+}
+
+// Start brings up a cache of the mirror heartbeat Leases in namespace
+// and returns a collector reading them, without waiting for the cache
+// to sync. Until it has, and for as long as the Leases cannot be
+// listed -- no Role, or a namespace the Role is not in -- the collector
+// reports nothing, so the exporter's other metrics never wait on this
+// one. Only Leases carrying the mirror side label are cached: the
+// Origin Leases beside them are none of the exporter's business.
+func Start(ctx context.Context, cfg *rest.Config, namespace, nodeName string, log logr.Logger) (*Collector, error) {
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		return nil, err
+	}
+	side, err := labels.NewRequirement(mxlv1alpha1.LabelMirrorSide, selection.Exists, nil)
+	if err != nil {
+		return nil, err
+	}
+	c, err := cache.New(cfg, cache.Options{
+		Scheme: scheme,
+		ByObject: map[client.Object]cache.ByObject{
+			&coordinationv1.Lease{}: {
+				Namespaces: map[string]cache.Config{namespace: {}},
+				Label:      labels.NewSelector().Add(*side),
+			},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Registered before the cache starts, so this returns at once.
+	inf, err := c.GetInformer(ctx, &coordinationv1.Lease{})
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		if err := c.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error(err, "mirror heartbeat Lease cache")
+		}
+	}()
+	go func() {
+		wctx, cancel := context.WithTimeout(ctx, syncWarnAfter)
+		defer cancel()
+		if !c.WaitForCacheSync(wctx) && ctx.Err() == nil {
+			log.Info("mirror heartbeat Leases not readable yet; mxl_mirror_heartbeat_age_seconds stays empty until they are",
+				"namespace", namespace, "waited", syncWarnAfter.String())
+		}
+	}()
+	hb := New(c, nodeName, log)
+	hb.synced = inf.HasSynced
+	return hb, nil
 }
 
 // New returns a collector reading the heartbeat Leases through reader
@@ -54,6 +119,11 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect implements prometheus.Collector.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
+	if c.synced != nil && !c.synced() {
+		// A List on an unsynced cache waits for the sync, which a
+		// Lease the exporter cannot read never finishes.
+		return
+	}
 	var leases coordinationv1.LeaseList
 	if err := c.reader.List(context.Background(), &leases,
 		client.InNamespace(mxlv1alpha1.LeaseNamespace),

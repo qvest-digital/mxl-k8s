@@ -315,7 +315,7 @@ Kubernetes: `>=1.28-0`
 | exporter.metrics.serviceMonitor.metricRelabelings | list | `[]` |  |
 | exporter.metrics.serviceMonitor.relabelings | list | `[]` |  |
 | exporter.metrics.serviceMonitor.scrapeTimeout | string | `"10s"` |  |
-| exporter.mirrorHeartbeats.enabled | bool | `true` | Publish mxl_mirror_heartbeat_age_seconds from the heartbeat Leases the gateways renew in the release namespace: seconds since each mirror side last made progress, reported by the exporter on the node of the gateway serving that side. Disabling it drops the metric and the exporter's read access to those Leases. |
+| exporter.mirrorHeartbeats.enabled | bool | `true` | Publish mxl_mirror_heartbeat_age_seconds from the heartbeat Leases the gateways renew in the release namespace: seconds since each mirror side last made progress, reported by the exporter on the node of the gateway serving that side. Disabling it drops the metric and the exporter's read access to those Leases. Where the exporter cannot read them, as with rbac.create=false and no grant of its own, the metric stays empty and the rest is served. |
 | exporter.nodeSelector | object | `{}` |  |
 | exporter.podAnnotations | object | `{}` |  |
 | exporter.podLabels | object | `{}` |  |

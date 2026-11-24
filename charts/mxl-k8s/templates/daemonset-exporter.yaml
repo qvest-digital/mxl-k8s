@@ -66,6 +66,11 @@ spec:
             # the role that makes it usable.
             - --topology={{ .Values.exporter.topology.enabled }}
             - --mirror-heartbeats={{ .Values.exporter.mirrorHeartbeats.enabled }}
+            {{- if .Values.exporter.mirrorHeartbeats.enabled }}
+            # The namespace the Lease Role is rendered in, so the watch
+            # never lists where the exporter has no access.
+            - --lease-namespace={{ include "mxlk8s.namespace" . }}
+            {{- end }}
             {{- if .Values.mxlfs.numa.metrics.enabled }}
             - --mxlfs-numa-metrics
             {{- end }}
