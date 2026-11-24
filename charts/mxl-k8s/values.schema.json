@@ -1269,6 +1269,19 @@
           "title": "metrics",
           "type": "object"
         },
+        "mirrorHeartbeats": {
+          "properties": {
+            "enabled": {
+              "default": "true",
+              "description": "Publish mxl_mirror_heartbeat_age_seconds from the heartbeat Leases the gateways renew in the release namespace: seconds since each mirror side last made progress, reported by the exporter on the node of the gateway serving that side. Disabling it drops the metric and the exporter's read access to those Leases.",
+              "required": [],
+              "title": "enabled"
+            }
+          },
+          "required": [],
+          "title": "mirrorHeartbeats",
+          "type": "object"
+        },
         "nodeSelector": {
           "required": [],
           "title": "nodeSelector",
@@ -1419,7 +1432,7 @@
           "properties": {
             "enabled": {
               "default": "true",
-              "description": "Publish mxl_flow_location_info from the MxlFlow CRs. That is what names the producing node (phase Origin), so dashboards do not need media functions to label themselves. Disabling it drops the metric and the exporter's only API access.",
+              "description": "Publish mxl_flow_location_info from the MxlFlow CRs. That is what names the producing node (phase Origin), so dashboards do not need media functions to label themselves. Disabling it drops the metric and the exporter's API access to MxlFlow.",
               "required": [],
               "title": "enabled"
             }
@@ -1462,6 +1475,7 @@
         "updateStrategy",
         "image",
         "topology",
+        "mirrorHeartbeats",
         "serviceAccount",
         "podAnnotations",
         "podLabels",

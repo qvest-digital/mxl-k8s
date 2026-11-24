@@ -51,6 +51,11 @@ type Config struct {
 	// consuming one. Disabling it drops that metric and the API reads
 	// behind it; the domain metrics are unaffected.
 	TopologyEnabled bool
+	// MirrorHeartbeats publishes mxl_mirror_heartbeat_age_seconds from
+	// the heartbeat Leases of the mirror sides this node's gateway
+	// serves. Disabling it drops that metric and the Lease reads behind
+	// it.
+	MirrorHeartbeats bool
 
 	// MxlfsNumaMetrics exports where the pages of each mxlfs domain and
 	// flow ring are, and what the module's moves did, read on every scan.
@@ -76,6 +81,8 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 		"Path to a kubeconfig file. Empty uses the in-cluster config.")
 	fs.BoolVar(&c.TopologyEnabled, "topology", true,
 		"Publish mxl_flow_location_info from the MxlFlow CRs, which names the producing node.")
+	fs.BoolVar(&c.MirrorHeartbeats, "mirror-heartbeats", true,
+		"Publish mxl_mirror_heartbeat_age_seconds from the heartbeat Leases of the mirror sides this node serves.")
 	fs.BoolVar(&c.MxlfsNumaMetrics, "mxlfs-numa-metrics", false,
 		"Export the NUMA placement counters of every domain on an mxlfs, read on every scan.")
 	if err := fs.Parse(args); err != nil {

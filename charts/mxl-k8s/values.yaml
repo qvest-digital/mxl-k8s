@@ -1231,7 +1231,14 @@ exporter:
     # -- Publish mxl_flow_location_info from the MxlFlow CRs. That is
     # what names the producing node (phase Origin), so dashboards do
     # not need media functions to label themselves. Disabling it drops
-    # the metric and the exporter's only API access.
+    # the metric and the exporter's API access to MxlFlow.
+    enabled: true
+  mirrorHeartbeats:
+    # -- Publish mxl_mirror_heartbeat_age_seconds from the heartbeat
+    # Leases the gateways renew in the release namespace: seconds since
+    # each mirror side last made progress, reported by the exporter on
+    # the node of the gateway serving that side. Disabling it drops the
+    # metric and the exporter's read access to those Leases.
     enabled: true
   serviceAccount:
     create: true

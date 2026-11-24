@@ -24,6 +24,7 @@ func TestFromFlagsDefaults(t *testing.T) {
 	require.Equal(t, ":8080", cfg.MetricsAddr)
 	require.Equal(t, ":8081", cfg.ProbeAddr)
 	require.True(t, cfg.TopologyEnabled)
+	require.True(t, cfg.MirrorHeartbeats)
 }
 
 // The node name labels every series. Without it two nodes' exporters
@@ -52,4 +53,10 @@ func TestFromFlagsMxlfsNumaMetrics(t *testing.T) {
 	cfg, err = parse(t, "--node-name=node-a", "--domain-path=/run/mxl/domain", "--mxlfs-numa-metrics")
 	require.NoError(t, err)
 	require.True(t, cfg.MxlfsNumaMetrics)
+}
+
+func TestFromFlagsMirrorHeartbeatsCanBeTurnedOff(t *testing.T) {
+	cfg, err := parse(t, "--node-name=node-a", "--domain-path=/run/mxl/domain", "--mirror-heartbeats=false")
+	require.NoError(t, err)
+	require.False(t, cfg.MirrorHeartbeats)
 }

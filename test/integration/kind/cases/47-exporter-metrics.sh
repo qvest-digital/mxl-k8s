@@ -50,6 +50,16 @@ metric_line() {
   ' "$1"
 }
 
+# heartbeat_age <file> <mirror> <namespace> <side>
+# The mxl_mirror_heartbeat_age_seconds sample for one side of a mirror,
+# empty when the exporter reports none.
+heartbeat_age() {
+  awk -v m="mirror=\"$2\"" -v n="namespace=\"$3\"" -v s="side=\"$4\"" '
+    index($0, "mxl_mirror_heartbeat_age_seconds{") == 1 &&
+      index($0, m) > 0 && index($0, n) > 0 && index($0, s) > 0 { print $NF; exit }
+  ' "$1"
+}
+
 # has_label <line> <label=value>
 has_label() {
   case "$1" in
@@ -213,4 +223,43 @@ else
     fail "${reader_exp} exported a series for ${writer_node}; each exporter must report only its own node"
   fi
   echo "   ${reader_exp} reports no series for ${writer_node}"
+
+  # Mirror heartbeats: each side of the demo mirror is reported by the
+  # exporter beside the gateway serving it, and by no other, with the
+  # age of a side that is moving grains.
+  mirror_ref=$("${KUBECTL[@]}" get mxlflowmirror -A -o \
+      'jsonpath={range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{"|"}{.spec.flowID}{"|"}{.spec.sourceNode}{"|"}{.spec.targetNode}{"\n"}{end}' \
+    | awk -F'|' -v f="$VIDEO_FLOW" -v s="$writer_node" -v t="$reader_node" \
+        '$2 == f && $3 == s && $4 == t { print $1; exit }')
+  [ -n "$mirror_ref" ] \
+    || fail "no MxlFlowMirror carries ${VIDEO_FLOW} from ${writer_node} to ${reader_node}"
+  mirror_ns="${mirror_ref%%/*}"
+  mirror_name="${mirror_ref#*/}"
+
+  deadline=$(( $(date +%s) + DISCOVER_TIMEOUT_SECS ))
+  source_age=""
+  target_age=""
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    scrape "$writer_exp" "$WORK_DIR/writer-hb.txt"
+    scrape "$reader_exp" "$WORK_DIR/reader-hb.txt"
+    source_age=$(heartbeat_age "$WORK_DIR/writer-hb.txt" "$mirror_name" "$mirror_ns" source)
+    target_age=$(heartbeat_age "$WORK_DIR/reader-hb.txt" "$mirror_name" "$mirror_ns" target)
+    [ -n "$source_age" ] && [ -n "$target_age" ] && break
+    sleep 3
+  done
+  [ -n "$source_age" ] \
+    || fail "no mxl_mirror_heartbeat_age_seconds for the source side of ${mirror_ref} on ${writer_node}"
+  [ -n "$target_age" ] \
+    || fail "no mxl_mirror_heartbeat_age_seconds for the target side of ${mirror_ref} on ${reader_node}"
+  [ -z "$(heartbeat_age "$WORK_DIR/writer-hb.txt" "$mirror_name" "$mirror_ns" target)" ] \
+    || fail "${writer_exp} reports the target side of ${mirror_ref}, which ${reader_node}'s gateway serves"
+  [ -z "$(heartbeat_age "$WORK_DIR/reader-hb.txt" "$mirror_name" "$mirror_ns" source)" ] \
+    || fail "${reader_exp} reports the source side of ${mirror_ref}, which ${writer_node}'s gateway serves"
+  # Published at 5s resolution, so a flowing side reads a few seconds.
+  for pair in "source:${source_age}" "target:${target_age}"; do
+    fresh=$(awk -v a="${pair#*:}" 'BEGIN { print (a+0 >= 0 && a+0 < 20) ? "yes" : "no" }')
+    [ "$fresh" = "yes" ] \
+      || fail "mxl_mirror_heartbeat_age_seconds for the ${pair%%:*} side of ${mirror_ref} is ${pair#*:}s on a flowing mirror, expected under 20s"
+  done
+  echo "   mxl_mirror_heartbeat_age_seconds: source ${source_age}s on ${writer_node}, target ${target_age}s on ${reader_node}"
 fi

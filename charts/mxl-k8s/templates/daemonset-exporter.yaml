@@ -63,8 +63,9 @@ spec:
           args:
             {{- include "mxlk8s.flags.render" (dict "flags" .Values.exporter.flags) | nindent 12 }}
             # Kept out of .flags so one value drives both the flag and
-            # the ClusterRole that makes it usable.
+            # the role that makes it usable.
             - --topology={{ .Values.exporter.topology.enabled }}
+            - --mirror-heartbeats={{ .Values.exporter.mirrorHeartbeats.enabled }}
             {{- if .Values.mxlfs.numa.metrics.enabled }}
             - --mxlfs-numa-metrics
             {{- end }}
