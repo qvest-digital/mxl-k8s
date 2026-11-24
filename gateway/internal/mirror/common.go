@@ -25,8 +25,11 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/qvest-digital/mxl-k8s/gateway/internal/fabric"
@@ -320,3 +323,83 @@ func sourceIsDelivering(mirror *mxlv1alpha1.MxlFlowMirror, openedAt time.Time) b
 	}
 	return false
 }
+
+// carryTransitionTime returns cond with the transition time of prev,
+// the condition of the same type the mirror carries, when its status
+// is unchanged, and with now when it is not or when there is none.
+// That is meta.SetStatusCondition's rule and what a transition time
+// means; stamping now on every publish would move it whenever the
+// reason, message or a heartbeat beside it did.
+func carryTransitionTime(prev *metav1.Condition, cond metav1.Condition) metav1.Condition {
+	merged := []metav1.Condition{}
+	if prev != nil {
+		merged = append(merged, *prev)
+	}
+	meta.SetStatusCondition(&merged, cond)
+	return *meta.FindStatusCondition(merged, cond.Type)
+}
+
+// publishedConditions remembers, per mirror, the progress condition a
+// gateway last wrote. Each gateway is the only writer of its own
+// condition type, so what it wrote is what the mirror carries, and the
+// transition time is carried from there rather than from the informer
+// cache: a cache that has not caught up with the last write still shows
+// the status before it, and a flip back to that status would then keep
+// a transition time from before the flip it reverses.
+type publishedConditions struct {
+	mu   sync.Mutex
+	last map[types.NamespacedName]metav1.Condition
+}
+
+// carry returns cond with its transition time carried from what was
+// last written for key, or, before the first write, from cached: the
+// condition the mirror carried when the gateway started serving it.
+func (p *publishedConditions) carry(key types.NamespacedName, cached *metav1.Condition, cond metav1.Condition) metav1.Condition {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if prev, ok := p.last[key]; ok {
+		return carryTransitionTime(&prev, cond)
+	}
+	return carryTransitionTime(cached, cond)
+}
+
+// written records cond as what key's mirror now carries.
+func (p *publishedConditions) written(key types.NamespacedName, cond metav1.Condition) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.last == nil {
+		p.last = make(map[types.NamespacedName]metav1.Condition)
+	}
+	p.last[key] = cond
+}
+
+// forget drops key, whose mirror this gateway no longer serves.
+func (p *publishedConditions) forget(key types.NamespacedName) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.last, key)
+}
+
+// publishBackoff spaces a status flusher's retries after a failed
+// write. A flusher ticks every second for every mirror it owns, so an
+// apiserver that rejects writes, such as one whose etcd has run out of
+// space, would otherwise take a retry per mirror per tick for as long
+// as the outage lasts. The wait doubles from the flush interval and
+// stops growing at statusQuantum, the longest a heartbeat waits anyway.
+// Only the flusher goroutine touches it.
+type publishBackoff struct {
+	wait time.Duration
+	next time.Time
+}
+
+// due reports whether a publish may be attempted at now.
+func (b *publishBackoff) due(now time.Time) bool { return !now.Before(b.next) }
+
+// failed records a failed publish at now and schedules the next try.
+func (b *publishBackoff) failed(now time.Time, interval time.Duration) {
+	b.wait = min(max(2*b.wait, interval), statusQuantum)
+	b.next = now.Add(b.wait)
+}
+
+// succeeded clears the backoff, so the next change publishes at once.
+func (b *publishBackoff) succeeded() { *b = publishBackoff{} }

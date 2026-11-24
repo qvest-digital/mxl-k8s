@@ -11,6 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -20,6 +21,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
@@ -919,4 +921,96 @@ func capsFor(node string, providers ...mxlv1alpha1.MxlFabricsProvider) *mxlv1alp
 			mxlv1alpha1.MxlFabricsProviderCapability{Name: p, DeviceCount: 1})
 	}
 	return caps
+}
+
+// --- status writes ---------------------------------------------------
+
+// Every gateway status write is an event that reconciles the mirror
+// here. An apply that restates conditions the mirror already carries
+// is not free: the apiserver decodes and merges the whole stored
+// object, descriptor included, to find nothing changed. Only a pass
+// whose answer moved may write.
+func TestWriteConditions_UnchangedJudgement_SendsNoApply(t *testing.T) {
+	m := newMirror(withIntentLabel(), withRequestor("consumer", "uid-1"))
+	applies := 0
+	c := fake.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}, &mxlv1alpha1.MxlFlow{}).
+		WithObjects(node(srcNode), node(tgtNode), m, flowOriginAt(srcNode), pod("consumer", "uid-1")).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourcePatch: func(ctx context.Context, cl client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if _, ok := obj.(*unstructured.Unstructured); ok && patch.Type() == types.ApplyPatchType {
+					applies++
+				}
+				return cl.SubResource(sub).Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+	lease := &fakeLease{fresh: map[string]bool{flowID + "/" + srcNode: true}}
+	r := &Reconciler{Client: c, Recorder: record.NewFakeRecorder(32), Lease: lease, GracePeriod: time.Hour}
+
+	reconcileOnce(t, r, m.Name)
+	require.Equal(t, 1, applies, "the first pass has conditions to publish")
+	first := getMirror(t, c, m.Name)
+
+	reconcileOnce(t, r, m.Name)
+	reconcileOnce(t, r, m.Name)
+	assert.Equal(t, 1, applies, "passes that reach the same judgement must not write")
+	assert.Equal(t, first.ResourceVersion, getMirror(t, c, m.Name).ResourceVersion)
+
+	lease.fresh[flowID+"/"+srcNode] = false
+	reconcileOnce(t, r, m.Name)
+	assert.Equal(t, 2, applies, "a changed judgement is written")
+	src := condition(t, getMirror(t, c, m.Name), mxlv1alpha1.ConditionTypeSourceable)
+	require.NotNil(t, src)
+	assert.Equal(t, metav1.ConditionFalse, src.Status)
+}
+
+// The skip compares every field the apply would write except the
+// transition time. A judgement that differs from what the mirror carries
+// only in its message, or only in the generation it was made against,
+// is written all the same.
+func TestWriteConditions_MessageOrGenerationAloneStillApplies(t *testing.T) {
+	claimed := judgement{ok: true, reason: mxlv1alpha1.ReasonRequestorLive, message: "consumer is live"}
+	src := sourceJudgement{judgement: judgement{ok: true, reason: "OriginLive", message: "origin on n-src"}}
+	current := func(gen int64) []metav1.Condition {
+		return []metav1.Condition{
+			{Type: mxlv1alpha1.ConditionTypeClaimed, Status: metav1.ConditionTrue, Reason: claimed.reason,
+				Message: claimed.message, ObservedGeneration: gen, LastTransitionTime: metav1.Now()},
+			{Type: mxlv1alpha1.ConditionTypeSourceable, Status: metav1.ConditionTrue, Reason: src.reason,
+				Message: src.message, ObservedGeneration: gen, LastTransitionTime: metav1.Now()},
+		}
+	}
+	cases := map[string]struct {
+		gen     int64
+		claimed judgement
+		want    int
+	}{
+		"unchanged":               {gen: 1, claimed: claimed, want: 0},
+		"message only":            {gen: 1, claimed: judgement{ok: true, reason: claimed.reason, message: "another consumer is live"}, want: 1},
+		"observedGeneration only": {gen: 2, claimed: claimed, want: 1},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := newMirror()
+			m.Generation = tc.gen
+			m.Status.Conditions = current(1)
+			applies := 0
+			c := fake.NewClientBuilder().
+				WithScheme(newScheme(t)).
+				WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+				WithObjects(m).
+				WithInterceptorFuncs(interceptor.Funcs{
+					SubResourcePatch: func(ctx context.Context, cl client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+						applies++
+						return cl.SubResource(sub).Patch(ctx, obj, patch, opts...)
+					},
+				}).
+				Build()
+			r := &Reconciler{Client: c}
+			_, err := r.writeConditions(context.Background(), m, tc.claimed, src)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, applies)
+		})
+	}
 }

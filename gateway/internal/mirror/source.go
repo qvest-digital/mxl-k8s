@@ -183,6 +183,9 @@ type SourceReconciler struct {
 	// question is not what they are exercising.
 	writerLiveFn func(ref mxlv1alpha1.FlowRef) (bool, error)
 
+	// published is the SourceProgress condition last written per mirror.
+	published publishedConditions
+
 	mu sync.Mutex
 	// sources holds the per-mirror half, keyed by MxlFlowMirror;
 	// shared holds what the mirrors of one flow on one provider have in
@@ -1605,16 +1608,26 @@ type sourceProgressState struct {
 // the target-side gateway or the operator on neighbouring fields.
 // The payload is the conditions slice and nothing else, so a stray
 // zero value never overwrites a foreign-owned status field.
+//
+// The condition keeps its transition time while its status holds,
+// carried from what this gateway last wrote (publishedConditions). The
+// cache is read only before the first write, and a mirror it does not
+// have takes now, the same as a first publish.
 func (r *SourceReconciler) publishSourceProgress(ctx context.Context, key types.NamespacedName, state sourceProgressState) error {
 	recordProgress(r.Recorder, key, mxlv1alpha1.ConditionTypeSourceProgress,
 		state.reason, state.message)
-	cond := metav1.Condition{
-		Type:               mxlv1alpha1.ConditionTypeSourceProgress,
-		Status:             state.status,
-		Reason:             state.reason,
-		Message:            state.message,
-		LastTransitionTime: metav1.Now(),
+	var live mxlv1alpha1.MxlFlowMirror
+	if err := r.Get(ctx, key, &live); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("get mirror for status flush: %w", err)
 	}
+	cond := r.published.carry(key,
+		apimeta.FindStatusCondition(live.Status.Conditions, mxlv1alpha1.ConditionTypeSourceProgress),
+		metav1.Condition{
+			Type:    mxlv1alpha1.ConditionTypeSourceProgress,
+			Status:  state.status,
+			Reason:  state.reason,
+			Message: state.message,
+		})
 	patch := &unstructured.Unstructured{}
 	patch.SetGroupVersionKind(mxlv1alpha1.GroupVersion.WithKind("MxlFlowMirror"))
 	patch.SetNamespace(key.Namespace)
@@ -1651,10 +1664,14 @@ func (r *SourceReconciler) publishSourceProgress(ctx context.Context, key types.
 	if err := unstructured.SetNestedField(patch.Object, status, "status"); err != nil {
 		return fmt.Errorf("build SSA payload: %w", err)
 	}
-	return r.Status().Patch(ctx, patch, client.Apply,
+	if err := r.Status().Patch(ctx, patch, client.Apply,
 		client.FieldOwner(sourceFieldOwner),
 		client.ForceOwnership,
-	)
+	); err != nil {
+		return err
+	}
+	r.published.written(key, cond)
+	return nil
 }
 
 // startFlusher launches the per-mirror status flusher. The flusher
@@ -1686,6 +1703,7 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 	defer t.Stop()
 
 	var last sourceProgressState
+	var retry publishBackoff
 	first := true
 	for {
 		select {
@@ -1787,11 +1805,19 @@ func (r *SourceReconciler) runFlusher(ctx context.Context, done chan struct{}, e
 		if !first && sourceStateEqual(state, last) {
 			continue
 		}
-		if err := r.publishSourceProgress(ctx, key, state); err != nil {
-			ctrl.Log.WithName("source-flush").Error(err, "publish",
-				"mirror", key, "reason", state.reason)
+		// A failed publish leaves last alone, so the state is offered
+		// again; the backoff decides when.
+		now := time.Now()
+		if !retry.due(now) {
 			continue
 		}
+		if err := r.publishSourceProgress(ctx, key, state); err != nil {
+			retry.failed(now, interval)
+			ctrl.Log.WithName("source-flush").Error(err, "publish",
+				"mirror", key, "reason", state.reason, "retryIn", retry.wait)
+			continue
+		}
+		retry.succeeded()
 		last = state
 		first = false
 	}
@@ -1825,6 +1851,7 @@ func (r *SourceReconciler) takeRedial(key types.NamespacedName) (time.Duration, 
 
 // retire releases the recorder of a mirror that is gone.
 func (r *SourceReconciler) retire(key types.NamespacedName) {
+	r.published.forget(key)
 	if r.Recorders != nil {
 		r.Recorders.ReleaseSource(key)
 	}

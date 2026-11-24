@@ -60,10 +60,12 @@ const targetFieldOwner = "mxl-target-gateway"
 // 12-channel audio flow serialises 402 bounce-buffer regions into
 // roughly 23 kB. The progress fields change whenever grains move.
 // While one manager owned both, SSA's rule that a manager releases a
-// field it omits forced every progress write to re-stamp the whole
-// descriptor, so a mirror rewrote 23 kB of unchanged JSON into etcd on
-// every flusher tick. Splitting the managers lets the progress payload
-// omit targetInfo without the apiserver stripping it.
+// field it omits forced every progress write to carry the whole
+// descriptor. Splitting the managers lets the progress payload omit
+// targetInfo without the apiserver stripping it. It keeps the
+// descriptor out of the request only: etcd stores every revision of
+// the object whole, descriptor included, which is what statusQuantum
+// bounds.
 const targetInfoFieldOwner = "mxl-target-gateway-info"
 
 // statusQuantum is the resolution at which grain-progress timestamps
@@ -249,6 +251,9 @@ const ReasonOpenTargetUnrecoverable = "OpenTargetUnrecoverable"
 type TargetReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// published is the TargetProgress condition last written per mirror.
+	published publishedConditions
 
 	// Recorders receives what each mirror's progress loop observes. Nil
 	// records nothing.
@@ -673,6 +678,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		if r.Recorders != nil {
 			r.Recorders.ReleaseTarget(req.NamespacedName)
 		}
+		r.published.forget(req.NamespacedName)
 		return r.reapOrphanedFinalizer(ctx, &mirror)
 	}
 
@@ -701,6 +707,7 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		if r.Recorders != nil {
 			r.Recorders.ReleaseTarget(req.NamespacedName)
 		}
+		r.published.forget(req.NamespacedName)
 		controllerutil.RemoveFinalizer(&mirror, TargetFinalizerName)
 		if err := r.Update(ctx, &mirror); err != nil {
 			// The other side's gateway removed its finalizer first and
@@ -2290,11 +2297,10 @@ func (r *TargetReconciler) dropFailedEntry(key types.NamespacedName, entry *targ
 	entry.dropped = true
 	if mirror, err := r.fetchMirror(ctx, key); err == nil {
 		_ = r.applyTargetStatus(ctx, mirror, mxlv1alpha1.MxlFlowMirrorFailed, nil, &metav1.Condition{
-			Type:               mxlv1alpha1.ConditionTypeTargetProgress,
-			Status:             metav1.ConditionFalse,
-			Reason:             ReasonStuckHandshakeCapReached,
-			Message:            fmt.Sprintf("fabric side unrecoverable after %d attempts", maxStuckRebuilds),
-			LastTransitionTime: metav1.Now(),
+			Type:    mxlv1alpha1.ConditionTypeTargetProgress,
+			Status:  metav1.ConditionFalse,
+			Reason:  ReasonStuckHandshakeCapReached,
+			Message: fmt.Sprintf("fabric side unrecoverable after %d attempts", maxStuckRebuilds),
 		})
 	}
 	entry.phaseMu.Unlock()
@@ -2404,24 +2410,6 @@ func closeTargetHandles(e *targetEntry, disp flowDisposition, grace time.Duratio
 	return true
 }
 
-// applyTargetStatus writes mirror.status via server-side apply with
-// FieldOwner=mxl-target-gateway. It is the only path that mutates
-// status on this reconciler: routing every write through one field
-// manager keeps LastTransitionTime stable across reconciles and lets
-// every write stamp observedGeneration off the freshly-cached object.
-//
-// lastGrainAt and cond are optional; nil pointers omit the
-// corresponding key from the SSA payload so the manager does not claim
-// ownership of fields it has nothing to say about. status.targetInfo
-// is deliberately absent: applyTargetInfo owns it under its own field
-// manager, which is what lets this payload stay small.
-//
-// targetAttemptCount is not optional: it rides on every payload
-// because SSA with a single FieldOwner releases ownership of a field
-// a later payload omits, and the apiserver then strips it. Sourcing
-// it from the live counter also keeps it honest - a write from any
-// path (flusher, recovery, teardown) reports the current failure run,
-// which is zero for as long as the target is open.
 // applyTargetInfo writes status.targetInfo under its own field
 // manager. Called only where the descriptor is produced - the initial
 // open and each fabric-side rebuild - so an unchanged descriptor costs
@@ -2457,6 +2445,25 @@ func (r *TargetReconciler) applyTargetInfo(ctx context.Context, mirror *mxlv1alp
 	)
 }
 
+// applyTargetStatus writes mirror.status via server-side apply with
+// FieldOwner=mxl-target-gateway. It is the only path that mutates
+// status on this reconciler, so it is where cond takes the live
+// condition's LastTransitionTime while its status holds (callers leave
+// the field unset) and where every write stamps observedGeneration off
+// the freshly-cached object.
+//
+// lastGrainAt and cond are optional; nil pointers omit the
+// corresponding key from the SSA payload so the manager does not claim
+// ownership of fields it has nothing to say about. status.targetInfo
+// is deliberately absent: applyTargetInfo owns it under its own field
+// manager, which is what lets this payload stay small.
+//
+// targetAttemptCount is not optional: it rides on every payload
+// because SSA with a single FieldOwner releases ownership of a field
+// a later payload omits, and the apiserver then strips it. Sourcing
+// it from the live counter also keeps it honest - a write from any
+// path (flusher, recovery, teardown) reports the current failure run,
+// which is zero for as long as the target is open.
 func (r *TargetReconciler) applyTargetStatus(
 	ctx context.Context,
 	mirror *mxlv1alpha1.MxlFlowMirror,
@@ -2481,6 +2488,8 @@ func (r *TargetReconciler) applyTargetStatus(
 	key := client.ObjectKeyFromObject(mirror)
 	if cond != nil {
 		recordProgress(r.Recorder, key, cond.Type, cond.Reason, cond.Message)
+		c := r.published.carry(key, meta.FindStatusCondition(mirror.Status.Conditions, cond.Type), *cond)
+		cond = &c
 	}
 	if phase != "" && phase != mirror.Status.Phase {
 		recordPhase(r.Recorder, key, mirror.Status.Phase, phase)
@@ -2505,10 +2514,16 @@ func (r *TargetReconciler) applyTargetStatus(
 	if err := unstructured.SetNestedField(patch.Object, status, "status"); err != nil {
 		return fmt.Errorf("build SSA payload: %w", err)
 	}
-	return r.Status().Patch(ctx, patch, client.Apply,
+	if err := r.Status().Patch(ctx, patch, client.Apply,
 		client.FieldOwner(targetFieldOwner),
 		client.ForceOwnership,
-	)
+	); err != nil {
+		return err
+	}
+	if cond != nil {
+		r.published.written(key, *cond)
+	}
+	return nil
 }
 
 // surfaceTargetFailure publishes phase plus a TargetProgress=False
@@ -2528,11 +2543,10 @@ func (r *TargetReconciler) applyTargetStatus(
 // maxTargetOpenAttempts is Degraded.
 func (r *TargetReconciler) surfaceTargetFailure(ctx context.Context, mirror *mxlv1alpha1.MxlFlowMirror, phase mxlv1alpha1.MxlFlowMirrorPhase, reason, message string) {
 	_ = r.applyTargetStatus(ctx, mirror, phase, nil, &metav1.Condition{
-		Type:               mxlv1alpha1.ConditionTypeTargetProgress,
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            message,
-		LastTransitionTime: metav1.Now(),
+		Type:    mxlv1alpha1.ConditionTypeTargetProgress,
+		Status:  metav1.ConditionFalse,
+		Reason:  reason,
+		Message: message,
 	})
 }
 
@@ -2619,16 +2633,18 @@ func (r *TargetReconciler) startFlusher(key types.NamespacedName, entry *targetE
 }
 
 // runFlusher is the per-mirror status flusher loop. Tracks the most
-// recently published state so a steady stream of grains does not
+// recently observed state so a steady stream of grains does not
 // turn into a steady stream of API writes.
 //
 // `last` is updated *before* the publish call: a transient publish
 // failure leaves the next tick with a correct previous-state
 // reference, so a subsequent Ready->Degraded->Recovered transition
 // renders the correct reason even when an external observer races
-// the post-publish bookkeeping. If the publish itself fails the
-// next tick re-derives state from entry.lastCommitAt and re-attempts
-// only when state genuinely changes.
+// the post-publish bookkeeping. A failed publish leaves the state
+// unsent, and the current state is published once the backoff allows,
+// whether or not it has changed since: a Degraded mirror's state stops
+// changing, so waiting for a change would leave a lost Degraded write
+// unpublished for as long as the mirror stays down.
 func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, key types.NamespacedName, entry *targetEntry) {
 	defer close(done)
 	t := time.NewTicker(r.flushInterval())
@@ -2636,7 +2652,8 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 
 	var last targetProgressState
 	var watch handshakeWatch
-	first := true
+	var retry publishBackoff
+	first, unsent := true, false
 	for {
 		select {
 		case <-ctx.Done():
@@ -2708,11 +2725,10 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 					"attempts", entry.recoveryAttempts.Load())
 				if mirror, err := r.fetchMirror(ctx, key); err == nil {
 					_ = r.applyTargetStatus(ctx, mirror, mxlv1alpha1.MxlFlowMirrorFailed, nil, &metav1.Condition{
-						Type:               mxlv1alpha1.ConditionTypeTargetProgress,
-						Status:             metav1.ConditionFalse,
-						Reason:             ReasonStuckHandshakeCapReached,
-						Message:            fmt.Sprintf("no commits in %s across %d rebuild attempts", r.stuckHandshakeAfter(), maxStuckRebuilds),
-						LastTransitionTime: metav1.Now(),
+						Type:    mxlv1alpha1.ConditionTypeTargetProgress,
+						Status:  metav1.ConditionFalse,
+						Reason:  ReasonStuckHandshakeCapReached,
+						Message: fmt.Sprintf("no commits in %s across %d rebuild attempts", r.stuckHandshakeAfter(), maxStuckRebuilds),
 					})
 				}
 				r.mu.Lock()
@@ -2783,15 +2799,25 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		if state.reason == "" {
 			continue
 		}
-		if !first && targetStateEqual(state, last) {
+		if !first && !unsent && targetStateEqual(state, last) {
 			continue
 		}
 		last = state
 		first = false
-		if err := r.publishTargetProgress(ctx, key, state, entry); err != nil {
-			ctrl.Log.WithName("target-flush").Error(err, "publish",
-				"mirror", key, "reason", state.reason)
+		now := time.Now()
+		if !retry.due(now) {
+			unsent = true
+			continue
 		}
+		if err := r.publishTargetProgress(ctx, key, state, entry); err != nil {
+			retry.failed(now, r.flushInterval())
+			unsent = true
+			ctrl.Log.WithName("target-flush").Error(err, "publish",
+				"mirror", key, "reason", state.reason, "retryIn", retry.wait)
+			continue
+		}
+		retry.succeeded()
+		unsent = false
 	}
 }
 
@@ -2945,25 +2971,22 @@ func sameQuantum(a, b time.Time) bool {
 	return d < statusQuantum
 }
 
-// publishTargetProgress writes the TargetProgress condition, Phase,
-// LastGrainAt, and TargetInfo onto the MxlFlowMirror's status. The
-// mirror is re-fetched from the cache on every call so the SSA
-// payload stamps the current Generation rather than a value captured
-// at flusher start. TargetInfo is re-stamped on every flush because
-// SSA with a single FieldOwner releases ownership of fields omitted
-// from a subsequent payload; without re-stamping the apiserver would
-// strip status.targetInfo after the second flush.
+// publishTargetProgress writes the TargetProgress condition, Phase
+// and LastGrainAt onto the MxlFlowMirror's status. The mirror is
+// re-fetched from the cache on every call so the SSA payload stamps
+// the current Generation rather than a value captured at flusher
+// start. TargetInfo is not part of it: applyTargetInfo owns that field
+// under its own manager.
 func (r *TargetReconciler) publishTargetProgress(ctx context.Context, key types.NamespacedName, state targetProgressState, entry *targetEntry) error {
 	mirror, err := r.fetchMirror(ctx, key)
 	if err != nil {
 		return fmt.Errorf("get mirror for status flush: %w", err)
 	}
 	cond := metav1.Condition{
-		Type:               mxlv1alpha1.ConditionTypeTargetProgress,
-		Status:             state.status,
-		Reason:             state.reason,
-		Message:            state.message,
-		LastTransitionTime: metav1.Now(),
+		Type:    mxlv1alpha1.ConditionTypeTargetProgress,
+		Status:  state.status,
+		Reason:  state.reason,
+		Message: state.message,
 	}
 	return r.applyTargetStatus(ctx, mirror, state.phase, state.lastCommitAt, &cond)
 }
