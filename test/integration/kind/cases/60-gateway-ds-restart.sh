@@ -18,8 +18,8 @@ set -euo pipefail
 
 GATEWAY_DS="${GATEWAY_DS:-mxl-k8s-gateway}"
 RECOVERY_TIMEOUT_SECS="${RECOVERY_TIMEOUT_SECS:-180}"
-# Phase=Degraded with status.lastGrainAt unchanged for this many
-# seconds means no fresh grains are landing - the target side has
+# Phase=Degraded with the target's heartbeat Lease unchanged for this
+# many seconds means no fresh grains are landing - the target side has
 # stalled and waiting longer will not recover the mirror.
 STUCK_SECS="${STUCK_SECS:-45}"
 POLL_INTERVAL_SECS=3
@@ -61,9 +61,22 @@ mirror_last_at=()
 mirror_frozen_secs=()
 
 # One polling-friendly line:
-#   <name>|<phase>|<lastGrainAt>|<targetProgressReason>;
+#   <name>|<phase>|<targetProgressReason>;
 # Reason is empty until the TargetProgress condition exists.
-POLL_JSONPATH='{range .items[*]}{.metadata.name}|{.status.phase}|{.status.lastGrainAt}|{range .status.conditions[?(@.type=="TargetProgress")]}{.reason}{end};{end}'
+POLL_JSONPATH='{range .items[*]}{.metadata.name}|{.status.phase}|{range .status.conditions[?(@.type=="TargetProgress")]}{.reason}{end};{end}'
+
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -d' ' -f1
+}
+
+# target_beat <mirror> -- spec.renewTime of the mirror's target
+# heartbeat Lease (api/v1alpha1 MirrorLeaseName), empty without one.
+target_beat() {
+  local hash
+  hash=$(printf '%s' "${NAMESPACE}/$1" | sha256 | cut -c1-32)
+  "${KUBECTL[@]}" -n mxl-system get lease "mxl-mirror-${hash}-target" \
+      -o jsonpath='{.spec.renewTime}' 2>/dev/null || true
+}
 
 deadline=$(( $(date +%s) + RECOVERY_TIMEOUT_SECS ))
 last_snapshot=""
@@ -76,18 +89,19 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   # Success when every mirror entry has phase=Ready. The regex
   # anchors on (name|Ready|...;)+ to require every entry, not just
   # one, to be Ready.
-  if echo "$snapshot" | grep -Eq '^([a-z0-9.-]+\|Ready\|[^|]*\|[^;]*;)+$'; then
+  if echo "$snapshot" | grep -Eq '^([a-z0-9.-]+\|Ready\|[^;]*;)+$'; then
     echo "  post-restart snapshot: ${snapshot}"
     exit 0
   fi
 
-  # Walk entries; for any Degraded mirror whose lastGrainAt has not
-  # advanced since the previous poll, accumulate dead time. Any
-  # phase change or lastGrainAt change resets the counter.
+  # Walk entries; for any Degraded mirror whose target heartbeat has
+  # not advanced since the previous poll, accumulate dead time. Any
+  # phase change or heartbeat change resets the counter.
   IFS=';' read -r -a entries <<<"$snapshot"
   for entry in "${entries[@]}"; do
     [ -z "$entry" ] && continue
-    IFS='|' read -r name phase last_at reason <<<"$entry"
+    IFS='|' read -r name phase reason <<<"$entry"
+    last_at=$(target_beat "$name")
 
     idx=-1
     for i in "${!mirror_names[@]}"; do
@@ -107,7 +121,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
       mirror_frozen_secs[$idx]=$(( mirror_frozen_secs[$idx] + POLL_INTERVAL_SECS ))
       if [ "${mirror_frozen_secs[$idx]}" -ge "$STUCK_SECS" ]; then
         echo "  current snapshot: ${snapshot}" >&2
-        echo "  mirror ${name} Degraded with lastGrainAt frozen at '${last_at}' for ${mirror_frozen_secs[$idx]}s (reason=${reason:-unknown})" >&2
+        echo "  mirror ${name} Degraded with its target heartbeat frozen at '${last_at}' for ${mirror_frozen_secs[$idx]}s (reason=${reason:-unknown})" >&2
         dump_recovery_diagnostics
         fail "mirror ${name} stuck Degraded: no grain commits for >=${STUCK_SECS}s after rollout"
       fi

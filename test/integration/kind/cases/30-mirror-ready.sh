@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Assert at least one MxlFlowMirror exists in the demo namespace and
-# every listed mirror reaches phase=Ready with a non-empty
-# status.targetInfo. status.targetInfo is set by the target-side
-# gateway reconciler after opening the libmxl Writer and the
-# fabrics Target; an empty value means the target plumbing never
-# materialised even if the phase string happens to read Ready.
+# every listed mirror reaches phase=Ready with its target descriptor
+# published. The target-side gateway reconciler writes the descriptor
+# into the MxlFlowMirrorTarget of the mirror's name after opening the
+# libmxl Writer and the fabrics Target, then names it by hash in
+# status.targetInfoHash; a missing or mismatching one means the target
+# plumbing never materialised even if the phase string reads Ready.
 #
-# The descriptor is also published in the MxlFlowMirrorTarget of the
-# mirror's name, which status.targetInfoHash must name, and both
+# The schema still declares the deprecated status.targetInfo,
+# status.lastGrainAt and status.lastSentAt, so a gateway that kept
+# writing them would leave them on the mirror; nothing does. Both
 # gateways renew a heartbeat Lease per mirror once grains move.
 
 set -euo pipefail
@@ -25,7 +27,7 @@ phase=$(wait_phase mxlflowmirrors "$JSONPATH" \
     fail "not all MxlFlowMirrors reached Ready in ${MIRROR_TIMEOUT_SECS}s"
   }
 
-# Walk every mirror; require status.targetInfo to be non-empty.
+# Walk every mirror; require a published descriptor and heartbeats.
 names=$("${KUBECTL[@]}" -n "$NAMESPACE" get mxlflowmirrors \
         -o jsonpath='{range .items[*]}{.metadata.name} {end}')
 [ -n "$names" ] || fail "no MxlFlowMirror resources found in namespace ${NAMESPACE}"
@@ -43,20 +45,19 @@ heartbeat() {
 }
 
 for name in $names; do
-  ti=$("${KUBECTL[@]}" -n "$NAMESPACE" get "mxlflowmirror/${name}" \
-        -o jsonpath='{.status.targetInfo}')
-  if [ -z "$ti" ]; then
-    fail "MxlFlowMirror/${name} has empty status.targetInfo (target side never opened)"
-  fi
   hash=$("${KUBECTL[@]}" -n "$NAMESPACE" get "mxlflowmirror/${name}" \
         -o jsonpath='{.status.targetInfoHash}')
+  [ -n "$hash" ] \
+    || fail "MxlFlowMirror/${name} has empty status.targetInfoHash (target side never opened)"
+  legacy=$("${KUBECTL[@]}" -n "$NAMESPACE" get "mxlflowmirror/${name}" \
+        -o jsonpath='{.status.targetInfo}{.status.lastGrainAt}{.status.lastSentAt}')
+  [ -z "$legacy" ] \
+    || fail "MxlFlowMirror/${name} status carries a deprecated descriptor or progress time, which no gateway may write"
   obj=$("${KUBECTL[@]}" -n "$NAMESPACE" get "mxlflowmirrortarget/${name}" \
         -o jsonpath='{.spec.targetInfo}') \
     || fail "MxlFlowMirror/${name} has no MxlFlowMirrorTarget"
   [ "$(printf '%s' "$obj" | sha256)" = "$hash" ] \
     || fail "MxlFlowMirror/${name} status.targetInfoHash does not name its MxlFlowMirrorTarget"
-  [ "$obj" = "$ti" ] \
-    || fail "MxlFlowMirror/${name} carries another descriptor in status.targetInfo than in its MxlFlowMirrorTarget"
 
   deadline=$(( $(date +%s) + 30 ))
   until heartbeat source "$name" && heartbeat target "$name"; do

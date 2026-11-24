@@ -8,7 +8,7 @@
 # keeps listening on the address it published, so on the source side
 # the target must not be set up again: that closes the flow's writer on
 # the target node, which invalidates every reader of it there, and
-# publishes a new TargetInfo for a connection that already reached the
+# publishes a new descriptor for a connection that already reached the
 # old one. After a target restart the new target publishes its own
 # address and the source has to follow it with no grain to prompt it.
 
@@ -119,10 +119,25 @@ for p in "$WRITER" "$ANCHOR"; do
 done
 
 mirror="mxlflowmirror/${FLOW}--${tgt_node}"
-wait_phase "$mirror" '{.status.phase}/{.status.lastGrainAt}' '^Ready/.+' "$MIRROR_TIMEOUT_SECS" >/dev/null \
-  || fail "${mirror} did not carry a grain"
+wait_phase "$mirror" '{.status.phase}' '^Ready$' "$MIRROR_TIMEOUT_SECS" >/dev/null \
+  || fail "${mirror} did not reach Ready"
 
-target_info() { "${KUBECTL[@]}" -n "$NAMESPACE" get "$mirror" -o 'jsonpath={.status.targetInfo}'; }
+# target_heartbeat: the renewTime of the mirror's target heartbeat Lease,
+# cut to whole seconds, empty without one. The target renews it while
+# grains commit; the mirror's status carries no progress time.
+target_heartbeat() {
+  "${KUBECTL[@]}" -n "$NAMESPACE" get leases -l mxl.qvest-digital.com/mirror-side=target \
+      -o jsonpath='{range .items[*]}{.metadata.annotations.mxl\.qvest-digital\.com/mirror}{" "}{.spec.renewTime}{"\n"}{end}' \
+    | awk -v m="${NAMESPACE}/${mirror#mxlflowmirror/}" '$1 == m { print substr($2, 1, 19) "Z" }'
+}
+
+deadline=$(( $(date +%s) + MIRROR_TIMEOUT_SECS ))
+until [ -n "$(target_heartbeat)" ]; do
+  [ "$(date +%s)" -lt "$deadline" ] || fail "${mirror} did not carry a grain"
+  sleep 2
+done
+
+target_info() { "${KUBECTL[@]}" -n "$NAMESPACE" get "$mirror" -o 'jsonpath={.status.targetInfoHash}'; }
 
 # bounce <node>: replace the gateway pod on the node and wait for the
 # replacement to run.
@@ -144,14 +159,6 @@ bounce() {
   fail "no replacement gateway pod came up on $1"
 }
 
-# target_heartbeat: the renewTime of the mirror's target heartbeat Lease,
-# cut to whole seconds. The target renews it while grains commit;
-# status.lastGrainAt changes only with the mirror's phase or reason.
-target_heartbeat() {
-  "${KUBECTL[@]}" -n "$NAMESPACE" get leases -l mxl.qvest-digital.com/mirror-side=target \
-      -o jsonpath='{range .items[*]}{.metadata.annotations.mxl\.qvest-digital\.com/mirror}{" "}{.spec.renewTime}{"\n"}{end}' \
-    | awk -v m="${NAMESPACE}/${mirror#mxlflowmirror/}" '$1 == m { print substr($2, 1, 19) "Z" }'
-}
 
 # resumes <what>: continue the writer and require a grain committed on
 # the target after the resume. The heartbeat is RFC 3339 in UTC at
@@ -176,22 +183,29 @@ resumes() {
 
 echo "-> producer paused, source reader reopened, source gateway restarted"
 before="$(target_info)"
-[ -n "$before" ] || fail "${mirror} has no targetInfo"
+[ -n "$before" ] || fail "${mirror} names no target descriptor"
 pause_writer || fail "could not stop the writer"
 sleep "$PAUSE_SETTLE_SECS"
 bounce "$src_node"
 sleep 15
 after="$(target_info)"
 [ "$after" = "$before" ] \
-  || fail "the target was set up again for a mirror whose producer only paused (targetInfo changed)"
-echo "   targetInfo unchanged"
+  || fail "the target was set up again for a mirror whose producer only paused (descriptor changed)"
+echo "   target descriptor unchanged"
 resumes "the source gateway restart"
 
 echo "-> producer paused, target gateway restarted"
 pause_writer || fail "could not stop the writer"
 sleep "$PAUSE_SETTLE_SECS"
+before="$(target_info)"
 bounce "$tgt_node"
-wait_phase "$mirror" '{.status.targetInfo}' '.+' "$MIRROR_TIMEOUT_SECS" >/dev/null \
-  || fail "the restarted target published no targetInfo"
+# The status keeps the old hash until the new target publishes, so
+# only a different one says the restarted target set itself up.
+deadline=$(( $(date +%s) + MIRROR_TIMEOUT_SECS ))
+until after="$(target_info)" && [ -n "$after" ] && [ "$after" != "$before" ]; do
+  [ "$(date +%s)" -lt "$deadline" ] || fail "the restarted target published no new descriptor"
+  sleep 2
+done
+echo "   target descriptor replaced"
 sleep 10
 resumes "the target gateway restart"
