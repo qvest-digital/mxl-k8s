@@ -319,10 +319,11 @@ type TargetReconciler struct {
 	// A redundancy set merging that flow learns its arrivals from it.
 	SamplesCommitted func(domain, id string, start, end uint64)
 
-	// Unfilled is told when a mirror is deleted, with the domain
-	// directory and the flow id, so a placeholder the mirror filled
-	// becomes one again rather than a copy nothing feeds. Nil leaves it
-	// out.
+	// Unfilled ends each Filled, with the same domain directory and flow
+	// id, once the target that filled the flow gives up its writer: the
+	// mirror is deleted, or its entry is dropped or closed for another
+	// open. A placeholder the target filled becomes one again rather
+	// than a copy nothing feeds. Nil leaves it out.
 	Unfilled func(domain, id string)
 
 	// Placer gives the ring of a target on an mxlfs domain the NIC's
@@ -330,9 +331,10 @@ type TargetReconciler struct {
 	// Nil places nothing.
 	Placer *numaplace.Placer
 
-	// Filled is told when a target's ring on an mxlfs domain has been
-	// allocated, with the domain directory and the flow id, so a
-	// placeholder there becomes a published copy. Nil leaves it out.
+	// Filled is told when a target on an mxlfs domain has its ring
+	// allocated and its fabric side open, with the domain directory and
+	// the flow id, so a placeholder there becomes a published copy. Nil
+	// leaves it out.
 	Filled func(domain, id string)
 
 	// Retire is told, with the domain directory and the flow id, before a
@@ -602,6 +604,20 @@ func (e *targetEntry) abandon() *mxl.Writer {
 	return writer
 }
 
+// releaseRing drops the holds on the entry's ring and ends its fill,
+// once, leaving the writer alone. An entry given up while its progress
+// loop still runs keeps the writer the loop may be using, but its ring
+// and fill go with it as on every other way out.
+func (e *targetEntry) releaseRing() {
+	e.lifecycle.Lock()
+	release := e.ringRelease
+	e.ringRelease = nil
+	e.lifecycle.Unlock()
+	if release != nil {
+		release()
+	}
+}
+
 // waitClosed reports whether ch closed within d. A nil channel counts
 // as closed: an entry whose goroutine was never started has nothing to
 // wait for.
@@ -702,13 +718,9 @@ func (r *TargetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		// does not remove finalizers either. Abandoned handles cost
 		// one node's memory until the gateway restarts, which is
 		// recoverable; an undeletable object is not.
-		domain := r.entryDomain(req.NamespacedName)
 		if !r.closeEntry(req.NamespacedName, r.localFlowDisposition(ctx, mirror.Ref().Name())) {
 			l.Info("target-side teardown timed out; abandoning libmxl handles to let the mirror be deleted",
 				"grace", r.teardownGrace())
-		}
-		if r.Unfilled != nil && domain != "" {
-			r.Unfilled(domain, mirror.Spec.FlowID)
 		}
 		if r.Recorders != nil {
 			r.Recorders.ReleaseTarget(req.NamespacedName)
@@ -1026,18 +1038,16 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain string, i
 	// pinning a lazily allocated mxlfs ring would fault it in page by page.
 	// It is allocated on the NICs' NUMA node when the placer holds it.
 	ringRelease := func() {}
+	var ringID string
 	if handles.OnMxlfs() {
 		dir := mxlfs.FlowDir(handles.DomainPath(), writer.Config().Common.ID)
-		id := strings.TrimSuffix(filepath.Base(dir), ".mxl-flow")
+		ringID = strings.TrimSuffix(filepath.Base(dir), ".mxl-flow")
 		ringRelease, err = allocateRing(func() func() {
-			return r.Placer.HoldTarget(handles.DomainPath(), id, mirrorRef(key))
+			return r.Placer.HoldTarget(handles.DomainPath(), ringID, mirrorRef(key))
 		}, func() error { return mxlfs.AllocateFlow(dir) })
 		if err != nil {
 			_ = writer.Close()
 			return nil, fmt.Errorf("%w: allocate ring: %w", errOpenWriterFailed, err)
-		}
-		if r.Filled != nil {
-			r.Filled(handles.DomainPath(), id)
 		}
 	}
 	target, info, s, bound, err := r.openFabricSideDispatch(handles, writer, provider, in.iface)
@@ -1045,6 +1055,12 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain string, i
 		_ = writer.Close()
 		ringRelease()
 		return nil, err
+	}
+	// Filled only once nothing can fail the open: the fill goes with the
+	// entry's ring holds, which every way of giving up its writer
+	// releases.
+	if handles.OnMxlfs() {
+		ringRelease = r.fill(handles.DomainPath(), ringID, ringRelease)
 	}
 
 	// The entry is not in r.targets yet, so nothing can be tearing it
@@ -1061,6 +1077,21 @@ func (r *TargetReconciler) openTarget(key types.NamespacedName, domain string, i
 	entry.ringRelease = ringRelease
 	r.startProgressLoop(entry, key, target, info, s)
 	return entry, nil
+}
+
+// fill tells Filled that a target fills flow id in domain and returns
+// release extended by the Unfilled that ends it. The entry calls its
+// release once, wherever it gives its writer up.
+func (r *TargetReconciler) fill(domain, id string, release func()) func() {
+	if r.Filled != nil {
+		r.Filled(domain, id)
+	}
+	return func() {
+		release()
+		if r.Unfilled != nil {
+			r.Unfilled(domain, id)
+		}
+	}
 }
 
 // allocateRing holds a target's ring, which gives it its node
@@ -2024,17 +2055,6 @@ func (r *TargetReconciler) StopFlow(domain, id string) {
 	}
 }
 
-// entryDomain is the domain directory of a live mirror, or "" for one
-// that is not live.
-func (r *TargetReconciler) entryDomain(key types.NamespacedName) string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if e := r.targets[key]; e != nil && e.handles != nil {
-		return e.handles.DomainPath()
-	}
-	return ""
-}
-
 // closeEntry drops a mirror from the live set and tears its handles
 // down, reporting whether the teardown completed within the grace. An
 // entry that was not live counts as torn down.
@@ -2323,6 +2343,7 @@ func (r *TargetReconciler) dropFailedEntry(key types.NamespacedName, entry *targ
 	// the grace keeps the writer: an orphaned handle beats a double
 	// free.
 	if !entry.stopProgressLoop(r.teardownGrace()) {
+		entry.releaseRing()
 		return
 	}
 	if writer := entry.abandon(); writer != nil {
@@ -2385,12 +2406,8 @@ func closeTargetHandles(e *targetEntry, disp flowDisposition, grace time.Duratio
 	flusherCancel, flusherDone := e.flusherCancel, e.flusherDone
 	info, target, writer := e.info, e.target, e.writer
 	e.info, e.target, e.writer = nil, nil, nil
-	ringRelease := e.ringRelease
-	e.ringRelease = nil
 	e.lifecycle.Unlock()
-	if ringRelease != nil {
-		defer ringRelease()
-	}
+	defer e.releaseRing()
 
 	if flusherCancel != nil {
 		flusherCancel()
@@ -2779,6 +2796,7 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 					log.FromContext(ctx).Info(
 						"stuck handshake cap: progress loop did not exit, abandoning libmxl handles",
 						"mirror", key, "grace", r.teardownGrace())
+					entry.releaseRing()
 					return
 				}
 				if writer := entry.abandon(); writer != nil {

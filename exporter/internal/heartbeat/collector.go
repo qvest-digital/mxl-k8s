@@ -36,7 +36,10 @@ var descAge = prometheus.NewDesc("mxl_mirror_heartbeat_age_seconds",
 	"Seconds since this side of the mirror last made progress, as renewed into its heartbeat Lease by the "+
 		"gateway serving it: the last completed transfer for the source, the last committed grain for the "+
 		"target. The gateway publishes it at 5s resolution.",
-	[]string{"namespace", "mirror", "side"}, nil)
+	// Not "namespace": Prometheus sets that label on every series it
+	// scrapes to the namespace of the exporter pod, and the mirror's own
+	// namespace would land in exported_namespace beside it.
+	[]string{"mirror_namespace", "mirror", "side"}, nil)
 
 // Collector exports mxl_mirror_heartbeat_age_seconds for the mirror
 // sides this node's gateway serves.

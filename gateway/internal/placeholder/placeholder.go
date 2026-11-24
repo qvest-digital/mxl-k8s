@@ -84,11 +84,26 @@ type Manager struct {
 	rmu  sync.Mutex // one Reconcile at a time: the controller's and Start's
 	mu   sync.Mutex
 	held map[string]*entry // by MxlFlow name
+	// fills counts the targets here filling each flow, by domain and
+	// id, whether or not a placeholder was held for it when they did.
+	// Two mirrors of one flow into this node fill it both.
+	fills map[fillKey]int
 	// swept is set once Start's first pass has run; opened are the
 	// domains opened since the last pass, whose markers the next pass
 	// judges.
 	swept  bool
 	opened []string
+}
+
+type fillKey struct{ domain, id string }
+
+func keyOf(domain, id string) fillKey { return fillKey{domain, strings.ToLower(id)} }
+
+// filling reports whether a target here fills flow id in domain.
+func (m *Manager) filling(domain, id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.fills[keyOf(domain, id)] > 0
 }
 
 type entry struct {
@@ -204,6 +219,10 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 
 	m.mu.Lock()
 	e := m.held[req.Name]
+	var filled bool
+	if e != nil {
+		filled = e.filled
+	}
 	m.mu.Unlock()
 	// The marker of a placeholder being replaced stays until the new one
 	// is held. The agent reads the marker, the definition and the writers
@@ -218,7 +237,7 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	}()
 	if e != nil {
 		// A placeholder a mirror fills is that mirror's copy until it goes.
-		if e.filled {
+		if filled {
 			return reconcile.Result{}, nil
 		}
 		// The writer's flock is advisory and does not keep the directory:
@@ -258,6 +277,15 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 	}
 	domain := h.DomainPath()
 	e = &entry{domain: domain, id: flow.Spec.ID}
+
+	// A flow a target here already fills is a copy, not absent: the
+	// location it publishes can lag the target by however long the
+	// agent takes. A placeholder held now would put its marker on the
+	// copy, which the agent and the exporter then take for no copy at
+	// all, for as long as the mirror lives.
+	if m.filling(domain, e.id) {
+		return reconcile.Result{}, nil
+	}
 
 	// A flow some process here already writes is not absent. Whether it
 	// exists at all is read from the directory: a path walk into a
@@ -336,11 +364,26 @@ func (m *Manager) Reconcile(ctx context.Context, req reconcile.Request) (reconci
 		m.held = make(map[string]*entry)
 	}
 	m.held[req.Name] = e
+	// A target that filled the flow while this placeholder was being
+	// created found none to mark filled, and removed the marker or found
+	// it not written yet; one whose fill also ended found none to mark
+	// again. The marker is settled here, under the lock Filled and
+	// Unfilled change it under, so neither lands between the decision
+	// and the file. The I/O under the lock is one file in the marker
+	// directory, never a lookup of a flow name, so nothing in it waits on
+	// mxlfs.
+	filled = m.fills[keyOf(domain, e.id)] > 0
+	e.filled = filled
+	if filled {
+		_ = os.Remove(MarkerPath(domain, e.id))
+	} else {
+		_ = os.WriteFile(MarkerPath(domain, e.id), nil, 0o644)
+	}
 	m.mu.Unlock()
 	if retired == MarkerPath(domain, e.id) {
 		retired = ""
 	}
-	l.Info("holding placeholder", "domain", domain, "created", created)
+	l.Info("holding placeholder", "domain", domain, "created", created, "filled", filled)
 	return reconcile.Result{}, nil
 }
 
@@ -529,14 +572,23 @@ func (m *Manager) Retire(domain, id string) {
 
 // Filled marks the placeholder of flow id in domain as a mirror's copy:
 // the marker goes, so the agent publishes the directory as a location.
+// The fill is remembered until its Unfilled, so a placeholder the
+// manager would hold for the flow later, or is holding right now, is
+// not marked as one. Every Filled is ended by exactly one Unfilled.
 func (m *Manager) Filled(domain, id string) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.fills == nil {
+		m.fills = make(map[fillKey]int)
+	}
+	m.fills[keyOf(domain, id)]++
+	// The marker is named by the id the placeholder was held under.
 	for _, e := range m.held {
-		if e.domain == domain && e.id == id {
+		if e.domain == domain && strings.EqualFold(e.id, id) {
 			e.filled = true
+			_ = os.Remove(MarkerPath(domain, e.id))
 		}
 	}
-	m.mu.Unlock()
 	_ = os.Remove(MarkerPath(domain, id))
 }
 
@@ -546,17 +598,22 @@ func (m *Manager) Filled(domain, id string) {
 // until the next mirror fills it. Without this the gateway's writer,
 // still holding the placeholder, made the directory look like a local
 // producer's and the node claimed Origin.
+//
+// A flow another target here still fills stays a copy.
 func (m *Manager) Unfilled(domain, id string) {
 	m.mu.Lock()
-	var held bool
+	defer m.mu.Unlock()
+	k := keyOf(domain, id)
+	if m.fills[k] > 1 {
+		m.fills[k]--
+		return
+	}
+	delete(m.fills, k)
 	for _, e := range m.held {
 		if e.domain == domain && strings.EqualFold(e.id, id) && e.filled {
-			e.filled, held = false, true
+			e.filled = false
+			_ = os.WriteFile(MarkerPath(domain, e.id), nil, 0o644)
 		}
-	}
-	m.mu.Unlock()
-	if held {
-		_ = os.WriteFile(MarkerPath(domain, id), nil, 0o644)
 	}
 }
 

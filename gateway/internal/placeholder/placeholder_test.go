@@ -147,6 +147,150 @@ func TestFilledPlaceholderLosesItsMarker(t *testing.T) {
 	require.Equal(t, []string{flowID}, m.Held())
 }
 
+// A gateway that starts finds every MxlFlow without a location here,
+// since the agent demoted them while no gateway wrote them, and its
+// targets set up again at the same time. A target that fills a flow
+// before the placeholder manager reaches it has nothing to mark filled
+// and no marker to remove. The marker a placeholder held afterwards
+// would then sit on the copy for as long as the mirror lives, and the
+// agent never publishes the copy as a location.
+func TestFlowATargetFilledFirstGetsNoPlaceholder(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	w, _, err := h.inst.NewWriter(flowDef)
+	require.NoError(t, err, "the target's writer")
+	t.Cleanup(func() { _ = w.Close() })
+	m.Filled(h.dir, flowID)
+
+	reconcileFlow(t, m)
+
+	require.Empty(t, m.Held())
+	require.False(t, IsPlaceholder(h.dir, flowID), "a copy a target fills carries no marker")
+}
+
+// fillingHandles fills the flow, as a target does, while the manager
+// creates the placeholder: after the marker is written and before the
+// entry is held.
+type fillingHandles struct {
+	*handles
+	fill func()
+}
+
+func (h *fillingHandles) MXL() *mxl.Instance {
+	if h.fill != nil {
+		h.fill()
+		h.fill = nil
+	}
+	return h.handles.MXL()
+}
+
+func TestFlowATargetFillsWhileItsPlaceholderIsCreatedLosesTheMarker(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	fh := &fillingHandles{handles: h}
+	fh.fill = func() { m.Filled(h.dir, flowID) }
+	m.Domain = func(context.Context, string) (Handles, error) { return fh, nil }
+
+	reconcileFlow(t, m)
+
+	require.Equal(t, []string{flowID}, m.Held())
+	require.False(t, IsPlaceholder(h.dir, flowID), "the placeholder is held as the filled copy it is")
+	m.Unfilled(h.dir, flowID)
+	require.True(t, IsPlaceholder(h.dir, flowID), "and becomes a placeholder again once its mirror goes")
+}
+
+// A target whose fill begins and ends while the placeholder is being
+// created removed the marker and found nothing held to mark again. The
+// placeholder held afterwards is one nothing fills, and without its
+// marker the agent would publish the gateway's writer as a local
+// producer's flow.
+func TestAFillThatEndsWhileThePlaceholderIsCreatedLeavesItsMarker(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	fh := &fillingHandles{handles: h}
+	fh.fill = func() {
+		m.Filled(h.dir, flowID)
+		m.Unfilled(h.dir, flowID)
+	}
+	m.Domain = func(context.Context, string) (Handles, error) { return fh, nil }
+
+	reconcileFlow(t, m)
+
+	require.Equal(t, []string{flowID}, m.Held())
+	require.True(t, IsPlaceholder(h.dir, flowID))
+}
+
+// Targets filling and letting go of the flow while its placeholder is
+// created, as a target rebuilding against a restarted gateway does,
+// leave the marker as the last of them left it: none fills the flow,
+// so it is a placeholder.
+func TestFillsRacingThePlaceholderSettleItsMarker(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	done := make(chan struct{})
+	fh := &fillingHandles{handles: h}
+	fh.fill = func() {
+		go func() {
+			defer close(done)
+			for range 500 {
+				m.Filled(h.dir, flowID)
+				m.Unfilled(h.dir, flowID)
+			}
+		}()
+	}
+	m.Domain = func(context.Context, string) (Handles, error) { return fh, nil }
+
+	reconcileFlow(t, m)
+	<-done
+
+	require.Equal(t, []string{flowID}, m.Held())
+	require.True(t, IsPlaceholder(h.dir, flowID))
+}
+
+// Two mirrors of one flow into this node fill it both. The first going
+// leaves a copy the second still feeds.
+func TestASecondFillOutlastsTheFirst(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	reconcileFlow(t, m)
+	m.Filled(h.dir, flowID)
+	m.Filled(h.dir, flowID)
+
+	m.Unfilled(h.dir, flowID)
+	require.False(t, IsPlaceholder(h.dir, flowID), "the second mirror still fills the flow")
+
+	m.Unfilled(h.dir, flowID)
+	require.True(t, IsPlaceholder(h.dir, flowID))
+}
+
+// Flow ids are matched without regard to case, as Unfilled and Retire
+// match them.
+func TestFilledMatchesTheFlowIDInAnyCase(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	reconcileFlow(t, m)
+
+	m.Filled(h.dir, strings.ToUpper(flowID))
+	require.False(t, IsPlaceholder(h.dir, flowID))
+
+	m.Unfilled(h.dir, flowID)
+	require.True(t, IsPlaceholder(h.dir, flowID))
+}
+
+// A fill ends with its mirror. The flow is absent here again and gets a
+// placeholder like any other.
+func TestFlowWhoseFillEndedGetsAPlaceholderAgain(t *testing.T) {
+	h := newDomain(t)
+	m := newManager(t, h, flow(origin))
+	m.Filled(h.dir, flowID)
+	m.Unfilled(h.dir, flowID)
+
+	reconcileFlow(t, m)
+
+	require.Equal(t, []string{flowID}, m.Held())
+	require.True(t, IsPlaceholder(h.dir, flowID))
+}
+
 // lockShared holds a shared flock on path from another process, as a
 // producer's libmxl writer does on a flow's data file.
 func lockShared(t *testing.T, path string) {
