@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.0-rc.59](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.58...v1.1.0-rc.59) (2026-11-24)
+
+
+### Bug Fixes
+
+* **exporter:** label mirror heartbeats by mirror_namespace ([28b7ad5](https://github.com/qvest-digital/mxl-k8s/commit/28b7ad5d5c963e8b6a0c311696dec7601d720e44))
+* **gateway:** end a target's fill with its entry, counted per target ([28b7ad5](https://github.com/qvest-digital/mxl-k8s/commit/28b7ad5d5c963e8b6a0c311696dec7601d720e44))
+* **gateway:** keep a placeholder's marker off a copy a target filled ([28b7ad5](https://github.com/qvest-digital/mxl-k8s/commit/28b7ad5d5c963e8b6a0c311696dec7601d720e44))
+
 ## [1.1.0-rc.58](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.57...v1.1.0-rc.58) (2026-11-24)
 
 
