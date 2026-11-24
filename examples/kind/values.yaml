@@ -9,3 +9,11 @@ global:
     # Images are kind-loaded directly into containerd; the chart must
     # not try to pull them from ghcr.io.
     pullPolicy: IfNotPresent
+
+agent:
+  flags:
+    # Shorter than the 5m default so the lifecycle case, which runs a
+    # few minutes after the demo flows appear, sees the agent re-stamp
+    # lastObserved and can fail when it does not. Above the 30s rescan,
+    # so a stamp younger than the interval is skipped as well.
+    observedRefreshInterval: 45s

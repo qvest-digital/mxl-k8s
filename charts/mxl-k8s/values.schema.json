@@ -292,7 +292,7 @@
             },
             "observedRefreshInterval": {
               "default": "5m",
-              "description": "How old a flow location's lastObserved may grow before the agent stamps it again. Each stamp is a write of the whole MxlFlow status. Flow directories appearing and vanishing are rescanned every 30s regardless.",
+              "description": "How old a flow location's lastObserved may grow before the agent stamps it again; must be positive. Each stamp is a write of the whole MxlFlow status. Flow directories appearing and vanishing are rescanned every 30s regardless, so 30s or less stamps on every rescan.",
               "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$",
               "title": "observedRefreshInterval",
               "type": "string"

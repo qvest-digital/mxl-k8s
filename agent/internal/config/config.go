@@ -169,8 +169,9 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.DurationVar(&c.ResyncPeriod, "resync-period", 30*time.Second,
 		"How often to refresh MxlDomain status.")
 	fs.DurationVar(&c.ObservedRefreshInterval, "observed-refresh-interval", 5*time.Minute,
-		"How old a flow location's lastObserved may grow before the agent stamps it again. "+
-			"Flow directories appearing and vanishing are still rescanned every 30s.")
+		"How old a flow location's lastObserved may grow before the agent stamps it again; "+
+			"must be positive. Flow directories appearing and vanishing are still rescanned "+
+			"every 30s, so a value at or below 30s stamps on every rescan.")
 	fs.StringVar(&c.IntentSocketPath, "intent-socket", "/run/mxl/agent.sock",
 		"UDS path for the on-demand intent endpoint. Empty disables.")
 	fs.StringVar(&c.ShimPath, "shim-path", "/run/mxl/libmxl-intent.so",
@@ -292,8 +293,8 @@ func (c *Config) Validate() error {
 	if c.IntentAPIBurst <= 0 {
 		return fmt.Errorf("--intent-api-burst must be positive, got %d", c.IntentAPIBurst)
 	}
-	if c.ObservedRefreshInterval < 0 {
-		return fmt.Errorf("--observed-refresh-interval must not be negative, got %v", c.ObservedRefreshInterval)
+	if c.ObservedRefreshInterval <= 0 {
+		return fmt.Errorf("--observed-refresh-interval must be positive, got %v", c.ObservedRefreshInterval)
 	}
 	return nil
 }
