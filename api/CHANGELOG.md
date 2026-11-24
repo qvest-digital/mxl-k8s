@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.1.0-rc.50](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.49...api/v1.1.0-rc.50) (2026-11-24)
+
+
+### Features
+
+* **exporter:** report mirror heartbeat age per side ([#477](https://github.com/qvest-digital/mxl-k8s/issues/477)) ([08ed4e0](https://github.com/qvest-digital/mxl-k8s/commit/08ed4e06875a5b749f2a2328c90f22f16b6e179c))
+
+
+### Bug Fixes
+
+* **agent:** remove a location once its flow directory is gone ([#477](https://github.com/qvest-digital/mxl-k8s/issues/477)) ([08ed4e0](https://github.com/qvest-digital/mxl-k8s/commit/08ed4e06875a5b749f2a2328c90f22f16b6e179c))
+
+
+### Performance
+
+* **agent:** refresh lastObserved every 5 minutes, not every rescan ([#477](https://github.com/qvest-digital/mxl-k8s/issues/477)) ([08ed4e0](https://github.com/qvest-digital/mxl-k8s/commit/08ed4e06875a5b749f2a2328c90f22f16b6e179c))
+
 ## [1.1.0-rc.49](https://github.com/qvest-digital/mxl-k8s/compare/api/v1.1.0-rc.48...api/v1.1.0-rc.49) (2026-11-24)
 
 
