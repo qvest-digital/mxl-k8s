@@ -378,3 +378,35 @@ func TestTeardown_FailedHeartbeatDeleteKeepsTheFinalizerMoving(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), key, &got))
 	assert.NotContains(t, got.Finalizers, TargetFinalizerName)
 }
+
+// Every phase-only status write releases TargetProgress and lastGrainAt,
+// not only a rebuild's: the slow path's Materializing and Ready for a
+// mirror whose entry is live do the same. The flusher publishes its
+// state again after any of them.
+func TestRunFlusher_RepublishesAfterAPhaseOnlyWrite(t *testing.T) {
+	scheme := newSourceTestScheme(t)
+	key := types.NamespacedName{Namespace: "ns1", Name: "m1"}
+	mirror := mirrorWithTargetFinalizer(key.Name, key.Namespace, "node-a", "flow-1",
+		mxlv1alpha1.MxlFlowMirrorStatus{Phase: mxlv1alpha1.MxlFlowMirrorReady, TargetInfo: "info-1"})
+	var w writeCounter
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&mxlv1alpha1.MxlFlowMirror{}).
+		WithObjects(mirror).WithInterceptorFuncs(w.funcs()).Build()
+	entry := &targetEntry{infoStr: "info-1"}
+	now := time.Now()
+	entry.lastCommitAt.Store(&now)
+	r := &TargetReconciler{Client: c, Scheme: scheme, NodeName: "node-a", FlushInterval: time.Millisecond,
+		targets: map[types.NamespacedName]*targetEntry{key: entry}, attempts: attemptTable[targetOpenInputs]{}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go r.runFlusher(ctx, done, key, entry)
+	defer func() { cancel(); <-done }()
+	require.Eventually(t, func() bool { s, _ := w.counts(); return s == 1 }, time.Second, time.Millisecond)
+
+	require.NoError(t, r.applyTargetStatus(context.Background(), mirror, mxlv1alpha1.MxlFlowMirrorReady, nil, nil))
+	require.Eventually(t, func() bool {
+		st := getMirrorStatus(t, c, key)
+		return st.LastGrainAt != nil && len(st.Conditions) == 1
+	}, time.Second, time.Millisecond, "the released condition and lastGrainAt are published again")
+}

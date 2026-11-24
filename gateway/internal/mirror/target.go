@@ -525,6 +525,11 @@ type targetEntry struct {
 	// rebuilt and the new progress loop is running.
 	recovering atomic.Bool
 
+	// statusReleased, set by a status write that carried no
+	// TargetProgress condition, tells the flusher to publish its state
+	// again, since that write released the condition and lastGrainAt.
+	statusReleased atomic.Bool
+
 	// lifecycle guards every mutable handle below, together with
 	// closed. The recovery goroutine swaps the fabric side and the
 	// progress-loop pair while a teardown on the reconcile goroutine
@@ -2492,6 +2497,7 @@ func (r *TargetReconciler) applyTargetStatus(
 	patch.SetName(mirror.Name)
 	r.mu.Lock()
 	attempts := r.attempts.count(client.ObjectKeyFromObject(mirror))
+	entry := r.targets[client.ObjectKeyFromObject(mirror)]
 	r.mu.Unlock()
 
 	// Every target-side status write lands here: the phase-only
@@ -2537,6 +2543,12 @@ func (r *TargetReconciler) applyTargetStatus(
 	}
 	if cond != nil {
 		r.published.written(key, *cond)
+	} else if entry != nil {
+		// A payload without the condition and lastGrainAt releases
+		// both. The flusher publishes them again on its next tick: a
+		// moving commit time no longer writes the status, so nothing
+		// else would before the next phase change.
+		entry.statusReleased.Store(true)
 	}
 	return nil
 }
@@ -2682,6 +2694,9 @@ func (r *TargetReconciler) runFlusher(ctx context.Context, done chan struct{}, k
 		// Its phase-only writes release TargetProgress and lastGrainAt,
 		// so the state is published again once it is done, changed or
 		// not: a moving commit time no longer writes the status.
+		if entry.statusReleased.Swap(false) {
+			unsent = true
+		}
 		if entry.recovering.Load() {
 			unsent = true
 			continue
