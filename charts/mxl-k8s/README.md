@@ -133,22 +133,28 @@ upgrade: the old label set ends and one with `variant` begins, which a
 as two series. Pods of the base gateway carry no variant and keep their
 label sets.
 
-The release that adds `MxlFlowMirrorTarget` publishes each mirror's
-target descriptor in an object of that kind, names it on the mirror by
-`status.targetInfoHash`, and still writes `status.targetInfo` for
-gateways that predate it, so a source and target gateway of different
-releases keep dialing each other. A gateway on a cluster whose CRDs
-lack the kind or the field reads and writes `status.targetInfo` alone.
-Apply the chart's CRDs for the hash to be published.
+1.1.0-rc.57 publishes each mirror's target descriptor in an
+`MxlFlowMirrorTarget`, names it on the mirror by `status.targetInfoHash`,
+and moves each side's progress timestamp into a heartbeat Lease in
+`mxl-system`, beside the Origin Leases, renewed every five seconds while
+grains move. It still wrote `status.targetInfo`, `status.lastGrainAt`
+and `status.lastSentAt` for gateways and agents that predate it.
 
-The same release moves each side's progress timestamp into a heartbeat
-Lease in `mxl-system`, beside the Origin Leases, renewed every five
-seconds while grains
-move; `status.lastGrainAt` and `status.lastSentAt` change only with the
-mirror's phase or progress reason. A target gateway of an earlier
-release reads the source's progress from `status.lastSentAt` only, so
-until it is upgraded it does not see a wedge that starts after the
-handshake on a mirror whose source runs the newer release.
+The release after 1.1.0-rc.57 that lists those three fields as
+deprecated in its changelog no longer writes or reads them. They stay
+in the CRD, so a 1.1.0-rc.57 gateway on a node not yet upgraded is not
+rejected for writing them, but nothing fills them any more, and the
+first write of each side's manager removes what the previous release
+left there. Every gateway and agent must run 1.1.0-rc.57 or later
+before upgrading to it: an older source gateway dials only
+`status.targetInfo` and never reaches its target, an older target
+gateway reads the source's progress only from `status.lastSentAt` and
+rebuilds no wedged fabric side, and an older agent waits for
+`status.targetInfo` before it reports an on-demand mirror Ready. The
+gateway refuses to start where the cluster does not serve
+`MxlFlowMirrorTarget`, so the chart's CRDs have to be applied with it.
+Anything that reads a mirror's progress or descriptor reads the
+heartbeat Leases and the `MxlFlowMirrorTarget` instead.
 
 ## Bundled image versions
 
