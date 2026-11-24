@@ -331,7 +331,7 @@ func TestReconcile_SeedsLastSentAtFromTheHeartbeat(t *testing.T) {
 
 	state := observedState(entry, defaultReaderStallAfter)
 	require.NotNil(t, state.lastSentAt,
-		"the next publish must still carry lastSentAt so SSA does not strip it")
+		"the next tick must still renew the source heartbeat from the seeded lastSentAt")
 	assert.True(t, state.lastSentAt.Equal(sentAt.Time))
 }
 

@@ -161,8 +161,9 @@ Three transitions in particular are easy to miss:
 - **Pod restart** lands in `Materializing` again, not `Ready` -- the
   in-memory `targetEntry` map is empty after restart, the fast-path
   declines, and the slow path reopens the writer. This also rotates
-  `TargetInfo`, which the source side picks up through its
-  `Watches(MxlFlowMirror)`.
+  the descriptor: a new `MxlFlowMirrorTarget` and
+  `status.targetInfoHash`, which the source side picks up through its
+  watches on both.
 - **A target that will not open** counts consecutive failures in
   `status.targetAttemptCount` and leaves `Materializing` for
   `Degraded` past `maxTargetOpenAttempts`
@@ -346,9 +347,9 @@ Failure modes:
   Pods, so it relies on the periodic requeue.
 - **Target gateway crashes between status update and progress
   goroutine start.** On restart, the fast-path's "live in-memory
-  entry" requirement fails; the reconciler reopens and rotates
-  `TargetInfo`. The source side picks up the rotation via its
-  watch.
+  entry" requirement fails; the reconciler reopens and rotates the
+  descriptor. The source side picks up the new
+  `status.targetInfoHash` and `MxlFlowMirrorTarget` via its watches.
 - **libfabric peer drops mid-stream.** Target's `ReadGrain` returns
   a non-recoverable error; the progress goroutine exits and
   `recoverFromFatalError` rebuilds the fabric side while keeping
