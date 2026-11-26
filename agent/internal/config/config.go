@@ -3,6 +3,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	"github.com/qvest-digital/mxl-k8s/agent/internal/domainfs"
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
@@ -103,6 +105,11 @@ type Config struct {
 	IntentAPIQPS   float64
 	IntentAPIBurst int
 
+	// DomainMode is the mode of every domain directory and of the mxlfs
+	// mounted on it, in octal: DomainModeShared or DomainModeSticky.
+	// Empty is DomainModeShared.
+	DomainMode string
+
 	// Mxlfs runs what a domain on mxlfs needs: placeholder and wanted
 	// flow watchers, redundancy set demand. Off, every domain is a plain
 	// directory.
@@ -133,6 +140,20 @@ type Config struct {
 	MxlfsNumaReleasePeriod time.Duration
 	MxlfsNumaReleaseDelay  time.Duration
 	MxlfsNumaReleaseRate   string
+}
+
+// Domain modes.
+const (
+	DomainModeShared = "0777"
+	DomainModeSticky = "1777"
+)
+
+// DomainDirMode is DomainMode as the mode of a directory.
+func (c *Config) DomainDirMode() fs.FileMode {
+	if c.DomainMode == DomainModeSticky {
+		return domainfs.StickyDirMode
+	}
+	return domainfs.DirMode
 }
 
 // Placement modes.
@@ -182,6 +203,10 @@ func FromFlags(fs *flag.FlagSet, args []string) (*Config, error) {
 	fs.StringVar(&c.ClaimStatusLabel, "claim-status-label", "",
 		"Pod label naming a pod's MediaFunctionClaim, whose status.io the agent "+
 			"writes from observed flow use. Empty disables.")
+	fs.StringVar(&c.DomainMode, "domain-mode", DomainModeShared,
+		"Mode of every domain directory and of the mxlfs mounted on it: 0777, or 1777, "+
+			"whose sticky bit lets only an entry's owner, the directory's owner (the "+
+			"agent's uid) or a process with CAP_FOWNER remove or rename a flow.")
 	fs.BoolVar(&c.Mxlfs, "mxlfs", false,
 		"Run what a domain on mxlfs needs: mirrors for opened placeholders and "+
 			"waited-for flows, and MxlFlowRedundancySet demand. Off, every domain is "+
@@ -272,6 +297,11 @@ func (c *Config) Validate() error {
 	if c.IntentMirrorBurst > 0 && c.IntentMirrorBurstWindow <= 0 {
 		return fmt.Errorf("--intent-mirror-burst-window must be positive while --intent-mirror-burst is set, got %v",
 			c.IntentMirrorBurstWindow)
+	}
+	switch c.DomainMode {
+	case "", DomainModeShared, DomainModeSticky:
+	default:
+		return fmt.Errorf("--domain-mode %q is not one of %s, %s", c.DomainMode, DomainModeShared, DomainModeSticky)
 	}
 	switch c.MxlfsHuge {
 	case "", "within_size", "always":

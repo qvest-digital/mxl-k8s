@@ -2,6 +2,7 @@ package domainpublisher
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -98,6 +99,23 @@ func TestSyncMaterialisesEverySelectedDomain(t *testing.T) {
 		assert.Equal(t, tc.mirrored, e.FanotifyReady, tc.name)
 		assert.EqualValues(t, 1024, e.CapacityBytes)
 		assert.NotNil(t, e.LastSeen)
+	}
+}
+
+// Every domain on the node gets the publisher's mode, the primary and
+// any other alike; the default is the world-writable 0777.
+func TestSyncGivesEveryDomainTheDirMode(t *testing.T) {
+	_, p, root := setup(t, node("n1", nil),
+		domain("studio", idA, "domain"), domain("scratch", idB, "scratch"))
+	assert.Equal(t, domainfs.DirMode, p.DirMode)
+	p.DirMode = domainfs.StickyDirMode
+
+	require.NoError(t, p.Sync(context.Background()))
+
+	for _, dir := range []string{"domain", "scratch"} {
+		info, err := os.Stat(filepath.Join(root, dir))
+		require.NoError(t, err)
+		assert.Equal(t, domainfs.StickyDirMode, info.Mode()&(os.ModeSticky|os.ModePerm), dir)
 	}
 }
 

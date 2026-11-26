@@ -148,6 +148,13 @@ The chart keeps the id of an existing object and generates one on
 first install; pin it in `domains[].id` where it has to be known ahead
 of time. Neither the id nor the directory can be changed afterwards.
 
+The agent gives every domain directory, and the mxlfs mounted on it,
+mode 0777: every function on the node creates its flows there under
+its own uid and can remove or rename any other. `agent.flags.domainMode:
+"1777"` adds the sticky bit, so a flow can be removed or renamed only by
+its owner, by the directory's owner, which is the agent's uid, or by a
+process with `CAP_FOWNER`.
+
 See [`charts/mxl-k8s/README.md`](../charts/mxl-k8s/README.md) for the
 full values reference, override examples (RDMA, private registry,
 IRSA), and the FluxCD `HelmRelease` snippet.

@@ -2,6 +2,7 @@ package config
 
 import (
 	"flag"
+	"os"
 	"testing"
 	"time"
 
@@ -65,6 +66,19 @@ func TestFromFlags_DefaultsFireWhenArgsProvided(t *testing.T) {
 		"a glob over the domain opens every flow at once; without a burst "+
 			"limit each open becomes a mirror onto the node")
 	assert.Equal(t, 10*time.Second, c.IntentMirrorBurstWindow)
+	assert.Equal(t, os.FileMode(0o777), c.DomainDirMode(),
+		"every function on the node creates flows in the domain under its own uid "+
+			"and has always been able to remove any of them")
+}
+
+// 1777 keeps the domain writable for every function and adds the sticky
+// bit, so a function cannot remove or rename another's flow.
+func TestFromFlags_StickyDomainMode(t *testing.T) {
+	c, err := FromFlags(flag.NewFlagSet("agent", flag.ContinueOnError),
+		[]string{"--domain-path=/run/mxl/domain", "--node-name=n1", "--domain-mode=1777"})
+	require.NoError(t, err)
+	assert.Equal(t, "1777", c.DomainMode, "passed to the mxlfs mount as mode=")
+	assert.Equal(t, os.ModeSticky|0o777, c.DomainDirMode())
 }
 
 func TestFromFlags_IntentMirrorLimits(t *testing.T) {
@@ -243,6 +257,18 @@ func TestValidate(t *testing.T) {
 			name:    "a NUMA node that is no number is rejected",
 			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", MxlfsNumaNodeDefault: "near", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
 			wantErr: "--mxlfs-numa-placement-node-default",
+		},
+		{
+			name:    "sticky domain mode passes",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", DomainMode: "1777", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
+			wantErr: "",
+		},
+		{
+			// A mode that takes write away from other uids breaks every
+			// function that is not the agent.
+			name:    "a domain mode other than 0777 or 1777 is rejected",
+			c:       Config{DomainPath: "/run/mxl/domain", NodeName: "n1", DomainMode: "0755", KubeAPIQPS: 50, KubeAPIBurst: 100, IntentAPIQPS: 50, IntentAPIBurst: 100, ObservedRefreshInterval: time.Minute},
+			wantErr: "--domain-mode",
 		},
 		{
 			name:    "unknown provider rejected",

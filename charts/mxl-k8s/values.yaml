@@ -79,13 +79,14 @@ domains:
 # every domain is a plain directory and the chart renders none of the
 # following.
 #
-# On, the agent mounts an mxlfs (mode=0777,wait=5000) on each domain
-# directory it materialises, before writing into it, and runs privileged
-# for Bidirectional propagation of the runtime root. A directory that is
-# already an mxlfs is left alone. Where the mount fails, as on a node
-# whose kernel has no mxlfs module, or where the directory already
-# holds flows, the domain stays a plain directory: the agent logs the
-# error and records a MxlfsUnavailable warning event on the Node.
+# On, the agent mounts an mxlfs (mode=0777, or agent.flags.domainMode,
+# and wait=5000) on each domain directory it materialises, before
+# writing into it, and runs privileged for Bidirectional propagation of
+# the runtime root. A directory that is already an mxlfs is left alone.
+# Where the mount fails, as on a node whose kernel has no mxlfs module,
+# or where the directory already holds flows, the domain stays a plain
+# directory: the agent logs the error and records a MxlfsUnavailable
+# warning event on the Node.
 #
 # The agent, gateway and operator run with --mxlfs, which adds
 # placeholders for flows absent on a node, lazy ring allocation and
@@ -500,6 +501,21 @@ agent:
     # @schema
     domainPath: /run/mxl/domain
     # @schema
+    # enum: ["", "0777", "1777"]
+    # @schema
+    # -- Mode of every domain directory and of the mxlfs mounted on it.
+    # Empty is 0777: every function on the node creates flows in the
+    # domain and can remove or rename any of them. 1777 adds the sticky
+    # bit, under which a flow can be removed or renamed only by its
+    # owner, by the domain directory's owner (the agent's uid) or by a
+    # process with CAP_FOWNER. Both images run as root, so the gateway,
+    # which drops every capability, passes that check as the directory's
+    # owner unless gateway.podSecurityContext.runAsUser sets another uid.
+    # A flow directory another uid created, such as an abandoned scaffold
+    # or a leftover of another geometry, is one the gateway cannot empty
+    # under either mode: libmxl gives other uids no write access to it.
+    domainMode: ""
+    # @schema
     # pattern: ^/.+
     # @schema
     intentSocket: /run/mxl/agent.sock
@@ -615,9 +631,9 @@ agent:
   # and access (read, the default, or write). Requires mxlfs.enabled. A
   # publish is refused, and retried by the kubelet, until the agent has
   # mounted the domain or left it plain. Write access is granted to any
-  # pod that asks for it in its volume attributes, and the domain
-  # directory is mode 0777, so a pod with write access can create,
-  # overwrite or remove any flow in the domain.
+  # pod that asks for it in its volume attributes, and at the default
+  # agent.flags.domainMode a pod with write access can create, overwrite
+  # or remove any flow in the domain.
   csi:
     enabled: false
     # @schema

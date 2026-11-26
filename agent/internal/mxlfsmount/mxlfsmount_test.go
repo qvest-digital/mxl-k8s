@@ -99,6 +99,21 @@ func TestEnsureMountsWithHugeOnlyWhenSet(t *testing.T) {
 	assert.Equal(t, "mode=0777,wait=5000,huge=always", *options)
 }
 
+// The mount carries the domain directory's mode from the start, so no
+// function meets a fresh mount in another mode before the agent's chmod.
+// Unset, it stays 0777, the mode every domain has had.
+func TestEnsureMountsWithTheModeItIsGiven(t *testing.T) {
+	m, _, _, options := harnessOpts(nil, nil)
+	m.Mode = "1777"
+	m.Huge = "always"
+	require.NoError(t, m.Ensure(t.TempDir()))
+	assert.Equal(t, "mode=1777,wait=5000,huge=always", *options)
+
+	m, _, _, options = harnessOpts(nil, nil)
+	require.NoError(t, m.Ensure(t.TempDir()))
+	assert.Equal(t, "mode=0777,wait=5000", *options)
+}
+
 // A module that does not know huge= refuses a mount that names it: the
 // domain is mounted without it, still an mxlfs, and the Node says why
 // under its own reason rather than as a plain directory.
