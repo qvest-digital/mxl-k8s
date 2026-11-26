@@ -277,9 +277,13 @@ cleanup:
     nodeCount: 1
     # -- Image used by the cleanup Job. Pinned tag (no :latest).
     image: busybox:1.38
+    # renovate: datasource=docker
     # -- Image used by the nodecount-guard init-container. Must
-    # carry /bin/sh, wc and a kubectl binary on PATH.
-    guardImage: alpine/k8s:1.37.2
+    # carry /bin/sh, wc and a kubectl binary on PATH. Its pull counts
+    # against timeoutSeconds, so it stays small. The guard only lists
+    # nodes, so a kubectl outside the server's supported version skew
+    # is accepted.
+    guardImage: alpine/kubectl:1.37.2@sha256:06c6e028a77b54849182acb93e77f91f6312db02c6232e053212add91309349a
     # @schema
     # minimum: 1
     # @schema

@@ -106,7 +106,7 @@ tests:
           value: nodecount-guard
       - equal:
           path: spec.template.spec.initContainers[0].image
-          value: alpine/k8s:1.37.2
+          value: alpine/kubectl:1.37.2@sha256:06c6e028a77b54849182acb93e77f91f6312db02c6232e053212add91309349a
       - matchRegex:
           path: spec.template.spec.initContainers[0].command[2]
           pattern: 'kubectl get nodes'
