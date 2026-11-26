@@ -488,3 +488,23 @@ tests:
       - equal:
           path: spec.template.spec.initContainers[0].command[3]
           value: "45"
+
+  # Under agent.flags.domainMode 1777 the gateway removes the flow
+  # directories it owns as the domain directory's owner, uid 0, which the
+  # agent creates and mounts it as. It needs no CAP_FOWNER for that, and a
+  # runAsUser or FOWNER here would change which flows it may remove.
+  - it: runs as the domain directory's owner without CAP_FOWNER under a sticky domain
+    set:
+      agent.flags.domainMode: "1777"
+      mxlfs.enabled: true
+    asserts:
+      - notExists:
+          path: spec.template.spec.securityContext.runAsUser
+      - notExists:
+          path: spec.template.spec.containers[0].securityContext.runAsUser
+      - notContains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          content: FOWNER
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: ALL
