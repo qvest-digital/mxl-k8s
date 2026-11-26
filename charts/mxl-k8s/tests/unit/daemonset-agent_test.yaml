@@ -100,3 +100,31 @@ tests:
       - equal:
           path: spec.template.spec.hostPID
           value: false
+
+  # Left empty, the agent keeps its 0777 and an image older than the
+  # flag still starts.
+  - it: renders no --domain-mode by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --domain-mode=
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --domain-mode=0777
+
+  - it: passes a sticky domain mode to the agent
+    set:
+      agent.flags.domainMode: "1777"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --domain-mode=1777
+
+  # A mode without write for other uids breaks every function on the
+  # node that is not the agent.
+  - it: rejects a domain mode other than 0777 or 1777
+    set:
+      agent.flags.domainMode: "0755"
+    asserts:
+      - failedTemplate:
+          errorPattern: "at '/agent/flags/domainMode'"

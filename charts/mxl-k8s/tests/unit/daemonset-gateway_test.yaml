@@ -488,3 +488,92 @@ tests:
       - equal:
           path: spec.template.spec.initContainers[0].command[3]
           value: "45"
+
+
+  # Under agent.flags.domainMode 1777 the gateway removes the flow
+  # directories it created as the domain directory's owner: uid 0, which
+  # the agent creates and mounts the domain as, with every capability
+  # dropped. The whole rendered pod and container security context is
+  # pinned, gateway and every variant, so a runAsUser at either level or
+  # an added FOWNER, which would change which flows it may remove, fails
+  # here.
+  - it: runs as uid 0 without CAP_FOWNER under a sticky domain
+    set:
+      agent.flags.domainMode: "1777"
+      mxlfs.enabled: true
+    asserts:
+      - notExists:
+          path: spec.template.spec.securityContext
+      - equal:
+          path: spec.template.spec.containers[0].securityContext
+          value:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+
+  - it: runs the efa variant as uid 0 without CAP_FOWNER under a sticky domain
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      agent.flags.domainMode: "1777"
+      mxlfs.enabled: true
+    documentSelector:
+      path: metadata.name
+      value: mxl-k8s-gateway-efa
+    asserts:
+      - notExists:
+          path: spec.template.spec.securityContext
+      - equal:
+          path: spec.template.spec.containers[0].securityContext
+          value:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [IPC_LOCK]
+
+  - it: runs the verbs variant as uid 0 without CAP_FOWNER under a sticky domain
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      agent.flags.domainMode: "1777"
+      mxlfs.enabled: true
+    documentSelector:
+      path: metadata.name
+      value: mxl-k8s-gateway-verbs
+    asserts:
+      - notExists:
+          path: spec.template.spec.securityContext
+      - equal:
+          path: spec.template.spec.containers[0].securityContext
+          value:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [IPC_LOCK]
+
+  - it: runs the tcp variant as uid 0 without CAP_FOWNER under a sticky domain
+    values:
+      - ../values/mixed-fabric.yaml
+    set:
+      agent.flags.domainMode: "1777"
+      mxlfs.enabled: true
+    documentSelector:
+      path: metadata.name
+      value: mxl-k8s-gateway-tcp
+    asserts:
+      - notExists:
+          path: spec.template.spec.securityContext
+      - equal:
+          path: spec.template.spec.containers[0].securityContext
+          value:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]

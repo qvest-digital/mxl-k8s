@@ -25,7 +25,7 @@ func spec() *mxlv1alpha1.MxlDomainSpec {
 // the file is the domain's identity on the node.
 func TestApplyWritesTheDefinitionTheSchemaRequires(t *testing.T) {
 	root := t.TempDir()
-	res, err := Apply(root, spec())
+	res, err := Apply(root, spec(), DirMode)
 	require.NoError(t, err)
 	assert.True(t, res.CreatedDir)
 	assert.True(t, res.WroteDefinition)
@@ -44,13 +44,33 @@ func TestApplyWritesTheDefinitionTheSchemaRequires(t *testing.T) {
 	assert.Equal(t, DirMode, info.Mode().Perm(), "every function creates flows in it")
 }
 
+// With the sticky bit, functions on the node still create flows, but one
+// cannot remove or rename another's. The bit follows the mode passed on
+// every resync, so a node switched back loses it again.
+func TestApplySetsTheModeItIsGiven(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "domain")
+
+	_, err := Apply(root, spec(), StickyDirMode)
+	require.NoError(t, err)
+	info, err := os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.ModeSticky|0o777, info.Mode()&(os.ModeSticky|os.ModePerm))
+
+	_, err = Apply(root, spec(), DirMode)
+	require.NoError(t, err)
+	info, err = os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o777), info.Mode()&(os.ModeSticky|os.ModePerm))
+}
+
 // A resync that finds the file current writes nothing, so functions
 // watching the directory see no churn every period.
 func TestApplyIsIdempotent(t *testing.T) {
 	root := t.TempDir()
-	_, err := Apply(root, spec())
+	_, err := Apply(root, spec(), DirMode)
 	require.NoError(t, err)
-	res, err := Apply(root, spec())
+	res, err := Apply(root, spec(), DirMode)
 	require.NoError(t, err)
 	assert.False(t, res.WroteDefinition)
 	assert.False(t, res.CreatedDir)
@@ -63,12 +83,12 @@ func TestApplyRefusesAForeignDomain(t *testing.T) {
 	root := t.TempDir()
 	other := *spec()
 	other.ID = "3310f209-9351-47c0-b9a2-14c59b6a4c23"
-	_, err := Apply(root, &other)
+	_, err := Apply(root, &other, DirMode)
 	require.NoError(t, err)
 	require.NoError(t, os.Mkdir(filepath.Join(root, "domain",
 		"4c02e7c0-ffeb-4595-8673-a265d103123a.mxl-flow"), 0o755))
 
-	_, err = Apply(root, spec())
+	_, err = Apply(root, spec(), DirMode)
 	require.ErrorIs(t, err, ErrForeignDomain)
 	d, err := ReadDefinition(filepath.Join(root, "domain", "domain_def.json"))
 	require.NoError(t, err)
@@ -85,7 +105,7 @@ func TestApplyOwnsOnlyTheHistoryOption(t *testing.T) {
 	optsPath := filepath.Join(dir, "options.json")
 	require.NoError(t, os.WriteFile(optsPath, []byte(`{"urn:x-mxl:option:other/v1.0": 7}`), 0o644))
 
-	res, err := Apply(root, spec())
+	res, err := Apply(root, spec(), DirMode)
 	require.NoError(t, err)
 	assert.False(t, res.WroteOptions)
 	b, _ := os.ReadFile(optsPath)
@@ -93,14 +113,14 @@ func TestApplyOwnsOnlyTheHistoryOption(t *testing.T) {
 
 	s := spec()
 	s.HistoryDuration = &metav1.Duration{Duration: 2 * time.Second}
-	res, err = Apply(root, s)
+	res, err = Apply(root, s, DirMode)
 	require.NoError(t, err)
 	assert.True(t, res.WroteOptions)
 	b, _ = os.ReadFile(optsPath)
 	assert.JSONEq(t, `{"urn:x-mxl:option:other/v1.0": 7,
 		"urn:x-mxl:option:history_duration/v1.0": 2000000000}`, string(b))
 
-	res, err = Apply(root, s)
+	res, err = Apply(root, s, DirMode)
 	require.NoError(t, err)
 	assert.False(t, res.WroteOptions)
 }
@@ -112,16 +132,16 @@ func TestApplyReplacesAForeignIDOnlyWithoutFlows(t *testing.T) {
 	root := t.TempDir()
 	other := *spec()
 	other.ID = "3310f209-9351-47c0-b9a2-14c59b6a4c23"
-	_, err := Apply(root, &other)
+	_, err := Apply(root, &other, DirMode)
 	require.NoError(t, err)
 
-	res, err := Apply(root, spec())
+	res, err := Apply(root, spec(), DirMode)
 	require.NoError(t, err, "no flows under the old id")
 	assert.True(t, res.WroteDefinition)
 
 	require.NoError(t, os.Mkdir(filepath.Join(root, "domain",
 		"4c02e7c0-ffeb-4595-8673-a265d103123a.mxl-flow"), 0o755))
-	_, err = Apply(root, &other)
+	_, err = Apply(root, &other, DirMode)
 	require.ErrorIs(t, err, ErrForeignDomain, "flows were written under the current id")
 }
 
@@ -141,7 +161,7 @@ func TestApplyRewritesAFileWithoutACompetingID(t *testing.T) {
 				"4c02e7c0-ffeb-4595-8673-a265d103123a.mxl-flow"), 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "domain_def.json"), []byte(content), 0o644))
 
-			res, err := Apply(root, spec())
+			res, err := Apply(root, spec(), DirMode)
 			require.NoError(t, err)
 			assert.True(t, res.WroteDefinition)
 			d, err := ReadDefinition(filepath.Join(dir, "domain_def.json"))

@@ -15,10 +15,15 @@ import (
 	mxlv1alpha1 "github.com/qvest-digital/mxl-k8s/api/v1alpha1"
 )
 
-// DirMode is the domain directory's mode. Every function on the node
-// creates flows in it under its own uid, and the directory has always
-// been world-writable for that reason.
+// DirMode is the domain directory's default mode. Every function on the
+// node creates flows in it under its own uid, and the directory has
+// always been world-writable for that reason.
 const DirMode fs.FileMode = 0o777
+
+// StickyDirMode is DirMode with the sticky bit: functions still create
+// flows, but only an entry's owner, the directory's owner or a process
+// with CAP_FOWNER can remove or rename it.
+const StickyDirMode = fs.ModeSticky | DirMode
 
 // FileMode is the mode of the files written here. Functions read them;
 // nothing but the agent writes them.
@@ -59,10 +64,10 @@ type Result struct {
 	WroteOptions    bool
 }
 
-// Apply makes <root>/<spec.Path()> match the spec. Files are
-// written only when their content differs, through a rename so a
-// reader never sees half a file.
-func Apply(root string, spec *mxlv1alpha1.MxlDomainSpec) (Result, error) {
+// Apply makes <root>/<spec.Path()> match the spec, with the directory at
+// mode. Files are written only when their content differs, through a
+// rename so a reader never sees half a file.
+func Apply(root string, spec *mxlv1alpha1.MxlDomainSpec, mode fs.FileMode) (Result, error) {
 	var res Result
 	dir := filepath.Join(root, spec.Path())
 
@@ -74,8 +79,9 @@ func Apply(root string, spec *mxlv1alpha1.MxlDomainSpec) (Result, error) {
 	} else if err != nil {
 		return res, fmt.Errorf("stat %s: %w", dir, err)
 	}
-	// Mkdir is subject to the umask; the mode is what functions need.
-	if err := os.Chmod(dir, DirMode); err != nil {
+	// Mkdir is subject to the umask, and an existing directory may have
+	// another mode; the mode is what functions need.
+	if err := os.Chmod(dir, mode); err != nil {
 		return res, fmt.Errorf("chmod %s: %w", dir, err)
 	}
 

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -51,8 +52,10 @@ type Publisher struct {
 	// OnMaterialised is handed the domains written on this node, name to
 	// directory, after every Sync, so tracking can follow them.
 	OnMaterialised func(map[string]string)
+	// DirMode is the mode every domain directory is given.
+	DirMode fs.FileMode
 	// Apply writes a domain onto the host. Nil uses domainfs.Apply.
-	Apply func(root string, spec *mxlv1alpha1.MxlDomainSpec) (domainfs.Result, error)
+	Apply func(root string, spec *mxlv1alpha1.MxlDomainSpec, mode fs.FileMode) (domainfs.Result, error)
 }
 
 // NewFromDomainPath builds a publisher from the agent's --domain-path:
@@ -67,6 +70,7 @@ func NewFromDomainPath(c client.Client, node, domainPath string, stats Filesyste
 		MirroredDir:   filepath.Base(clean),
 		Stats:         stats,
 		FanotifyReady: fanotifyReady,
+		DirMode:       domainfs.DirMode,
 	}
 }
 
@@ -138,7 +142,7 @@ func (p *Publisher) materialise(ctx context.Context, d *mxlv1alpha1.MxlDomain,
 	if apply == nil {
 		apply = domainfs.Apply
 	}
-	res, err := apply(p.Root, &d.Spec)
+	res, err := apply(p.Root, &d.Spec, p.DirMode)
 	if err != nil {
 		entry.Message = err.Error()
 		return entry

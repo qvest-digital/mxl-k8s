@@ -28,10 +28,13 @@ import (
 	apimxlfs "github.com/qvest-digital/mxl-k8s/api/mxlfs"
 )
 
-// Options are the mount options of every domain: writable by every
-// function on the node, as the plain directory is, and a path walk for
-// an absent flow waits up to 5s for it to appear.
-const Options = "mode=0777,wait=5000"
+// Options are the mount options of every domain beyond mode=: a path
+// walk for an absent flow waits up to 5s for it to appear.
+const Options = "wait=5000"
+
+// DefaultMode is the mount's mode= when Mounter.Mode is empty: writable by
+// every function on the node, as the plain directory is.
+const DefaultMode = "0777"
 
 // ReadyFile is written to the runtime root once the domains known at
 // start are mounted or left plain. /run is a tmpfs, so a reboot, which
@@ -76,6 +79,8 @@ type Mounter struct {
 	// Mount mounts an mxlfs on dir with the given options. Nil uses the
 	// mount syscall.
 	Mount func(dir, options string) error
+	// Mode is the mount's mode= option, in octal. Empty is DefaultMode.
+	Mode string
 	// Huge is the mount's huge= option, or empty to leave it out. With
 	// always, a file of at least 2 MiB takes a 2 MiB folio for its last
 	// partial 2 MiB, so a NIC maps a registered grain with 2 MiB pages.
@@ -141,13 +146,15 @@ func (m *Mounter) Ensure(dir string) error {
 	return nil
 }
 
-// option is a mount option beyond Options, which a module may not have.
+// option is a mount option beyond mode= and Options, which a module may
+// not have.
 type option struct {
 	name, value string
 	refused     func(dir string, err error)
 }
 
-// optional are the options set beyond Options, the oldest first.
+// optional are the options set beyond mode= and Options, the oldest
+// first.
 func (m *Mounter) optional() []option {
 	var o []option
 	if m.Huge != "" {
@@ -159,9 +166,13 @@ func (m *Mounter) optional() []option {
 	return o
 }
 
-// join is Options with optional added.
-func join(optional []option) string {
-	s := Options
+// join is mode= and Options with optional added.
+func (m *Mounter) join(optional []option) string {
+	mode := m.Mode
+	if mode == "" {
+		mode = DefaultMode
+	}
+	s := "mode=" + mode + "," + Options
 	for _, o := range optional {
 		s += "," + o.name + "=" + o.value
 	}
@@ -194,7 +205,7 @@ func (m *Mounter) mountEmpty(dir string, mount func(dir, options string) error) 
 		return "", fmt.Errorf("%s holds %d flows a mount would hide", dir, n)
 	}
 	optional := m.optional()
-	options := join(optional)
+	options := m.join(optional)
 	err = mount(dir, options)
 	// A module that predates an option refuses it as an unknown
 	// parameter, and one that finds no memory on the numa_node= node
@@ -208,7 +219,7 @@ func (m *Mounter) mountEmpty(dir string, mount func(dir, options string) error) 
 		refused = append(refused, optional[len(optional)-1])
 		refusals = append(refusals, err)
 		optional = optional[:len(optional)-1]
-		options = join(optional)
+		options = m.join(optional)
 		err = mount(dir, options)
 	}
 	if err == nil {

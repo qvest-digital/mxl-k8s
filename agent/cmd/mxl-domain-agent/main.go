@@ -184,6 +184,7 @@ func run(args []string) error {
 	domainPub := domainpublisher.NewFromDomainPath(kClient, cfg.NodeName,
 		cfg.DomainPath, statfs.Stats, ready.Load)
 	domainPub.Tracked = trackers.Tracked
+	domainPub.DirMode = cfg.DomainDirMode()
 	domainPub.OnMaterialised = func(all map[string]string) {
 		m := intent.Mirrored(primaryDir, all)
 		byDir := make(map[string]string, len(m))
@@ -215,16 +216,17 @@ func run(args []string) error {
 			HugeRefused:     mxlfsmount.HugeRefusedEvent(kClient, cfg.NodeName, setupLog),
 			NumaNode:        numaNode,
 			NumaNodeRefused: mxlfsmount.NumaNodeRefusedEvent(kClient, cfg.NodeName, setupLog),
+			Mode:            cfg.DomainMode,
 			Log:             ctrl.Log.WithName("mxlfsmount"),
 		}
 		if err := mounts.Ensure(cfg.DomainPath); err != nil {
 			return err
 		}
-		domainPub.Apply = func(base string, spec *mxlv1alpha1.MxlDomainSpec) (domainfs.Result, error) {
+		domainPub.Apply = func(base string, spec *mxlv1alpha1.MxlDomainSpec, mode os.FileMode) (domainfs.Result, error) {
 			if err := mounts.Ensure(filepath.Join(base, spec.Path())); err != nil {
 				return domainfs.Result{}, err
 			}
-			return domainfs.Apply(base, spec)
+			return domainfs.Apply(base, spec, mode)
 		}
 	} else if err := mxlfsmount.ClearReady(root); err != nil {
 		setupLog.Error(err, "remove mxlfs ready marker")
