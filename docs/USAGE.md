@@ -152,8 +152,10 @@ The agent gives every domain directory, and the mxlfs mounted on it,
 mode 0777: every function on the node creates its flows there under
 its own uid and can remove or rename any other. `agent.flags.domainMode:
 "1777"` adds the sticky bit, so a flow can be removed or renamed only by
-its owner, by the directory's owner, which is the agent's uid, or by a
-process with `CAP_FOWNER`.
+its owner, by the directory's owner or by a process with `CAP_FOWNER`.
+The agent creates and mounts the domain as uid 0, so a process running
+as uid 0 owns the directory and is not restricted by the sticky bit:
+1777 protects flows only from writers that do not run as root.
 
 See [`charts/mxl-k8s/README.md`](../charts/mxl-k8s/README.md) for the
 full values reference, override examples (RDMA, private registry,

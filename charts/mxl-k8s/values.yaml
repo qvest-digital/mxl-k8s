@@ -507,13 +507,16 @@ agent:
     # Empty is 0777: every function on the node creates flows in the
     # domain and can remove or rename any of them. 1777 adds the sticky
     # bit, under which a flow can be removed or renamed only by its
-    # owner, by the domain directory's owner (the agent's uid) or by a
-    # process with CAP_FOWNER. Both images run as root, so the gateway,
-    # which drops every capability, passes that check as the directory's
-    # owner unless gateway.podSecurityContext.runAsUser sets another uid.
-    # A flow directory another uid created, such as an abandoned scaffold
-    # or a leftover of another geometry, is one the gateway cannot empty
-    # under either mode: libmxl gives other uids no write access to it.
+    # owner, by the domain directory's owner or by a process with
+    # CAP_FOWNER. The agent creates and mounts the domain as uid 0, so
+    # uid 0 owns the directory and any process running as uid 0 passes
+    # that check, with or without capabilities: 1777 protects flows only
+    # from writers that do not run as root. The gateway runs as uid 0
+    # with every capability dropped, unless
+    # gateway.podSecurityContext.runAsUser sets another uid. A flow
+    # directory another uid created, such as an abandoned scaffold or a
+    # leftover of another geometry, is one the gateway cannot empty under
+    # either mode: libmxl gives other uids no write access to it.
     domainMode: ""
     # @schema
     # pattern: ^/.+
