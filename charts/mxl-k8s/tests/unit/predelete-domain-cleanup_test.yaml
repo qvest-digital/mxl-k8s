@@ -106,7 +106,7 @@ tests:
           value: nodecount-guard
       - equal:
           path: spec.template.spec.initContainers[0].image
-          value: bitnami/kubectl:1.31
+          value: alpine/k8s:1.37.2
       - matchRegex:
           path: spec.template.spec.initContainers[0].command[2]
           pattern: 'kubectl get nodes'

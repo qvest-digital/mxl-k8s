@@ -765,8 +765,8 @@
               "title": "enabled"
             },
             "guardImage": {
-              "default": "bitnami/kubectl:1.31",
-              "description": "Image used by the nodecount-guard init-container. Must carry a kubectl binary on PATH.",
+              "default": "alpine/k8s:1.37.2",
+              "description": "Image used by the nodecount-guard init-container. Must carry /bin/sh, wc and a kubectl binary on PATH.",
               "required": [],
               "title": "guardImage"
             },

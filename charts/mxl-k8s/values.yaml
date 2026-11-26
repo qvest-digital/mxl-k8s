@@ -278,8 +278,8 @@ cleanup:
     # -- Image used by the cleanup Job. Pinned tag (no :latest).
     image: busybox:1.38
     # -- Image used by the nodecount-guard init-container. Must
-    # carry a kubectl binary on PATH.
-    guardImage: bitnami/kubectl:1.31
+    # carry /bin/sh, wc and a kubectl binary on PATH.
+    guardImage: alpine/k8s:1.37.2
     # @schema
     # minimum: 1
     # @schema
