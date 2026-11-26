@@ -21,6 +21,16 @@
       "matchStrings": [
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?(?: extractVersion=(?<extractVersion>\\S+))?[ \\t]*\\n[ \\t]*[\\w.-]+[ \\t]*(?::|\\?=|=)[ \\t]*[\"']?(?<currentValue>[^\"'\\s#]+)"
       ]
+    },
+    {
+      "customType": "regex",
+      "description": "Track chart images written as a single repository:tag@digest string, which the helm-values manager does not read. A `# renovate: datasource=docker` marker sits above the value, separated from it only by comment lines.",
+      "managerFilePatterns": [
+        "/^charts/mxl-k8s/values\\.yaml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+)[ \\t]*\\n(?:[ \\t]*#.*\\n)*[ \\t]*[\\w.-]+:[ \\t]*(?<depName>[^:\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ]
     }
   ],
   "packageRules": [
