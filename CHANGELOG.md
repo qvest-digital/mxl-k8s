@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0-rc.62](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.61...v1.1.0-rc.62) (2026-11-26)
+
+
+### Features
+
+* **agent:** make the domain directory mode configurable ([#488](https://github.com/qvest-digital/mxl-k8s/issues/488)) ([d9c686f](https://github.com/qvest-digital/mxl-k8s/commit/d9c686fbcdfe7fe9f3099f86be68b9db93f19a76))
+
+
+### Bug Fixes
+
+* **chart:** pull the predelete guard from an image that still exists ([#486](https://github.com/qvest-digital/mxl-k8s/issues/486)) ([77713ad](https://github.com/qvest-digital/mxl-k8s/commit/77713ad31cd2a81f6a5a2f9b04f6e8c14cdc7a46))
+
 ## [1.1.0-rc.61](https://github.com/qvest-digital/mxl-k8s/compare/v1.1.0-rc.60...v1.1.0-rc.61) (2026-11-24)
 
 
