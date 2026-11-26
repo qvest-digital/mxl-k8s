@@ -566,9 +566,10 @@
           "title": "podSecurityContext"
         },
         "priorityClassName": {
-          "default": "",
-          "title": "priorityClassName",
-          "type": "string"
+          "default": "system-node-critical",
+          "description": "PriorityClass of the pods. A DaemonSet pod is bound to its node and cannot schedule elsewhere, so when a node's CPU or memory is already requested by pods that could run on another node, only a higher priority lets the scheduler preempt them; without it the pod stays Pending and an install that waits for readiness times out. Empty renders no priorityClassName.",
+          "required": [],
+          "title": "priorityClassName"
         },
         "readinessProbe": {
           "properties": {
@@ -735,7 +736,6 @@
         "serviceAccount",
         "podAnnotations",
         "podLabels",
-        "priorityClassName",
         "nodeSelector",
         "tolerations",
         "affinity",
@@ -1303,9 +1303,10 @@
           "title": "podSecurityContext"
         },
         "priorityClassName": {
-          "default": "",
-          "title": "priorityClassName",
-          "type": "string"
+          "default": "system-node-critical",
+          "description": "PriorityClass of the pods, for the reason given at agent.priorityClassName.",
+          "required": [],
+          "title": "priorityClassName"
         },
         "readinessProbe": {
           "properties": {
@@ -1479,7 +1480,6 @@
         "serviceAccount",
         "podAnnotations",
         "podLabels",
-        "priorityClassName",
         "nodeSelector",
         "tolerations",
         "affinity",
@@ -2028,9 +2028,10 @@
           "title": "podSecurityContext"
         },
         "priorityClassName": {
-          "default": "",
-          "title": "priorityClassName",
-          "type": "string"
+          "default": "system-node-critical",
+          "description": "PriorityClass of the pods, for the reason given at agent.priorityClassName.",
+          "required": [],
+          "title": "priorityClassName"
         },
         "rdma": {
           "properties": {
@@ -2477,7 +2478,6 @@
         "serviceAccount",
         "podAnnotations",
         "podLabels",
-        "priorityClassName",
         "nodeSelector",
         "tolerations",
         "affinity",

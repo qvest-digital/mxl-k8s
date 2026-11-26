@@ -488,3 +488,19 @@ tests:
       - equal:
           path: spec.template.spec.initContainers[0].command[3]
           value: "45"
+
+  # Same reason as the agent: a gateway pod is bound to its node.
+  - it: runs every variant at system-node-critical by default
+    values:
+      - ../values/mixed-fabric.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.priorityClassName
+          value: system-node-critical
+
+  - it: renders no priorityClassName when it is empty
+    set:
+      gateway.priorityClassName: ""
+    asserts:
+      - notExists:
+          path: spec.template.spec.priorityClassName

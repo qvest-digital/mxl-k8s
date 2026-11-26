@@ -100,3 +100,19 @@ tests:
       - equal:
           path: spec.template.spec.hostPID
           value: false
+
+  # A DaemonSet pod cannot move to another node. Without a priority above
+  # the pods that could, it stays Pending on a node whose requests are
+  # already taken, and an install waiting for readiness times out.
+  - it: runs at system-node-critical by default
+    asserts:
+      - equal:
+          path: spec.template.spec.priorityClassName
+          value: system-node-critical
+
+  - it: renders no priorityClassName when it is empty
+    set:
+      agent.priorityClassName: ""
+    asserts:
+      - notExists:
+          path: spec.template.spec.priorityClassName

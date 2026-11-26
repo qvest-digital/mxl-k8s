@@ -85,6 +85,7 @@ renders every gateway variant unchanged with mxlfs:
                   mountPropagation: Bidirectional
                   name: mxl-run
           hostPID: true
+          priorityClassName: system-node-critical
           serviceAccountName: mxl-k8s-agent
           volumes:
             - hostPath:
@@ -226,6 +227,7 @@ renders every gateway variant unchanged with mxlfs:
                   readOnly: true
           nodeSelector:
             mxl.qvest-digital.com/fabric: efa
+          priorityClassName: system-node-critical
           serviceAccountName: mxl-k8s-gateway
           tolerations:
             - effect: NoSchedule
@@ -380,6 +382,7 @@ renders every gateway variant unchanged with mxlfs:
                 - mountPath: /run/mxl
                   name: mxl-run
                   readOnly: true
+          priorityClassName: system-node-critical
           serviceAccountName: mxl-k8s-gateway
           volumes:
             - hostPath:
@@ -532,6 +535,7 @@ renders every gateway variant unchanged with mxlfs:
                   readOnly: true
           nodeSelector:
             mxl.qvest-digital.com/fabric: verbs
+          priorityClassName: system-node-critical
           serviceAccountName: mxl-k8s-gateway
           volumes:
             - hostPath:
@@ -640,6 +644,7 @@ renders the agent and gateway unchanged at defaults:
                 - mountPath: /run/mxl
                   name: mxl-run
           hostPID: true
+          priorityClassName: system-node-critical
           serviceAccountName: mxl-k8s-agent
           volumes:
             - hostPath:
@@ -745,6 +750,7 @@ renders the agent and gateway unchanged at defaults:
                   name: mxl-domains
           dnsPolicy: ClusterFirstWithHostNet
           hostNetwork: true
+          priorityClassName: system-node-critical
           serviceAccountName: mxl-k8s-gateway
           volumes:
             - hostPath:
@@ -873,6 +879,7 @@ renders the agent and gateway unchanged with mxlfs:
                 - mountPath: /registration
                   name: registration
           hostPID: true
+          priorityClassName: system-node-critical
           serviceAccountName: mxl-k8s-agent
           volumes:
             - hostPath:
@@ -1017,6 +1024,7 @@ renders the agent and gateway unchanged with mxlfs:
                 - mountPath: /run/mxl
                   name: mxl-run
                   readOnly: true
+          priorityClassName: system-node-critical
           serviceAccountName: mxl-k8s-gateway
           volumes:
             - hostPath:
@@ -1125,6 +1133,7 @@ renders the agent and gateway unchanged with rdma:
                 - mountPath: /run/mxl
                   name: mxl-run
           hostPID: true
+          priorityClassName: system-node-critical
           serviceAccountName: mxl-k8s-agent
           volumes:
             - hostPath:
@@ -1238,6 +1247,7 @@ renders the agent and gateway unchanged with rdma:
                   name: infiniband
           dnsPolicy: ClusterFirstWithHostNet
           hostNetwork: true
+          priorityClassName: system-node-critical
           serviceAccountName: mxl-k8s-gateway
           volumes:
             - hostPath:
@@ -1346,6 +1356,7 @@ renders the site's own init containers unchanged with mxlfs:
           initContainers:
             - image: site:pinned
               name: site-setup
+          priorityClassName: system-node-critical
           serviceAccountName: mxl-k8s-agent
           volumes:
             - hostPath:
@@ -1486,6 +1497,7 @@ renders the site's own init containers unchanged with mxlfs:
                   readOnly: true
             - image: site:pinned
               name: site-setup
+          priorityClassName: system-node-critical
           serviceAccountName: mxl-k8s-gateway
           volumes:
             - hostPath:

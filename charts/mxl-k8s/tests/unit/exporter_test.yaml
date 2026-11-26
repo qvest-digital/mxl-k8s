@@ -146,3 +146,22 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].args
           content: --topology=false
+
+  # Same reason as the agent: an exporter pod is bound to its node.
+  - it: runs at system-node-critical by default
+    set:
+      exporter.enabled: true
+    template: templates/daemonset-exporter.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.priorityClassName
+          value: system-node-critical
+
+  - it: renders no priorityClassName when it is empty
+    set:
+      exporter.enabled: true
+      exporter.priorityClassName: ""
+    template: templates/daemonset-exporter.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.priorityClassName

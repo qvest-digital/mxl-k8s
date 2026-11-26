@@ -655,7 +655,13 @@ agent:
   hostPID: true
   podAnnotations: {}
   podLabels: {}
-  priorityClassName: ""
+  # -- PriorityClass of the pods. A DaemonSet pod is bound to its node and
+  # cannot schedule elsewhere, so when a node's CPU or memory is already
+  # requested by pods that could run on another node, only a higher
+  # priority lets the scheduler preempt them; without it the pod stays
+  # Pending and an install that waits for readiness times out. Empty
+  # renders no priorityClassName.
+  priorityClassName: system-node-critical
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -1031,7 +1037,9 @@ gateway:
     automountServiceAccountToken: true
   podAnnotations: {}
   podLabels: {}
-  priorityClassName: ""
+  # -- PriorityClass of the pods, for the reason given at
+  # agent.priorityClassName.
+  priorityClassName: system-node-critical
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -1252,7 +1260,9 @@ exporter:
     automountServiceAccountToken: true
   podAnnotations: {}
   podLabels: {}
-  priorityClassName: ""
+  # -- PriorityClass of the pods, for the reason given at
+  # agent.priorityClassName.
+  priorityClassName: system-node-critical
   nodeSelector: {}
   tolerations: []
   affinity: {}
